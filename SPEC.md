@@ -28,6 +28,9 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
 - [x] 機能I (暗号学的ツリー拘束・Evidence Binding):
   1. `verify-step` / Verifier は、検証成功時の作業ツリー状態（ステージ済みGit Tree SHA）および `SPEC.md` のハッシュを Evidence Token と内部証跡レコードに拘束（Bind）して発行する。
   2. `commit-step` は、確定直前のステージ済みツリー SHA と `SPEC.md` ハッシュを再計算し、Evidence に記録された値と完全一致しない限りコミットを拒否（Exit 3）する。検証後の事後改ざんを物理遮断する。
+- [x] 機能J (安全な隔離退避・データ消失防止 Safe Quarantine):
+  1. 失敗時、未追跡ファイルおよび `.gitignore` 対象の生成物を含めた作業ツリー全体の物理スナップショット（アーカイブ）を `.dev/quarantines/` または隔離ブランチへ完全保全する。
+  2. 退避の正常完了が確認されるまで `git reset --hard` や `git clean` 等の破壊的リセット操作を一切実行してはならない。退避処理で例外が発生した場合はリセットを中止して即座に停止する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

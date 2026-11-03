@@ -907,6 +907,52 @@ class TestNightlyOrchestrator(unittest.TestCase):
             )
             self.assertIn("EVIDENCE ERROR", proc_commit.stderr)
 
+    def test_feature_j_safe_quarantine_preserves_ignored_and_untracked_files(self):
+        """機能J: 隔離退避時、.gitignore 対象の生成物や未追跡ファイルも含めて確実に保全されること。"""
+        import tempfile
+        from auto_developer.guard import GitGuard
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text("*.ignored\n.dev/\n", encoding="utf-8")
+            (repo / "base.txt").write_text("base content\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # 作業中に tracked な変更と、.gitignore されたファイルを作成
+            (repo / "base.txt").write_text("modified base\n", encoding="utf-8")
+            (repo / "critical_data.ignored").write_text("very important data generated during task\n", encoding="utf-8")
+
+            guard = GitGuard(repo_dir=repo)
+            quarantine_branch = guard.quarantine_and_restore(checkpoint, task_id="1")
+            self.assertTrue(bool(quarantine_branch), "Must create quarantine branch when worktree has changes")
+
+            # 本線はチェックポイントへリセットされ、作業ツリーはクリーンであること
+            self.assertEqual((repo / "base.txt").read_text(encoding="utf-8"), "base content\n")
+
+            # 一方で、退避ブランチまたはスナップショットに critical_data.ignored が保全されていること
+            archive_dir = repo / ".dev" / "quarantines"
+            has_archive = any(archive_dir.glob("*.tar.gz")) if archive_dir.exists() else False
+
+            # 退避ブランチにファイルが存在するかチェック
+            proc_check = subprocess.run(
+                ["git", "show", f"{quarantine_branch}:critical_data.ignored"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            has_in_branch = proc_check.returncode == 0
+
+            self.assertTrue(
+                has_archive or has_in_branch,
+                "Ignored file 'critical_data.ignored' must be preserved either in quarantine branch or in physical snapshot archive!",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

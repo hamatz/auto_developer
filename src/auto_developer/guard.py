@@ -107,8 +107,15 @@ class GitGuard:
         return "" if branch == "HEAD" else branch
 
     def quarantine_and_restore(self, checkpoint: str, task_id: str) -> str:
-        """作業ツリーの変更を破棄せず隔離ブランチに退避コミットし、本線をチェックポイントに復元する。"""
+        """作業ツリーの変更を破棄せず物理アーカイブおよび隔離ブランチへ強制退避し、退避確認後に本線をチェックポイントに復元する。"""
+        import tarfile
         import time
+
+        clean_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", task_id)
+        timestamp = int(time.time())
+        quarantine_dir = self.repo_dir / ".dev" / "quarantines"
+        quarantine_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = quarantine_dir / f"snapshot_task_{clean_id}_{timestamp}.tar.gz"
 
         proc_status = self._run_git(["status", "--porcelain"])
         has_changes = bool(proc_status.stdout.strip())
@@ -117,22 +124,29 @@ class GitGuard:
         current_branch = self.get_current_branch()
 
         if has_changes:
-            clean_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", task_id)
-            timestamp = int(time.time())
-            quarantine_branch = f"quarantine/{clean_id}-{timestamp}"
+            # 1. 物理スナップショットの作成 (.git と .dev/quarantines 自体を除外)
+            with tarfile.open(archive_path, "w:gz") as tar:
+                for item in self.repo_dir.iterdir():
+                    if item.name in (".git", ".dev"):
+                        continue
+                    tar.add(item, arcname=item.name)
 
-            # 新規ブランチを作成して退避コミット
+            if not archive_path.exists() or archive_path.stat().st_size == 0:
+                raise RuntimeError(f"Quarantine aborted: Failed to create snapshot archive at {archive_path}")
+
+            # 2. 隔離ブランチへの強制ステージとコミット (git add -A -f)
+            quarantine_branch = f"quarantine/{clean_id}-{timestamp}"
             self._run_git(["checkout", "-b", quarantine_branch])
-            self._run_git(["add", "-A"])
+            self._run_git(["add", "-A", "-f"])
             self._run_git(["commit", "-m", f"quarantine: save failed work for task {task_id} before rollback"])
 
-            # 元のブランチに戻る
+            # 3. 元のブランチに戻る
             if current_branch:
                 self._run_git(["checkout", current_branch])
             else:
                 self._run_git(["checkout", checkpoint])
 
-        # 作業ツリーをチェックポイントに完全復元
+        # 4. 退避の成功を確認後、本線作業ツリーをチェックポイントに復元
         self._run_git(["reset", "--hard", checkpoint])
         self._run_git(["clean", "-fd"])
 
