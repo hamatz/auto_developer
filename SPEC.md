@@ -25,6 +25,9 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   1. `cli.py` / `DEFAULT_VERIFY_SH` に `|| true` 等の失敗握りつぶしを含めず、テスト未設定や失敗時は Exit 0 以外で終了する。
   2. 本番実行時（`--mock` 未指定時）に Maker/Checker が未設定の場合は Exit 2 で起動を拒否する。
   3. Maker 実行後に作業ツリーに差分が存在しない場合（No-Op）、タスク未達成として合格させず安全停止（Exit 1）する。
+- [x] 機能I (暗号学的ツリー拘束・Evidence Binding):
+  1. `verify-step` / Verifier は、検証成功時の作業ツリー状態（ステージ済みGit Tree SHA）および `SPEC.md` のハッシュを Evidence Token と内部証跡レコードに拘束（Bind）して発行する。
+  2. `commit-step` は、確定直前のステージ済みツリー SHA と `SPEC.md` ハッシュを再計算し、Evidence に記録された値と完全一致しない限りコミットを拒否（Exit 3）する。検証後の事後改ざんを物理遮断する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

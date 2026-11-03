@@ -42,6 +42,20 @@ class GitGuard:
         proc = self._run_git(["rev-parse", "HEAD"])
         return proc.stdout.strip()
 
+    def get_working_tree_sha(self) -> str:
+        """現在の作業ツリーのステージ済み Git Tree SHA を取得する (git write-tree)。"""
+        self._run_git(["add", "-A"])
+        proc = self._run_git(["write-tree"])
+        return proc.stdout.strip()
+
+    def get_spec_sha(self, spec_path: Path | None = None) -> str:
+        """SPEC.md の SHA-256 ダイジェストを取得する。"""
+        import hashlib
+        p = spec_path or (self.repo_dir / "SPEC.md")
+        if not p.exists():
+            return ""
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+
     def has_changes_since(self, checkpoint: str) -> bool:
         """チェックポイント以降に変更（差分または未追跡・ステージ済みファイル）が存在するか判定する。"""
         proc_diff = self._run_git(["diff", checkpoint])

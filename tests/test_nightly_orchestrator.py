@@ -839,6 +839,74 @@ class TestNightlyOrchestrator(unittest.TestCase):
             plan_text = (repo / "PLAN.md").read_text(encoding="utf-8")
             self.assertIn("[FAILED]", plan_text)
 
+    def test_feature_i_evidence_binding_detects_tampered_tree_after_verify(self):
+        """機能I: verify-step 通過後に作業ツリーが改ざんされた場合、commit-step はコミットを拒否 (Exit 3) する。"""
+        import tempfile
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "nightly_orchestrator.py"
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. タスク\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            v_sh = repo / "scripts" / "verify_local.sh"
+            v_sh.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            v_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # 正常な変更を加えて verify-step を実行
+            (repo / "valid_feature.py").write_text("print('valid')", encoding="utf-8")
+            proc_verify = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "verify-step",
+                    "--task-id",
+                    "1",
+                    "--checkpoint",
+                    checkpoint,
+                ],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc_verify.returncode, 0, f"verify-step should pass:\n{proc_verify.stdout}\n{proc_verify.stderr}")
+            self.assertIn("VERIFICATION PASSED", proc_verify.stdout)
+
+            # 検証通過後に、未検証の改ざんコードを混入させる！
+            (repo / "tampered_payload.py").write_text("print('malicious backdoor')", encoding="utf-8")
+
+            # commit-step を実行
+            proc_commit = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "commit-step",
+                    "--task-id",
+                    "1",
+                    "--checkpoint",
+                    checkpoint,
+                ],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            # 現在の実装ではツリー未拘束のため Exit 0 でコミットされてしまうはず (脆弱性)
+            self.assertEqual(
+                proc_commit.returncode,
+                3,
+                f"Expected Exit 3 (Evidence tree mismatch/tampering), but got {proc_commit.returncode}:\nSTDOUT:\n{proc_commit.stdout}\nSTDERR:\n{proc_commit.stderr}",
+            )
+            self.assertIn("EVIDENCE ERROR", proc_commit.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

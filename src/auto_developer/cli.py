@@ -270,7 +270,14 @@ def main(argv: list[str] | None = None) -> int:
         if code != 0:
             print(f"VERIFICATION FAILED (Exit {code}):\n{out}", file=sys.stderr)
             return code
-        evidence = evidence_store.issue_evidence(task_id=args.task_id, checkpoint=args.checkpoint)
+        tree_sha = git_guard.get_working_tree_sha()
+        spec_sha = git_guard.get_spec_sha(spec_path)
+        evidence = evidence_store.issue_evidence(
+            task_id=args.task_id,
+            checkpoint=args.checkpoint,
+            tree_sha=tree_sha,
+            spec_sha=spec_sha,
+        )
         print(f"VERIFICATION PASSED (Evidence Token: {evidence['token']})")
         return 0
 
@@ -280,9 +287,17 @@ def main(argv: list[str] | None = None) -> int:
         if not target:
             print(f"ERROR: Task {args.task_id} not found in {plan_path}", file=sys.stderr)
             return 1
-        if not evidence_store.verify_and_consume(task_id=args.task_id, checkpoint=args.checkpoint):
+        current_tree_sha = git_guard.get_working_tree_sha()
+        current_spec_sha = git_guard.get_spec_sha(spec_path)
+        if not evidence_store.verify_and_consume(
+            task_id=args.task_id,
+            checkpoint=args.checkpoint,
+            expected_tree_sha=current_tree_sha,
+            expected_spec_sha=current_spec_sha,
+        ):
             print(
-                f"EVIDENCE ERROR: No valid verification evidence found for task {args.task_id}. Must pass verify-step first.",
+                f"EVIDENCE ERROR: No valid verification evidence found for task {args.task_id} matching current tree/spec. "
+                "Evidence missing or working tree/spec was tampered after verify-step.",
                 file=sys.stderr,
             )
             return 3

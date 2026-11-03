@@ -200,8 +200,23 @@ class NightlyOrchestrator:
             # Phase E: 確定とコミット (Evidence & Commit)
             print("  [Phase E: Commit] Checker approved. Issuing evidence and committing...")
             job_state.transition_phase("COMMIT")
-            self.evidence_store.issue_evidence(task.task_id, checkpoint)
-            if not self.evidence_store.verify_and_consume(task.task_id, checkpoint):
+            tree_sha = self.git_guard.get_working_tree_sha()
+            spec_sha = self.git_guard.get_spec_sha(self.spec_path)
+            self.evidence_store.issue_evidence(
+                task.task_id,
+                checkpoint,
+                tree_sha=tree_sha,
+                spec_sha=spec_sha,
+                details={"checker_decision": checker_reason},
+            )
+            current_tree = self.git_guard.get_working_tree_sha()
+            current_spec = self.git_guard.get_spec_sha(self.spec_path)
+            if not self.evidence_store.verify_and_consume(
+                task.task_id,
+                checkpoint,
+                expected_tree_sha=current_tree,
+                expected_spec_sha=current_spec,
+            ):
                 print(f"  EVIDENCE ERROR: Could not verify evidence for task {task.task_id}", file=sys.stderr)
                 return 3
 
