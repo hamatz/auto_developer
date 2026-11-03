@@ -1270,6 +1270,47 @@ class TestNightlyOrchestrator(unittest.TestCase):
                     f"Must reject starting when another process holds the workspace lock! Got exit {exit_code}",
                 )
 
+    def test_feature_n_atomic_commit_on_fixed_index_without_restaging(self):
+        """機能N-2: commit_task は再ステージ (git add -A) を行わず、検証済みIndexから直接コミットすること。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / "base.txt").write_text("initial\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            guard = GitGuard(repo_dir=repo)
+            # 正当な作業内容を作成
+            (repo / "feature.py").write_text("print('legitimate')\n", encoding="utf-8")
+            # 検証フェーズでの作業ツリーSHA（git add -A -> write-tree）
+            verified_tree_sha = guard.get_working_tree_sha()
+
+            # 検証通過後、コミット直前に未検証ファイルが作業ツリーに混入
+            (repo / "injected_unverified.py").write_text("print('unverified backdoor')\n", encoding="utf-8")
+
+            # commit_task を実行
+            task = Task("1", "Legitimate Task", 1, False, False)
+            guard.commit_task(task)
+
+            # HEAD^{tree} は検証済みツリーSHAと完全一致しなければならない
+            committed_tree_sha = guard.get_commit_tree_sha("HEAD")
+            self.assertEqual(
+                committed_tree_sha,
+                verified_tree_sha,
+                "commit_task must NOT restage unverified files! Committed tree must match verified index tree.",
+            )
+
+            # injected_unverified.py が HEAD に含まれていないこと
+            ls_proc = subprocess.run(["git", "ls-tree", "-r", "--name-only", "HEAD"], cwd=repo, capture_output=True, text=True, check=True)
+            self.assertNotIn(
+                "injected_unverified.py",
+                ls_proc.stdout.splitlines(),
+                "Unverified file must NOT be included in the commit!",
+            )
+
+
 
 if __name__ == "__main__":
     unittest.main()

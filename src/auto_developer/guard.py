@@ -99,8 +99,7 @@ class GitGuard:
         return True
 
     def commit_task(self, task: Task) -> str:
-        """タスクの変更をアトミックにコミットする。"""
-        self._run_git(["add", "-A"])
+        """タスクの変更をアトミックにコミットする。すでにステージ済みのIndexから直接コミットを作成する。"""
         msg = f"feat: {task.title} [refs: {task.task_id}]"
         self._run_git(["commit", "-m", msg])
         return self.get_current_checkpoint()

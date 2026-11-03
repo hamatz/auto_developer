@@ -281,6 +281,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     elif args.subcommand == "verify-step":
+        tasks = dispatcher.parse_plan(plan_path)
+        target = next((t for t in tasks if t.task_id == args.task_id), None)
+        if target:
+            dispatcher.mark_task_status(plan_path, target, status="completed")
+
         if not git_guard.check_protected_files_untouched(args.checkpoint):
             print(f"CIRCUIT BREAKER: Protected file modified since {args.checkpoint}", file=sys.stderr)
             return 10
@@ -321,8 +326,14 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 3
-        dispatcher.mark_task_status(plan_path, target, status="completed")
         commit_hash = git_guard.commit_task(target)
+        committed_tree = git_guard.get_commit_tree_sha("HEAD")
+        if committed_tree != current_tree_sha:
+            print(
+                f"FATAL INVARIANT BREACH: Committed tree {committed_tree} does not match verified tree {current_tree_sha}!",
+                file=sys.stderr,
+            )
+            return 3
         print(f"COMMITTED: {commit_hash}")
         return 0
 
