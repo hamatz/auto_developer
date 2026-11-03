@@ -260,3 +260,163 @@ class MorningReporter:
         ]
         log_path.write_text("\n".join(content), encoding="utf-8")
 
+
+def main() -> int:
+    """CLI エントリーポイント。"""
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="Antigravity Autonomous Pipeline Orchestrator")
+    parser.add_argument("--plan", type=Path, default=Path("PLAN.md"), help="Path to PLAN.md")
+    parser.add_argument(
+        "--verify-script",
+        type=Path,
+        default=Path("scripts/verify_local.sh"),
+        help="Path to verification script",
+    )
+    parser.add_argument(
+        "--report", type=Path, default=Path("NIGHTLY_REPORT.md"), help="Path to NIGHTLY_REPORT.md"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Simulate execution without modifying git or state"
+    )
+    parser.add_argument(
+        "--timeout", type=int, default=300, help="Max verification timeout in seconds"
+    )
+
+    args = parser.parse_args()
+
+    git_guard = GitGuard()
+    dispatcher = TaskDispatcher()
+    verifier = DeterministicVerifier()
+    reporter = MorningReporter()
+
+    # Pre-flight check
+    try:
+        if not args.dry_run:
+            git_guard.assert_clean_working_tree()
+    except RuntimeError as e:
+        print(f"PRE-FLIGHT ERROR: {e}", file=sys.stderr)
+        return 2
+
+    if not args.plan.exists():
+        print(f"PRE-FLIGHT ERROR: Plan file not found: {args.plan}", file=sys.stderr)
+        return 2
+
+    tasks = dispatcher.parse_plan(args.plan)
+    total_tasks = len(tasks)
+    succeeded_tasks: list[dict[str, Any]] = []
+
+    print(f"=== Starting Nightly Orchestrator (Total Tasks: {total_tasks}, Dry-Run: {args.dry_run}) ===")
+
+    while True:
+        task = dispatcher.get_next_pending_task(tasks)
+        if not task:
+            print("All pending tasks completed!")
+            break
+
+        print(f"Processing Task [{task.task_id}]: {task.title}")
+
+        if args.dry_run:
+            succeeded_tasks.append(
+                {"task_id": task.task_id, "title": task.title, "commit": "simulated_hash", "verifier": "dry-run"}
+            )
+            # Update in-memory task status for dry-run simulation
+            tasks = [
+                Task(t.task_id, t.title, t.line_number, True if t.task_id == task.task_id else t.is_completed, t.is_failed)
+                for t in tasks
+            ]
+            continue
+
+        checkpoint = git_guard.get_current_checkpoint()
+
+        # Invariant pre-check
+        if not git_guard.check_protected_files_untouched(checkpoint):
+            print(f"CIRCUIT BREAKER: Protected file modified in task {task.task_id}. Rollback triggered.", file=sys.stderr)
+            git_guard.rollback_and_clean(checkpoint)
+            dispatcher.mark_task_status(args.plan, task, status="failed")
+            reporter.write_report(
+                args.report,
+                {
+                    "status": "STOPPED (FAIL-FAST)",
+                    "total_tasks": total_tasks,
+                    "succeeded_count": len(succeeded_tasks),
+                    "quarantined_count": 1,
+                    "remaining_count": total_tasks - len(succeeded_tasks) - 1,
+                    "checkpoint": checkpoint,
+                    "completed_tasks": succeeded_tasks,
+                    "quarantined_task": {
+                        "task_id": task.task_id,
+                        "phase": "INVARIANT_BREACH",
+                        "log_path": f"logs/nightly/task_{task.task_id}_failure.log",
+                        "root_cause_summary": "Protected file (SPEC.md / .github / verify script) modification detected.",
+                    },
+                },
+            )
+            return 1
+
+        # Run verification
+        code, out = verifier.run_verification(args.verify_script, timeout_sec=args.timeout)
+        if code != 0:
+            print(f"Verification failed on task {task.task_id} (Exit {code}).", file=sys.stderr)
+            git_guard.rollback_and_clean(checkpoint)
+            dispatcher.mark_task_status(args.plan, task, status="failed")
+            log_path = Path(f"logs/nightly/task_{task.task_id}_failure.log")
+            reporter.write_failure_log(
+                log_path,
+                {
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "checkpoint": checkpoint,
+                    "attempt_1_log": out,
+                },
+            )
+            reporter.write_report(
+                args.report,
+                {
+                    "status": "STOPPED (FAIL-FAST)",
+                    "total_tasks": total_tasks,
+                    "succeeded_count": len(succeeded_tasks),
+                    "quarantined_count": 1,
+                    "remaining_count": total_tasks - len(succeeded_tasks) - 1,
+                    "checkpoint": checkpoint,
+                    "completed_tasks": succeeded_tasks,
+                    "quarantined_task": {
+                        "task_id": task.task_id,
+                        "phase": "VERIFIER_ERROR",
+                        "log_path": str(log_path),
+                        "root_cause_summary": out[:300],
+                    },
+                },
+            )
+            return 1
+
+        # Success: commit and mark done
+        commit_hash = git_guard.commit_task(task)
+        dispatcher.mark_task_status(args.plan, task, status="completed")
+        succeeded_tasks.append(
+            {"task_id": task.task_id, "title": task.title, "commit": commit_hash, "verifier": "verify_local.sh"}
+        )
+        tasks = dispatcher.parse_plan(args.plan)
+
+    reporter.write_report(
+        args.report,
+        {
+            "status": "COMPLETED",
+            "total_tasks": total_tasks,
+            "succeeded_count": len(succeeded_tasks),
+            "quarantined_count": 0,
+            "remaining_count": 0,
+            "checkpoint": git_guard.get_current_checkpoint() if not args.dry_run else "simulated",
+            "completed_tasks": succeeded_tasks,
+        },
+    )
+    print(f"Execution complete. Report written to {args.report}")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
+
+
