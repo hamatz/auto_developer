@@ -201,6 +201,118 @@ class TestNightlyOrchestrator(unittest.TestCase):
             )
             self.assertIn("almost working", proc_diff.stdout)
 
+    def test_feature_evidence_gated_commit(self):
+        """機能追加: verify-step の証跡なしで commit-step を呼ぶと拒否されること (P0対応)。"""
+        import tempfile
+        import sys
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir()
+            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+
+            plan_file = repo_dir / "PLAN.md"
+            plan_file.write_text("- [ ] 1. テストタスク\n", encoding="utf-8")
+            verify_script = repo_dir / "verify.sh"
+            verify_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            verify_script.chmod(0o755)
+
+            subprocess.run(["git", "add", "PLAN.md", "verify.sh"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True)
+
+            # 新規コードを作成
+            (repo_dir / "app.py").write_text("print('hello')", encoding="utf-8")
+
+            # 1. 証跡なしで commit-step を呼び出すと失敗すること
+            proc_commit_fail = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).parents[1] / "scripts" / "nightly_orchestrator.py"),
+                    "--plan",
+                    str(plan_file),
+                    "commit-step",
+                    "--task-id",
+                    "1",
+                ],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(
+                proc_commit_fail.returncode,
+                0,
+                "commit-step must fail without verification evidence",
+            )
+            self.assertIn("EVIDENCE", proc_commit_fail.stderr)
+
+            # 2. verify-step を実行すると証跡が発行されること
+            checkpoint = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=repo_dir, capture_output=True, text=True, check=True
+            ).stdout.strip()
+
+            proc_verify = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).parents[1] / "scripts" / "nightly_orchestrator.py"),
+                    "--plan",
+                    str(plan_file),
+                    "--verify-script",
+                    str(verify_script),
+                    "verify-step",
+                    "--checkpoint",
+                    checkpoint,
+                    "--task-id",
+                    "1",
+                ],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc_verify.returncode, 0, f"verify-step failed: {proc_verify.stderr}")
+            self.assertIn("VERIFICATION PASSED", proc_verify.stdout)
+
+            # 3. 証跡発行後は commit-step が成功し、証跡が消費されること
+            proc_commit_success = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).parents[1] / "scripts" / "nightly_orchestrator.py"),
+                    "--plan",
+                    str(plan_file),
+                    "commit-step",
+                    "--task-id",
+                    "1",
+                    "--checkpoint",
+                    checkpoint,
+                ],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                proc_commit_success.returncode,
+                0,
+                f"commit-step should succeed with valid evidence: {proc_commit_success.stderr}",
+            )
+            self.assertIn("COMMITTED", proc_commit_success.stdout)
+
+            # 4. コミット後は証跡が消費されているため、再度 commit-step を呼ぶと拒否されること (リプレイ防止)
+            proc_commit_replay = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).parents[1] / "scripts" / "nightly_orchestrator.py"),
+                    "--plan",
+                    str(plan_file),
+                    "commit-step",
+                    "--task-id",
+                    "1",
+                ],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(proc_commit_replay.returncode, 0)
+
     def test_feature_f_morning_report_generation(self):
         """機能F: NIGHTLY_REPORT.md が所定のスキーマで生成される。"""
         import tempfile

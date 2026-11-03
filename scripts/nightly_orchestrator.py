@@ -235,6 +235,65 @@ class DeterministicVerifier:
             return 1, f"Failed to execute verification script: {e}"
 
 
+class EvidenceStore:
+    """検証合格の証跡（Evidence Token）の発行・検証・失効を管理するモジュール。"""
+
+    def __init__(self, repo_dir: Path | None = None) -> None:
+        self.repo_dir = repo_dir or Path.cwd()
+        self.evidence_dir = self.repo_dir / ".git" / "nightly_evidence"
+
+    def issue_evidence(
+        self, task_id: str, checkpoint: str, details: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """検証合格の証跡を発行し、.git 配下に永続化する。"""
+        import hashlib
+        import json
+        import time
+
+        self.evidence_dir.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        raw = f"{task_id}:{checkpoint}:{now}"
+        token = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        evidence = {
+            "task_id": task_id,
+            "checkpoint": checkpoint,
+            "issued_at": now,
+            "token": token,
+            "details": details or {},
+        }
+        path = self.evidence_dir / f"task_{task_id}.json"
+        path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+        return evidence
+
+    def verify_and_consume(self, task_id: str, checkpoint: str | None = None) -> bool:
+        """指定タスクの有効な証跡が存在するか検証し、存在すれば消費（削除）する。"""
+        import json
+
+        path = self.evidence_dir / f"task_{task_id}.json"
+        if not path.exists():
+            return False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if str(data.get("task_id")) != str(task_id):
+                return False
+            if checkpoint and str(data.get("checkpoint")) != str(checkpoint):
+                return False
+            path.unlink()
+            return True
+        except Exception:
+            return False
+
+    def clear_evidence(self, task_id: str | None = None) -> None:
+        """証跡ファイルを破棄する。"""
+        if task_id:
+            path = self.evidence_dir / f"task_{task_id}.json"
+            if path.exists():
+                path.unlink()
+        elif self.evidence_dir.exists():
+            for p in self.evidence_dir.glob("task_*.json"):
+                p.unlink()
+
+
 class MorningReporter:
     """NIGHTLY_REPORT.md および隔離ログの生成を担当。"""
 
@@ -352,10 +411,12 @@ def main() -> int:
     # Subcommand: verify-step
     verify_parser = subparsers.add_parser("verify-step", help="Check protected files and run verify script")
     verify_parser.add_argument("--checkpoint", type=str, required=True, help="Checkpoint commit hash")
+    verify_parser.add_argument("--task-id", type=str, default="default", help="Task ID being verified")
 
     # Subcommand: commit-step
     commit_parser = subparsers.add_parser("commit-step", help="Commit current task and mark [x] in PLAN.md")
     commit_parser.add_argument("--task-id", type=str, required=True, help="Task ID to commit")
+    commit_parser.add_argument("--checkpoint", type=str, default=None, help="Optional checkpoint commit hash to verify")
 
     # Subcommand: rollback-step
     rollback_parser = subparsers.add_parser("rollback-step", help="Rollback working tree and mark task as failed")
@@ -369,6 +430,7 @@ def main() -> int:
     dispatcher = TaskDispatcher()
     verifier = DeterministicVerifier()
     reporter = MorningReporter()
+    evidence_store = EvidenceStore()
 
     # Handling Subcommands:
     if args.subcommand == "pre-flight":
@@ -401,7 +463,8 @@ def main() -> int:
         if code != 0:
             print(f"VERIFICATION FAILED (Exit {code}):\n{out}", file=sys.stderr)
             return code
-        print("VERIFICATION PASSED")
+        evidence = evidence_store.issue_evidence(task_id=args.task_id, checkpoint=args.checkpoint)
+        print(f"VERIFICATION PASSED (Evidence Token: {evidence['token']})")
         return 0
 
     elif args.subcommand == "commit-step":
@@ -410,6 +473,12 @@ def main() -> int:
         if not target:
             print(f"ERROR: Task {args.task_id} not found in {args.plan}", file=sys.stderr)
             return 1
+        if not evidence_store.verify_and_consume(task_id=args.task_id, checkpoint=args.checkpoint):
+            print(
+                f"EVIDENCE ERROR: No valid verification evidence found for task {args.task_id}. Must pass verify-step first.",
+                file=sys.stderr,
+            )
+            return 3
         dispatcher.mark_task_status(args.plan, target, status="completed")
         commit_hash = git_guard.commit_task(target)
         print(f"COMMITTED: {commit_hash}")
@@ -419,6 +488,7 @@ def main() -> int:
         tasks = dispatcher.parse_plan(args.plan)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
         task_id = target.task_id if target else args.task_id
+        evidence_store.clear_evidence(task_id=task_id)
         quarantine_branch = git_guard.quarantine_and_restore(args.checkpoint, task_id=task_id)
         if target:
             dispatcher.mark_task_status(args.plan, target, status="failed")
@@ -476,6 +546,7 @@ def main() -> int:
 
         if not git_guard.check_protected_files_untouched(checkpoint):
             print(f"CIRCUIT BREAKER: Protected file modified in task {task.task_id}. Rollback triggered.", file=sys.stderr)
+            evidence_store.clear_evidence(task.task_id)
             quarantine_branch = git_guard.quarantine_and_restore(checkpoint, task_id=task.task_id)
             dispatcher.mark_task_status(args.plan, task, status="failed")
             reporter.write_report(
@@ -502,6 +573,7 @@ def main() -> int:
         code, out = verifier.run_verification(args.verify_script, timeout_sec=args.timeout)
         if code != 0:
             print(f"Verification failed on task {task.task_id} (Exit {code}).", file=sys.stderr)
+            evidence_store.clear_evidence(task.task_id)
             quarantine_branch = git_guard.quarantine_and_restore(checkpoint, task_id=task.task_id)
             dispatcher.mark_task_status(args.plan, task, status="failed")
             log_path = Path(f"logs/nightly/task_{task.task_id}_failure.log")
@@ -535,6 +607,11 @@ def main() -> int:
                 },
             )
             return 1
+
+        evidence = evidence_store.issue_evidence(task.task_id, checkpoint)
+        if not evidence_store.verify_and_consume(task.task_id, checkpoint):
+            print(f"EVIDENCE ERROR: Failed to verify evidence for task {task.task_id}", file=sys.stderr)
+            return 3
 
         dispatcher.mark_task_status(args.plan, task, status="completed")
         commit_hash = git_guard.commit_task(task)
