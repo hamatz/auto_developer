@@ -42,6 +42,14 @@ class GitGuard:
         proc = self._run_git(["rev-parse", "HEAD"])
         return proc.stdout.strip()
 
+    def has_changes_since(self, checkpoint: str) -> bool:
+        """チェックポイント以降に変更（差分または未追跡・ステージ済みファイル）が存在するか判定する。"""
+        proc_diff = self._run_git(["diff", checkpoint])
+        if proc_diff.stdout.strip():
+            return True
+        proc_status = self._run_git(["status", "--porcelain"])
+        return bool(proc_status.stdout.strip())
+
     def check_protected_files_untouched(self, checkpoint: str) -> bool:
         """チェックポイント以降に変更されたファイル（未追跡・ステージ済を含む）に保護対象が含まれていないか検査する。"""
         files_to_check: set[str] = set()

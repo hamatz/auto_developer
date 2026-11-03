@@ -113,6 +113,19 @@ class NightlyOrchestrator:
                 print(f"  Maker failed with exit {maker_code}:\n{maker_out}", file=sys.stderr)
                 return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "MAKER_CRASH", maker_out)
 
+            # Phase A-2: 差分存在検査 (No-Op Reject)
+            if not self.git_guard.has_changes_since(checkpoint):
+                print(f"  REJECT: Maker completed with exit 0 but produced no modifications for task {task.task_id}!", file=sys.stderr)
+                return self._handle_failure(
+                    task,
+                    checkpoint,
+                    total_tasks,
+                    succeeded_tasks,
+                    job_state,
+                    "MAKER_NO_DIFF",
+                    "Maker completed with exit 0 but produced no changes (diff or new files)",
+                )
+
             # Phase B: 不変条件検査 (Circuit Breaker)
             if not self.git_guard.check_protected_files_untouched(checkpoint):
                 print(f"  CIRCUIT BREAKER: Protected file modified in task {task.task_id}!", file=sys.stderr)
@@ -132,6 +145,17 @@ class NightlyOrchestrator:
                 maker_code2, maker_out2 = self.runner_adapter.run_maker(task, context={"attempt": 2, "prev_error": out})
                 if maker_code2 != 0:
                     return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "MAKER_CRASH", maker_out2)
+
+                if not self.git_guard.has_changes_since(checkpoint):
+                    return self._handle_failure(
+                        task,
+                        checkpoint,
+                        total_tasks,
+                        succeeded_tasks,
+                        job_state,
+                        "MAKER_NO_DIFF",
+                        "Maker retry produced no changes",
+                    )
 
                 if not self.git_guard.check_protected_files_untouched(checkpoint):
                     return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "INVARIANT_BREACH", "Protected file modified on retry")

@@ -42,8 +42,13 @@ echo "=== [2/2] Running Project Tests ==="
 # プロジェクトのテストコマンドに置き換えてください (例: pytest, npm test, cargo test 等)
 if [ -d "tests" ]; then
   if command -v python3 >/dev/null 2>&1; then
-    python3 -m unittest discover -s tests -p "test_*.py" 2>/dev/null || true
+    python3 -m unittest discover -s tests -p "test_*.py"
+  else
+    echo "ERROR: python3 not found to execute tests"
+    exit 1
   fi
+else
+  echo "WARNING: No tests/ directory found. Add test suites to enforce verification."
 fi
 
 echo "=== All verification checks passed! (Exit 0) ==="
@@ -166,6 +171,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--resume", action="store_true", help="Resume interrupted job from state file"
+    )
+    parser.add_argument(
+        "--mock", action="store_true", help="Run with simulated mock agents (for testing only)"
     )
     parser.add_argument(
         "--maker-cmd", type=str, default="", help="Command template to execute Maker"
@@ -327,20 +335,28 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     # Default Autonomous Loop ("run" or no subcommand):
+    is_mock = getattr(args, "mock", False)
     maker_cmd = getattr(args, "maker_cmd", "")
     checker_cmd = getattr(args, "checker_cmd", "")
     dry_run = getattr(args, "dry_run", False)
     resume = getattr(args, "resume", False)
     timeout = getattr(args, "timeout", None) or 300
 
-    if maker_cmd or checker_cmd:
-        runner: RunnerAdapter = CommandRunnerAdapter(
+    if is_mock:
+        runner: RunnerAdapter = MockRunnerAdapter()
+    else:
+        if not maker_cmd or not checker_cmd:
+            print(
+                "CONFIG ERROR: In production mode, both Maker and Checker commands must be configured (--maker-cmd and --checker-cmd).\n"
+                "Use --mock if you want to execute with simulated mock agents for testing.",
+                file=sys.stderr,
+            )
+            return 2
+        runner = CommandRunnerAdapter(
             maker_cmd_template=maker_cmd,
             checker_cmd_template=checker_cmd,
             timeout_sec=timeout,
         )
-    else:
-        runner = MockRunnerAdapter()
 
     orchestrator = NightlyOrchestrator(
         repo_dir=work_dir,

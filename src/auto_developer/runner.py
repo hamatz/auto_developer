@@ -60,7 +60,7 @@ class CommandRunnerAdapter(RunnerAdapter):
 
     def run_maker(self, task: Task, context: dict[str, Any]) -> tuple[int, str]:
         if not self.maker_cmd_template:
-            return 0, "(No maker command configured, simulated no-op)"
+            return 1, "ERROR: No maker_cmd_template configured (Fail-Closed)"
         cmd_str = self.maker_cmd_template.format(
             task_id=task.task_id,
             task_title=task.title,
@@ -83,7 +83,7 @@ class CommandRunnerAdapter(RunnerAdapter):
 
     def run_checker(self, task: Task, diff: str, spec_content: str) -> tuple[bool, str]:
         if not self.checker_cmd_template:
-            return True, "(No checker command configured, auto-approved)"
+            return False, "ERROR: No checker_cmd_template configured (Fail-Closed)"
         cmd_str = self.checker_cmd_template.format(
             task_id=task.task_id,
             task_title=task.title,

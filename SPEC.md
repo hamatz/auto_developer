@@ -21,6 +21,10 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
 - [x] 機能E (隔離退避 & クリーンロールバック): 失敗時、作業ツリーの差分・成果物を破棄せず `quarantine/task-<id>-*` ブランチへ退避コミットした上で、本線作業ツリーを直前のチェックポイントに完全復元（`git reset --hard && git clean -fd`）し、`logs/nightly/task_<id>_failure.log` にエラーダンプを保存してパイプライン全体を即座に安全停止する（Exit 1）。
 - [x] 機能F (朝次レポート生成): 正常完了時およびFail-Fast停止時に、完了タスク一覧・隔離ブランチ・失敗理由・残タスクをまとめた `NIGHTLY_REPORT.md` を自動生成する。
 - [x] 機能G (証跡ベース確定ゲート): `commit-step` は、直前の `verify-step` で発行された有効な Evidence Token を検証・消費しない限り、コミットを拒否（Exit 3）する。未検証コードの混入を物理遮断する。
+- [x] 機能H (Fail-Closed Runner & 検証ゲート不変性):
+  1. `cli.py` / `DEFAULT_VERIFY_SH` に `|| true` 等の失敗握りつぶしを含めず、テスト未設定や失敗時は Exit 0 以外で終了する。
+  2. 本番実行時（`--mock` 未指定時）に Maker/Checker が未設定の場合は Exit 2 で起動を拒否する。
+  3. Maker 実行後に作業ツリーに差分が存在しない場合（No-Op）、タスク未達成として合格させず安全停止（Exit 1）する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
