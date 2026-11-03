@@ -132,14 +132,31 @@ class GitGuard:
         return proc.stdout.strip()
 
     def check_protected_files_untouched(self, checkpoint: str) -> bool:
-        """チェックポイント以降に変更されたファイルに保護対象が含まれていないか検査する。"""
-        proc = self._run_git(["diff", "--name-only", checkpoint])
-        modified_files = proc.stdout.splitlines()
+        """チェックポイント以降に変更されたファイル（未追跡・ステージ済を含む）に保護対象が含まれていないか検査する。"""
+        files_to_check: set[str] = set()
 
-        for file_path in modified_files:
-            stripped = file_path.strip()
+        # 1. Diff against checkpoint (tracked modifications)
+        proc_diff = self._run_git(["diff", "--name-only", checkpoint])
+        for line in proc_diff.stdout.splitlines():
+            if line.strip():
+                files_to_check.add(line.strip())
+
+        # 2. Porcelain status (untracked files ??, staged files, uncommitted changes)
+        proc_status = self._run_git(["status", "--porcelain"])
+        for line in proc_status.stdout.splitlines():
+            if not line.strip():
+                continue
+            # Format: XY filename or XY orig -> renamed
+            raw_path = line[3:].strip()
+            if " -> " in raw_path:
+                for p in raw_path.split(" -> "):
+                    files_to_check.add(p.strip().strip('"'))
+            else:
+                files_to_check.add(raw_path.strip('"'))
+
+        for file_path in files_to_check:
             for pattern in self.PROTECTED_PATTERNS:
-                if pattern.search(stripped):
+                if pattern.search(file_path):
                     return False
         return True
 

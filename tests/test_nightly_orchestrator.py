@@ -105,6 +105,17 @@ class TestNightlyOrchestrator(unittest.TestCase):
             subprocess.run(["git", "add", "SPEC.md"], cwd=repo_dir, check=True)
             self.assertFalse(git_guard.check_protected_files_untouched(checkpoint))
 
+            # 未追跡（Untracked）の保護ファイル作成も検知して拒否できること (P0脆弱性の再現)
+            subprocess.run(["git", "reset", "--hard", checkpoint], cwd=repo_dir, check=True)
+            github_dir = repo_dir / ".github" / "workflows"
+            github_dir.mkdir(parents=True)
+            untracked_wf = github_dir / "unauthorized.yml"
+            untracked_wf.write_text("evil", encoding="utf-8")
+            self.assertFalse(
+                git_guard.check_protected_files_untouched(checkpoint),
+                "GitGuard must detect untracked protected files!",
+            )
+
     def test_feature_e_rollback_and_clean_untracked_files(self):
         """機能E: 障害ロールバック時に未追跡ファイルも含めて作業ツリーを完全初期化する。"""
         import tempfile
