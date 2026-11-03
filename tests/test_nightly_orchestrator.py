@@ -1385,6 +1385,52 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 names = tar.getnames()
                 self.assertIn("new_untracked_data.json", names, "Safe untracked files must be preserved in tar snapshot")
 
+    def test_feature_p_verify_step_failure_preserves_uncompleted_plan(self):
+        """機能P-1: CLI verify-step が検証失敗した場合、PLAN.md は [x] にならず未完了状態が保たれること。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. 失敗するタスク\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            failing_sh = repo / "scripts" / "verify_local.sh"
+            failing_sh.write_text("#!/bin/bash\nexit 1\n", encoding="utf-8")
+            failing_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # 作業ファイルを作成
+            (repo / "feature.py").write_text("print('failing')", encoding="utf-8")
+
+            # verify-step を実行
+            script_path = Path(__file__).resolve().parents[1] / "scripts" / "nightly_orchestrator.py"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "verify-step",
+                    "--task-id",
+                    "1",
+                    "--checkpoint",
+                    checkpoint,
+                ],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0, "verify-step must fail when verify_local.sh exits 1")
+
+            # 検証失敗時、PLAN.md に [x] が残っていてはならない！
+            plan_content = (repo / "PLAN.md").read_text(encoding="utf-8")
+            self.assertIn("- [ ] 1. 失敗するタスク", plan_content, "PLAN.md must remain uncompleted on verify failure!")
+            self.assertNotIn("- [x]", plan_content, "PLAN.md must NOT have [x] when verification fails!")
+
+
 
 
 

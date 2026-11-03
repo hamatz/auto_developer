@@ -7,13 +7,13 @@
 -->
 
 ## 現在の目標
-- Phase 1 Hardening (Round 3): 排他制御とアトミック確定、Quarantine tracked限定
+- Phase 1 Hardening (Round 4): タスク再実行防止の保証と状態遷移の完全性検証
 
 ## ステップ
-- [x] 1. プロセス排他ロック (P1-1: fcntl.flock による多重起動防止) (Red-First)
-- [x] 2. 固定インデックスによるアトミックコミット (P0-1: 再ステージなし直接確定) (Red-First)
-- [x] 3. Quarantine の Git コミット対象を tracked に限定 (P0-2: git add -u による完全秘密隔離) (Red-First)
+- [x] 1. verify-step 失敗時の PLAN.md ロールバック保証 (Red-First)
+- [ ] 2. 連続タスク実行時の Maker 呼出回数保証 (2タスクで厳密に2回) & 再起動時再実行防止 (Red-First)
+- [ ] 3. 総合回帰検証 (全テスト・Ruff・Mypy)
 
 ## 止まっていること・判断待ち
-- なし（全ステップ完了）
+- なし
 
