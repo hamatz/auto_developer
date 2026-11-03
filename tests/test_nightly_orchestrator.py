@@ -2,11 +2,13 @@
 
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 # Target classes to be implemented in scripts/nightly_orchestrator.py
 from scripts.nightly_orchestrator import (
+    DEFAULT_VERIFY_SH,
     CommandRunnerAdapter,
     GitGuard,
     JobState,
@@ -22,7 +24,6 @@ from scripts.nightly_orchestrator import (
 class TestNightlyOrchestrator(unittest.TestCase):
     def test_feature_a_task_dispatcher_parse_and_update(self):
         """機能A: PLAN.md から未実行タスクを順次抽出し、状態を更新する。"""
-        import tempfile
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             plan_content = """# PLAN.md
@@ -745,8 +746,6 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
     def test_feature_h_default_verify_sh_fails_on_broken_test(self):
         """機能H-1: init が生成する scripts/verify_local.sh はテスト失敗を握りつぶさず非ゼロで終了する。"""
-        import tempfile
-        from auto_developer.cli import DEFAULT_VERIFY_SH
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
@@ -909,8 +908,6 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
     def test_feature_j_safe_quarantine_preserves_ignored_and_untracked_files(self):
         """機能J: 隔離退避時、.gitignore 対象の生成物や未追跡ファイルも含めて確実に保全されること。"""
-        import tempfile
-        from auto_developer.guard import GitGuard
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
@@ -983,8 +980,6 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
     def test_feature_l_cannot_resume_completed_or_failed_job(self):
         """機能L-1: 既に COMPLETED または FAILED な JobState を --resume した場合に再開を拒否すること。"""
-        import tempfile
-        from auto_developer.models import JobState
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
