@@ -14,8 +14,12 @@ class MorningReporter:
         succeeded = summary_data.get("succeeded_count", 0)
         quarantined_count = summary_data.get("quarantined_count", 0)
         checkpoint = summary_data.get("checkpoint", "N/A")
+        initial_checkpoint = summary_data.get("initial_checkpoint")
+        final_commit = summary_data.get("final_commit")
         executive_summary = summary_data.get("executive_summary")
         quick_try_command = summary_data.get("quick_try_command")
+        run_command = summary_data.get("run_command")
+        verify_command = summary_data.get("verify_command")
         known_limitations = summary_data.get("known_limitations") or []
 
         lines = [
@@ -35,8 +39,30 @@ class MorningReporter:
                 ]
             )
 
-        # 2. 動作確認コマンド (Quick Try) / 機能P
-        if quick_try_command:
+        # 2. 動作確認コマンド (Quick Try) / 機能P, 機能R
+        if run_command or verify_command:
+            lines.append("## 動作確認コマンド (Quick Try)")
+            if run_command:
+                lines.extend(
+                    [
+                        "### 1. 成果物を利用するコマンド (Run)",
+                        "```bash",
+                        run_command,
+                        "```",
+                        "",
+                    ]
+                )
+            if verify_command:
+                lines.extend(
+                    [
+                        "### 2. 検証ゲートを再実行するコマンド (Verify)",
+                        "```bash",
+                        verify_command,
+                        "```",
+                        "",
+                    ]
+                )
+        elif quick_try_command:
             lines.extend(
                 [
                     "## 動作確認コマンド (Quick Try)",
@@ -47,20 +73,27 @@ class MorningReporter:
                 ]
             )
 
-        # 3. 概要 (Status Overview)
-        lines.extend(
-            [
-                "## 概要 (Status Overview)",
-                "| 指標 | 状況 |",
-                "| :--- | :--- |",
-                f"| **稼働ステータス** | **{status}** |",
-                f"| **タスク進捗** | **{succeeded} / {total}** 完了 |",
-                f"| **要確認・隔離** | **{quarantined_count}** 件 |",
-                f"| **直前正常チェックポイント** | `{checkpoint}` |",
-                "",
-                "## 今回の成果と監査証跡 (Milestones & Audit Evidence)",
-            ]
-        )
+        # 3. 概要 (Status Overview) / 機能R
+        status_lines = [
+            "## 概要 (Status Overview)",
+            "| 指標 | 状況 |",
+            "| :--- | :--- |",
+            f"| **稼働ステータス** | **{status}** |",
+            f"| **タスク進捗** | **{succeeded} / {total}** 完了 |",
+            f"| **要確認・隔離** | **{quarantined_count}** 件 |",
+        ]
+        if initial_checkpoint and final_commit:
+            status_lines.extend(
+                [
+                    f"| **初期チェックポイント** | `{initial_checkpoint}` |",
+                    f"| **最新コミット (HEAD)** | `{final_commit}` |",
+                ]
+            )
+        else:
+            status_lines.append(f"| **直前正常チェックポイント** | `{checkpoint}` |")
+        status_lines.append("")
+        status_lines.append("## 今回の成果と監査証跡 (Milestones & Audit Evidence)")
+        lines.extend(status_lines)
 
         completed_tasks = summary_data.get("completed_tasks", [])
         if completed_tasks:

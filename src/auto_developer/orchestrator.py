@@ -132,6 +132,7 @@ class NightlyOrchestrator:
                 print(f"PRE-FLIGHT ERROR: {e}", file=sys.stderr)
                 return 2
 
+        initial_checkpoint = self.git_guard.get_current_checkpoint()
         tasks = self.dispatcher.parse_plan(self.plan_path)
         total_tasks = len(tasks)
         succeeded_tasks = job_state.completed_tasks
@@ -266,12 +267,20 @@ class NightlyOrchestrator:
             spec_sha = self.git_guard.get_spec_sha(self.spec_path)
 
             # 2. 検証済みツリーに対する証跡を発行
+            last_out_lines = [l.strip() for l in out.strip().splitlines() if l.strip()]
+            verification_meta = {
+                "exit_code": code,
+                "output_summary": last_out_lines[-10:] if last_out_lines else [],
+            }
             self.evidence_store.issue_evidence(
                 task.task_id,
                 checkpoint,
                 tree_sha=final_tree_sha,
                 spec_sha=spec_sha,
-                details={"checker_decision": checker_reason},
+                details={
+                    "checker_decision": checker_reason,
+                    "verification": verification_meta,
+                },
             )
 
             # 3. 証跡の検証と消費（ツリー整合性照合）
@@ -311,6 +320,7 @@ class NightlyOrchestrator:
                     "decision": "APPROVE",
                     "reason": checker_reason,
                 },
+                verification_info=verification_meta,
             )
 
             task_info = {
@@ -333,13 +343,26 @@ class NightlyOrchestrator:
         job_state.transition_phase("COMPLETED")
         if not self.dry_run:
             job_state.save(self.state_path)
-            # 意思決定支援型 Morning Brief サマリーの組み立て (機能P / P1-3)
+            # 意思決定支援型 Morning Brief サマリーの組み立て (機能P, 機能R)
             exec_summary = (
                 f"全 {len(succeeded_tasks)} 件のタスクが検証ゲートおよび独立Checker査読を通過し、正常に完了しました。"
                 if len(succeeded_tasks) == total_tasks
                 else f"{len(succeeded_tasks)} / {total_tasks} 件のタスクが正常に完了しました。"
             )
-            quick_cmd = "bash scripts/verify_local.sh" if (self.repo_dir / "scripts" / "verify_local.sh").exists() else "python3 -m unittest discover tests"
+            verify_cmd = "bash scripts/verify_local.sh" if (self.repo_dir / "scripts" / "verify_local.sh").exists() else "python3 -m unittest discover tests"
+
+            # 成果物利用コマンド (Run) の自動推測
+            run_cmd = None
+            if (self.repo_dir / "src").is_dir():
+                pkgs = [p.name for p in (self.repo_dir / "src").iterdir() if p.is_dir() and (p / "__main__.py").exists()]
+                if pkgs:
+                    run_cmd = f"python3 -m {pkgs[0]} --help"
+            if not run_cmd:
+                root_pkgs = [p.name for p in self.repo_dir.iterdir() if p.is_dir() and (p / "__main__.py").exists()]
+                if root_pkgs:
+                    run_cmd = f"python3 -m {root_pkgs[0]} --help"
+
+            current_head = self.git_guard.get_current_checkpoint()
             self.reporter.write_report(
                 self.report_path,
                 {
@@ -348,10 +371,13 @@ class NightlyOrchestrator:
                     "succeeded_count": len(succeeded_tasks),
                     "quarantined_count": 0,
                     "remaining_count": 0,
-                    "checkpoint": self.git_guard.get_current_checkpoint(),
+                    "checkpoint": current_head,
+                    "initial_checkpoint": initial_checkpoint,
+                    "final_commit": current_head,
                     "completed_tasks": succeeded_tasks,
                     "executive_summary": exec_summary,
-                    "quick_try_command": quick_cmd,
+                    "run_command": run_cmd,
+                    "verify_command": verify_cmd,
                 },
             )
             print(f"\nExecution complete! Report written to {self.report_path}")

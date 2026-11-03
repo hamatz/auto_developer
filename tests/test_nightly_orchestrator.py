@@ -1751,6 +1751,130 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertIn("| Task | Title | Commit | Verified Tree | Checker Review |", content)
             self.assertIn("| `task-1` | CLI骨格 | `b9645bb` |", content)
 
+    def test_feature_q_audit_records_include_verification_and_checker_info(self):
+        """機能Q: CLI verify-step & commit-step を通じて Verification と Checker の証跡が Record に記録されること。"""
+        from auto_developer.evidence import EvidenceStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            script_path = Path(__file__).parents[1] / "scripts" / "nightly_orchestrator.py"
+
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\nlogs/\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("# SPEC\nCore spec.\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. 監査証跡タスク\n", encoding="utf-8")
+
+            scripts_dir = repo / "scripts"
+            scripts_dir.mkdir(parents=True, exist_ok=True)
+            verify_sh = scripts_dir / "verify_local.sh"
+            verify_sh.write_text("#!/usr/bin/env bash\necho 'All 10 tests passed'\nexit 0\n", encoding="utf-8")
+            verify_sh.chmod(0o755)
+
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # 1. Maker が作業を実施
+            (repo / "module.py").write_text("def run(): pass\n", encoding="utf-8")
+
+            # 2. auto-dev verify-step を実行
+            proc_verify = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "verify-step",
+                    "--task-id",
+                    "1",
+                    "--checkpoint",
+                    checkpoint,
+                ],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc_verify.returncode, 0, f"verify-step failed: {proc_verify.stderr}")
+
+            # 3. auto-dev commit-step を Checker 情報付きで実行
+            proc_commit = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "commit-step",
+                    "--task-id",
+                    "1",
+                    "--checkpoint",
+                    checkpoint,
+                    "--checker-decision",
+                    "APPROVE",
+                    "--checker-reason",
+                    "Reviewed diff and verified 0-regression against SPEC.md",
+                ],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc_commit.returncode, 0, f"commit-step failed: {proc_commit.stderr}")
+
+            # 4. 永続監査レコードの内容を検証
+            store = EvidenceStore(repo_dir=repo)
+            record = store.get_record("1")
+            self.assertIsNotNone(record)
+            assert record is not None
+
+            # verification の詳細が記録されていること
+            self.assertIn("verification", record, "record must contain verification metadata")
+            self.assertEqual(record["verification"]["exit_code"], 0)
+
+            # checker の詳細が記録されていること
+            self.assertIn("checker", record, "record must contain checker review metadata")
+            self.assertEqual(record["checker"]["decision"], "APPROVE")
+            self.assertIn("Reviewed diff", record["checker"]["reason"])
+
+    def test_feature_r_morning_brief_dual_commands_and_split_checkpoints(self):
+        """機能R: Morning Brief で成果物実行(Run)と検証(Verify)が分離され、初期と最終コミットが区別されること。"""
+        from auto_developer.reporter import MorningReporter
+
+        reporter = MorningReporter()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "NIGHTLY_REPORT.md"
+            summary_data = {
+                "status": "COMPLETED",
+                "total_tasks": 1,
+                "succeeded_count": 1,
+                "quarantined_count": 0,
+                "initial_checkpoint": "003fd387092bab02",
+                "final_commit": "84f864138968304a",
+                "executive_summary": "パイロット改修が完了しました。",
+                "run_command": "python3 -m doccheck ./docs --json-out ./out/report.json",
+                "verify_command": "bash scripts/verify_local.sh",
+                "completed_tasks": [
+                    {
+                        "task_id": "1",
+                        "title": "バグ修正",
+                        "commit": "84f864138968304a",
+                        "evidence_tree_sha": "tree123",
+                        "checker_decision": "APPROVE",
+                    }
+                ],
+            }
+            reporter.write_report(report_path, summary_data)
+            content = report_path.read_text(encoding="utf-8")
+
+            # デュアルコマンド案内（Run と Verify の分離）
+            self.assertIn("成果物を利用するコマンド (Run)", content)
+            self.assertIn("python3 -m doccheck ./docs --json-out ./out/report.json", content)
+            self.assertIn("検証ゲートを再実行するコマンド (Verify)", content)
+            self.assertIn("bash scripts/verify_local.sh", content)
+
+            # チェックポイント分離表示
+            self.assertIn("| **初期チェックポイント** | `003fd387092bab02` |", content)
+            self.assertIn("| **最新コミット (HEAD)** | `84f864138968304a` |", content)
+
 
 if __name__ == "__main__":
     unittest.main()
