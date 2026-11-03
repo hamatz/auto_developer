@@ -7,14 +7,15 @@
 -->
 
 ## 現在の目標
-- Phase 2A: プラグイン & CLI パッケージ化（auto-dev: 任意プロジェクトへ外側から適用する自律基盤）
+- Phase 1 Hardening: 4つのP0問題の解消と安全な自律運転の確立
 
 ## ステップ
-- [x] 1. Python パッケージ構造の整備 (src/auto_developer/) と pyproject.toml への auto-dev CLI 定義
-- [x] 2. プロジェクト初期化コマンド (auto-dev init) の受入テスト作成と実装 (Red-First)
-- [x] 3. 外部プロジェクトディレクトリに対する自律稼働（auto-dev run & brief）の検証
-- [x] 4. Antigravity プラグインマニフェスト整備とドキュメント更新・全テスト検証
+- [x] 1. Gate & Runner の Fail-Closed 化（DEFAULT_VERIFY_SH の || true 削除、Runner未設定時の拒否、Maker差分なし時の安全停止）(Red-First)
+- [x] 2. Evidence Binding（Git Tree SHA, Spec SHA, Checker判定を証跡に拘束し、確定時に再照合）(Red-First)
+- [x] 3. Safe Quarantine（無視ファイルや未追跡ファイルを完全保護し、退避確認前にリセットしない）(Red-First)
+- [x] 4. Checker の構造化（JSON判定）と CI 検査範囲拡大 (Red-First)
+- [x] 5. JobState 状態遷移と安全なクラッシュ復旧 (Red-First)
 
 ## 止まっていること・判断待ち
-- なし
+- なし（全ステップ完了）
 

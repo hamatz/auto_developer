@@ -743,6 +743,300 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertIn("AUTO DEVELOPER / MORNING BRIEF", proc_brief.stdout)
             self.assertIn("新規モジュール作成", proc_brief.stdout)
 
+    def test_feature_h_default_verify_sh_fails_on_broken_test(self):
+        """機能H-1: init が生成する scripts/verify_local.sh はテスト失敗を握りつぶさず非ゼロで終了する。"""
+        import tempfile
+        from auto_developer.cli import DEFAULT_VERIFY_SH
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / "SPEC.md").write_text("spec", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            verify_sh = repo / "scripts" / "verify_local.sh"
+            verify_sh.write_text(DEFAULT_VERIFY_SH, encoding="utf-8")
+            verify_sh.chmod(0o755)
+
+            # 失敗するテストを配置
+            tests_dir = repo / "tests"
+            tests_dir.mkdir(parents=True, exist_ok=True)
+            (tests_dir / "test_failing.py").write_text(
+                "import unittest\nclass FailTest(unittest.TestCase):\n    def test_fail(self):\n        self.fail('Intentionally failing')\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init with failing test"], cwd=repo, check=True)
+
+            res = subprocess.run(["bash", str(verify_sh)], cwd=repo, capture_output=True, text=True, check=False)
+            self.assertNotEqual(res.returncode, 0, f"verify_local.sh must fail on broken tests! Output:\n{res.stdout}\n{res.stderr}")
+            test_section = DEFAULT_VERIFY_SH.split("Running Project Tests")[1]
+            self.assertNotIn("|| true", test_section)
+
+    def test_feature_h_runner_fails_closed_when_unconfigured(self):
+        """機能H-2: 本番モード (--mock 未指定) で Maker/Checker コマンドが未指定なら起動拒否 (Exit 2)。"""
+        import tempfile
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "nightly_orchestrator.py"
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. タスク\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            v_sh = repo / "scripts" / "verify_local.sh"
+            v_sh.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            v_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            # run without --maker-cmd, --checker-cmd, or --mock
+            proc = subprocess.run(
+                [sys.executable, str(script_path), "run"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 2, f"Expected Exit 2 when runner unconfigured, got {proc.returncode}:\n{proc.stdout}\n{proc.stderr}")
+            self.assertIn("Maker and Checker commands must be configured", proc.stderr)
+
+    def test_feature_h_maker_no_diff_fails_and_quarantines(self):
+        """機能H-3: Maker が成功終了しても作業ツリーに差分が一切ない場合、タスク未達成として隔離・停止する。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. 何も変更しないタスク\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            v_sh = repo / "scripts" / "verify_local.sh"
+            v_sh.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            v_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            # Mock runner that returns exit 0 but produces NO file changes
+            mock_runner = MockRunnerAdapter(maker_exit_code=0, maker_output="I did nothing")
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=v_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=repo / ".dev" / "job_state.json",
+                runner_adapter=mock_runner,
+                dry_run=False,
+            )
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 1, "Must exit with code 1 when Maker produces no diff")
+            # PLAN.md should mark task as failed
+            plan_text = (repo / "PLAN.md").read_text(encoding="utf-8")
+            self.assertIn("[FAILED]", plan_text)
+
+    def test_feature_i_evidence_binding_detects_tampered_tree_after_verify(self):
+        """機能I: verify-step 通過後に作業ツリーが改ざんされた場合、commit-step はコミットを拒否 (Exit 3) する。"""
+        import tempfile
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / "nightly_orchestrator.py"
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. タスク\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            v_sh = repo / "scripts" / "verify_local.sh"
+            v_sh.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            v_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # 正常な変更を加えて verify-step を実行
+            (repo / "valid_feature.py").write_text("print('valid')", encoding="utf-8")
+            proc_verify = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "verify-step",
+                    "--task-id",
+                    "1",
+                    "--checkpoint",
+                    checkpoint,
+                ],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc_verify.returncode, 0, f"verify-step should pass:\n{proc_verify.stdout}\n{proc_verify.stderr}")
+            self.assertIn("VERIFICATION PASSED", proc_verify.stdout)
+
+            # 検証通過後に、未検証の改ざんコードを混入させる！
+            (repo / "tampered_payload.py").write_text("print('malicious backdoor')", encoding="utf-8")
+
+            # commit-step を実行
+            proc_commit = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "commit-step",
+                    "--task-id",
+                    "1",
+                    "--checkpoint",
+                    checkpoint,
+                ],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            # 現在の実装ではツリー未拘束のため Exit 0 でコミットされてしまうはず (脆弱性)
+            self.assertEqual(
+                proc_commit.returncode,
+                3,
+                f"Expected Exit 3 (Evidence tree mismatch/tampering), but got {proc_commit.returncode}:\nSTDOUT:\n{proc_commit.stdout}\nSTDERR:\n{proc_commit.stderr}",
+            )
+            self.assertIn("EVIDENCE ERROR", proc_commit.stderr)
+
+    def test_feature_j_safe_quarantine_preserves_ignored_and_untracked_files(self):
+        """機能J: 隔離退避時、.gitignore 対象の生成物や未追跡ファイルも含めて確実に保全されること。"""
+        import tempfile
+        from auto_developer.guard import GitGuard
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text("*.ignored\n.dev/\n", encoding="utf-8")
+            (repo / "base.txt").write_text("base content\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # 作業中に tracked な変更と、.gitignore されたファイルを作成
+            (repo / "base.txt").write_text("modified base\n", encoding="utf-8")
+            (repo / "critical_data.ignored").write_text("very important data generated during task\n", encoding="utf-8")
+
+            guard = GitGuard(repo_dir=repo)
+            quarantine_branch = guard.quarantine_and_restore(checkpoint, task_id="1")
+            self.assertTrue(bool(quarantine_branch), "Must create quarantine branch when worktree has changes")
+
+            # 本線はチェックポイントへリセットされ、作業ツリーはクリーンであること
+            self.assertEqual((repo / "base.txt").read_text(encoding="utf-8"), "base content\n")
+
+            # 一方で、退避ブランチまたはスナップショットに critical_data.ignored が保全されていること
+            archive_dir = repo / ".dev" / "quarantines"
+            has_archive = any(archive_dir.glob("*.tar.gz")) if archive_dir.exists() else False
+
+            # 退避ブランチにファイルが存在するかチェック
+            proc_check = subprocess.run(
+                ["git", "show", f"{quarantine_branch}:critical_data.ignored"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            has_in_branch = proc_check.returncode == 0
+
+            self.assertTrue(
+                has_archive or has_in_branch,
+                "Ignored file 'critical_data.ignored' must be preserved either in quarantine branch or in physical snapshot archive!",
+            )
+
+    def test_feature_k_checker_rejects_not_approved_text(self):
+        """機能K-1: Checker が 'NOT APPROVED' を出力した場合に誤って承認せず REJECT と判定すること。"""
+        task = Task("1", "テストタスク", 1, False, False)
+        # 'NOT APPROVED' という否定を含むテキストを出力する Checker コマンド
+        runner = CommandRunnerAdapter(
+            checker_cmd_template="echo 'NOT APPROVED: The spec is violated.'",
+        )
+        approved, explanation = runner.run_checker(task, diff="some diff", spec_content="some spec")
+        self.assertFalse(approved, f"'NOT APPROVED' must NOT be evaluated as approved! Got approved={approved}, explanation={explanation}")
+
+    def test_feature_k_checker_parses_structured_json(self):
+        """機能K-2: Checker が JSON 形式で decision を返した場合に構造化判定できること。"""
+        task = Task("1", "テストタスク", 1, False, False)
+        # APPROVE json
+        runner_approve = CommandRunnerAdapter(
+            checker_cmd_template="""echo '{"decision": "APPROVE", "findings": []}'""",
+        )
+        approved, _ = runner_approve.run_checker(task, diff="diff", spec_content="spec")
+        self.assertTrue(approved)
+
+        # REJECT json
+        runner_reject = CommandRunnerAdapter(
+            checker_cmd_template="""echo '{"decision": "REJECT", "findings": ["Missing tests"]}'""",
+        )
+        approved2, expl2 = runner_reject.run_checker(task, diff="diff", spec_content="spec")
+        self.assertFalse(approved2)
+        self.assertIn("Missing tests", expl2)
+
+    def test_feature_l_cannot_resume_completed_or_failed_job(self):
+        """機能L-1: 既に COMPLETED または FAILED な JobState を --resume した場合に再開を拒否すること。"""
+        import tempfile
+        from auto_developer.models import JobState
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [x] 1. 完了タスク\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            v_sh = repo / "scripts" / "verify_local.sh"
+            v_sh.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            v_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            state_path = repo / ".dev" / "job_state.json"
+            completed_state = JobState(job_id="job-done", status="COMPLETED")
+            completed_state.save(state_path)
+
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=v_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=state_path,
+                runner_adapter=MockRunnerAdapter(),
+                dry_run=False,
+                resume=True,
+            )
+            # 完了済みジョブの再開は Exit 0 (何もしない) で早期終了すべき
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 0)
+
+            # 失敗・隔離済みジョブの場合
+            failed_state = JobState(job_id="job-failed", status="FAILED", quarantined_task={"task_id": "1"})
+            failed_state.save(state_path)
+            orchestrator_failed = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=v_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=state_path,
+                runner_adapter=MockRunnerAdapter(),
+                dry_run=False,
+                resume=True,
+            )
+            # FAILED ジョブは安全のため手動介入なしでの再開を拒絶 (Exit 2) すべき
+            exit_code_failed = orchestrator_failed.run()
+            self.assertEqual(exit_code_failed, 2, "Must reject resuming a FAILED job without resolving")
+
 
 if __name__ == "__main__":
     unittest.main()

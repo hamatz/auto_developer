@@ -55,6 +55,23 @@ class NightlyOrchestrator:
         # 1. JobState の初期化または再開
         if self.resume and self.state_path.exists():
             job_state = JobState.load(self.state_path)
+            if job_state.status == "COMPLETED":
+                print("RESUME INFO: Job is already COMPLETED. Nothing to resume.")
+                return 0
+            if job_state.status == "FAILED":
+                print(
+                    f"RESUME ERROR: Job {job_state.job_id} previously ended with FAILED status. "
+                    "Quarantined task must be inspected/resolved before starting a new run.",
+                    file=sys.stderr,
+                )
+                return 2
+            if not job_state.can_resume():
+                print(
+                    f"RESUME ERROR: Job {job_state.job_id} is in status '{job_state.status}' and cannot be resumed.",
+                    file=sys.stderr,
+                )
+                return 2
+
             print(f"Resuming job {job_state.job_id} from phase {job_state.current_phase}")
             # クラッシュ時の残骸作業ツリーがあれば隔離退避してクリーン復元
             if job_state.checkpoint_hash and not self.dry_run:
@@ -113,6 +130,19 @@ class NightlyOrchestrator:
                 print(f"  Maker failed with exit {maker_code}:\n{maker_out}", file=sys.stderr)
                 return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "MAKER_CRASH", maker_out)
 
+            # Phase A-2: 差分存在検査 (No-Op Reject)
+            if not self.git_guard.has_changes_since(checkpoint):
+                print(f"  REJECT: Maker completed with exit 0 but produced no modifications for task {task.task_id}!", file=sys.stderr)
+                return self._handle_failure(
+                    task,
+                    checkpoint,
+                    total_tasks,
+                    succeeded_tasks,
+                    job_state,
+                    "MAKER_NO_DIFF",
+                    "Maker completed with exit 0 but produced no changes (diff or new files)",
+                )
+
             # Phase B: 不変条件検査 (Circuit Breaker)
             if not self.git_guard.check_protected_files_untouched(checkpoint):
                 print(f"  CIRCUIT BREAKER: Protected file modified in task {task.task_id}!", file=sys.stderr)
@@ -132,6 +162,17 @@ class NightlyOrchestrator:
                 maker_code2, maker_out2 = self.runner_adapter.run_maker(task, context={"attempt": 2, "prev_error": out})
                 if maker_code2 != 0:
                     return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "MAKER_CRASH", maker_out2)
+
+                if not self.git_guard.has_changes_since(checkpoint):
+                    return self._handle_failure(
+                        task,
+                        checkpoint,
+                        total_tasks,
+                        succeeded_tasks,
+                        job_state,
+                        "MAKER_NO_DIFF",
+                        "Maker retry produced no changes",
+                    )
 
                 if not self.git_guard.check_protected_files_untouched(checkpoint):
                     return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "INVARIANT_BREACH", "Protected file modified on retry")
@@ -176,8 +217,23 @@ class NightlyOrchestrator:
             # Phase E: 確定とコミット (Evidence & Commit)
             print("  [Phase E: Commit] Checker approved. Issuing evidence and committing...")
             job_state.transition_phase("COMMIT")
-            self.evidence_store.issue_evidence(task.task_id, checkpoint)
-            if not self.evidence_store.verify_and_consume(task.task_id, checkpoint):
+            tree_sha = self.git_guard.get_working_tree_sha()
+            spec_sha = self.git_guard.get_spec_sha(self.spec_path)
+            self.evidence_store.issue_evidence(
+                task.task_id,
+                checkpoint,
+                tree_sha=tree_sha,
+                spec_sha=spec_sha,
+                details={"checker_decision": checker_reason},
+            )
+            current_tree = self.git_guard.get_working_tree_sha()
+            current_spec = self.git_guard.get_spec_sha(self.spec_path)
+            if not self.evidence_store.verify_and_consume(
+                task.task_id,
+                checkpoint,
+                expected_tree_sha=current_tree,
+                expected_spec_sha=current_spec,
+            ):
                 print(f"  EVIDENCE ERROR: Could not verify evidence for task {task.task_id}", file=sys.stderr)
                 return 3
 
@@ -224,7 +280,7 @@ class NightlyOrchestrator:
         reason: str,
     ) -> int:
         self.evidence_store.clear_evidence(task.task_id)
-        job_state.status = "STOPPED_FAIL_FAST"
+        job_state.status = "FAILED"
         job_state.transition_phase("QUARANTINE")
         quarantine_branch = self.git_guard.quarantine_and_restore(checkpoint, task_id=task.task_id)
         self.dispatcher.mark_task_status(self.plan_path, task, status="failed")

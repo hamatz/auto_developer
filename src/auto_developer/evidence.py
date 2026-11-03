@@ -12,7 +12,12 @@ class EvidenceStore:
         self.evidence_dir = self.repo_dir / ".git" / "nightly_evidence"
 
     def issue_evidence(
-        self, task_id: str, checkpoint: str, details: dict[str, Any] | None = None
+        self,
+        task_id: str,
+        checkpoint: str,
+        tree_sha: str = "",
+        spec_sha: str = "",
+        details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """検証合格の証跡を発行し、.git 配下に永続化する。"""
         import hashlib
@@ -21,11 +26,13 @@ class EvidenceStore:
 
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
         now = time.time()
-        raw = f"{task_id}:{checkpoint}:{now}"
+        raw = f"{task_id}:{checkpoint}:{tree_sha}:{spec_sha}:{now}"
         token = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         evidence = {
             "task_id": task_id,
             "checkpoint": checkpoint,
+            "tree_sha": tree_sha,
+            "spec_sha": spec_sha,
             "issued_at": now,
             "token": token,
             "details": details or {},
@@ -34,8 +41,14 @@ class EvidenceStore:
         path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         return evidence
 
-    def verify_and_consume(self, task_id: str, checkpoint: str | None = None) -> bool:
-        """指定タスクの有効な証跡が存在するか検証し、存在すれば消費（削除）する。"""
+    def verify_and_consume(
+        self,
+        task_id: str,
+        checkpoint: str | None = None,
+        expected_tree_sha: str | None = None,
+        expected_spec_sha: str | None = None,
+    ) -> bool:
+        """指定タスクの有効な証跡が存在するか検証し、Tree SHA と SPEC ハッシュが一致すれば消費（削除）する。"""
         import json
 
         path = self.evidence_dir / f"task_{task_id}.json"
@@ -46,6 +59,10 @@ class EvidenceStore:
             if str(data.get("task_id")) != str(task_id):
                 return False
             if checkpoint and str(data.get("checkpoint")) != str(checkpoint):
+                return False
+            if expected_tree_sha and str(data.get("tree_sha")) != str(expected_tree_sha):
+                return False
+            if expected_spec_sha and str(data.get("spec_sha")) != str(expected_spec_sha):
                 return False
             path.unlink()
             return True

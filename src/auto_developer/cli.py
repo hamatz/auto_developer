@@ -42,8 +42,13 @@ echo "=== [2/2] Running Project Tests ==="
 # プロジェクトのテストコマンドに置き換えてください (例: pytest, npm test, cargo test 等)
 if [ -d "tests" ]; then
   if command -v python3 >/dev/null 2>&1; then
-    python3 -m unittest discover -s tests -p "test_*.py" 2>/dev/null || true
+    python3 -m unittest discover -s tests -p "test_*.py"
+  else
+    echo "ERROR: python3 not found to execute tests"
+    exit 1
   fi
+else
+  echo "WARNING: No tests/ directory found. Add test suites to enforce verification."
 fi
 
 echo "=== All verification checks passed! (Exit 0) ==="
@@ -168,6 +173,9 @@ def main(argv: list[str] | None = None) -> int:
         "--resume", action="store_true", help="Resume interrupted job from state file"
     )
     parser.add_argument(
+        "--mock", action="store_true", help="Run with simulated mock agents (for testing only)"
+    )
+    parser.add_argument(
         "--maker-cmd", type=str, default="", help="Command template to execute Maker"
     )
     parser.add_argument(
@@ -262,7 +270,14 @@ def main(argv: list[str] | None = None) -> int:
         if code != 0:
             print(f"VERIFICATION FAILED (Exit {code}):\n{out}", file=sys.stderr)
             return code
-        evidence = evidence_store.issue_evidence(task_id=args.task_id, checkpoint=args.checkpoint)
+        tree_sha = git_guard.get_working_tree_sha()
+        spec_sha = git_guard.get_spec_sha(spec_path)
+        evidence = evidence_store.issue_evidence(
+            task_id=args.task_id,
+            checkpoint=args.checkpoint,
+            tree_sha=tree_sha,
+            spec_sha=spec_sha,
+        )
         print(f"VERIFICATION PASSED (Evidence Token: {evidence['token']})")
         return 0
 
@@ -272,9 +287,17 @@ def main(argv: list[str] | None = None) -> int:
         if not target:
             print(f"ERROR: Task {args.task_id} not found in {plan_path}", file=sys.stderr)
             return 1
-        if not evidence_store.verify_and_consume(task_id=args.task_id, checkpoint=args.checkpoint):
+        current_tree_sha = git_guard.get_working_tree_sha()
+        current_spec_sha = git_guard.get_spec_sha(spec_path)
+        if not evidence_store.verify_and_consume(
+            task_id=args.task_id,
+            checkpoint=args.checkpoint,
+            expected_tree_sha=current_tree_sha,
+            expected_spec_sha=current_spec_sha,
+        ):
             print(
-                f"EVIDENCE ERROR: No valid verification evidence found for task {args.task_id}. Must pass verify-step first.",
+                f"EVIDENCE ERROR: No valid verification evidence found for task {args.task_id} matching current tree/spec. "
+                "Evidence missing or working tree/spec was tampered after verify-step.",
                 file=sys.stderr,
             )
             return 3
@@ -327,20 +350,28 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     # Default Autonomous Loop ("run" or no subcommand):
+    is_mock = getattr(args, "mock", False)
     maker_cmd = getattr(args, "maker_cmd", "")
     checker_cmd = getattr(args, "checker_cmd", "")
     dry_run = getattr(args, "dry_run", False)
     resume = getattr(args, "resume", False)
     timeout = getattr(args, "timeout", None) or 300
 
-    if maker_cmd or checker_cmd:
-        runner: RunnerAdapter = CommandRunnerAdapter(
+    if is_mock:
+        runner: RunnerAdapter = MockRunnerAdapter()
+    else:
+        if not maker_cmd or not checker_cmd:
+            print(
+                "CONFIG ERROR: In production mode, both Maker and Checker commands must be configured (--maker-cmd and --checker-cmd).\n"
+                "Use --mock if you want to execute with simulated mock agents for testing.",
+                file=sys.stderr,
+            )
+            return 2
+        runner = CommandRunnerAdapter(
             maker_cmd_template=maker_cmd,
             checker_cmd_template=checker_cmd,
             timeout_sec=timeout,
         )
-    else:
-        runner = MockRunnerAdapter()
 
     orchestrator = NightlyOrchestrator(
         repo_dir=work_dir,
