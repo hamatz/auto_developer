@@ -981,6 +981,62 @@ class TestNightlyOrchestrator(unittest.TestCase):
         self.assertFalse(approved2)
         self.assertIn("Missing tests", expl2)
 
+    def test_feature_l_cannot_resume_completed_or_failed_job(self):
+        """機能L-1: 既に COMPLETED または FAILED な JobState を --resume した場合に再開を拒否すること。"""
+        import tempfile
+        from auto_developer.models import JobState
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [x] 1. 完了タスク\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            v_sh = repo / "scripts" / "verify_local.sh"
+            v_sh.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            v_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            state_path = repo / ".dev" / "job_state.json"
+            completed_state = JobState(job_id="job-done", status="COMPLETED")
+            completed_state.save(state_path)
+
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=v_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=state_path,
+                runner_adapter=MockRunnerAdapter(),
+                dry_run=False,
+                resume=True,
+            )
+            # 完了済みジョブの再開は Exit 0 (何もしない) で早期終了すべき
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 0)
+
+            # 失敗・隔離済みジョブの場合
+            failed_state = JobState(job_id="job-failed", status="FAILED", quarantined_task={"task_id": "1"})
+            failed_state.save(state_path)
+            orchestrator_failed = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=v_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=state_path,
+                runner_adapter=MockRunnerAdapter(),
+                dry_run=False,
+                resume=True,
+            )
+            # FAILED ジョブは安全のため手動介入なしでの再開を拒絶 (Exit 2) すべき
+            exit_code_failed = orchestrator_failed.run()
+            self.assertEqual(exit_code_failed, 2, "Must reject resuming a FAILED job without resolving")
+
 
 if __name__ == "__main__":
     unittest.main()

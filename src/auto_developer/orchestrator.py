@@ -55,6 +55,23 @@ class NightlyOrchestrator:
         # 1. JobState の初期化または再開
         if self.resume and self.state_path.exists():
             job_state = JobState.load(self.state_path)
+            if job_state.status == "COMPLETED":
+                print("RESUME INFO: Job is already COMPLETED. Nothing to resume.")
+                return 0
+            if job_state.status == "FAILED":
+                print(
+                    f"RESUME ERROR: Job {job_state.job_id} previously ended with FAILED status. "
+                    "Quarantined task must be inspected/resolved before starting a new run.",
+                    file=sys.stderr,
+                )
+                return 2
+            if not job_state.can_resume():
+                print(
+                    f"RESUME ERROR: Job {job_state.job_id} is in status '{job_state.status}' and cannot be resumed.",
+                    file=sys.stderr,
+                )
+                return 2
+
             print(f"Resuming job {job_state.job_id} from phase {job_state.current_phase}")
             # クラッシュ時の残骸作業ツリーがあれば隔離退避してクリーン復元
             if job_state.checkpoint_hash and not self.dry_run:
@@ -263,7 +280,7 @@ class NightlyOrchestrator:
         reason: str,
     ) -> int:
         self.evidence_store.clear_evidence(task.task_id)
-        job_state.status = "STOPPED_FAIL_FAST"
+        job_state.status = "FAILED"
         job_state.transition_phase("QUARANTINE")
         quarantine_branch = self.git_guard.quarantine_and_restore(checkpoint, task_id=task.task_id)
         self.dispatcher.mark_task_status(self.plan_path, task, status="failed")

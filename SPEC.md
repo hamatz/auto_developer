@@ -34,6 +34,10 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
 - [x] 機能K (Checker 構造化判定 & 型検査完全性):
   1. `CommandRunnerAdapter.run_checker()` は JSON 構造化結果 (`{ "decision": "APPROVE" | "REJECT", ... }`) を解析し判定する。"NOT APPROVED" などの否定文が誤って承認される誤判定を物理遮断する。
   2. 検証ゲートの `mypy` 対象を `src scripts` に拡大し、全パッケージ実装の静的型検査を通過させる。
+- [x] 機能L (安全なクラッシュ復旧と状態遷移):
+  1. ジョブ状態は `QUEUED`, `RUNNING`, `SUSPENDED`, `COMPLETED`, `FAILED` の状態遷移を定義し、永続化する。
+  2. `--resume` 実行時、`can_resume()` により再開可能状態であることを厳密に検証し、完了済み（COMPLETED）または隔離停止（FAILED）ジョブの意図しない再処理・巻き戻しを拒否する。
+  3. コミットフェーズでのクラッシュ時、Git 履歴を照合してタスクコミット完了済みか判定し、二重コミットを防止する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

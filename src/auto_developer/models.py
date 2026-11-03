@@ -27,7 +27,7 @@ class JobState:
     """オーケストレーターの実行状態（Job State）を保持・永続化するモジュール。"""
 
     job_id: str
-    status: str = "IDLE"  # IDLE, RUNNING, STOPPED_FAIL_FAST, COMPLETED
+    status: str = "IDLE"  # IDLE, QUEUED, RUNNING, SUSPENDED, COMPLETED, FAILED
     current_task_id: str | None = None
     current_phase: str = "INIT"  # INIT, MAKER, VERIFY, CHECKER, COMMIT, QUARANTINE
     current_attempt: int = 1
@@ -55,7 +55,7 @@ class JobState:
 
     def can_resume(self) -> bool:
         """中断から安全に再開可能か判定する。"""
-        return self.status == "RUNNING" and self.current_task_id is not None
+        return self.status in ("RUNNING", "SUSPENDED")
 
     def save(self, path: Path) -> None:
         """ディスク（JSON）に状態を永続化する。"""
