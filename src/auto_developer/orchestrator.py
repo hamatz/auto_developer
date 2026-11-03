@@ -73,6 +73,16 @@ class NightlyOrchestrator:
                 return 2
 
             print(f"Resuming job {job_state.job_id} from phase {job_state.current_phase}")
+            # HEAD 照合: 現在の作業ツリーの親コミット (HEAD) が保存された checkpoint_hash と一致するか
+            current_head = self.git_guard.get_current_checkpoint()
+            if job_state.checkpoint_hash and current_head != job_state.checkpoint_hash:
+                print(
+                    f"RESUME ERROR: Current git HEAD ({current_head}) does not match job checkpoint ({job_state.checkpoint_hash}).\n"
+                    "Manual commits or branch changes detected. Refusing destructive rollback.",
+                    file=sys.stderr,
+                )
+                return 2
+
             # クラッシュ時の残骸作業ツリーがあれば隔離退避してクリーン復元
             if job_state.checkpoint_hash and not self.dry_run:
                 print(f"Resetting uncommitted work back to checkpoint {job_state.checkpoint_hash} for safe resume...")
@@ -215,17 +225,26 @@ class NightlyOrchestrator:
                 return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "CHECKER_REJECT", checker_reason)
 
             # Phase E: 確定とコミット (Evidence & Commit)
-            print("  [Phase E: Commit] Checker approved. Issuing evidence and committing...")
+            print("  [Phase E: Commit] Checker approved. Finalizing plan and issuing evidence...")
             job_state.transition_phase("COMMIT")
-            tree_sha = self.git_guard.get_working_tree_sha()
+
+            # 1. PLAN.md のタスク状態を completed に更新（コミット対象の最終ツリーを確定）
+            self.dispatcher.mark_task_status(self.plan_path, task, status="completed")
+
+            # 2. PLAN.md 更新を含めた最終作業ツリー全体の Tree SHA と SPEC SHA を取得
+            final_tree_sha = self.git_guard.get_working_tree_sha()
             spec_sha = self.git_guard.get_spec_sha(self.spec_path)
+
+            # 3. 最終ツリーに対する証跡を発行
             self.evidence_store.issue_evidence(
                 task.task_id,
                 checkpoint,
-                tree_sha=tree_sha,
+                tree_sha=final_tree_sha,
                 spec_sha=spec_sha,
                 details={"checker_decision": checker_reason},
             )
+
+            # 4. 証跡の検証と消費（ツリー整合性照合）
             current_tree = self.git_guard.get_working_tree_sha()
             current_spec = self.git_guard.get_spec_sha(self.spec_path)
             if not self.evidence_store.verify_and_consume(
@@ -237,9 +256,26 @@ class NightlyOrchestrator:
                 print(f"  EVIDENCE ERROR: Could not verify evidence for task {task.task_id}", file=sys.stderr)
                 return 3
 
-            self.dispatcher.mark_task_status(self.plan_path, task, status="completed")
+            # 5. コミット実行
             commit_hash = self.git_guard.commit_task(task)
-            task_info = {"task_id": task.task_id, "title": task.title, "commit": commit_hash, "verifier": "verify_local.sh & Checker"}
+
+            # 6. コミットされた Git Commit の Tree SHA と Evidence Tree SHA の完全一致を検証
+            committed_tree_sha = self.git_guard.get_commit_tree_sha(commit_hash)
+            if committed_tree_sha != final_tree_sha:
+                print(
+                    f"  FATAL INVARIANT BREACH: Committed tree {committed_tree_sha} does not match verified tree {final_tree_sha}!",
+                    file=sys.stderr,
+                )
+                return 3
+
+            task_info = {
+                "task_id": task.task_id,
+                "title": task.title,
+                "commit": commit_hash,
+                "evidence_tree_sha": final_tree_sha,
+                "committed_tree_sha": committed_tree_sha,
+                "verifier": "verify_local.sh & Checker",
+            }
             succeeded_tasks.append(task_info)
             job_state.completed_tasks = succeeded_tasks
             job_state.save(self.state_path)

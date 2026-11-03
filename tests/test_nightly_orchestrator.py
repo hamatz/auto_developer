@@ -1032,6 +1032,201 @@ class TestNightlyOrchestrator(unittest.TestCase):
             exit_code_failed = orchestrator_failed.run()
             self.assertEqual(exit_code_failed, 2, "Must reject resuming a FAILED job without resolving")
 
+    def test_feature_m_committed_tree_strictly_equals_evidence_tree(self):
+        """機能M-1: 実際にコミットされた Git Tree SHA (HEAD^{tree}) は Evidence に拘束された Tree SHA と完全一致すること。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. 確定タスク\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            v_sh = repo / "scripts" / "verify_local.sh"
+            v_sh.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            v_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            # Maker が feature.py を作成するモック
+            class TaskMaker(RunnerAdapter):
+                def run_maker(self, task, context):
+                    (repo / "feature.py").write_text("def run(): pass\n", encoding="utf-8")
+                    return 0, "created feature.py"
+
+                def run_checker(self, task, diff, spec_content):
+                    return True, '{"decision": "APPROVE"}'
+
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=v_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=repo / ".dev" / "job_state.json",
+                runner_adapter=TaskMaker(),
+                dry_run=False,
+            )
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 0)
+
+            # コミットされた最新のツリー SHA
+            committed_tree = subprocess.run(
+                ["git", "rev-parse", "HEAD^{tree}"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+
+            # 直近のコミット情報
+            state_data = JobState.load(repo / ".dev" / "job_state.json")
+            commit_info = state_data.completed_tasks[0]
+            evidence_tree = commit_info.get("evidence_tree_sha", "")
+
+            # コミットされたツリーの SHA と、Evidence で検証・承認された Tree SHA が完全一致すること！
+            self.assertEqual(
+                committed_tree,
+                evidence_tree,
+                f"Committed Git Tree ({committed_tree}) must strictly match Evidence Tree SHA ({evidence_tree})! "
+                "PLAN.md was modified AFTER Evidence verification, creating an unverified commit tree.",
+            )
+
+    def test_feature_m_quarantine_does_not_commit_secrets_to_git_and_excludes_from_snapshot(self):
+        """機能M-2: 隔離処理は .gitignore 対象の秘密情報 (.env, 鍵) を Git に強制追加せず、スナップショットからも除外すること。"""
+        import tarfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".env*\n*.key\n.dev/\n", encoding="utf-8")
+            (repo / "base.py").write_text("print('base')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # タスク作業中に正常コードと秘密情報を作成
+            (repo / "failed_feature.py").write_text("print('incomplete')\n", encoding="utf-8")
+            (repo / ".env").write_text("SECRET_API_KEY=topsecret123\n", encoding="utf-8")
+            (repo / "private.key").write_text("-----BEGIN RSA PRIVATE KEY-----\n", encoding="utf-8")
+
+            guard = GitGuard(repo_dir=repo)
+            quarantine_branch = guard.quarantine_and_restore(checkpoint, task_id="sec1")
+
+            # 1. 隔離ブランチに .env や private.key がコミットされていないこと！
+            proc_env = subprocess.run(
+                ["git", "show", f"{quarantine_branch}:.env"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(proc_env.returncode, 0, "Secrets (.env) must NEVER be force-added to git quarantine branch!")
+
+            proc_key = subprocess.run(
+                ["git", "show", f"{quarantine_branch}:private.key"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(proc_key.returncode, 0, "Private keys must NEVER be force-added to git quarantine branch!")
+
+            # 2. ソースコードは隔離ブランチに保全されていること
+            proc_code = subprocess.run(
+                ["git", "show", f"{quarantine_branch}:failed_feature.py"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc_code.returncode, 0, "Source code changes must be preserved in quarantine branch")
+
+            # 3. 物理スナップショット archive からも秘密情報が除外されていること
+            archive_dir = repo / ".dev" / "quarantines"
+            archives = list(archive_dir.glob("*.tar.gz"))
+            self.assertTrue(bool(archives), "Snapshot archive must be created")
+            with tarfile.open(archives[0], "r:gz") as tar:
+                names = tar.getnames()
+                self.assertNotIn(".env", names, "Secret .env must be excluded from recovery snapshot")
+                self.assertNotIn("private.key", names, "Private key must be excluded from recovery snapshot")
+                self.assertIn("failed_feature.py", names, "Source code must be preserved in recovery snapshot")
+
+    def test_feature_m_resume_rejects_head_mismatch(self):
+        """機能M-3: --resume 実行時、現在の HEAD が保存された checkpoint_hash と不一致なら巻き戻しを拒絶 (Exit 2) すること。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. タスク\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            v_sh = repo / "scripts" / "verify_local.sh"
+            v_sh.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            v_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            old_checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # その後、人間が別のコミットを進めたとする
+            (repo / "human_change.txt").write_text("human committed something else\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "human commit"], cwd=repo, check=True)
+            new_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # job_state には古い old_checkpoint が残っている
+            state_path = repo / ".dev" / "job_state.json"
+            running_state = JobState(job_id="job-old", status="RUNNING", current_task_id="1", checkpoint_hash=old_checkpoint)
+            running_state.save(state_path)
+
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=v_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=state_path,
+                runner_adapter=MockRunnerAdapter(),
+                dry_run=False,
+                resume=True,
+            )
+            # HEAD が進んでいるため、古い checkpoint への破壊的リセットを防ぎ Exit 2 で停止すべき
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 2, "Must reject resuming when current HEAD diverges from job checkpoint!")
+
+            # 人間のコミットが巻き戻されていないこと
+            current_head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(current_head_after, new_head, "Human commit must NOT be wiped out by resume reset!")
+
+    def test_feature_m_default_verify_fails_when_no_tests_configured(self):
+        """機能M-4: DEFAULT_VERIFY_SH は tests/ ディレクトリまたはテストが存在しない場合に Exit 1 で失敗すること。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            verify_sh = repo / "scripts" / "verify_local.sh"
+            verify_sh.write_text(DEFAULT_VERIFY_SH, encoding="utf-8")
+            verify_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init without tests"], cwd=repo, check=True)
+
+            res = subprocess.run(["bash", str(verify_sh)], cwd=repo, capture_output=True, text=True, check=False)
+            self.assertNotEqual(
+                res.returncode,
+                0,
+                f"verify_local.sh must fail (Exit 1) when no tests are configured! Got exit {res.returncode}:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}",
+            )
+            self.assertIn("No tests configured", res.stdout + res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

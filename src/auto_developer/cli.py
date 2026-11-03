@@ -40,16 +40,21 @@ fi
 
 echo "=== [2/2] Running Project Tests ==="
 # プロジェクトのテストコマンドに置き換えてください (例: pytest, npm test, cargo test 等)
-if [ -d "tests" ]; then
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -m unittest discover -s tests -p "test_*.py"
-  else
-    echo "ERROR: python3 not found to execute tests"
-    exit 1
-  fi
-else
-  echo "WARNING: No tests/ directory found. Add test suites to enforce verification."
+if [ ! -d "tests" ] || [ -z "$(find tests -name 'test_*.py' 2>/dev/null)" ]; then
+  echo "ERROR: No tests configured. A valid test suite (e.g. tests/test_*.py) is required to enforce verification gates."
+  exit 1
 fi
+
+if [ -x "/usr/bin/python3" ]; then
+  PYTHON="/usr/bin/python3"
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON="python3"
+else
+  echo "ERROR: python3 not found to execute tests"
+  exit 1
+fi
+
+"$PYTHON" -m unittest discover -s tests -p "test_*.py"
 
 echo "=== All verification checks passed! (Exit 0) ==="
 """
@@ -83,6 +88,14 @@ DEFAULT_SPEC_MD = """# Product Specification & Invariant Contracts (SPEC.md)
 ## 3. 厳格な不変条件 (System Invariants)
 1. 保護アセット不変: `.github/**`, `SPEC.md`, `scripts/verify_local.sh`, 免疫テストの無断改変を物理遮断する。
 2. 失敗時の隔離保存: タスク失敗時は成果を破棄せず quarantine ブランチに退避し、本線を直前の正常状態へ復元する。
+"""
+
+DEFAULT_TEST_PY = """import unittest
+
+
+class SmokeTest(unittest.TestCase):
+    def test_smoke(self):
+        self.assertTrue(True)
 """
 
 
@@ -131,6 +144,13 @@ def init_project(target_dir: Path) -> int:
     else:
         gitignore.write_text("\n".join(needed_ignores) + "\n", encoding="utf-8")
         print("  ✓ Created .gitignore with Auto Developer artifacts")
+
+    # 5. tests/test_smoke.py (初期検証用テスト)
+    smoke_test = target_dir / "tests" / "test_smoke.py"
+    if not (target_dir / "tests").exists():
+        smoke_test.parent.mkdir(parents=True, exist_ok=True)
+        smoke_test.write_text(DEFAULT_TEST_PY, encoding="utf-8")
+        print("  ✓ Created tests/test_smoke.py (Initial verification test)")
 
     print("\nInitialization complete! You can now run `auto-dev run` or `auto-dev --dry-run`.")
     return 0

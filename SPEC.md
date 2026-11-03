@@ -38,6 +38,11 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   1. ジョブ状態は `QUEUED`, `RUNNING`, `SUSPENDED`, `COMPLETED`, `FAILED` の状態遷移を定義し、永続化する。
   2. `--resume` 実行時、`can_resume()` により再開可能状態であることを厳密に検証し、完了済み（COMPLETED）または隔離停止（FAILED）ジョブの意図しない再処理・巻き戻しを拒否する。
   3. コミットフェーズでのクラッシュ時、Git 履歴を照合してタスクコミット完了済みか判定し、二重コミットを防止する。
+- [x] 機能M (最終確定ツリー整合性 & 安全な隔離・復旧):
+  1. `commit-step` / オーケストレーターは `PLAN.md` のタスク完了更新を含めた最終作業ツリーに対して Evidence を発行・検証・消費し、生成されたコミットの Tree SHA (`git rev-parse HEAD^{tree}`) が Evidence の `tree_sha` と完全一致することを保証する（無検証コード確定の物理遮断）。
+  2. `quarantine_and_restore()` は `git add -A -f` を廃止して `.gitignore` を厳密に遵守し、シークレット（`.env*`, `*.pem`, `*.key`, `*token*` 等）の Git 格納を物理遮断する。Recovery Snapshot においてもシークレットパターンを除外する。
+  3. `JobState.save()` は一時ファイルと `os.replace` によるアトミック書き込みを行い、クラッシュ時の JSON 破損を防止する。また `--resume` 時に HEAD が `checkpoint_hash` と異なる場合は巻き戻しを拒否する。
+  4. `DEFAULT_VERIFY_SH` は `tests/` が存在しない、またはテストが未構成の場合に Exit 1 で終了する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

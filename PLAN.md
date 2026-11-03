@@ -7,14 +7,13 @@
 -->
 
 ## 現在の目標
-- Phase 1 Hardening: 4つのP0問題の解消と安全な自律運転の確立
+- Phase 1 Hardening (Round 2): 安全機構の整合性確保とシークレット保護
 
 ## ステップ
-- [x] 1. Gate & Runner の Fail-Closed 化（DEFAULT_VERIFY_SH の || true 削除、Runner未設定時の拒否、Maker差分なし時の安全停止）(Red-First)
-- [x] 2. Evidence Binding（Git Tree SHA, Spec SHA, Checker判定を証跡に拘束し、確定時に再照合）(Red-First)
-- [x] 3. Safe Quarantine（無視ファイルや未追跡ファイルを完全保護し、退避確認前にリセットしない）(Red-First)
-- [x] 4. Checker の構造化（JSON判定）と CI 検査範囲拡大 (Red-First)
-- [x] 5. JobState 状態遷移と安全なクラッシュ復旧 (Red-First)
+- [x] 1. Evidence と最終コミットツリーの完全一致 (P0-2) (Red-First)
+- [x] 2. Quarantine からの秘密情報排除と安全なスナップショット (P0-3) (Red-First)
+- [x] 3. JobState の原子的保存 & HEAD 巻き戻し防止 (P1-2) (Red-First)
+- [x] 4. DEFAULT_VERIFY_SH のテスト未構成時の Fail-Closed 化 (P1-3) (Red-First)
 
 ## 止まっていること・判断待ち
 - なし（全ステップ完了）

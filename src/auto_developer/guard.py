@@ -48,6 +48,11 @@ class GitGuard:
         proc = self._run_git(["write-tree"])
         return proc.stdout.strip()
 
+    def get_commit_tree_sha(self, commit_ref: str = "HEAD") -> str:
+        """指定したコミットの Git Tree SHA を取得する (git rev-parse <ref>^{tree})。"""
+        proc = self._run_git(["rev-parse", f"{commit_ref}^{{tree}}"])
+        return proc.stdout.strip()
+
     def get_spec_sha(self, spec_path: Path | None = None) -> str:
         """SPEC.md の SHA-256 ダイジェストを取得する。"""
         import hashlib
@@ -106,8 +111,21 @@ class GitGuard:
         branch = proc.stdout.strip()
         return "" if branch == "HEAD" else branch
 
+    SECRET_EXCLUDE_PATTERNS = (
+        re.compile(r"^\.env(\..+)?$"),
+        re.compile(r"\.(key|pem|pkcs12|pfx)$", re.IGNORECASE),
+        re.compile(r"(id_rsa|id_ed25519|id_ecdsa)", re.IGNORECASE),
+        re.compile(r"(secret|token|credential)", re.IGNORECASE),
+    )
+
+    def is_secret_file(self, filename: str) -> bool:
+        """シークレット・認証情報ファイル名パターンに合致するか判定する。"""
+        return any(pattern.search(filename) for pattern in self.SECRET_EXCLUDE_PATTERNS)
+
     def quarantine_and_restore(self, checkpoint: str, task_id: str) -> str:
-        """作業ツリーの変更を破棄せず物理アーカイブおよび隔離ブランチへ強制退避し、退避確認後に本線をチェックポイントに復元する。"""
+        """作業ツリーの変更を破棄せず物理アーカイブおよび隔離ブランチへ退避し、退避確認後に本線をチェックポイントに復元する。
+        秘密情報 (.env や鍵) は Git 隔離ブランチおよびスナップショットから厳格に除外される。
+        """
         import tarfile
         import time
 
@@ -124,20 +142,26 @@ class GitGuard:
         current_branch = self.get_current_branch()
 
         if has_changes:
-            # 1. 物理スナップショットの作成 (.git と .dev/quarantines 自体を除外)
+            # 1. 物理スナップショットの作成 (秘密情報・Git内部ディレクトリを除外)
             with tarfile.open(archive_path, "w:gz") as tar:
                 for item in self.repo_dir.iterdir():
                     if item.name in (".git", ".dev"):
                         continue
-                    tar.add(item, arcname=item.name)
+                    if self.is_secret_file(item.name):
+                        continue
+                    tar.add(
+                        item,
+                        arcname=item.name,
+                        filter=lambda tarinfo: None if self.is_secret_file(Path(tarinfo.name).name) else tarinfo,
+                    )
 
             if not archive_path.exists() or archive_path.stat().st_size == 0:
                 raise RuntimeError(f"Quarantine aborted: Failed to create snapshot archive at {archive_path}")
 
-            # 2. 隔離ブランチへの強制ステージとコミット (git add -A -f)
+            # 2. 隔離ブランチへの安全なステージとコミット (.gitignore を厳格遵守し -f は使用しない)
             quarantine_branch = f"quarantine/{clean_id}-{timestamp}"
             self._run_git(["checkout", "-b", quarantine_branch])
-            self._run_git(["add", "-A", "-f"])
+            self._run_git(["add", "-A"])
             self._run_git(["commit", "-m", f"quarantine: save failed work for task {task_id} before rollback"])
 
             # 3. 元のブランチに戻る
