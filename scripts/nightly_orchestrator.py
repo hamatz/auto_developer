@@ -99,20 +99,62 @@ class TaskDispatcher:
 class GitGuard:
     """Git作業ツリーの整合性管理、不変条件外部検査、およびロールバックを担当。"""
 
+    PROTECTED_PATTERNS = [
+        re.compile(r"^\.github/"),
+        re.compile(r"^SPEC\.md$"),
+        re.compile(r"^scripts/verify_local\.sh$"),
+        re.compile(r"^tests/immunity/"),
+    ]
+
     def __init__(self, repo_dir: Path | None = None) -> None:
         self.repo_dir = repo_dir or Path.cwd()
 
+    def _run_git(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git"] + args,
+            cwd=self.repo_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
     def assert_clean_working_tree(self) -> None:
-        raise NotImplementedError
+        """作業ツリーがクリーンである（未コミットの変更がない）ことを検証する。"""
+        proc = self._run_git(["status", "--porcelain"])
+        if proc.stdout.strip():
+            raise RuntimeError(
+                f"Dirty working tree: uncommitted changes detected in {self.repo_dir}:\n{proc.stdout}"
+            )
 
     def get_current_checkpoint(self) -> str:
-        raise NotImplementedError
+        """現在の HEAD コミットハッシュを取得する。"""
+        proc = self._run_git(["rev-parse", "HEAD"])
+        return proc.stdout.strip()
 
     def check_protected_files_untouched(self, checkpoint: str) -> bool:
-        raise NotImplementedError
+        """チェックポイント以降に変更されたファイルに保護対象が含まれていないか検査する。"""
+        proc = self._run_git(["diff", "--name-only", checkpoint])
+        modified_files = proc.stdout.splitlines()
+
+        for file_path in modified_files:
+            stripped = file_path.strip()
+            for pattern in self.PROTECTED_PATTERNS:
+                if pattern.search(stripped):
+                    return False
+        return True
+
+    def commit_task(self, task: Task) -> str:
+        """タスクの変更をアトミックにコミットする。"""
+        self._run_git(["add", "-A"])
+        msg = f"feat: {task.title} [refs: {task.task_id}]"
+        self._run_git(["commit", "-m", msg])
+        return self.get_current_checkpoint()
 
     def rollback_and_clean(self, checkpoint: str) -> None:
-        raise NotImplementedError
+        """作業ツリーをチェックポイントに巻き戻し、未追跡ファイルを強制削除して完全初期化する。"""
+        self._run_git(["reset", "--hard", checkpoint])
+        self._run_git(["clean", "-fd"])
+
 
 
 class DeterministicVerifier:
