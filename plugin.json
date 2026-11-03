@@ -1,6 +1,11 @@
 {
   "name": "auto-developer",
+  "version": "0.1.0",
   "description": "Auto Developer: Trustworthy autonomous development orchestrator. Executes sequential PLAN.md tasks overnight with verification gates, quarantine preservation, and morning briefs.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/google/auto_developer"
+  },
   "suggestedPrompts": [
     "/nightly-run",
     "/nightly-setup"

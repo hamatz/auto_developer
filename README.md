@@ -64,10 +64,20 @@ Auto Developer は、本リポジトリ内だけでなく、**「Antigravity プ
 
 ### 方式 A: Antigravity プラグインとして利用する（推奨）
 
-Antigravity のプラグインディレクトリにシンボリックリンクを作成することで、任意のワークスペースから Antigravity スキル（`/nightly-setup`, `/nightly-run`）として呼び出せるようになります。
+Auto Developer は Antigravity プラグイン規格（`plugin.json` および `skills/`）に完全準拠しているため、**GitHub リポジトリの URL を指定して直接オンラインからインストール**するか、**ローカルでシンボリックリンクを貼る**だけで利用できます。
 
+#### 1. オンラインから直接インストールする場合（GitHub 公開時）
 ```bash
-# 1. プラグインディレクトリへ登録（初回のみ）
+# Antigravity CLI からインストール
+agy plugin install https://github.com/google/auto_developer
+
+# または Antigravity IDE / デスクトップアプリの UI から：
+# 「Customizations」→「Plugins」→「+ Install from URL」に上記 GitHub URL を入力
+```
+
+#### 2. ローカル開発環境から登録する場合
+```bash
+# 1. プラグインディレクトリへシンボリックリンクを作成（初回のみ）
 mkdir -p ~/.gemini/config/plugins
 ln -s /path/to/auto_developer ~/.gemini/config/plugins/auto-developer
 
