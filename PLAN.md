@@ -11,7 +11,7 @@
 
 ## ステップ
 - [x] 1. Evidence と最終コミットツリーの完全一致 (P0-2) (Red-First)
-- [ ] 2. Quarantine からの秘密情報排除と安全なスナップショット (P0-3) (Red-First)
+- [x] 2. Quarantine からの秘密情報排除と安全なスナップショット (P0-3) (Red-First)
 - [ ] 3. JobState の原子的保存 & HEAD 巻き戻し防止 (P1-2) (Red-First)
 - [ ] 4. DEFAULT_VERIFY_SH のテスト未構成時の Fail-Closed 化 (P1-3) (Red-First)
 

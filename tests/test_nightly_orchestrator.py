@@ -1093,6 +1093,68 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 "PLAN.md was modified AFTER Evidence verification, creating an unverified commit tree.",
             )
 
+    def test_feature_m_quarantine_does_not_commit_secrets_to_git_and_excludes_from_snapshot(self):
+        """機能M-2: 隔離処理は .gitignore 対象の秘密情報 (.env, 鍵) を Git に強制追加せず、スナップショットからも除外すること。"""
+        import tarfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".env*\n*.key\n.dev/\n", encoding="utf-8")
+            (repo / "base.py").write_text("print('base')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # タスク作業中に正常コードと秘密情報を作成
+            (repo / "failed_feature.py").write_text("print('incomplete')\n", encoding="utf-8")
+            (repo / ".env").write_text("SECRET_API_KEY=topsecret123\n", encoding="utf-8")
+            (repo / "private.key").write_text("-----BEGIN RSA PRIVATE KEY-----\n", encoding="utf-8")
+
+            guard = GitGuard(repo_dir=repo)
+            quarantine_branch = guard.quarantine_and_restore(checkpoint, task_id="sec1")
+
+            # 1. 隔離ブランチに .env や private.key がコミットされていないこと！
+            proc_env = subprocess.run(
+                ["git", "show", f"{quarantine_branch}:.env"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(proc_env.returncode, 0, "Secrets (.env) must NEVER be force-added to git quarantine branch!")
+
+            proc_key = subprocess.run(
+                ["git", "show", f"{quarantine_branch}:private.key"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(proc_key.returncode, 0, "Private keys must NEVER be force-added to git quarantine branch!")
+
+            # 2. ソースコードは隔離ブランチに保全されていること
+            proc_code = subprocess.run(
+                ["git", "show", f"{quarantine_branch}:failed_feature.py"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc_code.returncode, 0, "Source code changes must be preserved in quarantine branch")
+
+            # 3. 物理スナップショット archive からも秘密情報が除外されていること
+            archive_dir = repo / ".dev" / "quarantines"
+            archives = list(archive_dir.glob("*.tar.gz"))
+            self.assertTrue(bool(archives), "Snapshot archive must be created")
+            with tarfile.open(archives[0], "r:gz") as tar:
+                names = tar.getnames()
+                self.assertNotIn(".env", names, "Secret .env must be excluded from recovery snapshot")
+                self.assertNotIn("private.key", names, "Private key must be excluded from recovery snapshot")
+                self.assertIn("failed_feature.py", names, "Source code must be preserved in recovery snapshot")
+
 
 if __name__ == "__main__":
     unittest.main()
