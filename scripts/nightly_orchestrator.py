@@ -167,6 +167,44 @@ class GitGuard:
         self._run_git(["commit", "-m", msg])
         return self.get_current_checkpoint()
 
+    def get_current_branch(self) -> str:
+        """現在のブランチ名を取得する。detached HEAD の場合は空文字。"""
+        proc = self._run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+        branch = proc.stdout.strip()
+        return "" if branch == "HEAD" else branch
+
+    def quarantine_and_restore(self, checkpoint: str, task_id: str) -> str:
+        """作業ツリーの変更を破棄せず隔離ブランチに退避コミットし、本線をチェックポイントに復元する。"""
+        import time
+
+        proc_status = self._run_git(["status", "--porcelain"])
+        has_changes = bool(proc_status.stdout.strip())
+
+        quarantine_branch = ""
+        current_branch = self.get_current_branch()
+
+        if has_changes:
+            clean_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", task_id)
+            timestamp = int(time.time())
+            quarantine_branch = f"quarantine/{clean_id}-{timestamp}"
+
+            # 新規ブランチを作成して退避コミット
+            self._run_git(["checkout", "-b", quarantine_branch])
+            self._run_git(["add", "-A"])
+            self._run_git(["commit", "-m", f"quarantine: save failed work for task {task_id} before rollback"])
+
+            # 元のブランチに戻る
+            if current_branch:
+                self._run_git(["checkout", current_branch])
+            else:
+                self._run_git(["checkout", checkpoint])
+
+        # 作業ツリーをチェックポイントに完全復元
+        self._run_git(["reset", "--hard", checkpoint])
+        self._run_git(["clean", "-fd"])
+
+        return quarantine_branch
+
     def rollback_and_clean(self, checkpoint: str) -> None:
         """作業ツリーをチェックポイントに巻き戻し、未追跡ファイルを強制削除して完全初期化する。"""
         self._run_git(["reset", "--hard", checkpoint])
@@ -234,6 +272,7 @@ class MorningReporter:
                 [
                     f"* **Failed Task ID**: task-{quarantined['task_id']}",
                     f"* **Failure Phase**: {quarantined.get('phase', 'UNKNOWN')}",
+                    f"* **Quarantined Branch**: `{quarantined.get('quarantined_branch', 'N/A')}`",
                     f"* **Failure Log**: {quarantined.get('log_path', 'N/A')}",
                     "* **Root Cause Summary**:",
                     "  ```text",
@@ -379,7 +418,8 @@ def main() -> int:
     elif args.subcommand == "rollback-step":
         tasks = dispatcher.parse_plan(args.plan)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
-        git_guard.rollback_and_clean(args.checkpoint)
+        task_id = target.task_id if target else args.task_id
+        quarantine_branch = git_guard.quarantine_and_restore(args.checkpoint, task_id=task_id)
         if target:
             dispatcher.mark_task_status(args.plan, target, status="failed")
             log_path = Path(f"logs/nightly/task_{target.task_id}_failure.log")
@@ -389,10 +429,11 @@ def main() -> int:
                     "task_id": target.task_id,
                     "title": target.title,
                     "checkpoint": args.checkpoint,
+                    "quarantined_branch": quarantine_branch,
                     "attempt_1_log": args.reason,
                 },
             )
-        print(f"ROLLED BACK TO {args.checkpoint} AND CLEANED")
+        print(f"ROLLED BACK TO {args.checkpoint} (Work quarantined to: {quarantine_branch or 'none'})")
         return 0
 
     # Default standalone loop (dry-run or direct batch):
@@ -435,7 +476,7 @@ def main() -> int:
 
         if not git_guard.check_protected_files_untouched(checkpoint):
             print(f"CIRCUIT BREAKER: Protected file modified in task {task.task_id}. Rollback triggered.", file=sys.stderr)
-            git_guard.rollback_and_clean(checkpoint)
+            quarantine_branch = git_guard.quarantine_and_restore(checkpoint, task_id=task.task_id)
             dispatcher.mark_task_status(args.plan, task, status="failed")
             reporter.write_report(
                 args.report,
@@ -450,6 +491,7 @@ def main() -> int:
                     "quarantined_task": {
                         "task_id": task.task_id,
                         "phase": "INVARIANT_BREACH",
+                        "quarantined_branch": quarantine_branch,
                         "log_path": f"logs/nightly/task_{task.task_id}_failure.log",
                         "root_cause_summary": "Protected file modification detected.",
                     },
@@ -460,7 +502,7 @@ def main() -> int:
         code, out = verifier.run_verification(args.verify_script, timeout_sec=args.timeout)
         if code != 0:
             print(f"Verification failed on task {task.task_id} (Exit {code}).", file=sys.stderr)
-            git_guard.rollback_and_clean(checkpoint)
+            quarantine_branch = git_guard.quarantine_and_restore(checkpoint, task_id=task.task_id)
             dispatcher.mark_task_status(args.plan, task, status="failed")
             log_path = Path(f"logs/nightly/task_{task.task_id}_failure.log")
             reporter.write_failure_log(
@@ -469,6 +511,7 @@ def main() -> int:
                     "task_id": task.task_id,
                     "title": task.title,
                     "checkpoint": checkpoint,
+                    "quarantined_branch": quarantine_branch,
                     "attempt_1_log": out,
                 },
             )
@@ -485,6 +528,7 @@ def main() -> int:
                     "quarantined_task": {
                         "task_id": task.task_id,
                         "phase": "VERIFIER_ERROR",
+                        "quarantined_branch": quarantine_branch,
                         "log_path": str(log_path),
                         "root_cause_summary": out[:300],
                     },

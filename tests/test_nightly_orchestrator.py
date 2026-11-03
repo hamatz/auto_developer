@@ -151,6 +151,56 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertFalse(orphan_file.exists())
             self.assertFalse(orphan_dir.exists())
 
+    def test_feature_e_quarantine_preserves_work_in_branch(self):
+        """機能E拡張: ロールバック時に作業成果を完全破棄せず quarantine ブランチに退避する。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir()
+            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+
+            tracked_file = repo_dir / "app.py"
+            tracked_file.write_text("def run(): pass", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "base commit"], cwd=repo_dir, check=True)
+
+            git_guard = GitGuard(repo_dir=repo_dir)
+            checkpoint = git_guard.get_current_checkpoint()
+
+            # 作業ツリーで実装を試行
+            tracked_file.write_text("def run(): return 'almost working'", encoding="utf-8")
+            helper_file = repo_dir / "helper.py"
+            helper_file.write_text("# helper logic", encoding="utf-8")
+
+            # 隔離退避 & 復元を実行
+            quarantine_branch = git_guard.quarantine_and_restore(checkpoint=checkpoint, task_id="task-99")
+
+            # 本線作業ツリーはクリーンに復元されていること
+            self.assertEqual(tracked_file.read_text(encoding="utf-8"), "def run(): pass")
+            self.assertFalse(helper_file.exists())
+            git_guard.assert_clean_working_tree()
+
+            # 隔離ブランチに成果が保存されていること
+            proc = subprocess.run(
+                ["git", "show", f"{quarantine_branch}:helper.py"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertIn("# helper logic", proc.stdout)
+
+            proc_diff = subprocess.run(
+                ["git", "diff", f"{checkpoint}..{quarantine_branch}", "--", "app.py"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertIn("almost working", proc_diff.stdout)
+
     def test_feature_f_morning_report_generation(self):
         """機能F: NIGHTLY_REPORT.md が所定のスキーマで生成される。"""
         import tempfile
