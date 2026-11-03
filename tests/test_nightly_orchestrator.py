@@ -1699,6 +1699,58 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 "Immunity test file must be restored back to protected content",
             )
 
+    def test_feature_p_decision_support_morning_brief(self):
+        """機能P (P1-3): Morning Brief が成果要約、お試しコマンド、監査証跡テーブルを出力すること。"""
+        from auto_developer.reporter import MorningReporter
+
+        reporter = MorningReporter()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "NIGHTLY_REPORT.md"
+            summary_data = {
+                "status": "COMPLETED",
+                "total_tasks": 2,
+                "succeeded_count": 2,
+                "quarantined_count": 0,
+                "checkpoint": "abc1234",
+                "executive_summary": "DocCheck Liteの実装が完了しました。46件のテストが成功しました。",
+                "quick_try_command": "python3 -m unittest discover tests",
+                "known_limitations": ["通常のMarkdownインラインリンクに対応していますが、複雑な括弧構文には制限があります。"],
+                "completed_tasks": [
+                    {
+                        "task_id": "1",
+                        "title": "CLI骨格",
+                        "commit": "b9645bb123456",
+                        "evidence_tree_sha": "tree111",
+                        "checker_decision": "APPROVE",
+                    },
+                    {
+                        "task_id": "2",
+                        "title": "Markdown解析",
+                        "commit": "e30bfd2123456",
+                        "evidence_tree_sha": "tree222",
+                        "checker_decision": "APPROVE",
+                    },
+                ],
+            }
+            reporter.write_report(report_path, summary_data)
+            content = report_path.read_text(encoding="utf-8")
+
+            # 成果の要約 (Executive Summary) が含まれること
+            self.assertIn("## 成果の要約 (Executive Summary)", content)
+            self.assertIn("DocCheck Liteの実装が完了しました。", content)
+
+            # 動作確認コマンド (Quick Try) が含まれること
+            self.assertIn("## 動作確認コマンド (Quick Try)", content)
+            self.assertIn("python3 -m unittest discover tests", content)
+
+            # 既知の制約 (Known Limitations) が含まれること
+            self.assertIn("## 既知の制約・境界条件 (Known Limitations)", content)
+            self.assertIn("複雑な括弧構文には制限があります", content)
+
+            # 監査証跡サマリー表が含まれること
+            self.assertIn("| Task | Title | Commit | Verified Tree | Checker Review |", content)
+            self.assertIn("| `task-1` | CLI骨格 | `b9645bb` |", content)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,32 +14,84 @@ class MorningReporter:
         succeeded = summary_data.get("succeeded_count", 0)
         quarantined_count = summary_data.get("quarantined_count", 0)
         checkpoint = summary_data.get("checkpoint", "N/A")
+        executive_summary = summary_data.get("executive_summary")
+        quick_try_command = summary_data.get("quick_try_command")
+        known_limitations = summary_data.get("known_limitations") or []
 
         lines = [
             "# AUTO DEVELOPER / MORNING BRIEF",
             "",
             "おはようございます。直近の開発自律稼働サマリーです。",
             "",
-            "## 概要 (Status Overview)",
-            "| 指標 | 状況 |",
-            "| :--- | :--- |",
-            f"| **稼働ステータス** | **{status}** |",
-            f"| **タスク進捗** | **{succeeded} / {total}** 完了 |",
-            f"| **要確認・隔離** | **{quarantined_count}** 件 |",
-            f"| **直前正常チェックポイント** | `{checkpoint}` |",
-            "",
-            "## 今回の成果 (Completed Milestones)",
         ]
+
+        # 1. 成果の要約 (Executive Summary) / 機能P
+        if executive_summary:
+            lines.extend(
+                [
+                    "## 成果の要約 (Executive Summary)",
+                    executive_summary,
+                    "",
+                ]
+            )
+
+        # 2. 動作確認コマンド (Quick Try) / 機能P
+        if quick_try_command:
+            lines.extend(
+                [
+                    "## 動作確認コマンド (Quick Try)",
+                    "```bash",
+                    quick_try_command,
+                    "```",
+                    "",
+                ]
+            )
+
+        # 3. 概要 (Status Overview)
+        lines.extend(
+            [
+                "## 概要 (Status Overview)",
+                "| 指標 | 状況 |",
+                "| :--- | :--- |",
+                f"| **稼働ステータス** | **{status}** |",
+                f"| **タスク進捗** | **{succeeded} / {total}** 完了 |",
+                f"| **要確認・隔離** | **{quarantined_count}** 件 |",
+                f"| **直前正常チェックポイント** | `{checkpoint}` |",
+                "",
+                "## 今回の成果と監査証跡 (Milestones & Audit Evidence)",
+            ]
+        )
 
         completed_tasks = summary_data.get("completed_tasks", [])
         if completed_tasks:
+            lines.extend(
+                [
+                    "| Task | Title | Commit | Verified Tree | Checker Review |",
+                    "| :--- | :--- | :--- | :--- | :--- |",
+                ]
+            )
             for item in completed_tasks:
+                tid = item.get("task_id", "")
+                title = item.get("title", "")
+                commit_sha = item.get("commit", "")[:7]
+                tree_sha = item.get("evidence_tree_sha", "")[:7] or "N/A"
+                checker = item.get("checker_decision", "APPROVE")
                 lines.append(
-                    f"* **task-{item['task_id']}: {item['title']}** (`{item['commit']}`)\n"
-                    f"  - 検証ゲート・Checker独立査読を通過し、本線（main）にコミット済み。"
+                    f"| `task-{tid}` | {title} | `{commit_sha}` | `{tree_sha}` | {checker} |"
                 )
         else:
             lines.append("* (完了した新規タスクはありません)")
+
+        # 4. 既知の制約・境界条件 (Known Limitations) / 機能P
+        if known_limitations:
+            lines.extend(
+                [
+                    "",
+                    "## 既知の制約・境界条件 (Known Limitations)",
+                ]
+            )
+            for lim in known_limitations:
+                lines.append(f"- {lim}")
 
         lines.extend(["", "## 要確認・隔離事項 (Quarantined Work)"])
         quarantined = summary_data.get("quarantined_task")
@@ -100,6 +152,8 @@ class MorningReporter:
         succeeded = summary_data.get("succeeded_count", 0)
         quarantined_count = summary_data.get("quarantined_count", 0)
         checkpoint = summary_data.get("checkpoint", "N/A")
+        executive_summary = summary_data.get("executive_summary")
+        quick_try = summary_data.get("quick_try_command")
 
         lines = [
             "============================================================",
@@ -108,9 +162,17 @@ class MorningReporter:
             f" Status: {status}",
             f" Progress: {succeeded}/{total} tasks completed ({quarantined_count} quarantined)",
             f" Checkpoint: {checkpoint}",
-            "------------------------------------------------------------",
-            " [Completed Milestones]",
         ]
+        if executive_summary:
+            lines.append(f" Summary: {executive_summary}")
+        if quick_try:
+            lines.append(f" Quick Try: {quick_try}")
+        lines.extend(
+            [
+                "------------------------------------------------------------",
+                " [Completed Milestones & Audit]",
+            ]
+        )
         completed = summary_data.get("completed_tasks", [])
         if completed:
             for c in completed:

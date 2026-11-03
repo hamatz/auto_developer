@@ -49,7 +49,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
 - [x] 機能O (免疫テストディレクトリ初期化と保護):
   1. `auto-dev init` 実行時、人間が承認した受入仕様テストを格納する `tests/immunity/` ディレクトリおよび初期受入テスト `tests/immunity/test_acceptance_sample.py` を自動生成する。
   2. Maker による `tests/immunity/` 配下の改変・新規作成・削除を外部不変条件違反として機械的に遮断・隔離する。
-- [ ] 機能P (意思決定支援型 Morning Brief の生成):
+- [x] 機能P (意思決定支援型 Morning Brief の生成):
   1. `NIGHTLY_REPORT.md` において、単なるコミット一覧だけでなく、「成果の要約」「即時動作確認コマンド」「既知の制約・境界条件」「人間への次のアクション」「監査証跡サマリー」を構造的に出力する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
