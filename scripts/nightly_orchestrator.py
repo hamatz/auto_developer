@@ -354,8 +354,8 @@ def main() -> int:
         if not target:
             print(f"ERROR: Task {args.task_id} not found in {args.plan}", file=sys.stderr)
             return 1
-        commit_hash = git_guard.commit_task(target)
         dispatcher.mark_task_status(args.plan, target, status="completed")
+        commit_hash = git_guard.commit_task(target)
         print(f"COMMITTED: {commit_hash}")
         return 0
 
@@ -475,8 +475,8 @@ def main() -> int:
             )
             return 1
 
-        commit_hash = git_guard.commit_task(task)
         dispatcher.mark_task_status(args.plan, task, status="completed")
+        commit_hash = git_guard.commit_task(task)
         succeeded_tasks.append(
             {"task_id": task.task_id, "title": task.title, "commit": commit_hash, "verifier": "verify_local.sh"}
         )

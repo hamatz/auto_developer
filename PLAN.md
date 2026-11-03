@@ -19,7 +19,7 @@
 - [x] 7. skills/nightly-run/SKILL.md の作成（Antigravity ワークスペーススキル定義）
 - [x] 8. PROMPTS.md への Maker / Checker 無記憶プロンプトテンプレートの追記
 - [x] 9. Checker による独立査読（SPEC.md と git diff のみでの検証）
-- [ ] 10. scripts/nightly_orchestrator.py に --version フラグを追加しバージョン番号を出力可能にする
+- [x] 10. scripts/nightly_orchestrator.py に --version フラグを追加しバージョン番号を出力可能にする
 
 ## 止まっていること・判断待ち
 - なし
