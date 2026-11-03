@@ -283,16 +283,23 @@ def main(argv: list[str] | None = None) -> int:
     elif args.subcommand == "verify-step":
         tasks = dispatcher.parse_plan(plan_path)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
-        if target:
-            dispatcher.mark_task_status(plan_path, target, status="completed")
+        if not target:
+            print(f"ERROR: Task {args.task_id} not found in {plan_path}", file=sys.stderr)
+            return 1
+
+        original_plan_content = plan_path.read_text(encoding="utf-8")
+        # 検証対象の最終ツリーに PLAN.md の完了反映を含める
+        dispatcher.mark_task_status(plan_path, target, status="completed")
 
         if not git_guard.check_protected_files_untouched(args.checkpoint):
+            plan_path.write_text(original_plan_content, encoding="utf-8")
             print(f"CIRCUIT BREAKER: Protected file modified since {args.checkpoint}", file=sys.stderr)
             return 10
         code, out = verifier.run_verification(
             verify_script, timeout_sec=args.timeout, cwd=work_dir
         )
         if code != 0:
+            plan_path.write_text(original_plan_content, encoding="utf-8")
             print(f"VERIFICATION FAILED (Exit {code}):\n{out}", file=sys.stderr)
             return code
         tree_sha = git_guard.get_working_tree_sha()
