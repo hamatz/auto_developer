@@ -298,6 +298,21 @@ class NightlyOrchestrator:
                 )
                 return 3
 
+            # 6. 永続監査レコード（Evidence Record）の保存 (機能N / P1-1)
+            self.evidence_store.archive_record(
+                task_id=task.task_id,
+                status="COMPLETED",
+                commit_info={
+                    "sha": commit_hash,
+                    "tree_sha": committed_tree_sha,
+                    "tree_verified": True,
+                },
+                checker_info={
+                    "decision": "APPROVE",
+                    "reason": checker_reason,
+                },
+            )
+
             task_info = {
                 "task_id": task.task_id,
                 "title": task.title,
@@ -318,6 +333,13 @@ class NightlyOrchestrator:
         job_state.transition_phase("COMPLETED")
         if not self.dry_run:
             job_state.save(self.state_path)
+            # 意思決定支援型 Morning Brief サマリーの組み立て (機能P / P1-3)
+            exec_summary = (
+                f"全 {len(succeeded_tasks)} 件のタスクが検証ゲートおよび独立Checker査読を通過し、正常に完了しました。"
+                if len(succeeded_tasks) == total_tasks
+                else f"{len(succeeded_tasks)} / {total_tasks} 件のタスクが正常に完了しました。"
+            )
+            quick_cmd = "bash scripts/verify_local.sh" if (self.repo_dir / "scripts" / "verify_local.sh").exists() else "python3 -m unittest discover tests"
             self.reporter.write_report(
                 self.report_path,
                 {
@@ -328,6 +350,8 @@ class NightlyOrchestrator:
                     "remaining_count": 0,
                     "checkpoint": self.git_guard.get_current_checkpoint(),
                     "completed_tasks": succeeded_tasks,
+                    "executive_summary": exec_summary,
+                    "quick_try_command": quick_cmd,
                 },
             )
             print(f"\nExecution complete! Report written to {self.report_path}")

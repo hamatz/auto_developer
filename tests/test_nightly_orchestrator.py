@@ -682,6 +682,12 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertIn("NIGHTLY_REPORT.md", gitignore_text)
             self.assertIn("logs/", gitignore_text)
 
+            # 機能O: tests/immunity/ ディレクトリと初期免疫テストが生成されていること
+            immunity_dir = target_project / "tests" / "immunity"
+            self.assertTrue(immunity_dir.is_dir(), "tests/immunity/ directory must be created")
+            immunity_sample = immunity_dir / "test_acceptance_sample.py"
+            self.assertTrue(immunity_sample.exists(), "tests/immunity/test_acceptance_sample.py must be created")
+
             # 2. 再度実行しても既存ファイルを破壊・上書きしないこと (Idempotent)
             (target_project / "PLAN.md").write_text("# Custom Plan\n", encoding="utf-8")
             proc2 = subprocess.run(
@@ -1571,9 +1577,179 @@ class TestNightlyOrchestrator(unittest.TestCase):
             current_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
             self.assertEqual(current_head, checkpoint, "HEAD must remain at checkpoint on task failure")
 
+    def test_feature_n_evidence_audit_record_persisted_after_commit(self):
+        """機能N (P1-1): コミット後も証跡レコードが永続化され、監査・検証詳細が照合可能であること。"""
+        import json
 
+        from auto_developer.evidence import EvidenceStore
+        from auto_developer.orchestrator import NightlyOrchestrator
+        from auto_developer.runner import CommandRunnerAdapter
 
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
 
+            (repo / ".gitignore").write_text(".dev/\nlogs/\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("# SPEC\nCore spec content.\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. 監査テストタスク\n", encoding="utf-8")
+
+            verify_sh = repo / "verify.sh"
+            verify_sh.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            verify_sh.chmod(0o755)
+
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            class SuccessRunner(CommandRunnerAdapter):
+                def run_maker(self, task, context):
+                    (repo / f"task_{task.task_id}.py").write_text("print('audit pass')\n", encoding="utf-8")
+                    return 0, "maker output"
+
+                def run_checker(self, task, diff, spec_content):
+                    return True, json.dumps({"decision": "APPROVE", "reason": "LGTM for audit"})
+
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=verify_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=repo / ".dev" / "job_state.json",
+                runner_adapter=SuccessRunner(),
+                dry_run=False,
+            )
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 0)
+
+            # 監査レコードが .git/nightly_evidence/records/ または archive/ に存在すること
+            evidence_store = EvidenceStore(repo_dir=repo)
+            records = evidence_store.get_records()
+            self.assertEqual(len(records), 1, "Evidence records must contain 1 entry for completed task")
+            record = records[0]
+            self.assertEqual(record["task_id"], "1")
+            self.assertEqual(record["status"], "COMPLETED")
+            self.assertIn("tree_sha", record)
+            self.assertIn("spec_sha", record)
+            self.assertIn("issued_at", record)
+            self.assertIn("consumed_at", record)
+            self.assertIn("commit", record)
+            self.assertIn("sha", record["commit"])
+            self.assertTrue(record["commit"]["tree_verified"])
+
+            # ファイルとしても永続化されていること
+            record_path = evidence_store.records_dir / "task_1.json"
+            self.assertTrue(record_path.exists(), f"Record file must exist at {record_path}")
+            data = json.loads(record_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["task_id"], "1")
+
+    def test_feature_o_maker_immunity_tampering_is_quarantined(self):
+        """機能O (P1-2): Maker が tests/immunity/ を勝手に変更・作成した場合、即座にQuarantineされること。"""
+        from auto_developer.orchestrator import NightlyOrchestrator
+        from auto_developer.runner import CommandRunnerAdapter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\nlogs/\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("# SPEC\nCore spec content.\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. 免疫テスト改変タスク\n", encoding="utf-8")
+
+            immunity_dir = repo / "tests" / "immunity"
+            immunity_dir.mkdir(parents=True, exist_ok=True)
+            (immunity_dir / "test_acceptance.py").write_text("# protected acceptance test\n", encoding="utf-8")
+
+            verify_sh = repo / "verify.sh"
+            verify_sh.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            verify_sh.chmod(0o755)
+
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init with immunity test"], cwd=repo, check=True)
+
+            class MaliciousMakerRunner(CommandRunnerAdapter):
+                def run_maker(self, task, context):
+                    # Maker が受入テストを書き換えて通過させようとする（自作自演・緩和）
+                    (immunity_dir / "test_acceptance.py").write_text("# tampered test\n", encoding="utf-8")
+                    return 0, "maker modified immunity test"
+
+                def run_checker(self, task, diff, spec_content):
+                    return True, '{"decision": "APPROVE"}'
+
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=verify_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=repo / ".dev" / "job_state.json",
+                runner_adapter=MaliciousMakerRunner(),
+                dry_run=False,
+            )
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 1, "Must exit with code 1 due to immunity invariant breach")
+
+            # 作業ツリーがチェックポイントに復元されていること
+            self.assertEqual(
+                (immunity_dir / "test_acceptance.py").read_text(encoding="utf-8"),
+                "# protected acceptance test\n",
+                "Immunity test file must be restored back to protected content",
+            )
+
+    def test_feature_p_decision_support_morning_brief(self):
+        """機能P (P1-3): Morning Brief が成果要約、お試しコマンド、監査証跡テーブルを出力すること。"""
+        from auto_developer.reporter import MorningReporter
+
+        reporter = MorningReporter()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "NIGHTLY_REPORT.md"
+            summary_data = {
+                "status": "COMPLETED",
+                "total_tasks": 2,
+                "succeeded_count": 2,
+                "quarantined_count": 0,
+                "checkpoint": "abc1234",
+                "executive_summary": "DocCheck Liteの実装が完了しました。46件のテストが成功しました。",
+                "quick_try_command": "python3 -m unittest discover tests",
+                "known_limitations": ["通常のMarkdownインラインリンクに対応していますが、複雑な括弧構文には制限があります。"],
+                "completed_tasks": [
+                    {
+                        "task_id": "1",
+                        "title": "CLI骨格",
+                        "commit": "b9645bb123456",
+                        "evidence_tree_sha": "tree111",
+                        "checker_decision": "APPROVE",
+                    },
+                    {
+                        "task_id": "2",
+                        "title": "Markdown解析",
+                        "commit": "e30bfd2123456",
+                        "evidence_tree_sha": "tree222",
+                        "checker_decision": "APPROVE",
+                    },
+                ],
+            }
+            reporter.write_report(report_path, summary_data)
+            content = report_path.read_text(encoding="utf-8")
+
+            # 成果の要約 (Executive Summary) が含まれること
+            self.assertIn("## 成果の要約 (Executive Summary)", content)
+            self.assertIn("DocCheck Liteの実装が完了しました。", content)
+
+            # 動作確認コマンド (Quick Try) が含まれること
+            self.assertIn("## 動作確認コマンド (Quick Try)", content)
+            self.assertIn("python3 -m unittest discover tests", content)
+
+            # 既知の制約 (Known Limitations) が含まれること
+            self.assertIn("## 既知の制約・境界条件 (Known Limitations)", content)
+            self.assertIn("複雑な括弧構文には制限があります", content)
+
+            # 監査証跡サマリー表が含まれること
+            self.assertIn("| Task | Title | Commit | Verified Tree | Checker Review |", content)
+            self.assertIn("| `task-1` | CLI骨格 | `b9645bb` |", content)
 
 
 if __name__ == "__main__":
