@@ -595,27 +595,33 @@ class NightlyOrchestrator:
         import sys
         import time
 
-        # 1. 事前検証
+        if not self.plan_path.exists():
+            print(f"PRE-FLIGHT ERROR: Plan file not found: {self.plan_path}", file=sys.stderr)
+            return 2
+
+        # 1. JobState の初期化または再開
+        if self.resume and self.state_path.exists():
+            job_state = JobState.load(self.state_path)
+            print(f"Resuming job {job_state.job_id} from phase {job_state.current_phase}")
+            # クラッシュ時の残骸作業ツリーがあれば隔離退避してクリーン復元
+            if job_state.checkpoint_hash and not self.dry_run:
+                print(f"Resetting uncommitted work back to checkpoint {job_state.checkpoint_hash} for safe resume...")
+                self.git_guard.quarantine_and_restore(
+                    job_state.checkpoint_hash, task_id=job_state.current_task_id or "interrupted"
+                )
+        else:
+            job_id = f"job-{int(time.time())}"
+            job_state = JobState(job_id=job_id, status="RUNNING")
+            if not self.dry_run:
+                job_state.save(self.state_path)
+
+        # 2. クリーンツリー事前検証
         if not self.dry_run:
             try:
                 self.git_guard.assert_clean_working_tree()
             except RuntimeError as e:
                 print(f"PRE-FLIGHT ERROR: {e}", file=sys.stderr)
                 return 2
-
-        if not self.plan_path.exists():
-            print(f"PRE-FLIGHT ERROR: Plan file not found: {self.plan_path}", file=sys.stderr)
-            return 2
-
-        # 2. JobState の初期化または再開
-        if self.resume and self.state_path.exists():
-            job_state = JobState.load(self.state_path)
-            print(f"Resuming job {job_state.job_id} from phase {job_state.current_phase}")
-        else:
-            job_id = f"job-{int(time.time())}"
-            job_state = JobState(job_id=job_id, status="RUNNING")
-            if not self.dry_run:
-                job_state.save(self.state_path)
 
         tasks = self.dispatcher.parse_plan(self.plan_path)
         total_tasks = len(tasks)

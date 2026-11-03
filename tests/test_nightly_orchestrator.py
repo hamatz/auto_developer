@@ -395,6 +395,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
 
+            (repo_dir / ".gitignore").write_text(".dev/\nNIGHTLY_REPORT.md\nlogs/\n", encoding="utf-8")
             plan_file = repo_dir / "PLAN.md"
             plan_file.write_text("- [ ] 1. 自動実装タスク\n", encoding="utf-8")
             spec_file = repo_dir / "SPEC.md"
@@ -407,7 +408,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
             )
             verify_script.chmod(0o755)
 
-            subprocess.run(["git", "add", "PLAN.md", "SPEC.md", "verify.sh"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "add", ".gitignore", "PLAN.md", "SPEC.md", "verify.sh"], cwd=repo_dir, check=True)
             subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True)
 
             # Maker 実装を行うカスタム RunnerAdapter
@@ -455,6 +456,102 @@ class TestNightlyOrchestrator(unittest.TestCase):
             # 4. レポートが生成されていること
             self.assertTrue(report_file.exists())
             self.assertIn("COMPLETED", report_file.read_text(encoding="utf-8"))
+
+    def test_job_resume_after_interruption(self):
+        """プロセス中断後の --resume による安全な再開の受入検証。"""
+        import sys
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir()
+            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+
+            (repo_dir / ".gitignore").write_text(".dev/\nNIGHTLY_REPORT.md\nlogs/\n", encoding="utf-8")
+            plan_file = repo_dir / "PLAN.md"
+            plan_file.write_text("- [ ] 1. タスク一\n- [ ] 2. タスク二\n", encoding="utf-8")
+            spec_file = repo_dir / "SPEC.md"
+            spec_file.write_text("# SPEC\n", encoding="utf-8")
+            verify_script = repo_dir / "verify.sh"
+            verify_script.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            verify_script.chmod(0o755)
+
+            subprocess.run(["git", "add", ".gitignore", "PLAN.md", "SPEC.md", "verify.sh"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True)
+
+            state_file = repo_dir / ".dev" / "job_state.json"
+            report_file = repo_dir / "NIGHTLY_REPORT.md"
+
+            # 1回目の実行: タスク1完了後、タスク2のMakerで例外発生（クラッシュを模擬）
+            class CrashingRunner(RunnerAdapter):
+                def __init__(self):
+                    self.task1_done = False
+
+                def run_maker(self, task: Task, context: dict):
+                    if task.task_id == "1":
+                        (repo_dir / "task1.txt").write_text("done", encoding="utf-8")
+                        self.task1_done = True
+                        return 0, "Task 1 completed"
+                    # タスク2でクラッシュ
+                    raise SystemExit("Simulated Crash during Task 2")
+
+                def run_checker(self, task: Task, diff: str, spec_content: str):
+                    return True, "APPROVE"
+
+            orch1 = NightlyOrchestrator(
+                repo_dir=repo_dir,
+                plan_path=plan_file,
+                spec_path=spec_file,
+                verify_script=verify_script,
+                report_path=report_file,
+                state_path=state_file,
+                runner_adapter=CrashingRunner(),
+            )
+
+            with self.assertRaises(SystemExit):
+                orch1.run()
+
+            # タスク1はコミット済みであること
+            plan_after_crash = plan_file.read_text(encoding="utf-8")
+            self.assertIn("- [x] 1. タスク一", plan_after_crash)
+            self.assertIn("- [ ] 2. タスク二", plan_after_crash)
+
+            # 状態ファイルが残っていること
+            state_after_crash = JobState.load(state_file)
+            self.assertEqual(len(state_after_crash.completed_tasks), 1)
+
+            # 2回目の実行: --resume で再開（クラッシュしない正常なRunnerを使用）
+            class HealthyRunner(RunnerAdapter):
+                def run_maker(self, task: Task, context: dict):
+                    (repo_dir / f"task{task.task_id}.txt").write_text("done", encoding="utf-8")
+                    return 0, "OK"
+
+                def run_checker(self, task: Task, diff: str, spec_content: str):
+                    return True, "APPROVE"
+
+            orch2 = NightlyOrchestrator(
+                repo_dir=repo_dir,
+                plan_path=plan_file,
+                spec_path=spec_file,
+                verify_script=verify_script,
+                report_path=report_file,
+                state_path=state_file,
+                runner_adapter=HealthyRunner(),
+                resume=True,
+            )
+
+            exit_code = orch2.run()
+            self.assertEqual(exit_code, 0)
+
+            # 最終的にタスク1・2両方が [x] になり完了していること
+            final_plan = plan_file.read_text(encoding="utf-8")
+            self.assertIn("- [x] 1. タスク一", final_plan)
+            self.assertIn("- [x] 2. タスク二", final_plan)
+
+            final_state = JobState.load(state_file)
+            self.assertEqual(final_state.status, "COMPLETED")
+            self.assertEqual(len(final_state.completed_tasks), 2)
 
     def test_feature_f_morning_report_generation(self):
         """機能F: NIGHTLY_REPORT.md が所定のスキーマで生成される。"""
