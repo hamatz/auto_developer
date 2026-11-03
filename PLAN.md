@@ -7,13 +7,13 @@
 -->
 
 ## 現在の目標
-- Phase 1C: Morning Brief の刷新（人間不在後の引き継ぎ体験・意思決定支援の向上）
+- Phase 1 ドキュメント刷新 & チュートリアル（試しに使ってみる手順）の整備
 
 ## ステップ
-- [x] 1. MorningReporter 刷新の受入テスト作成 (Red-First)
-- [x] 2. MorningReporter の意思決定支援型レポート（Morning Brief）実装
-- [x] 3. CLI サブコマンド morning-brief の実装と表示テスト
-- [x] 4. 受入テスト全通過とローカル検証・コミット
+- [x] 1. README.md の刷新: 新アーキテクチャ解説と「試しに使ってみるクイックスタート（Hands-on Walkthrough）」の追加
+- [x] 2. docs/designs/autonomous_pipeline_orchestrator.md の最新化（JobState, RunnerAdapter, Quarantine, EvidenceGate）
+- [x] 3. skills/nightly-run/SKILL.md と PROMPTS.md の手順整備
+- [x] 4. verify_local.sh による整合性確認とコミット
 
 ## 止まっていること・判断待ち
 - なし

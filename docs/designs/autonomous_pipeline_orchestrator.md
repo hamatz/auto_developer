@@ -50,8 +50,14 @@
   * `PLAN.md` のタスクリストは上から順に直列実行する。カスタムコメントタグ（`<!-- depends_on -->`）等の複雑なDAGパーサーは実装せず（YAGNI原則）、いずれかのタスクが2回失敗した時点でパイプライン全体を即座に安全停止する。
 * **Decision 2 (Checkerの権限: Strict Binary Gatekeeper)**:
   * 無人夜間バッチにおいて、Checkerにコード修正・不要コード剪定のコミット権限を与えず、`APPROVE` または `REJECT` の二値判定に徹する。修正が必要な場合はMakerへ差し戻すか、2回目なら停止する。
-* **Decision 3 (ランタイム境界: Antigravity-Native Runner)**:
-  * オーケストレーターの主幹ループはAntigravityスキル（`/nightly-run`）として動作し、IDEネイティブの `invoke_subagent` を用いてMakerおよびCheckerを呼び出す。Git操作、差分検査、テスト実行はPython/シェルスクリプト（`scripts/nightly_orchestrator.py`）をヘルパーとして実行する。
+* **Decision 3 (ランタイム境界: Job Orchestrator & Runner Adapter)**:
+  * 単一の会話セッションへの依存を排除し、Python の独立プロセス（`NightlyOrchestrator`）を親として設計。`.dev/job_state.json` に実行状態（JobState）を永続化し、プロセス中断やクラッシュ時にも `--resume` で安全に直前のチェックポイントから再開可能とする。AIセッション（Maker/Checker）の起動と監視は `RunnerAdapter` により抽象化する。
+* **Decision 4 (作業成果の隔離退避: Quarantine Preservation)**:
+  * 従来の `git reset --hard` & `git clean -fd` による破壊的ロールバックを廃止。タスク失敗時は作業ツリーの差分を `quarantine/task-<id>-*` ブランチへ退避コミットした上で本線を直前のチェックポイントへ復元する。本線の安全性と試行錯誤成果の保存を完全に両立する。
+* **Decision 5 (確定ゲートの厳格化: Evidence-Gated Commit)**:
+  * 未検証コードの混入を防ぐため、決定論的検証（`verify-step`）通過時に暗号学的 Evidence Token を発行。コミット処理（`commit-step`）はこの証跡を検証・ワンタイム消費しない限り Exit 3 で物理遮断する。
+* **Decision 6 (翌朝の意思決定支援: Actionable Morning Brief)**:
+  * 単なる件数ダンプを廃止し、人間が朝戻ってきた際に3分で状況を把握し、具体的なコマンド（差分確認、ログ調査、再試行、破棄）とともに次の判断を下せる `AUTO DEVELOPER / MORNING BRIEF` および CLI コマンド `morning-brief` を提供する。
 
 --------------------------------------------------------------------------------
 
@@ -62,10 +68,10 @@
 * **When**: 開発者が就寝前に `/nightly-run` を起動する。
 * **Then**: オーケストレーターが `PLAN.md` のタスクを順に実行。各タスクでMakerが実装し、不変条件検査、ローカル検証スクリプト、Checkerの査読を通過してコミットが順次作成される。全タスク完了後、`NIGHTLY_REPORT.md` に成功サマリーが生成され、朝起きた時点で即座に確認・マージ可能な状態となる。
 
-### CUJ 2: 途中タスク失敗時の安全停止（Fail-Fast）
+### CUJ 2: 途中タスク失敗時の安全停止（隔離退避と意思決定支援）
 * **Given**: Task 1, Task 2 が順に定義された状態。
 * **When**: Task 1 の実装でテストが2回連続で失敗する（または保護ファイルを不正改変する）。
-* **Then**: オーケストレーターはCircuit Breakerを発動し、Git作業ツリーを `git reset --hard <checkpoint> && git clean -fd` で初期化。エラーログを `logs/nightly/task_1_failure.log` に隔離し、`PLAN.md` のTask 1を `- [ ] Task 1 **[FAILED]**` とマーク。パイプラインを即座に安全停止し、`NIGHTLY_REPORT.md` に障害詳細と未着手タスク一覧を記録して人間へハンドオフする。
+* **Then**: オーケストレーターはCircuit Breakerを発動し、作業ツリーの変更を `quarantine/task-1-*` ブランチへ退避コミット。その後、本線作業ツリーを直前のクリーンチェックポイントへ復元（`git reset --hard && git clean -fd`）。エラーログを `logs/nightly/task_1_failure.log` に保存し、`PLAN.md` のTask 1を `- [ ] Task 1 **[FAILED]**` とマーク。パイプラインを即座に安全停止し、翌朝の意思決定支援レポート（`AUTO DEVELOPER / MORNING BRIEF`）に隔離ブランチ差分確認コマンドや `--resume` 再試行コマンドを提示して人間に引き継ぐ。
 
 --------------------------------------------------------------------------------
 
