@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 from auto_developer.dispatcher import TaskDispatcher
 from auto_developer.evidence import EvidenceStore
@@ -377,9 +378,8 @@ def main(argv: list[str] | None = None) -> int:
         checker_info: dict[str, Any] = {}
         if args.checker_json:
             try:
-                import json
                 checker_info = cast(dict[str, Any], json.loads(args.checker_json))
-            except Exception:
+            except (json.JSONDecodeError, ValueError):
                 checker_info = {"raw": args.checker_json}
         if args.checker_decision:
             checker_info["decision"] = args.checker_decision

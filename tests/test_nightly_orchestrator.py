@@ -1753,7 +1753,6 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
     def test_feature_q_audit_records_include_verification_and_checker_info(self):
         """機能Q: CLI verify-step & commit-step を通じて Verification と Checker の証跡が Record に記録されること。"""
-        import json
         from auto_developer.evidence import EvidenceStore
 
         with tempfile.TemporaryDirectory() as tmpdir:
