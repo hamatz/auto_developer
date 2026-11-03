@@ -13,6 +13,9 @@ from scripts.nightly_orchestrator import (
     MorningReporter,
     EvidenceStore,
     JobState,
+    RunnerAdapter,
+    MockRunnerAdapter,
+    CommandRunnerAdapter,
 )
 
 
@@ -349,6 +352,36 @@ class TestNightlyOrchestrator(unittest.TestCase):
             final_state = JobState.load(state_file)
             self.assertEqual(final_state.status, "COMPLETED")
             self.assertFalse(final_state.can_resume())
+
+    def test_runner_adapter_mock_and_command(self):
+        """RunnerAdapter の Mock および Command 実行の検証。"""
+        task = Task(task_id="1", title="モックタスク", line_number=0, is_completed=False, is_failed=False)
+
+        # 1. MockRunnerAdapter
+        mock_runner = MockRunnerAdapter(maker_exit_code=0, checker_approve=True)
+        code, out = mock_runner.run_maker(task, context={"prompt": "implement task 1"})
+        self.assertEqual(code, 0)
+        approved, reason = mock_runner.run_checker(task, diff="some diff", spec_content="spec")
+        self.assertTrue(approved)
+
+        # Checker REJECT のケース
+        rejecting_runner = MockRunnerAdapter(maker_exit_code=0, checker_approve=False, checker_reason="Bad style")
+        app, rsn = rejecting_runner.run_checker(task, diff="some diff", spec_content="spec")
+        self.assertFalse(app)
+        self.assertEqual(rsn, "Bad style")
+
+        # 2. CommandRunnerAdapter (bash -c でシミュレート)
+        cmd_runner = CommandRunnerAdapter(
+            maker_cmd_template="echo 'Making task {task_id}'",
+            checker_cmd_template="echo 'APPROVE: Looks solid'",
+        )
+        code, out = cmd_runner.run_maker(task, context={})
+        self.assertEqual(code, 0)
+        self.assertIn("Making task 1", out)
+
+        app, rsn = cmd_runner.run_checker(task, diff="+ new code", spec_content="spec")
+        self.assertTrue(app)
+        self.assertIn("Looks solid", rsn)
 
     def test_feature_f_morning_report_generation(self):
         """機能F: NIGHTLY_REPORT.md が所定のスキーマで生成される。"""
