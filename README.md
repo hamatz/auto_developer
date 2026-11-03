@@ -1,6 +1,6 @@
 # Auto Developer: 自律型開発実行基盤 (Trustworthy Autonomous Runner)
 
-[![Verify CI](https://github.com/google/auto_developer/actions/workflows/verify.yml/badge.svg)](.github/workflows/verify.yml)
+[![Verify CI](https://github.com/hamatz/auto_developer/actions/workflows/verify.yml/badge.svg)](.github/workflows/verify.yml)
 [![Antigravity Plugin](https://img.shields.io/badge/Antigravity-Plugin-brightgreen.svg)](plugin.json)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
@@ -69,7 +69,7 @@ Auto Developer は Antigravity プラグイン規格（`plugin.json` および `
 #### 1. オンラインから直接インストールする場合（GitHub 公開時）
 ```bash
 # Antigravity CLI からインストール
-agy plugin install https://github.com/google/auto_developer
+agy plugin install https://github.com/hamatz/auto_developer
 
 # または Antigravity IDE / デスクトップアプリの UI から：
 # 「Customizations」→「Plugins」→「+ Install from URL」に上記 GitHub URL を入力
@@ -107,10 +107,10 @@ pip install -e /path/to/auto_developer
 
 ```bash
 # GitHub から直接インストールする場合（PyPI 公開不要）:
-pip install git+https://github.com/google/auto_developer.git
+pip install git+https://github.com/hamatz/auto_developer.git
 
 # またはローカルクローンから editable インストールする場合:
-# git clone https://github.com/google/auto_developer.git
+# git clone https://github.com/hamatz/auto_developer.git
 # pip install -e auto_developer
 ```
 
