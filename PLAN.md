@@ -7,14 +7,13 @@
 -->
 
 ## 現在の目標
-- Phase 1 Hardening (Round 2): 安全機構の整合性確保とシークレット保護
+- Phase 1 Hardening (Round 3): 排他制御とアトミック確定、Quarantine tracked限定
 
 ## ステップ
-- [x] 1. Evidence と最終コミットツリーの完全一致 (P0-2) (Red-First)
-- [x] 2. Quarantine からの秘密情報排除と安全なスナップショット (P0-3) (Red-First)
-- [x] 3. JobState の原子的保存 & HEAD 巻き戻し防止 (P1-2) (Red-First)
-- [x] 4. DEFAULT_VERIFY_SH のテスト未構成時の Fail-Closed 化 (P1-3) (Red-First)
+- [x] 1. プロセス排他ロック (P1-1: fcntl.flock による多重起動防止) (Red-First)
+- [ ] 2. 固定インデックスによるアトミックコミット (P0-1: 再ステージなし直接確定) (Red-First)
+- [ ] 3. Quarantine の Git コミット対象を tracked に限定 (P0-2: git add -u による完全秘密隔離) (Red-First)
 
 ## 止まっていること・判断待ち
-- なし（全ステップ完了）
+- なし
 

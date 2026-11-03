@@ -1227,6 +1227,49 @@ class TestNightlyOrchestrator(unittest.TestCase):
             )
             self.assertIn("No tests configured", res.stdout + res.stderr)
 
+    def test_feature_n_process_lock_prevents_concurrent_orchestrator(self):
+        """機能N-1: 同一ワークスペースでオーケストレーターが実行中の場合、2重起動を Exit 2 で即座に拒否すること。"""
+        import fcntl
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. タスク\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            v_sh = repo / "scripts" / "verify_local.sh"
+            v_sh.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            v_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            lock_file = repo / ".dev" / "auto_developer.lock"
+            lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # 別プロセスがロックを保持している状態を模擬
+            with open(lock_file, "w") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                # オーケストレーターを起動しようとする
+                orchestrator = NightlyOrchestrator(
+                    repo_dir=repo,
+                    plan_path=repo / "PLAN.md",
+                    spec_path=repo / "SPEC.md",
+                    verify_script=v_sh,
+                    report_path=repo / "NIGHTLY_REPORT.md",
+                    state_path=repo / ".dev" / "job_state.json",
+                    runner_adapter=MockRunnerAdapter(),
+                    dry_run=False,
+                )
+                exit_code = orchestrator.run()
+                self.assertEqual(
+                    exit_code,
+                    2,
+                    f"Must reject starting when another process holds the workspace lock! Got exit {exit_code}",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
