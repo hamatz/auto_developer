@@ -169,7 +169,8 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
             tracked_file = repo_dir / "app.py"
             tracked_file.write_text("def run(): pass", encoding="utf-8")
-            subprocess.run(["git", "add", "app.py"], cwd=repo_dir, check=True)
+            (repo_dir / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py", ".gitignore"], cwd=repo_dir, check=True)
             subprocess.run(["git", "commit", "-m", "base commit"], cwd=repo_dir, check=True)
 
             git_guard = GitGuard(repo_dir=repo_dir)
@@ -188,16 +189,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertFalse(helper_file.exists())
             git_guard.assert_clean_working_tree()
 
-            # 隔離ブランチに成果が保存されていること
-            proc = subprocess.run(
-                ["git", "show", f"{quarantine_branch}:helper.py"],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            self.assertIn("# helper logic", proc.stdout)
-
+            # 隔離ブランチに追跡済みファイルの成果が保存されていること (git add -u)
             proc_diff = subprocess.run(
                 ["git", "diff", f"{checkpoint}..{quarantine_branch}", "--", "app.py"],
                 cwd=repo_dir,
@@ -206,6 +198,23 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 check=True,
             )
             self.assertIn("almost working", proc_diff.stdout)
+
+            # 未追跡ファイル (helper.py) は Git 履歴には入らず、物理スナップショット (.tar.gz) に保全されていること
+            proc_helper = subprocess.run(
+                ["git", "show", f"{quarantine_branch}:helper.py"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(proc_helper.returncode, 0, "Untracked helper.py must NOT be committed to git quarantine branch")
+
+            import tarfile
+            archive_dir = repo_dir / ".dev" / "quarantines"
+            archives = list(archive_dir.glob("*.tar.gz"))
+            self.assertTrue(bool(archives))
+            with tarfile.open(archives[0], "r:gz") as tar:
+                self.assertIn("helper.py", tar.getnames())
 
     def test_feature_evidence_gated_commit(self):
         """機能追加: verify-step の証跡なしで commit-step を呼ぶと拒否されること (P0対応)。"""
@@ -1109,6 +1118,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
             checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
 
             # タスク作業中に正常コードと秘密情報を作成
+            (repo / "base.py").write_text("print('base modified')\n", encoding="utf-8")
             (repo / "failed_feature.py").write_text("print('incomplete')\n", encoding="utf-8")
             (repo / ".env").write_text("SECRET_API_KEY=topsecret123\n", encoding="utf-8")
             (repo / "private.key").write_text("-----BEGIN RSA PRIVATE KEY-----\n", encoding="utf-8")
@@ -1135,7 +1145,18 @@ class TestNightlyOrchestrator(unittest.TestCase):
             )
             self.assertNotEqual(proc_key.returncode, 0, "Private keys must NEVER be force-added to git quarantine branch!")
 
-            # 2. ソースコードは隔離ブランチに保全されていること
+            # 2. 追跡済みソースコードの変更は隔離ブランチに保全されていること (git add -u)
+            proc_tracked = subprocess.run(
+                ["git", "show", f"{quarantine_branch}:base.py"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc_tracked.returncode, 0, "Tracked source changes must be preserved in quarantine branch")
+            self.assertIn("base modified", proc_tracked.stdout)
+
+            # 未追跡ソースコードは Git 履歴には入らないこと (git add -u)
             proc_code = subprocess.run(
                 ["git", "show", f"{quarantine_branch}:failed_feature.py"],
                 cwd=repo,
@@ -1143,9 +1164,9 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 text=True,
                 check=False,
             )
-            self.assertEqual(proc_code.returncode, 0, "Source code changes must be preserved in quarantine branch")
+            self.assertNotEqual(proc_code.returncode, 0, "Untracked files must not be added to git quarantine branch")
 
-            # 3. 物理スナップショット archive からも秘密情報が除外されていること
+            # 3. 物理スナップショット archive からは秘密情報が除外され、安全な未追跡コードが保全されていること
             archive_dir = repo / ".dev" / "quarantines"
             archives = list(archive_dir.glob("*.tar.gz"))
             self.assertTrue(bool(archives), "Snapshot archive must be created")
@@ -1226,6 +1247,145 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 f"verify_local.sh must fail (Exit 1) when no tests are configured! Got exit {res.returncode}:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}",
             )
             self.assertIn("No tests configured", res.stdout + res.stderr)
+
+    def test_feature_n_process_lock_prevents_concurrent_orchestrator(self):
+        """機能N-1: 同一ワークスペースでオーケストレーターが実行中の場合、2重起動を Exit 2 で即座に拒否すること。"""
+        import fcntl
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. タスク\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            v_sh = repo / "scripts" / "verify_local.sh"
+            v_sh.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            v_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            lock_file = repo / ".dev" / "auto_developer.lock"
+            lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # 別プロセスがロックを保持している状態を模擬
+            with open(lock_file, "w") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                # オーケストレーターを起動しようとする
+                orchestrator = NightlyOrchestrator(
+                    repo_dir=repo,
+                    plan_path=repo / "PLAN.md",
+                    spec_path=repo / "SPEC.md",
+                    verify_script=v_sh,
+                    report_path=repo / "NIGHTLY_REPORT.md",
+                    state_path=repo / ".dev" / "job_state.json",
+                    runner_adapter=MockRunnerAdapter(),
+                    dry_run=False,
+                )
+                exit_code = orchestrator.run()
+                self.assertEqual(
+                    exit_code,
+                    2,
+                    f"Must reject starting when another process holds the workspace lock! Got exit {exit_code}",
+                )
+
+    def test_feature_n_atomic_commit_on_fixed_index_without_restaging(self):
+        """機能N-2: commit_task は再ステージ (git add -A) を行わず、検証済みIndexから直接コミットすること。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / "base.txt").write_text("initial\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            guard = GitGuard(repo_dir=repo)
+            # 正当な作業内容を作成
+            (repo / "feature.py").write_text("print('legitimate')\n", encoding="utf-8")
+            # 検証フェーズでの作業ツリーSHA（git add -A -> write-tree）
+            verified_tree_sha = guard.get_working_tree_sha()
+
+            # 検証通過後、コミット直前に未検証ファイルが作業ツリーに混入
+            (repo / "injected_unverified.py").write_text("print('unverified backdoor')\n", encoding="utf-8")
+
+            # commit_task を実行
+            task = Task("1", "Legitimate Task", 1, False, False)
+            guard.commit_task(task)
+
+            # HEAD^{tree} は検証済みツリーSHAと完全一致しなければならない
+            committed_tree_sha = guard.get_commit_tree_sha("HEAD")
+            self.assertEqual(
+                committed_tree_sha,
+                verified_tree_sha,
+                "commit_task must NOT restage unverified files! Committed tree must match verified index tree.",
+            )
+
+            # injected_unverified.py が HEAD に含まれていないこと
+            ls_proc = subprocess.run(["git", "ls-tree", "-r", "--name-only", "HEAD"], cwd=repo, capture_output=True, text=True, check=True)
+            self.assertNotIn(
+                "injected_unverified.py",
+                ls_proc.stdout.splitlines(),
+                "Unverified file must NOT be included in the commit!",
+            )
+
+    def test_feature_n_quarantine_only_commits_tracked_changes_to_git(self):
+        """機能N-3: 隔離ブランチへの Git コミットは追跡済みファイル (git add -u) に限定し、未追跡ファイルを一切Gitに格納しないこと。"""
+        import tarfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "main.py").write_text("print('tracked initial')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            guard = GitGuard(repo_dir=repo)
+
+            # 1. 追跡中ファイルを変更
+            (repo / "main.py").write_text("print('tracked modified')\n", encoding="utf-8")
+
+            # 2. 未追跡ファイル（例えば未無視の設定ファイルやAPI出力）を作成
+            (repo / "new_untracked_data.json").write_text('{"data": 123}\n', encoding="utf-8")
+
+            # 隔離退避を実行
+            q_branch = guard.quarantine_and_restore(checkpoint, task_id="task-99")
+            self.assertTrue(q_branch.startswith("quarantine/task-99-"))
+
+            # 隔離ブランチの Git 履歴ツリーを検査
+            ls_proc = subprocess.run(
+                ["git", "ls-tree", "-r", "--name-only", q_branch],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            files_in_q_commit = ls_proc.stdout.splitlines()
+
+            # 追跡済みファイルの変更は Git 隔離ブランチに保存されていること
+            self.assertIn("main.py", files_in_q_commit)
+
+            # 未追跡ファイルは Git 履歴に絶対コミットされてはいけないこと！ (git add -u の保証)
+            self.assertNotIn(
+                "new_untracked_data.json",
+                files_in_q_commit,
+                "Untracked files must NEVER be committed into the git quarantine branch! Use git add -u.",
+            )
+
+            # ただし、安全な未追跡ファイルは物理リカバリースナップショット (.tar.gz) 側には保全されていること
+            q_dir = repo / ".dev" / "quarantines"
+            tar_files = list(q_dir.glob("snapshot_task_task-99_*.tar.gz"))
+            self.assertTrue(len(tar_files) > 0, "Recovery tar snapshot must exist")
+            with tarfile.open(tar_files[0], "r:gz") as tar:
+                names = tar.getnames()
+                self.assertIn("new_untracked_data.json", names, "Safe untracked files must be preserved in tar snapshot")
+
+
 
 
 if __name__ == "__main__":

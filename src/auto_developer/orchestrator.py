@@ -52,6 +52,35 @@ class NightlyOrchestrator:
             print(f"PRE-FLIGHT ERROR: Plan file not found: {self.plan_path}", file=sys.stderr)
             return 2
 
+        # 0. プロセス排他ロック (同一ワークスペースでの二重起動防止)
+        import fcntl
+        lock_file = self.repo_dir / ".dev" / "auto_developer.lock"
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(lock_file, "a+") as lock_fd:
+                try:
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except (BlockingIOError, OSError):
+                    print(
+                        f"CONCURRENCY ERROR: Another auto-dev process is currently executing in {self.repo_dir}.\n"
+                        f"Acquisition of exclusive lock {lock_file} failed. Exiting to prevent concurrent state corruption.",
+                        file=sys.stderr,
+                    )
+                    return 2
+
+                try:
+                    return self._run_loop()
+                finally:
+                    try:
+                        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+        except OSError as e:
+            print(f"LOCK ERROR: Could not open lock file {lock_file}: {e}", file=sys.stderr)
+            return 2
+
+    def _run_loop(self) -> int:
+
         # 1. JobState の初期化または再開
         if self.resume and self.state_path.exists():
             job_state = JobState.load(self.state_path)
@@ -158,6 +187,9 @@ class NightlyOrchestrator:
                 print(f"  CIRCUIT BREAKER: Protected file modified in task {task.task_id}!", file=sys.stderr)
                 return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "INVARIANT_BREACH", "Protected file modification detected")
 
+            # 確定対象のツリーを検証前に反映（PLAN.md のタスク状態を completed に更新）
+            self.dispatcher.mark_task_status(self.plan_path, task, status="completed")
+
             # Phase C: 決定論的検証 & 再試行 (Verification Gate)
             print(f"  [Phase C: Verifier] Running {self.verify_script}...")
             code, out = self.verifier.run_verification(
@@ -187,6 +219,7 @@ class NightlyOrchestrator:
                 if not self.git_guard.check_protected_files_untouched(checkpoint):
                     return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "INVARIANT_BREACH", "Protected file modified on retry")
 
+                self.dispatcher.mark_task_status(self.plan_path, task, status="completed")
                 code, out = self.verifier.run_verification(
                     self.verify_script, timeout_sec=self.timeout_sec, cwd=self.repo_dir
                 )
@@ -228,14 +261,11 @@ class NightlyOrchestrator:
             print("  [Phase E: Commit] Checker approved. Finalizing plan and issuing evidence...")
             job_state.transition_phase("COMMIT")
 
-            # 1. PLAN.md のタスク状態を completed に更新（コミット対象の最終ツリーを確定）
-            self.dispatcher.mark_task_status(self.plan_path, task, status="completed")
-
-            # 2. PLAN.md 更新を含めた最終作業ツリー全体の Tree SHA と SPEC SHA を取得
+            # 1. すでに検証・査読を通過した作業ツリー全体の Tree SHA と SPEC SHA を取得
             final_tree_sha = self.git_guard.get_working_tree_sha()
             spec_sha = self.git_guard.get_spec_sha(self.spec_path)
 
-            # 3. 最終ツリーに対する証跡を発行
+            # 2. 検証済みツリーに対する証跡を発行
             self.evidence_store.issue_evidence(
                 task.task_id,
                 checkpoint,
@@ -244,7 +274,7 @@ class NightlyOrchestrator:
                 details={"checker_decision": checker_reason},
             )
 
-            # 4. 証跡の検証と消費（ツリー整合性照合）
+            # 3. 証跡の検証と消費（ツリー整合性照合）
             current_tree = self.git_guard.get_working_tree_sha()
             current_spec = self.git_guard.get_spec_sha(self.spec_path)
             if not self.evidence_store.verify_and_consume(
@@ -256,10 +286,10 @@ class NightlyOrchestrator:
                 print(f"  EVIDENCE ERROR: Could not verify evidence for task {task.task_id}", file=sys.stderr)
                 return 3
 
-            # 5. コミット実行
+            # 4. コミット実行（固定されたインデックスから直接コミット）
             commit_hash = self.git_guard.commit_task(task)
 
-            # 6. コミットされた Git Commit の Tree SHA と Evidence Tree SHA の完全一致を検証
+            # 5. コミットされた Git Commit の Tree SHA と Evidence Tree SHA の完全一致を検証
             committed_tree_sha = self.git_guard.get_commit_tree_sha(commit_hash)
             if committed_tree_sha != final_tree_sha:
                 print(
