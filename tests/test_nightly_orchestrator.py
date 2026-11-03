@@ -1,22 +1,21 @@
 """Acceptance test suite for Antigravity Autonomous Pipeline Orchestrator (SPEC.md)."""
 
-from pathlib import Path
 import subprocess
+import sys
 import unittest
+from pathlib import Path
 
 # Target classes to be implemented in scripts/nightly_orchestrator.py
 from scripts.nightly_orchestrator import (
+    CommandRunnerAdapter,
+    GitGuard,
+    JobState,
+    MockRunnerAdapter,
+    MorningReporter,
+    NightlyOrchestrator,
+    RunnerAdapter,
     Task,
     TaskDispatcher,
-    GitGuard,
-    DeterministicVerifier,
-    MorningReporter,
-    EvidenceStore,
-    JobState,
-    RunnerAdapter,
-    MockRunnerAdapter,
-    CommandRunnerAdapter,
-    NightlyOrchestrator,
 )
 
 
@@ -49,7 +48,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
             # 完了状態に更新
             dispatcher.mark_task_status(plan_file, next_task, status="completed")
             updated_tasks = dispatcher.parse_plan(plan_file)
-            task1 = [t for t in updated_tasks if t.task_id == "1"][0]
+            task1 = next(t for t in updated_tasks if t.task_id == "1")
             self.assertTrue(task1.is_completed)
 
             # 失敗状態に更新
@@ -209,8 +208,8 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
     def test_feature_evidence_gated_commit(self):
         """機能追加: verify-step の証跡なしで commit-step を呼ぶと拒否されること (P0対応)。"""
-        import tempfile
         import sys
+        import tempfile
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             repo_dir.mkdir()
@@ -244,6 +243,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 cwd=repo_dir,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             self.assertNotEqual(
                 proc_commit_fail.returncode,
@@ -274,6 +274,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 cwd=repo_dir,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             self.assertEqual(proc_verify.returncode, 0, f"verify-step failed: {proc_verify.stderr}")
             self.assertIn("VERIFICATION PASSED", proc_verify.stdout)
@@ -294,6 +295,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 cwd=repo_dir,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             self.assertEqual(
                 proc_commit_success.returncode,
@@ -316,6 +318,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 cwd=repo_dir,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             self.assertNotEqual(proc_commit_replay.returncode, 0)
 
@@ -362,7 +365,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         mock_runner = MockRunnerAdapter(maker_exit_code=0, checker_approve=True)
         code, out = mock_runner.run_maker(task, context={"prompt": "implement task 1"})
         self.assertEqual(code, 0)
-        approved, reason = mock_runner.run_checker(task, diff="some diff", spec_content="spec")
+        approved, _ = mock_runner.run_checker(task, diff="some diff", spec_content="spec")
         self.assertTrue(approved)
 
         # Checker REJECT のケース
@@ -459,7 +462,6 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
     def test_job_resume_after_interruption(self):
         """プロセス中断後の --resume による安全な再開の受入検証。"""
-        import sys
         import tempfile
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
@@ -627,6 +629,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 cwd=repo_dir,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             self.assertEqual(proc.returncode, 0, f"morning-brief failed: {proc.stderr}")
             self.assertIn("AUTO DEVELOPER / MORNING BRIEF", proc.stdout)
@@ -636,7 +639,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
     def test_cli_init_command(self):
         """auto-dev init コマンドによるプロジェクトひな形生成の受入検証。"""
-        import sys
+        import os
         import tempfile
         with tempfile.TemporaryDirectory() as tmp_dir:
             target_project = Path(tmp_dir) / "my_new_app"
@@ -650,6 +653,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 cwd=target_project,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             self.assertEqual(proc.returncode, 0, f"init failed: {proc.stderr}")
             self.assertIn("Initialization complete", proc.stdout)
@@ -659,7 +663,6 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertTrue((target_project / "SPEC.md").exists())
             verify_sh = target_project / "scripts" / "verify_local.sh"
             self.assertTrue(verify_sh.exists())
-            import os
             self.assertTrue(os.access(verify_sh, os.X_OK))
 
             gitignore = target_project / ".gitignore"
@@ -676,13 +679,13 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 cwd=target_project,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             self.assertEqual(proc2.returncode, 0)
             self.assertEqual((target_project / "PLAN.md").read_text(encoding="utf-8"), "# Custom Plan\n")
 
     def test_external_project_workflow(self):
         """外部プロジェクトにおける auto-dev init -> git commit -> auto-dev run -> brief の全フロー検証。"""
-        import sys
         import tempfile
         with tempfile.TemporaryDirectory() as tmp_dir:
             ext_app = Path(tmp_dir) / "external_project"
@@ -723,6 +726,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 cwd=ext_app,
                 capture_output=True,
                 text=True,
+                check=False,
             )
             self.assertEqual(proc_run.returncode, 0, f"auto-dev run failed:\nSTDOUT:\n{proc_run.stdout}\nSTDERR:\n{proc_run.stderr}")
             self.assertIn("Execution complete", proc_run.stdout)
@@ -734,7 +738,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertIn("- [x] 1. 新規モジュール作成", (ext_app / "PLAN.md").read_text(encoding="utf-8"))
 
             # 6. auto-dev brief で外部アプリのブリーフィングが確認できること
-            proc_brief = subprocess.run([sys.executable, str(script_path), "brief"], cwd=ext_app, capture_output=True, text=True)
+            proc_brief = subprocess.run([sys.executable, str(script_path), "brief"], cwd=ext_app, capture_output=True, text=True, check=False)
             self.assertEqual(proc_brief.returncode, 0)
             self.assertIn("AUTO DEVELOPER / MORNING BRIEF", proc_brief.stdout)
             self.assertIn("新規モジュール作成", proc_brief.stdout)

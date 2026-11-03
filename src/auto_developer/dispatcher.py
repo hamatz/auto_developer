@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
 
 from auto_developer.models import Task
 
@@ -61,7 +61,7 @@ class TaskDispatcher:
             for idx, line in enumerate(lines):
                 if f"{task.task_id}." in line and task.title in line:
                     task = Task(task.task_id, task.title, idx, task.is_completed, task.is_failed)
-                    target_line = lines[idx]
+                    target_line = line
                     break
 
         if status == "completed":

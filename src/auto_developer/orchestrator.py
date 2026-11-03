@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from auto_developer.dispatcher import TaskDispatcher
@@ -144,7 +144,7 @@ class NightlyOrchestrator:
                     return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "VERIFIER_ERROR", out)
 
             # Phase D: 独立査読 (Checker Review)
-            print(f"  [Phase D: Checker] Running independent review...")
+            print("  [Phase D: Checker] Running independent review...")
             job_state.transition_phase("CHECKER")
             job_state.save(self.state_path)
             diff_proc = self.git_guard._run_git(["diff", checkpoint])
@@ -161,7 +161,7 @@ class NightlyOrchestrator:
                         try:
                             content = full_p.read_text(encoding="utf-8")
                             untracked_diffs.append(f"--- /dev/null\n+++ b/{u_path}\n@@ -0,0 +1 @@\n{content}")
-                        except Exception:
+                        except (OSError, UnicodeDecodeError):
                             pass
 
             if untracked_diffs:
@@ -174,9 +174,9 @@ class NightlyOrchestrator:
                 return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "CHECKER_REJECT", checker_reason)
 
             # Phase E: 確定とコミット (Evidence & Commit)
-            print(f"  [Phase E: Commit] Checker approved. Issuing evidence and committing...")
+            print("  [Phase E: Commit] Checker approved. Issuing evidence and committing...")
             job_state.transition_phase("COMMIT")
-            evidence = self.evidence_store.issue_evidence(task.task_id, checkpoint)
+            self.evidence_store.issue_evidence(task.task_id, checkpoint)
             if not self.evidence_store.verify_and_consume(task.task_id, checkpoint):
                 print(f"  EVIDENCE ERROR: Could not verify evidence for task {task.task_id}", file=sys.stderr)
                 return 3

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import re
 import subprocess
+from pathlib import Path
 
 from auto_developer.models import Task
 
@@ -10,12 +10,12 @@ from auto_developer.models import Task
 class GitGuard:
     """Git作業ツリーの整合性管理、不変条件外部検査、および隔離退避を担当。"""
 
-    PROTECTED_PATTERNS = [
+    PROTECTED_PATTERNS = (
         re.compile(r"^\.github/"),
         re.compile(r"^SPEC\.md$"),
         re.compile(r"^scripts/verify_local\.sh$"),
         re.compile(r"^tests/immunity/"),
-    ]
+    )
 
     def __init__(self, repo_dir: Path | None = None) -> None:
         self.repo_dir = repo_dir or Path.cwd()

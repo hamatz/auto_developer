@@ -49,7 +49,7 @@ class EvidenceStore:
                 return False
             path.unlink()
             return True
-        except Exception:
+        except (OSError, json.JSONDecodeError):
             return False
 
     def clear_evidence(self, task_id: str | None = None) -> None:

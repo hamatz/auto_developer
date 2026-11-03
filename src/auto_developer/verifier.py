@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 
 class DeterministicVerifier:
@@ -21,11 +21,12 @@ class DeterministicVerifier:
                 cwd=working_dir,
                 capture_output=True,
                 text=True,
+                check=False,
                 timeout=timeout_sec,
             )
             output = proc.stdout + "\n" + proc.stderr
             return proc.returncode, output.strip()
         except subprocess.TimeoutExpired as e:
             return 124, f"Verification timed out after {timeout_sec}s: {e}"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return 1, f"Failed to execute verification script: {e}"

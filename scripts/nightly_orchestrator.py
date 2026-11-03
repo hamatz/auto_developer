@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Antigravity Autonomous Pipeline Orchestrator (CLI Wrapper for Backward Compatibility)."""
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 # Ensure src/ is on sys.path so auto_developer can be imported directly
 src_dir = str(Path(__file__).resolve().parents[1] / "src")
@@ -24,6 +24,22 @@ from auto_developer import (
     TaskDispatcher,
 )
 from auto_developer.cli import main
+
+__all__ = [
+    "CommandRunnerAdapter",
+    "DeterministicVerifier",
+    "EvidenceStore",
+    "ExecutionResult",
+    "GitGuard",
+    "JobState",
+    "MockRunnerAdapter",
+    "MorningReporter",
+    "NightlyOrchestrator",
+    "RunnerAdapter",
+    "Task",
+    "TaskDispatcher",
+    "main",
+]
 
 if __name__ == "__main__":
     sys.exit(main())

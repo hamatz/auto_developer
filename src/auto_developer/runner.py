@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from pathlib import Path
 import subprocess
+from abc import ABC, abstractmethod
 from typing import Any
 
 from auto_developer.models import Task
@@ -14,12 +13,10 @@ class RunnerAdapter(ABC):
     @abstractmethod
     def run_maker(self, task: Task, context: dict[str, Any]) -> tuple[int, str]:
         """Maker セッションを起動してタスクを実装させ、(exit_code, output) を返す。"""
-        pass
 
     @abstractmethod
     def run_checker(self, task: Task, diff: str, spec_content: str) -> tuple[bool, str]:
         """Checker セッションを起動して独立査読を行わせ、(is_approved, explanation) を返す。"""
-        pass
 
 
 class MockRunnerAdapter(RunnerAdapter):
@@ -75,12 +72,13 @@ class CommandRunnerAdapter(RunnerAdapter):
                 ["bash", "-c", cmd_str],
                 capture_output=True,
                 text=True,
+                check=False,
                 timeout=self.timeout_sec,
             )
             return proc.returncode, proc.stdout + "\n" + proc.stderr
         except subprocess.TimeoutExpired:
             return 124, f"Maker execution timed out after {self.timeout_sec}s"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return 1, f"Failed to execute Maker: {e}"
 
     def run_checker(self, task: Task, diff: str, spec_content: str) -> tuple[bool, str]:
@@ -96,6 +94,7 @@ class CommandRunnerAdapter(RunnerAdapter):
                 input=f"--- DIFF ---\n{diff}\n--- SPEC ---\n{spec_content}",
                 capture_output=True,
                 text=True,
+                check=False,
                 timeout=self.timeout_sec,
             )
             output = proc.stdout + "\n" + proc.stderr
@@ -105,5 +104,5 @@ class CommandRunnerAdapter(RunnerAdapter):
             return is_approved, output.strip()
         except subprocess.TimeoutExpired:
             return False, f"Checker timed out after {self.timeout_sec}s"
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return False, f"Failed to execute Checker: {e}"
