@@ -1430,6 +1430,148 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertIn("- [ ] 1. 失敗するタスク", plan_content, "PLAN.md must remain uncompleted on verify failure!")
             self.assertNotIn("- [x]", plan_content, "PLAN.md must NOT have [x] when verification fails!")
 
+    def test_feature_p_two_tasks_executed_exactly_once_and_no_rerun_on_restart(self):
+        """機能P-2: 2タスク連続実行でMakerが厳密に2回だけ呼ばれ、成功タスクは[x]となり再起動しても再実行されないこと。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. 第一タスク\n- [ ] 2. 第二タスク\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            v_sh = repo / "scripts" / "verify_local.sh"
+            v_sh.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            v_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            maker_invocations: list[str] = []
+
+            class TrackingRunner(RunnerAdapter):
+                def run_maker(self, task, context):
+                    maker_invocations.append(task.task_id)
+                    (repo / f"task_{task.task_id}.py").write_text(f"# work for {task.task_id}\n", encoding="utf-8")
+                    return 0, f"completed {task.task_id}"
+
+                def run_checker(self, task, diff, spec_content):
+                    return True, '{"decision": "APPROVE"}'
+
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=v_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=repo / ".dev" / "job_state.json",
+                runner_adapter=TrackingRunner(),
+                dry_run=False,
+            )
+
+            # 1. オーケストレーター実行
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 0, "Orchestrator must complete successfully")
+
+            # 2. Maker はタスク1とタスク2に対して厳密に1回ずつ（計2回）呼ばれていること
+            self.assertEqual(
+                maker_invocations,
+                ["1", "2"],
+                f"Maker must be called exactly once per task! Actual calls: {maker_invocations}",
+            )
+
+            # 3. PLAN.md 内のタスクが両方とも [x] になっていること
+            final_plan = (repo / "PLAN.md").read_text(encoding="utf-8")
+            self.assertIn("- [x] 1. 第一タスク", final_plan)
+            self.assertIn("- [x] 2. 第二タスク", final_plan)
+            self.assertNotIn("- [ ]", final_plan, "All pending tasks must be marked [x]")
+
+            # 4. コミットツリーと Evidence Tree SHA の完全一致を検証
+            state = JobState.load(repo / ".dev" / "job_state.json")
+            self.assertEqual(len(state.completed_tasks), 2)
+            for t_info in state.completed_tasks:
+                c_hash = t_info["commit"]
+                c_tree = subprocess.run(["git", "rev-parse", f"{c_hash}^{{tree}}"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+                self.assertEqual(c_tree, t_info["evidence_tree_sha"], f"Commit tree must match evidence tree for task {t_info['task_id']}")
+
+            # 5. 再起動（同一リポジトリでオーケストレーターを再実行）
+            maker_invocations_before_restart = list(maker_invocations)
+            orchestrator_restart = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=v_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=repo / ".dev" / "job_state.json",
+                runner_adapter=TrackingRunner(),
+                dry_run=False,
+            )
+            exit_code_restart = orchestrator_restart.run()
+            self.assertEqual(exit_code_restart, 0, "Restart should succeed with 0")
+
+            # 再起動によって Maker が追加実行されていないこと！
+            self.assertEqual(
+                maker_invocations,
+                maker_invocations_before_restart,
+                "Maker must NOT be called again for completed [x] tasks upon restart!",
+            )
+
+    def test_feature_p_task_failure_preserves_uncompleted_and_stops_safely(self):
+        """機能P-3: 検証失敗時はタスクが[x]にならず[FAILED]となり、後続タスクを実行せず安全に停止すること。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. 失敗タスク\n- [ ] 2. 後続タスク\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            failing_sh = repo / "scripts" / "verify_local.sh"
+            failing_sh.write_text("#!/bin/bash\nexit 1\n", encoding="utf-8")
+            failing_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            maker_calls = []
+
+            class FailingRunner(RunnerAdapter):
+                def run_maker(self, task, context):
+                    maker_calls.append(task.task_id)
+                    (repo / f"task_{task.task_id}.py").write_text("broken\n", encoding="utf-8")
+                    return 0, "generated broken code"
+
+                def run_checker(self, task, diff, spec_content):
+                    return True, '{"decision": "APPROVE"}'
+
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=failing_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=repo / ".dev" / "job_state.json",
+                runner_adapter=FailingRunner(),
+                dry_run=False,
+            )
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 1, "Must exit with code 1 on verification failure")
+
+            # タスク2は実行されていないこと
+            self.assertNotIn("2", maker_calls, "Subsequent task 2 must NOT be executed after task 1 failure")
+
+            # PLAN.md の状態検査
+            plan_text = (repo / "PLAN.md").read_text(encoding="utf-8")
+            self.assertIn("**[FAILED]**", plan_text)
+            self.assertNotIn("- [x]", plan_text, "Failed task must NOT be marked [x]")
+            self.assertIn("- [ ] 2. 後続タスク", plan_text)
+
+            # HEAD は checkpoint のままであること
+            current_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(current_head, checkpoint, "HEAD must remain at checkpoint on task failure")
+
+
 
 
 
