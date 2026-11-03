@@ -23,9 +23,10 @@ from auto_developer import (
     Task,
     TaskDispatcher,
 )
-from auto_developer.cli import main
+from auto_developer.cli import DEFAULT_VERIFY_SH, main
 
 __all__ = [
+    "DEFAULT_VERIFY_SH",
     "CommandRunnerAdapter",
     "DeterministicVerifier",
     "EvidenceStore",
