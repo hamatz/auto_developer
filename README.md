@@ -3,7 +3,7 @@
 [![Verify CI](https://github.com/google/auto_developer/actions/workflows/verify.yml/badge.svg)](.github/workflows/verify.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-**Auto Developer** は、Google Antigravity および Elephant-Goldfish Model（EGM）の設計規律に基づき、**「夜寝ている間にAIエージェントが安全に実装・検証・コミットを自動完遂する」** ことを実現する自律型直列パイプライン・オーケストレーターです。
+**Auto Developer** は、Google Antigravity および [Agent Harness Kit 論文](https://github.com/hamatz/agent-harness-kit/blob/main/docs/paper.md) で提唱される Elephant-Goldfish Model（EGM）の設計規律に基づき、**「夜寝ている間にAIエージェントが安全に実装・検証・コミットを自動完遂する」** ことを実現する自律型直列パイプライン・オーケストレーターです。
 
 ---
 

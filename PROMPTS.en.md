@@ -2,7 +2,7 @@
 
 Example messages to give the agent at each stage, from "I only have a vague idea in my head" to the first feature being merged. They are written to work with any tool — Antigravity, Claude Code, Codex and others. Replace the parts in `[ ]` with your own content. (The Japanese version, [`PROMPTS.md`](PROMPTS.md), is canonical.)
 
-As a rule, **open a new session for each stage**. The idea behind this kit is not to let an agent implement while remembering the design conversation, and not to let it review while having watched the implementation's trial and error (Chapter 3 of the paper). Results from earlier stages are handed over not through conversation but through files (`docs/designs/`, `SPEC.md`, `PLAN.md`, git history).
+As a rule, **open a new session for each stage**. The idea behind this kit is not to let an agent implement while remembering the design conversation, and not to let it review while having watched the implementation's trial and error ([Chapter 3 of the paper](https://github.com/hamatz/agent-harness-kit/blob/main/docs/paper.md)). Results from earlier stages are handed over not through conversation but through files (`docs/designs/`, `SPEC.md`, `PLAN.md`, git history).
 
 | Stage | Who | Session | What remains |
 | --- | --- | --- | --- |
@@ -94,7 +94,7 @@ Based on docs/designs/[project-name].md, create the following three things.
 Don't write any implementation code yet.
 ```
 
-**What the human does** — Read `SPEC.md` and the acceptance tests, and check that they reflect the specification correctly. This is where, in this kit, the human spends the most time reading (Section 1.2 of the paper). Once satisfied, merge the pull request and, after the `verify` workflow has passed once, add `verify` to the ruleset's required status checks. **Only start letting the agent write the implementation once this wall is up.**
+**What the human does** — Read `SPEC.md` and the acceptance tests, and check that they reflect the specification correctly. This is where, in this kit, the human spends the most time reading ([Section 1.2 of the paper](https://github.com/hamatz/agent-harness-kit/blob/main/docs/paper.md)). Once satisfied, merge the pull request and, after the `verify` workflow has passed once, add `verify` to the ruleset's required status checks. **Only start letting the agent write the implementation once this wall is up.**
 
 ---
 
