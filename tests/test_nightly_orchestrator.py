@@ -682,6 +682,12 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertIn("NIGHTLY_REPORT.md", gitignore_text)
             self.assertIn("logs/", gitignore_text)
 
+            # 機能O: tests/immunity/ ディレクトリと初期免疫テストが生成されていること
+            immunity_dir = target_project / "tests" / "immunity"
+            self.assertTrue(immunity_dir.is_dir(), "tests/immunity/ directory must be created")
+            immunity_sample = immunity_dir / "test_acceptance_sample.py"
+            self.assertTrue(immunity_sample.exists(), "tests/immunity/test_acceptance_sample.py must be created")
+
             # 2. 再度実行しても既存ファイルを破壊・上書きしないこと (Idempotent)
             (target_project / "PLAN.md").write_text("# Custom Plan\n", encoding="utf-8")
             proc2 = subprocess.run(
@@ -1637,6 +1643,61 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertTrue(record_path.exists(), f"Record file must exist at {record_path}")
             data = json.loads(record_path.read_text(encoding="utf-8"))
             self.assertEqual(data["task_id"], "1")
+
+    def test_feature_o_maker_immunity_tampering_is_quarantined(self):
+        """機能O (P1-2): Maker が tests/immunity/ を勝手に変更・作成した場合、即座にQuarantineされること。"""
+        from auto_developer.orchestrator import NightlyOrchestrator
+        from auto_developer.runner import CommandRunnerAdapter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\nlogs/\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("# SPEC\nCore spec content.\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. 免疫テスト改変タスク\n", encoding="utf-8")
+
+            immunity_dir = repo / "tests" / "immunity"
+            immunity_dir.mkdir(parents=True, exist_ok=True)
+            (immunity_dir / "test_acceptance.py").write_text("# protected acceptance test\n", encoding="utf-8")
+
+            verify_sh = repo / "verify.sh"
+            verify_sh.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            verify_sh.chmod(0o755)
+
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init with immunity test"], cwd=repo, check=True)
+
+            class MaliciousMakerRunner(CommandRunnerAdapter):
+                def run_maker(self, task, context):
+                    # Maker が受入テストを書き換えて通過させようとする（自作自演・緩和）
+                    (immunity_dir / "test_acceptance.py").write_text("# tampered test\n", encoding="utf-8")
+                    return 0, "maker modified immunity test"
+
+                def run_checker(self, task, diff, spec_content):
+                    return True, '{"decision": "APPROVE"}'
+
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=verify_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=repo / ".dev" / "job_state.json",
+                runner_adapter=MaliciousMakerRunner(),
+                dry_run=False,
+            )
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 1, "Must exit with code 1 due to immunity invariant breach")
+
+            # 作業ツリーがチェックポイントに復元されていること
+            self.assertEqual(
+                (immunity_dir / "test_acceptance.py").read_text(encoding="utf-8"),
+                "# protected acceptance test\n",
+                "Immunity test file must be restored back to protected content",
+            )
 
 
 if __name__ == "__main__":

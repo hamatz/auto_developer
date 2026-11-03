@@ -98,6 +98,17 @@ class SmokeTest(unittest.TestCase):
         self.assertTrue(True)
 """
 
+DEFAULT_IMMUNITY_TEST_PY = """# tests/immunity/ - 人間が定義・承認した受入仕様テスト（免疫テスト）
+# Maker（実装AI）による変更・削除・勝手な追加は機械的に遮断・隔離されます。
+import unittest
+
+
+class AcceptanceImmunityTest(unittest.TestCase):
+    def test_acceptance_contract(self):
+        \"\"\"SPEC.md に定義されたコア仕様の受入条件を記述してください。\"\"\"
+        self.assertTrue(True)
+"""
+
 
 def init_project(target_dir: Path) -> int:
     """指定ディレクトリに Auto Developer 規律ファイル群を生成する。"""
@@ -151,6 +162,16 @@ def init_project(target_dir: Path) -> int:
         smoke_test.parent.mkdir(parents=True, exist_ok=True)
         smoke_test.write_text(DEFAULT_TEST_PY, encoding="utf-8")
         print("  ✓ Created tests/test_smoke.py (Initial verification test)")
+
+    # 6. tests/immunity/test_acceptance_sample.py (保護された受入・免疫テスト / 機能O)
+    immunity_dir = target_dir / "tests" / "immunity"
+    immunity_sample = immunity_dir / "test_acceptance_sample.py"
+    if not immunity_sample.exists():
+        immunity_dir.mkdir(parents=True, exist_ok=True)
+        immunity_sample.write_text(DEFAULT_IMMUNITY_TEST_PY, encoding="utf-8")
+        print("  ✓ Created tests/immunity/test_acceptance_sample.py (Protected Acceptance Test)")
+    else:
+        print("  - tests/immunity/test_acceptance_sample.py already exists, skipping")
 
     print("\nInitialization complete! You can now run `auto-dev run` or `auto-dev --dry-run`.")
     return 0
