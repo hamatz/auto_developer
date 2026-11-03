@@ -8,6 +8,8 @@ credentials.json
 
 # 検証アーティファクト（Playwright の慣習に合わせる）
 test-results/
+NIGHTLY_REPORT.md
+logs/
 
 node_modules/
 
