@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 class EvidenceStore:
@@ -100,7 +100,7 @@ class EvidenceStore:
         if not record_path.exists():
             return None
         try:
-            data = json.loads(record_path.read_text(encoding="utf-8"))
+            data = cast(dict[str, Any], json.loads(record_path.read_text(encoding="utf-8")))
             data["status"] = status
             if commit_info is not None:
                 data["commit"] = commit_info
@@ -125,14 +125,15 @@ class EvidenceStore:
         records: list[dict[str, Any]] = []
         for p in sorted(self.records_dir.glob("task_*.json")):
             try:
-                data = json.loads(p.read_text(encoding="utf-8"))
+                data = cast(dict[str, Any], json.loads(p.read_text(encoding="utf-8")))
                 records.append(data)
             except (OSError, json.JSONDecodeError):
                 continue
+
         # task_id の数値順にソート（数値変換可能な場合）
-        def _sort_key(item: dict[str, Any]) -> tuple[int, str]:
+        def _sort_key(item: dict[str, Any]) -> tuple[int, int, str]:
             tid = str(item.get("task_id", ""))
-            return (0, int(tid)) if tid.isdigit() else (1, tid)
+            return (0, int(tid), "") if tid.isdigit() else (1, 0, tid)
 
         records.sort(key=_sort_key)
         return records
@@ -145,7 +146,7 @@ class EvidenceStore:
         if not record_path.exists():
             return None
         try:
-            return json.loads(record_path.read_text(encoding="utf-8"))
+            return cast(dict[str, Any], json.loads(record_path.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError):
             return None
 

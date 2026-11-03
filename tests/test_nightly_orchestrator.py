@@ -1580,8 +1580,8 @@ class TestNightlyOrchestrator(unittest.TestCase):
     def test_feature_n_evidence_audit_record_persisted_after_commit(self):
         """機能N (P1-1): コミット後も証跡レコードが永続化され、監査・検証詳細が照合可能であること。"""
         import json
+
         from auto_developer.evidence import EvidenceStore
-        from auto_developer.guard import GitGuard
         from auto_developer.orchestrator import NightlyOrchestrator
         from auto_developer.runner import CommandRunnerAdapter
 
