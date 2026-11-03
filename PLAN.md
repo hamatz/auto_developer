@@ -7,14 +7,13 @@
 -->
 
 ## 現在の目標
-- ChatGPT 6.1-sol レビュー対応（Phase 1: Trustworthy Runner & 防壁強化）
+- Phase 1B: Job State 永続化 & Runner Adapter 実装（会話セッションから独立した自律オーケストレーション基盤）
 
 ## ステップ
-- [x] 1. 足元の整合性修正: .github/workflows/verify.yml の Python 化、scripts/verify_local.sh の静的検査拡充、--dry-run の副作用排除
-- [x] 2. 防壁強化 (Red-First): GitGuard で未追跡ファイル（??）を含む保護ファイル検査のテスト作成と実装
-- [x] 3. 隔離退避の実装: ロールバック時に作業成果を抹消せず quarantine ブランチに退避保存する機構の実装
-- [x] 4. 証跡ゲートの実装: verify-step による証跡（Evidence Token）発行と commit-step での検証強制
-- [x] 5. 受入テスト拡充とローカル検証・CI整合確認
+- [x] 1. JobState クラスの設計と永続化・中断復旧テスト (Red-First)
+- [ ] 2. RunnerAdapter の設計（抽象インターフェース・Mock・CommandRunner）と単体テスト
+- [ ] 3. Orchestrator メインループへの統合（Maker起動・再試行・Checker査読・State同期）
+- [ ] 4. 中断復旧（Resume）とエンドツーエンド自律走行の受入テスト検証
 
 ## 止まっていること・判断待ち
 - なし

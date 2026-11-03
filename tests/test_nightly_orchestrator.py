@@ -11,6 +11,8 @@ from scripts.nightly_orchestrator import (
     GitGuard,
     DeterministicVerifier,
     MorningReporter,
+    EvidenceStore,
+    JobState,
 )
 
 
@@ -312,6 +314,41 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 text=True,
             )
             self.assertNotEqual(proc_commit_replay.returncode, 0)
+
+    def test_job_state_persistence_and_recovery(self):
+        """JobState の永続化と中断復旧（Crash Recovery）の検証。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_file = Path(tmp_dir) / "job_state.json"
+
+            # 1. 状態の初期化と保存
+            state = JobState(
+                job_id="job-20261103",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="MAKER",
+                current_attempt=1,
+                checkpoint_hash="abc1234",
+            )
+            state.save(state_file)
+            self.assertTrue(state_file.exists())
+
+            # 2. クラッシュ後の再読み込み（復元）
+            loaded = JobState.load(state_file)
+            self.assertEqual(loaded.job_id, "job-20261103")
+            self.assertEqual(loaded.status, "RUNNING")
+            self.assertEqual(loaded.current_task_id, "1")
+            self.assertEqual(loaded.current_phase, "MAKER")
+            self.assertTrue(loaded.can_resume())
+
+            # 3. 状態遷移と完了の保存
+            loaded.transition_phase("COMMIT")
+            loaded.status = "COMPLETED"
+            loaded.save(state_file)
+
+            final_state = JobState.load(state_file)
+            self.assertEqual(final_state.status, "COMPLETED")
+            self.assertFalse(final_state.can_resume())
 
     def test_feature_f_morning_report_generation(self):
         """機能F: NIGHTLY_REPORT.md が所定のスキーマで生成される。"""
