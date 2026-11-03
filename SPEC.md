@@ -54,7 +54,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
 - [x] 機能Q (完全監査レコードの保持とCLI配管強化):
   1. `auto-dev verify-step` 実行時、検証ゲートの成否・終了コード・出力サマリーを Evidence Token の `details.verification` に拘束して発行する。
   2. `auto-dev commit-step` は `--checker-decision` および `--checker-reason`（または `--checker-json`）を受け取り、コミット時に `EvidenceStore.archive_record()` へ渡して永続監査レコードに Checker 査読情報を確実に記録する。Checker 情報が未指定の場合は `UNSPECIFIED`（証拠未取得）として記録・表示する。
-- [ ] 機能R (Morning Brief のデュアルコマンド案内とチェックポイント分離表示):
+- [x] 機能R (Morning Brief のデュアルコマンド案内とチェックポイント分離表示):
   1. Morning Brief の「動作確認コマンド」において、「検証コマンド (Verify)」と「成果物利用コマンド (Run)」を明確に分離して提示する。
   2. レポートの概要テーブルにおいて、開発開始時の「初期チェックポイント (Initial Checkpoint)」と完了時の「最新コミット (Final Commit)」を区別して表示する。
 

@@ -1836,6 +1836,46 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertEqual(record["checker"]["decision"], "APPROVE")
             self.assertIn("Reviewed diff", record["checker"]["reason"])
 
+    def test_feature_r_morning_brief_dual_commands_and_split_checkpoints(self):
+        """機能R: Morning Brief で成果物実行(Run)と検証(Verify)が分離され、初期と最終コミットが区別されること。"""
+        from auto_developer.reporter import MorningReporter
+
+        reporter = MorningReporter()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "NIGHTLY_REPORT.md"
+            summary_data = {
+                "status": "COMPLETED",
+                "total_tasks": 1,
+                "succeeded_count": 1,
+                "quarantined_count": 0,
+                "initial_checkpoint": "003fd387092bab02",
+                "final_commit": "84f864138968304a",
+                "executive_summary": "パイロット改修が完了しました。",
+                "run_command": "python3 -m doccheck ./docs --json-out ./out/report.json",
+                "verify_command": "bash scripts/verify_local.sh",
+                "completed_tasks": [
+                    {
+                        "task_id": "1",
+                        "title": "バグ修正",
+                        "commit": "84f864138968304a",
+                        "evidence_tree_sha": "tree123",
+                        "checker_decision": "APPROVE",
+                    }
+                ],
+            }
+            reporter.write_report(report_path, summary_data)
+            content = report_path.read_text(encoding="utf-8")
+
+            # デュアルコマンド案内（Run と Verify の分離）
+            self.assertIn("成果物を利用するコマンド (Run)", content)
+            self.assertIn("python3 -m doccheck ./docs --json-out ./out/report.json", content)
+            self.assertIn("検証ゲートを再実行するコマンド (Verify)", content)
+            self.assertIn("bash scripts/verify_local.sh", content)
+
+            # チェックポイント分離表示
+            self.assertIn("| **初期チェックポイント** | `003fd387092bab02` |", content)
+            self.assertIn("| **最新コミット (HEAD)** | `84f864138968304a` |", content)
+
 
 if __name__ == "__main__":
     unittest.main()
