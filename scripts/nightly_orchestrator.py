@@ -161,14 +161,102 @@ class DeterministicVerifier:
     """ローカル検証スクリプトの実行と判定を担当。"""
 
     def run_verification(self, script_path: Path, timeout_sec: int = 300) -> tuple[int, str]:
-        raise NotImplementedError
+        """検証スクリプトを実行し、(exit_code, output) を返す。"""
+        if not script_path.exists():
+            return 1, f"Verification script not found: {script_path}"
+
+        try:
+            proc = subprocess.run(
+                ["bash", str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+            output = proc.stdout + "\n" + proc.stderr
+            return proc.returncode, output.strip()
+        except subprocess.TimeoutExpired as e:
+            return 124, f"Verification timed out after {timeout_sec}s: {e}"
+        except Exception as e:
+            return 1, f"Failed to execute verification script: {e}"
 
 
 class MorningReporter:
     """NIGHTLY_REPORT.md および隔離ログの生成を担当。"""
 
     def write_report(self, report_path: Path, summary_data: dict[str, Any]) -> None:
-        raise NotImplementedError
+        """NIGHTLY_REPORT.md を所定のスキーマで作成・更新する。"""
+        lines = [
+            "# Nightly Execution Report",
+            "",
+            "## 1. Summary",
+            f"* **Status**: {summary_data.get('status', 'UNKNOWN')}",
+            f"* **Total Tasks**: {summary_data.get('total_tasks', 0)}",
+            f"* **Succeeded**: {summary_data.get('succeeded_count', 0)}",
+            f"* **Quarantined**: {summary_data.get('quarantined_count', 0)}",
+            f"* **Remaining**: {summary_data.get('remaining_count', 0)}",
+            f"* **Checkpoint Restored**: {summary_data.get('checkpoint', 'N/A')}",
+            "",
+            "## 2. Completed Tasks",
+            "| Task ID | Description | Commit Hash | Verified By |",
+            "| --- | --- | --- | --- |",
+        ]
+
+        completed_tasks = summary_data.get("completed_tasks", [])
+        if completed_tasks:
+            for item in completed_tasks:
+                lines.append(
+                    f"| task-{item['task_id']} | {item['title']} | `{item['commit']}` | {item.get('verifier', 'verify_local.sh')} |"
+                )
+        else:
+            lines.append("| - | (なし) | - | - |")
+
+        lines.extend(["", "## 3. Quarantined Task (If Failed)"])
+        quarantined = summary_data.get("quarantined_task")
+        if quarantined:
+            lines.extend(
+                [
+                    f"* **Failed Task ID**: task-{quarantined['task_id']}",
+                    f"* **Failure Phase**: {quarantined.get('phase', 'UNKNOWN')}",
+                    f"* **Failure Log**: {quarantined.get('log_path', 'N/A')}",
+                    "* **Root Cause Summary**:",
+                    "  ```text",
+                    f"  {quarantined.get('root_cause_summary', 'No details')}",
+                    "  ```",
+                ]
+            )
+        else:
+            lines.append("No tasks were quarantined.")
+
+        lines.extend(
+            [
+                "",
+                "## 4. Next Actions for Developer",
+                "- [ ] Review quarantined task failure log",
+                "- [ ] Inspect git diff of succeeded commits: `git log --oneline -M`",
+                "",
+            ]
+        )
+
+        report_path.write_text("\n".join(lines), encoding="utf-8")
 
     def write_failure_log(self, log_path: Path, failure_data: dict[str, Any]) -> None:
-        raise NotImplementedError
+        """logs/nightly/task_<id>_failure.log を作成する。"""
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        content = [
+            "=== TASK FAILURE DUMP ===",
+            f"Task ID: {failure_data.get('task_id')}",
+            f"Task Title: {failure_data.get('title')}",
+            f"Checkpoint Commit: {failure_data.get('checkpoint')}",
+            "",
+            "--- ATTEMPT 1 LOG ---",
+            failure_data.get("attempt_1_log", "(none)"),
+            "",
+            "--- ATTEMPT 2 LOG ---",
+            failure_data.get("attempt_2_log", "(none)"),
+            "",
+            "--- WORKSPACE GIT DIFF BEFORE ROLLBACK ---",
+            failure_data.get("git_diff", "(empty)"),
+            "",
+        ]
+        log_path.write_text("\n".join(content), encoding="utf-8")
+
