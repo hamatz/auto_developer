@@ -1751,6 +1751,91 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertIn("| Task | Title | Commit | Verified Tree | Checker Review |", content)
             self.assertIn("| `task-1` | CLI骨格 | `b9645bb` |", content)
 
+    def test_feature_q_audit_records_include_verification_and_checker_info(self):
+        """機能Q: CLI verify-step & commit-step を通じて Verification と Checker の証跡が Record に記録されること。"""
+        import json
+        from auto_developer.evidence import EvidenceStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            script_path = Path(__file__).parents[1] / "scripts" / "nightly_orchestrator.py"
+
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\nlogs/\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("# SPEC\nCore spec.\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. 監査証跡タスク\n", encoding="utf-8")
+
+            scripts_dir = repo / "scripts"
+            scripts_dir.mkdir(parents=True, exist_ok=True)
+            verify_sh = scripts_dir / "verify_local.sh"
+            verify_sh.write_text("#!/usr/bin/env bash\necho 'All 10 tests passed'\nexit 0\n", encoding="utf-8")
+            verify_sh.chmod(0o755)
+
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # 1. Maker が作業を実施
+            (repo / "module.py").write_text("def run(): pass\n", encoding="utf-8")
+
+            # 2. auto-dev verify-step を実行
+            proc_verify = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "verify-step",
+                    "--task-id",
+                    "1",
+                    "--checkpoint",
+                    checkpoint,
+                ],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc_verify.returncode, 0, f"verify-step failed: {proc_verify.stderr}")
+
+            # 3. auto-dev commit-step を Checker 情報付きで実行
+            proc_commit = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "commit-step",
+                    "--task-id",
+                    "1",
+                    "--checkpoint",
+                    checkpoint,
+                    "--checker-decision",
+                    "APPROVE",
+                    "--checker-reason",
+                    "Reviewed diff and verified 0-regression against SPEC.md",
+                ],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc_commit.returncode, 0, f"commit-step failed: {proc_commit.stderr}")
+
+            # 4. 永続監査レコードの内容を検証
+            store = EvidenceStore(repo_dir=repo)
+            record = store.get_record("1")
+            self.assertIsNotNone(record)
+            assert record is not None
+
+            # verification の詳細が記録されていること
+            self.assertIn("verification", record, "record must contain verification metadata")
+            self.assertEqual(record["verification"]["exit_code"], 0)
+
+            # checker の詳細が記録されていること
+            self.assertIn("checker", record, "record must contain checker review metadata")
+            self.assertEqual(record["checker"]["decision"], "APPROVE")
+            self.assertIn("Reviewed diff", record["checker"]["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

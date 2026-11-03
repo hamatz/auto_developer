@@ -252,6 +252,9 @@ def main(argv: list[str] | None = None) -> int:
     commit_parser = subparsers.add_parser("commit-step", help="Commit current task and mark [x] in PLAN.md")
     commit_parser.add_argument("--task-id", type=str, required=True, help="Task ID to commit")
     commit_parser.add_argument("--checkpoint", type=str, default=None, help="Optional checkpoint commit hash to verify")
+    commit_parser.add_argument("--checker-decision", type=str, default=None, help="Checker review decision (e.g. APPROVE)")
+    commit_parser.add_argument("--checker-reason", type=str, default=None, help="Checker review justification")
+    commit_parser.add_argument("--checker-json", type=str, default=None, help="Checker review structured JSON string")
 
     # Subcommand: rollback-step
     rollback_parser = subparsers.add_parser("rollback-step", help="Rollback working tree and mark task as failed")
@@ -325,11 +328,18 @@ def main(argv: list[str] | None = None) -> int:
             return code
         tree_sha = git_guard.get_working_tree_sha()
         spec_sha = git_guard.get_spec_sha(spec_path)
+        out_lines = [line.strip() for line in out.strip().splitlines() if line.strip()]
         evidence = evidence_store.issue_evidence(
             task_id=args.task_id,
             checkpoint=args.checkpoint,
             tree_sha=tree_sha,
             spec_sha=spec_sha,
+            details={
+                "verification": {
+                    "exit_code": code,
+                    "output_summary": out_lines[-10:] if out_lines else [],
+                }
+            },
         )
         print(f"VERIFICATION PASSED (Evidence Token: {evidence['token']})")
         return 0
@@ -362,6 +372,25 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 3
+
+        # Checker 査読メタデータの抽出 (機能Q)
+        checker_info: dict[str, Any] = {}
+        if args.checker_json:
+            try:
+                import json
+                checker_info = cast(dict[str, Any], json.loads(args.checker_json))
+            except Exception:
+                checker_info = {"raw": args.checker_json}
+        if args.checker_decision:
+            checker_info["decision"] = args.checker_decision
+        if args.checker_reason:
+            checker_info["reason"] = args.checker_reason
+        if not checker_info:
+            checker_info = {
+                "decision": "UNSPECIFIED",
+                "reason": "No checker review metadata provided via CLI",
+            }
+
         evidence_store.archive_record(
             task_id=args.task_id,
             status="COMPLETED",
@@ -370,6 +399,7 @@ def main(argv: list[str] | None = None) -> int:
                 "tree_sha": committed_tree,
                 "tree_verified": True,
             },
+            checker_info=checker_info,
         )
         print(f"COMMITTED: {commit_hash}")
         return 0

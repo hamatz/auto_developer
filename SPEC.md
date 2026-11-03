@@ -51,6 +51,12 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   2. Maker による `tests/immunity/` 配下の改変・新規作成・削除を外部不変条件違反として機械的に遮断・隔離する。
 - [x] 機能P (意思決定支援型 Morning Brief の生成):
   1. `NIGHTLY_REPORT.md` において、単なるコミット一覧だけでなく、「成果の要約」「即時動作確認コマンド」「既知の制約・境界条件」「人間への次のアクション」「監査証跡サマリー」を構造的に出力する。
+- [x] 機能Q (完全監査レコードの保持とCLI配管強化):
+  1. `auto-dev verify-step` 実行時、検証ゲートの成否・終了コード・出力サマリーを Evidence Token の `details.verification` に拘束して発行する。
+  2. `auto-dev commit-step` は `--checker-decision` および `--checker-reason`（または `--checker-json`）を受け取り、コミット時に `EvidenceStore.archive_record()` へ渡して永続監査レコードに Checker 査読情報を確実に記録する。Checker 情報が未指定の場合は `UNSPECIFIED`（証拠未取得）として記録・表示する。
+- [ ] 機能R (Morning Brief のデュアルコマンド案内とチェックポイント分離表示):
+  1. Morning Brief の「動作確認コマンド」において、「検証コマンド (Verify)」と「成果物利用コマンド (Run)」を明確に分離して提示する。
+  2. レポートの概要テーブルにおいて、開発開始時の「初期チェックポイント (Initial Checkpoint)」と完了時の「最新コミット (Final Commit)」を区別して表示する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

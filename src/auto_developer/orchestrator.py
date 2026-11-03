@@ -266,12 +266,20 @@ class NightlyOrchestrator:
             spec_sha = self.git_guard.get_spec_sha(self.spec_path)
 
             # 2. 検証済みツリーに対する証跡を発行
+            last_out_lines = [l.strip() for l in out.strip().splitlines() if l.strip()]
+            verification_meta = {
+                "exit_code": code,
+                "output_summary": last_out_lines[-10:] if last_out_lines else [],
+            }
             self.evidence_store.issue_evidence(
                 task.task_id,
                 checkpoint,
                 tree_sha=final_tree_sha,
                 spec_sha=spec_sha,
-                details={"checker_decision": checker_reason},
+                details={
+                    "checker_decision": checker_reason,
+                    "verification": verification_meta,
+                },
             )
 
             # 3. 証跡の検証と消費（ツリー整合性照合）
@@ -311,6 +319,7 @@ class NightlyOrchestrator:
                     "decision": "APPROVE",
                     "reason": checker_reason,
                 },
+                verification_info=verification_meta,
             )
 
             task_info = {

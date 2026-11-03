@@ -108,6 +108,13 @@ class EvidenceStore:
                 data["checker"] = checker_info
             if verification_info is not None:
                 data["verification"] = verification_info
+            elif (
+                "verification" not in data
+                and "details" in data
+                and isinstance(data["details"], dict)
+                and "verification" in data["details"]
+            ):
+                data["verification"] = data["details"]["verification"]
             record_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2),
                 encoding="utf-8",
