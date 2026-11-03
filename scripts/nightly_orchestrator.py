@@ -264,9 +264,13 @@ class MorningReporter:
 def main() -> int:
     """CLI エントリーポイント。"""
     import argparse
+    import json
     import sys
 
+    VERSION = "0.1.0"
+
     parser = argparse.ArgumentParser(description="Antigravity Autonomous Pipeline Orchestrator")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument("--plan", type=Path, default=Path("PLAN.md"), help="Path to PLAN.md")
     parser.add_argument(
         "--verify-script",
@@ -284,6 +288,25 @@ def main() -> int:
         "--timeout", type=int, default=300, help="Max verification timeout in seconds"
     )
 
+    subparsers = parser.add_subparsers(dest="subcommand", help="Subcommand actions")
+
+    # Subcommand: pre-flight
+    subparsers.add_parser("pre-flight", help="Check clean working tree and print next pending task")
+
+    # Subcommand: verify-step
+    verify_parser = subparsers.add_parser("verify-step", help="Check protected files and run verify script")
+    verify_parser.add_argument("--checkpoint", type=str, required=True, help="Checkpoint commit hash")
+
+    # Subcommand: commit-step
+    commit_parser = subparsers.add_parser("commit-step", help="Commit current task and mark [x] in PLAN.md")
+    commit_parser.add_argument("--task-id", type=str, required=True, help="Task ID to commit")
+
+    # Subcommand: rollback-step
+    rollback_parser = subparsers.add_parser("rollback-step", help="Rollback working tree and mark task as failed")
+    rollback_parser.add_argument("--checkpoint", type=str, required=True, help="Checkpoint commit hash")
+    rollback_parser.add_argument("--task-id", type=str, required=True, help="Task ID to mark failed")
+    rollback_parser.add_argument("--reason", type=str, default="Verification failed", help="Failure reason")
+
     args = parser.parse_args()
 
     git_guard = GitGuard()
@@ -291,7 +314,71 @@ def main() -> int:
     verifier = DeterministicVerifier()
     reporter = MorningReporter()
 
-    # Pre-flight check
+    # Handling Subcommands:
+    if args.subcommand == "pre-flight":
+        try:
+            git_guard.assert_clean_working_tree()
+        except RuntimeError as e:
+            print(f"PRE-FLIGHT ERROR: {e}", file=sys.stderr)
+            return 2
+        tasks = dispatcher.parse_plan(args.plan)
+        next_task = dispatcher.get_next_pending_task(tasks)
+        checkpoint = git_guard.get_current_checkpoint()
+        result = {
+            "clean": True,
+            "checkpoint": checkpoint,
+            "next_task": {
+                "id": next_task.task_id,
+                "title": next_task.title,
+            }
+            if next_task
+            else None,
+        }
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+
+    elif args.subcommand == "verify-step":
+        if not git_guard.check_protected_files_untouched(args.checkpoint):
+            print(f"CIRCUIT BREAKER: Protected file modified since {args.checkpoint}", file=sys.stderr)
+            return 10
+        code, out = verifier.run_verification(args.verify_script, timeout_sec=args.timeout)
+        if code != 0:
+            print(f"VERIFICATION FAILED (Exit {code}):\n{out}", file=sys.stderr)
+            return code
+        print("VERIFICATION PASSED")
+        return 0
+
+    elif args.subcommand == "commit-step":
+        tasks = dispatcher.parse_plan(args.plan)
+        target = next((t for t in tasks if t.task_id == args.task_id), None)
+        if not target:
+            print(f"ERROR: Task {args.task_id} not found in {args.plan}", file=sys.stderr)
+            return 1
+        commit_hash = git_guard.commit_task(target)
+        dispatcher.mark_task_status(args.plan, target, status="completed")
+        print(f"COMMITTED: {commit_hash}")
+        return 0
+
+    elif args.subcommand == "rollback-step":
+        tasks = dispatcher.parse_plan(args.plan)
+        target = next((t for t in tasks if t.task_id == args.task_id), None)
+        git_guard.rollback_and_clean(args.checkpoint)
+        if target:
+            dispatcher.mark_task_status(args.plan, target, status="failed")
+            log_path = Path(f"logs/nightly/task_{target.task_id}_failure.log")
+            reporter.write_failure_log(
+                log_path,
+                {
+                    "task_id": target.task_id,
+                    "title": target.title,
+                    "checkpoint": args.checkpoint,
+                    "attempt_1_log": args.reason,
+                },
+            )
+        print(f"ROLLED BACK TO {args.checkpoint} AND CLEANED")
+        return 0
+
+    # Default standalone loop (dry-run or direct batch):
     try:
         if not args.dry_run:
             git_guard.assert_clean_working_tree()
@@ -321,7 +408,6 @@ def main() -> int:
             succeeded_tasks.append(
                 {"task_id": task.task_id, "title": task.title, "commit": "simulated_hash", "verifier": "dry-run"}
             )
-            # Update in-memory task status for dry-run simulation
             tasks = [
                 Task(t.task_id, t.title, t.line_number, True if t.task_id == task.task_id else t.is_completed, t.is_failed)
                 for t in tasks
@@ -330,7 +416,6 @@ def main() -> int:
 
         checkpoint = git_guard.get_current_checkpoint()
 
-        # Invariant pre-check
         if not git_guard.check_protected_files_untouched(checkpoint):
             print(f"CIRCUIT BREAKER: Protected file modified in task {task.task_id}. Rollback triggered.", file=sys.stderr)
             git_guard.rollback_and_clean(checkpoint)
@@ -349,13 +434,12 @@ def main() -> int:
                         "task_id": task.task_id,
                         "phase": "INVARIANT_BREACH",
                         "log_path": f"logs/nightly/task_{task.task_id}_failure.log",
-                        "root_cause_summary": "Protected file (SPEC.md / .github / verify script) modification detected.",
+                        "root_cause_summary": "Protected file modification detected.",
                     },
                 },
             )
             return 1
 
-        # Run verification
         code, out = verifier.run_verification(args.verify_script, timeout_sec=args.timeout)
         if code != 0:
             print(f"Verification failed on task {task.task_id} (Exit {code}).", file=sys.stderr)
@@ -391,7 +475,6 @@ def main() -> int:
             )
             return 1
 
-        # Success: commit and mark done
         commit_hash = git_guard.commit_task(task)
         dispatcher.mark_task_status(args.plan, task, status="completed")
         succeeded_tasks.append(
@@ -413,6 +496,7 @@ def main() -> int:
     )
     print(f"Execution complete. Report written to {args.report}")
     return 0
+
 
 
 if __name__ == "__main__":
