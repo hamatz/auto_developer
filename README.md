@@ -103,11 +103,15 @@ pip install -e /path/to/auto_developer
 
 ### 方式 B: スタンドアロン CLI (`auto-dev`) として利用する
 
-ターミナルや外部エージェント CLI（Codex, Claude Code など）と組み合わせて動かす場合：
+ターミナルや外部エージェント CLI（Codex, Claude Code など）と組み合わせてコマンドラインから直接動かす場合：
 
 ```bash
-# 1. パッケージのインストール
-pip install -e /path/to/auto_developer
+# GitHub から直接インストールする場合（PyPI 公開不要）:
+pip install git+https://github.com/google/auto_developer.git
+
+# またはローカルクローンから editable インストールする場合:
+# git clone https://github.com/google/auto_developer.git
+# pip install -e auto_developer
 ```
 
 #### ターミナルでの利用フロー：

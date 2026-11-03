@@ -10,10 +10,18 @@ This skill sets up the Elephant-Goldfish Model (EGM) discipline files in the cur
 ## Execution Steps
 
 When the user runs `/nightly-setup`:
-1. Execute `auto-dev init` (or `python3 -m auto_developer.cli init`) in the current workspace root.
-2. Confirm that the following files were prepared:
-   - `PLAN.md`: Sequential task tracking list.
-   - `SPEC.md`: Product requirements and safety invariants.
-   - `scripts/verify_local.sh`: Local deterministic verification gate.
-   - `.gitignore`: Configured to ignore execution artifacts (`.dev/`, `logs/`, `NIGHTLY_REPORT.md`).
+1. If the `auto-dev` CLI is installed and available, execute `auto-dev init`.
+2. Otherwise, directly create/update the discipline files in the workspace root:
+   - **`scripts/verify_local.sh`**:
+     ```bash
+     #!/usr/bin/env bash
+     set -euo pipefail
+     echo "=== Checking project verification checks ==="
+     # Add your tests, linters, or typecheckers here (e.g., pytest, npm test, cargo test)
+     exit 0
+     ```
+     Ensure it is executable (`chmod +x scripts/verify_local.sh`).
+   - **`PLAN.md`**: Sequential task checklist (`- [ ] 1. First task`).
+   - **`SPEC.md`**: Requirements and safety invariants.
+   - **`.gitignore`**: Append `.dev/`, `logs/`, and `NIGHTLY_REPORT.md` if not already present.
 3. Guide the developer on drafting their first task in `PLAN.md` and approving requirements in `SPEC.md`.
