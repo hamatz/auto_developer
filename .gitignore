@@ -1,0 +1,22 @@
+# 誤コミット防止（読み取りは防げない。これは壁ではない）
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# 検証アーティファクト（Playwright の慣習に合わせる）
+test-results/
+
+node_modules/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+

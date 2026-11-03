@@ -1,0 +1,42 @@
+# 壁：このワークフローをルールセット（またはブランチ保護）の「必須ステータスチェック」に指定して初めて壁になる。
+# ファイルを置くだけでは壁にならない。バイパスは管理者も含め誰にも許さず、
+# エージェントの資格情報にはワークフローやルールセットを変更できる権限を与えないこと。
+name: verify
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      # 以下3つはプロジェクトに合わせて置き換える（例は TypeScript）
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm test
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 組織アカウントのリポジトリでは無料のライセンスキーが必要（個人アカウントでは不要）
+          # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+      # --- UI を持つリポジトリの場合 ---
+      # - run: npx playwright install --with-deps chromium
+      # - run: npm start &                                  # 検査対象を起動する
+      # - run: node tests/verify_ui.mjs http://localhost:3000
+      # 画面の正しさは、プロジェクトごとに測れる条件を足す。組版のように組み合わせで
+      # 結果が変わるものは、全組み合わせを機械に掛ける（examples/compositor/tests/ を参照）
+      # - if: failure()
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: test-results
+      #     path: test-results/
