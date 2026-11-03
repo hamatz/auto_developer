@@ -7,18 +7,15 @@
 -->
 
 ## 現在の目標
-- SPEC.md の「Antigravity Autonomous Pipeline Orchestrator (夜間自律稼働エンジン)」の実装と検証
+- ChatGPT 6.1-sol レビュー対応（Phase 1: Trustworthy Runner & 防壁強化）
 
 ## ステップ
-- [x] 1. pyproject.toml の作成とパッケージ構成設定
-- [x] 2. scripts/nightly_orchestrator.py のデータクラスと TaskDispatcher の実装
-- [x] 3. scripts/nightly_orchestrator.py の GitGuard（クリーン検査・外部差分検査・完全ロールバック）の実装
-- [x] 4. scripts/nightly_orchestrator.py の DeterministicVerifier と MorningReporter の実装
-- [x] 5. scripts/nightly_orchestrator.py の CLI 引数処理とメイン実行ループの実装
-- [x] 6. 受入テスト（tests/test_nightly_orchestrator.py）の全通過（Green）と verify_local.sh の検証
-- [x] 7. skills/nightly-run/SKILL.md の作成（Antigravity ワークスペーススキル定義）
-- [x] 8. PROMPTS.md への Maker / Checker 無記憶プロンプトテンプレートの追記
-- [x] 9. Checker による独立査読（SPEC.md と git diff のみでの検証）
+- [x] 1. 足元の整合性修正: .github/workflows/verify.yml の Python 化、scripts/verify_local.sh の静的検査拡充、--dry-run の副作用排除
+- [ ] 2. 防壁強化 (Red-First): GitGuard で未追跡ファイル（??）を含む保護ファイル検査のテスト作成と実装
+- [ ] 3. 隔離退避の実装: ロールバック時に作業成果を抹消せず quarantine ブランチに退避保存する機構の実装
+- [ ] 4. 証跡ゲートの実装: verify-step による証跡（Evidence Token）発行と commit-step での検証強制
+- [ ] 5. 受入テスト拡充とローカル検証・CI整合確認
 
 ## 止まっていること・判断待ち
 - なし
+

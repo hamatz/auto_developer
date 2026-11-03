@@ -14,29 +14,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
         with:
-          node-version: 20
-      - run: npm ci
-      # 以下3つはプロジェクトに合わせて置き換える（例は TypeScript）
-      - run: npx tsc --noEmit
-      - run: npm run lint
-      - run: npm test
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff mypy pytest
+      - name: Lint and format check
+        run: |
+          ruff check .
+      - name: Type check
+        run: |
+          mypy scripts
+      - name: Run verification script
+        run: |
+          bash scripts/verify_local.sh
       - name: Secret scan
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # 組織アカウントのリポジトリでは無料のライセンスキーが必要（個人アカウントでは不要）
-          # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
-      # --- UI を持つリポジトリの場合 ---
-      # - run: npx playwright install --with-deps chromium
-      # - run: npm start &                                  # 検査対象を起動する
-      # - run: node tests/verify_ui.mjs http://localhost:3000
-      # 画面の正しさは、プロジェクトごとに測れる条件を足す。組版のように組み合わせで
-      # 結果が変わるものは、全組み合わせを機械に掛ける（examples/compositor/tests/ を参照）
-      # - if: failure()
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: test-results
-      #     path: test-results/

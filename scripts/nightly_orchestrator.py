@@ -482,19 +482,22 @@ def main() -> int:
         )
         tasks = dispatcher.parse_plan(args.plan)
 
-    reporter.write_report(
-        args.report,
-        {
-            "status": "COMPLETED",
-            "total_tasks": total_tasks,
-            "succeeded_count": len(succeeded_tasks),
-            "quarantined_count": 0,
-            "remaining_count": 0,
-            "checkpoint": git_guard.get_current_checkpoint() if not args.dry_run else "simulated",
-            "completed_tasks": succeeded_tasks,
-        },
-    )
-    print(f"Execution complete. Report written to {args.report}")
+    if not args.dry_run:
+        reporter.write_report(
+            args.report,
+            {
+                "status": "COMPLETED",
+                "total_tasks": total_tasks,
+                "succeeded_count": len(succeeded_tasks),
+                "quarantined_count": 0,
+                "remaining_count": 0,
+                "checkpoint": git_guard.get_current_checkpoint(),
+                "completed_tasks": succeeded_tasks,
+            },
+        )
+        print(f"Execution complete. Report written to {args.report}")
+    else:
+        print(f"[DRY-RUN] Execution simulation complete. {len(succeeded_tasks)} tasks simulated. Report was not modified.")
     return 0
 
 
