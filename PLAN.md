@@ -12,8 +12,8 @@
 ## ステップ
 - [x] 1. プロセス排他ロック (P1-1: fcntl.flock による多重起動防止) (Red-First)
 - [x] 2. 固定インデックスによるアトミックコミット (P0-1: 再ステージなし直接確定) (Red-First)
-- [ ] 3. Quarantine の Git コミット対象を tracked に限定 (P0-2: git add -u による完全秘密隔離) (Red-First)
+- [x] 3. Quarantine の Git コミット対象を tracked に限定 (P0-2: git add -u による完全秘密隔離) (Red-First)
 
 ## 止まっていること・判断待ち
-- なし
+- なし（全ステップ完了）
 

@@ -157,11 +157,11 @@ class GitGuard:
             if not archive_path.exists() or archive_path.stat().st_size == 0:
                 raise RuntimeError(f"Quarantine aborted: Failed to create snapshot archive at {archive_path}")
 
-            # 2. 隔離ブランチへの安全なステージとコミット (.gitignore を厳格遵守し -f は使用しない)
+            # 2. 隔離ブランチへの安全なステージとコミット (追跡済みファイルのみ add -u でステージし、未追跡の秘密ファイル混入を物理遮断)
             quarantine_branch = f"quarantine/{clean_id}-{timestamp}"
             self._run_git(["checkout", "-b", quarantine_branch])
-            self._run_git(["add", "-A"])
-            self._run_git(["commit", "-m", f"quarantine: save failed work for task {task_id} before rollback"])
+            self._run_git(["add", "-u"])
+            self._run_git(["commit", "--allow-empty", "-m", f"quarantine: save failed work for task {task_id} before rollback"])
 
             # 3. 元のブランチに戻る
             if current_branch:
