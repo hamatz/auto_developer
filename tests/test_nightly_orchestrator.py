@@ -1032,6 +1032,67 @@ class TestNightlyOrchestrator(unittest.TestCase):
             exit_code_failed = orchestrator_failed.run()
             self.assertEqual(exit_code_failed, 2, "Must reject resuming a FAILED job without resolving")
 
+    def test_feature_m_committed_tree_strictly_equals_evidence_tree(self):
+        """機能M-1: 実際にコミットされた Git Tree SHA (HEAD^{tree}) は Evidence に拘束された Tree SHA と完全一致すること。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. 確定タスク\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            v_sh = repo / "scripts" / "verify_local.sh"
+            v_sh.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            v_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            # Maker が feature.py を作成するモック
+            class TaskMaker(RunnerAdapter):
+                def run_maker(self, task, context):
+                    (repo / "feature.py").write_text("def run(): pass\n", encoding="utf-8")
+                    return 0, "created feature.py"
+
+                def run_checker(self, task, diff, spec_content):
+                    return True, '{"decision": "APPROVE"}'
+
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=v_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=repo / ".dev" / "job_state.json",
+                runner_adapter=TaskMaker(),
+                dry_run=False,
+            )
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 0)
+
+            # コミットされた最新のツリー SHA
+            committed_tree = subprocess.run(
+                ["git", "rev-parse", "HEAD^{tree}"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+
+            # 直近のコミット情報
+            state_data = JobState.load(repo / ".dev" / "job_state.json")
+            commit_info = state_data.completed_tasks[0]
+            evidence_tree = commit_info.get("evidence_tree_sha", "")
+
+            # コミットされたツリーの SHA と、Evidence で検証・承認された Tree SHA が完全一致すること！
+            self.assertEqual(
+                committed_tree,
+                evidence_tree,
+                f"Committed Git Tree ({committed_tree}) must strictly match Evidence Tree SHA ({evidence_tree})! "
+                "PLAN.md was modified AFTER Evidence verification, creating an unverified commit tree.",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

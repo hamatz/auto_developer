@@ -48,6 +48,11 @@ class GitGuard:
         proc = self._run_git(["write-tree"])
         return proc.stdout.strip()
 
+    def get_commit_tree_sha(self, commit_ref: str = "HEAD") -> str:
+        """指定したコミットの Git Tree SHA を取得する (git rev-parse <ref>^{tree})。"""
+        proc = self._run_git(["rev-parse", f"{commit_ref}^{{tree}}"])
+        return proc.stdout.strip()
+
     def get_spec_sha(self, spec_path: Path | None = None) -> str:
         """SPEC.md の SHA-256 ダイジェストを取得する。"""
         import hashlib
