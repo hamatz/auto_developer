@@ -1204,6 +1204,29 @@ class TestNightlyOrchestrator(unittest.TestCase):
             current_head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
             self.assertEqual(current_head_after, new_head, "Human commit must NOT be wiped out by resume reset!")
 
+    def test_feature_m_default_verify_fails_when_no_tests_configured(self):
+        """機能M-4: DEFAULT_VERIFY_SH は tests/ ディレクトリまたはテストが存在しない場合に Exit 1 で失敗すること。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            verify_sh = repo / "scripts" / "verify_local.sh"
+            verify_sh.write_text(DEFAULT_VERIFY_SH, encoding="utf-8")
+            verify_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init without tests"], cwd=repo, check=True)
+
+            res = subprocess.run(["bash", str(verify_sh)], cwd=repo, capture_output=True, text=True, check=False)
+            self.assertNotEqual(
+                res.returncode,
+                0,
+                f"verify_local.sh must fail (Exit 1) when no tests are configured! Got exit {res.returncode}:\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}",
+            )
+            self.assertIn("No tests configured", res.stdout + res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
