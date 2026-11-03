@@ -1155,6 +1155,55 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 self.assertNotIn("private.key", names, "Private key must be excluded from recovery snapshot")
                 self.assertIn("failed_feature.py", names, "Source code must be preserved in recovery snapshot")
 
+    def test_feature_m_resume_rejects_head_mismatch(self):
+        """機能M-3: --resume 実行時、現在の HEAD が保存された checkpoint_hash と不一致なら巻き戻しを拒絶 (Exit 2) すること。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. タスク\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            v_sh = repo / "scripts" / "verify_local.sh"
+            v_sh.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+            v_sh.chmod(0o755)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            old_checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # その後、人間が別のコミットを進めたとする
+            (repo / "human_change.txt").write_text("human committed something else\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "human commit"], cwd=repo, check=True)
+            new_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # job_state には古い old_checkpoint が残っている
+            state_path = repo / ".dev" / "job_state.json"
+            running_state = JobState(job_id="job-old", status="RUNNING", current_task_id="1", checkpoint_hash=old_checkpoint)
+            running_state.save(state_path)
+
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=v_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=state_path,
+                runner_adapter=MockRunnerAdapter(),
+                dry_run=False,
+                resume=True,
+            )
+            # HEAD が進んでいるため、古い checkpoint への破壊的リセットを防ぎ Exit 2 で停止すべき
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 2, "Must reject resuming when current HEAD diverges from job checkpoint!")
+
+            # 人間のコミットが巻き戻されていないこと
+            current_head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(current_head_after, new_head, "Human commit must NOT be wiped out by resume reset!")
+
 
 if __name__ == "__main__":
     unittest.main()

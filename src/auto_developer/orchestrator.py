@@ -73,6 +73,16 @@ class NightlyOrchestrator:
                 return 2
 
             print(f"Resuming job {job_state.job_id} from phase {job_state.current_phase}")
+            # HEAD 照合: 現在の作業ツリーの親コミット (HEAD) が保存された checkpoint_hash と一致するか
+            current_head = self.git_guard.get_current_checkpoint()
+            if job_state.checkpoint_hash and current_head != job_state.checkpoint_hash:
+                print(
+                    f"RESUME ERROR: Current git HEAD ({current_head}) does not match job checkpoint ({job_state.checkpoint_hash}).\n"
+                    "Manual commits or branch changes detected. Refusing destructive rollback.",
+                    file=sys.stderr,
+                )
+                return 2
+
             # クラッシュ時の残骸作業ツリーがあれば隔離退避してクリーン復元
             if job_state.checkpoint_hash and not self.dry_run:
                 print(f"Resetting uncommitted work back to checkpoint {job_state.checkpoint_hash} for safe resume...")

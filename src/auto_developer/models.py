@@ -58,8 +58,9 @@ class JobState:
         return self.status in ("RUNNING", "SUSPENDED")
 
     def save(self, path: Path) -> None:
-        """ディスク（JSON）に状態を永続化する。"""
+        """ディスク（JSON）に状態をアトミックに永続化する (一時ファイル + os.replace)。"""
         import json
+        import os
         import time
 
         self.last_updated_at = time.time()
@@ -75,7 +76,9 @@ class JobState:
             "quarantined_task": self.quarantined_task,
             "last_updated_at": self.last_updated_at,
         }
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path = path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, path)
 
     @classmethod
     def load(cls, path: Path) -> JobState:
