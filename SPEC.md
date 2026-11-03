@@ -43,6 +43,14 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   2. `quarantine_and_restore()` は `git add -A -f` を廃止して `.gitignore` を厳密に遵守し、シークレット（`.env*`, `*.pem`, `*.key`, `*token*` 等）の Git 格納を物理遮断する。Recovery Snapshot においてもシークレットパターンを除外する。
   3. `JobState.save()` は一時ファイルと `os.replace` によるアトミック書き込みを行い、クラッシュ時の JSON 破損を防止する。また `--resume` 時に HEAD が `checkpoint_hash` と異なる場合は巻き戻しを拒否する。
   4. `DEFAULT_VERIFY_SH` は `tests/` が存在しない、またはテストが未構成の場合に Exit 1 で終了する。
+- [ ] 機能N (Evidence Record の永続化と監査ログ分離):
+  1. `verify_and_consume()` において、認証トークン消費時に証跡を破棄せず、永続監査レコード（`.git/nightly_evidence/archive/task_<id>.json` または `.dev/evidence/task_<id>.json`）として保存し、事後監査を可能にする。
+  2. Evidence Record には `task_id`, `checkpoint`, `tree_sha`, `spec_sha`, `issued_at`, `consumed_at`, `status`, `verification`, `checker`, `commit` などの監査メタデータを記録・照合可能とする。
+- [ ] 機能O (免疫テストディレクトリ初期化と保護):
+  1. `auto-dev init` 実行時、人間が承認した受入仕様テストを格納する `tests/immunity/` ディレクトリおよび初期受入テスト `tests/immunity/test_acceptance_sample.py` を自動生成する。
+  2. Maker による `tests/immunity/` 配下の改変・新規作成・削除を外部不変条件違反として機械的に遮断・隔離する。
+- [ ] 機能P (意思決定支援型 Morning Brief の生成):
+  1. `NIGHTLY_REPORT.md` において、単なるコミット一覧だけでなく、「成果の要約」「即時動作確認コマンド」「既知の制約・境界条件」「人間への次のアクション」「監査証跡サマリー」を構造的に出力する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

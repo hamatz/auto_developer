@@ -298,6 +298,21 @@ class NightlyOrchestrator:
                 )
                 return 3
 
+            # 6. 永続監査レコード（Evidence Record）の保存 (機能N / P1-1)
+            self.evidence_store.archive_record(
+                task_id=task.task_id,
+                status="COMPLETED",
+                commit_info={
+                    "sha": commit_hash,
+                    "tree_sha": committed_tree_sha,
+                    "tree_verified": True,
+                },
+                checker_info={
+                    "decision": "APPROVE",
+                    "reason": checker_reason,
+                },
+            )
+
             task_info = {
                 "task_id": task.task_id,
                 "title": task.title,

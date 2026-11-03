@@ -341,6 +341,15 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 3
+        evidence_store.archive_record(
+            task_id=args.task_id,
+            status="COMPLETED",
+            commit_info={
+                "sha": commit_hash,
+                "tree_sha": committed_tree,
+                "tree_verified": True,
+            },
+        )
         print(f"COMMITTED: {commit_hash}")
         return 0
 

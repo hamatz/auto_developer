@@ -1571,9 +1571,72 @@ class TestNightlyOrchestrator(unittest.TestCase):
             current_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
             self.assertEqual(current_head, checkpoint, "HEAD must remain at checkpoint on task failure")
 
+    def test_feature_n_evidence_audit_record_persisted_after_commit(self):
+        """機能N (P1-1): コミット後も証跡レコードが永続化され、監査・検証詳細が照合可能であること。"""
+        import json
+        from auto_developer.evidence import EvidenceStore
+        from auto_developer.guard import GitGuard
+        from auto_developer.orchestrator import NightlyOrchestrator
+        from auto_developer.runner import CommandRunnerAdapter
 
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
 
+            (repo / ".gitignore").write_text(".dev/\nlogs/\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("# SPEC\nCore spec content.\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. 監査テストタスク\n", encoding="utf-8")
 
+            verify_sh = repo / "verify.sh"
+            verify_sh.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            verify_sh.chmod(0o755)
+
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            class SuccessRunner(CommandRunnerAdapter):
+                def run_maker(self, task, context):
+                    (repo / f"task_{task.task_id}.py").write_text("print('audit pass')\n", encoding="utf-8")
+                    return 0, "maker output"
+
+                def run_checker(self, task, diff, spec_content):
+                    return True, json.dumps({"decision": "APPROVE", "reason": "LGTM for audit"})
+
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=verify_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=repo / ".dev" / "job_state.json",
+                runner_adapter=SuccessRunner(),
+                dry_run=False,
+            )
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 0)
+
+            # 監査レコードが .git/nightly_evidence/records/ または archive/ に存在すること
+            evidence_store = EvidenceStore(repo_dir=repo)
+            records = evidence_store.get_records()
+            self.assertEqual(len(records), 1, "Evidence records must contain 1 entry for completed task")
+            record = records[0]
+            self.assertEqual(record["task_id"], "1")
+            self.assertEqual(record["status"], "COMPLETED")
+            self.assertIn("tree_sha", record)
+            self.assertIn("spec_sha", record)
+            self.assertIn("issued_at", record)
+            self.assertIn("consumed_at", record)
+            self.assertIn("commit", record)
+            self.assertIn("sha", record["commit"])
+            self.assertTrue(record["commit"]["tree_verified"])
+
+            # ファイルとしても永続化されていること
+            record_path = evidence_store.records_dir / "task_1.json"
+            self.assertTrue(record_path.exists(), f"Record file must exist at {record_path}")
+            data = json.loads(record_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["task_id"], "1")
 
 
 if __name__ == "__main__":
