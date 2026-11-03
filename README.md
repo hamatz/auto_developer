@@ -54,6 +54,46 @@ flowchart TD
 
 ---
 
+## 📦 インストールと外部プロジェクトでの利用
+
+Auto Developer は、本リポジトリ内だけでなく、**あなたの既存プロジェクトや新しい作業フォルダにプラグインまたは CLI として導入**して利用できます。
+
+### 1. グローバルまたはローカル環境へのインストール
+```bash
+# 本リポジトリを editable モードでインストール（開発中または常用）
+pip install -e /path/to/auto_developer
+
+# またはパッケージとしてインストール
+# pip install auto-developer
+```
+インストールすると、`auto-dev` コマンドが利用可能になります。
+
+### 2. 任意の外部プロジェクトでの初期化
+新しい作業フォルダや既存リポジトリで初期化します：
+```bash
+cd /path/to/your-project
+auto-dev init
+```
+これにより、以下のEGM規律ファイル群が自動作成（または `.gitignore` に追記）されます：
+- `PLAN.md`: 自律タスク実行計画
+- `SPEC.md`: 仕様および不変条件定義
+- `scripts/verify_local.sh`: ローカル確定検証ゲート（実行権限付き）
+- `.gitignore`: `.dev/`, `logs/`, `NIGHTLY_REPORT.md` を自動登録
+
+### 3. 自律開発の実行と確認
+```bash
+# 自律パイプラインを実行
+auto-dev run
+
+# または Antigravity 内でスキルを実行
+# /nightly-run
+
+# 翌朝または作業後のブリーフィング表示
+auto-dev brief
+```
+
+---
+
 ## 🔰 5分で体験するクイックスタート (Hands-on Walkthrough)
 
 まずは実際に手を動かして、Auto Developer の自律サイクルと防壁を体験してみましょう。
@@ -129,44 +169,53 @@ git branch -D try-auto-developer
 
 ---
 
-## 🛠️ CLI リファレンス (`scripts/nightly_orchestrator.py`)
+## 🛠️ CLI リファレンス (`auto-dev` / `scripts/nightly_orchestrator.py`)
 
-### メイン自律実行
+`auto-dev` CLI（または互換ラッパー `python3 scripts/nightly_orchestrator.py`）で利用できるコマンド一覧です。
+
+### 1. プロジェクト初期化
+```bash
+# 任意のプロジェクトで EGM 規律ファイル群を生成
+auto-dev init
+```
+
+### 2. メイン自律実行 (`auto-dev run` または引数なし)
 ```bash
 # 通常の自律実行（未指定時は MockRunner で安全に動作）
-python3 scripts/nightly_orchestrator.py
+auto-dev run
 
 # 外部エージェント CLI（Codex, Claude, カスタムスクリプト）を指定して自律実行
-python3 scripts/nightly_orchestrator.py \
+auto-dev run \
   --maker-cmd "python3 my_agent.py maker --task '{task_id}' --attempt '{attempt}' --err '{prev_error}'" \
   --checker-cmd "python3 my_agent.py checker --task '{task_id}'"
 
 # プロセス中断・クラッシュからの安全な再開
-python3 scripts/nightly_orchestrator.py --resume
+auto-dev run --resume
 
 # ドライラン（副作用なしのシミュレーション）
-python3 scripts/nightly_orchestrator.py --dry-run
+auto-dev run --dry-run
 ```
 
-### 朝次ブリーフィング
+### 3. 朝次ブリーフィング (`auto-dev brief`)
 ```bash
 # 直近の実行結果と次のアクション選択肢をコンソール表示
-python3 scripts/nightly_orchestrator.py morning-brief
+auto-dev brief
+# （互換コマンド: auto-dev morning-brief）
 ```
 
-### サブコマンド（エージェント連携・手動操作用）
+### 4. 低レベルサブコマンド（エージェント連携・手動ステップ実行用）
 ```bash
 # クリーンツリー検査と次タスク取得
-python3 scripts/nightly_orchestrator.py pre-flight
+auto-dev pre-flight
 
 # 不変条件検査 & 検証スクリプト実行（成功時に Evidence Token 発行）
-python3 scripts/nightly_orchestrator.py verify-step --checkpoint <commit_hash> --task-id <id>
+auto-dev verify-step --checkpoint <commit_hash> --task-id <id>
 
 # 証跡を検証してコミット（未検証の場合は拒否）
-python3 scripts/nightly_orchestrator.py commit-step --task-id <id> --checkpoint <commit_hash>
+auto-dev commit-step --task-id <id> --checkpoint <commit_hash>
 
 # 作業成果を quarantine ブランチへ退避コミットし、本線をチェックポイントへ復元
-python3 scripts/nightly_orchestrator.py rollback-step --checkpoint <commit_hash> --task-id <id> --reason "原因"
+auto-dev rollback-step --checkpoint <commit_hash> --task-id <id> --reason "原因"
 ```
 
 ---

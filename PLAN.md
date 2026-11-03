@@ -7,13 +7,13 @@
 -->
 
 ## 現在の目標
-- Phase 1 ドキュメント刷新 & チュートリアル（試しに使ってみる手順）の整備
+- Phase 2A: プラグイン & CLI パッケージ化（auto-dev: 任意プロジェクトへ外側から適用する自律基盤）
 
 ## ステップ
-- [x] 1. README.md の刷新: 新アーキテクチャ解説と「試しに使ってみるクイックスタート（Hands-on Walkthrough）」の追加
-- [x] 2. docs/designs/autonomous_pipeline_orchestrator.md の最新化（JobState, RunnerAdapter, Quarantine, EvidenceGate）
-- [x] 3. skills/nightly-run/SKILL.md と PROMPTS.md の手順整備
-- [x] 4. verify_local.sh による整合性確認とコミット
+- [x] 1. Python パッケージ構造の整備 (src/auto_developer/) と pyproject.toml への auto-dev CLI 定義
+- [x] 2. プロジェクト初期化コマンド (auto-dev init) の受入テスト作成と実装 (Red-First)
+- [x] 3. 外部プロジェクトディレクトリに対する自律稼働（auto-dev run & brief）の検証
+- [x] 4. Antigravity プラグインマニフェスト整備とドキュメント更新・全テスト検証
 
 ## 止まっていること・判断待ち
 - なし

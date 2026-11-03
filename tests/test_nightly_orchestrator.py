@@ -634,6 +634,111 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertIn("quarantine/task-2-12345", proc.stdout)
             self.assertIn("--resume", proc.stdout)
 
+    def test_cli_init_command(self):
+        """auto-dev init コマンドによるプロジェクトひな形生成の受入検証。"""
+        import sys
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target_project = Path(tmp_dir) / "my_new_app"
+            target_project.mkdir()
+
+            script_path = Path(__file__).parents[1] / "scripts" / "nightly_orchestrator.py"
+
+            # 1. 空のプロジェクトで auto-dev init を実行
+            proc = subprocess.run(
+                [sys.executable, str(script_path), "--work-dir", str(target_project), "init"],
+                cwd=target_project,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, f"init failed: {proc.stderr}")
+            self.assertIn("Initialization complete", proc.stdout)
+
+            # 生成されたファイルを検証
+            self.assertTrue((target_project / "PLAN.md").exists())
+            self.assertTrue((target_project / "SPEC.md").exists())
+            verify_sh = target_project / "scripts" / "verify_local.sh"
+            self.assertTrue(verify_sh.exists())
+            import os
+            self.assertTrue(os.access(verify_sh, os.X_OK))
+
+            gitignore = target_project / ".gitignore"
+            self.assertTrue(gitignore.exists())
+            gitignore_text = gitignore.read_text(encoding="utf-8")
+            self.assertIn(".dev/", gitignore_text)
+            self.assertIn("NIGHTLY_REPORT.md", gitignore_text)
+            self.assertIn("logs/", gitignore_text)
+
+            # 2. 再度実行しても既存ファイルを破壊・上書きしないこと (Idempotent)
+            (target_project / "PLAN.md").write_text("# Custom Plan\n", encoding="utf-8")
+            proc2 = subprocess.run(
+                [sys.executable, str(script_path), "--work-dir", str(target_project), "init"],
+                cwd=target_project,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc2.returncode, 0)
+            self.assertEqual((target_project / "PLAN.md").read_text(encoding="utf-8"), "# Custom Plan\n")
+
+    def test_external_project_workflow(self):
+        """外部プロジェクトにおける auto-dev init -> git commit -> auto-dev run -> brief の全フロー検証。"""
+        import sys
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ext_app = Path(tmp_dir) / "external_project"
+            ext_app.mkdir()
+
+            script_path = Path(__file__).parents[1] / "scripts" / "nightly_orchestrator.py"
+
+            # 1. 外部アプリで init
+            subprocess.run([sys.executable, str(script_path), "init"], cwd=ext_app, check=True)
+
+            # 2. Git 初期化と初期コミット
+            subprocess.run(["git", "init"], cwd=ext_app, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=ext_app, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=ext_app, check=True)
+            subprocess.run(["git", "add", "-A"], cwd=ext_app, check=True)
+            subprocess.run(["git", "commit", "-m", "init external app"], cwd=ext_app, check=True)
+
+            # 3. PLAN.md を作成
+            (ext_app / "PLAN.md").write_text("- [ ] 1. 新規モジュール作成\n", encoding="utf-8")
+            subprocess.run(["git", "add", "PLAN.md"], cwd=ext_app, check=True)
+            subprocess.run(["git", "commit", "-m", "add plan"], cwd=ext_app, check=True)
+
+            # 4. 外部アプリ内で auto-dev run を実行（外部Makerコマンドを指定）
+            python_bin = sys.executable
+            maker_code = f'{python_bin} -c "open(\'module.py\', \'w\').write(\'def ok(): return True\\n\')"'
+            checker_code = 'echo "APPROVE: Looks good"'
+
+            proc_run = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "run",
+                    "--maker-cmd",
+                    maker_code,
+                    "--checker-cmd",
+                    checker_code,
+                ],
+                cwd=ext_app,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc_run.returncode, 0, f"auto-dev run failed:\nSTDOUT:\n{proc_run.stdout}\nSTDERR:\n{proc_run.stderr}")
+            self.assertIn("Execution complete", proc_run.stdout)
+
+            # 5. 外部アプリの Git 履歴とファイルを検証
+            log_proc = subprocess.run(["git", "log", "-1", "--oneline"], cwd=ext_app, capture_output=True, text=True, check=True)
+            self.assertIn("feat: 新規モジュール作成", log_proc.stdout)
+            self.assertTrue((ext_app / "module.py").exists())
+            self.assertIn("- [x] 1. 新規モジュール作成", (ext_app / "PLAN.md").read_text(encoding="utf-8"))
+
+            # 6. auto-dev brief で外部アプリのブリーフィングが確認できること
+            proc_brief = subprocess.run([sys.executable, str(script_path), "brief"], cwd=ext_app, capture_output=True, text=True)
+            self.assertEqual(proc_brief.returncode, 0)
+            self.assertIn("AUTO DEVELOPER / MORNING BRIEF", proc_brief.stdout)
+            self.assertIn("新規モジュール作成", proc_brief.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

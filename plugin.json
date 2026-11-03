@@ -1,0 +1,8 @@
+{
+  "name": "auto-developer",
+  "description": "Auto Developer: Trustworthy autonomous development orchestrator. Executes sequential PLAN.md tasks overnight with verification gates, quarantine preservation, and morning briefs.",
+  "suggestedPrompts": [
+    "/nightly-run",
+    "/nightly-setup"
+  ]
+}
