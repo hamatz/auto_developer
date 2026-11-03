@@ -13,6 +13,11 @@ if git rev-parse --verify "$CHECKPOINT" >/dev/null 2>&1; then
 fi
 
 echo "=== [2/2] Running Python unit and acceptance tests ==="
-python3 -m unittest discover -s tests -p "test_*.py"
+if [ -x "/usr/bin/python3" ]; then
+  PYTHON="/usr/bin/python3"
+else
+  PYTHON="python3"
+fi
+"$PYTHON" -m unittest discover -s tests -p "test_*.py"
 
 echo "=== All verification checks passed! (Exit 0) ==="
