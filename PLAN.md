@@ -7,13 +7,13 @@
 -->
 
 ## 現在の目標
-- Phase 1B: Job State 永続化 & Runner Adapter 実装（会話セッションから独立した自律オーケストレーション基盤）
+- Phase 1C: Morning Brief の刷新（人間不在後の引き継ぎ体験・意思決定支援の向上）
 
 ## ステップ
-- [x] 1. JobState クラスの設計と永続化・中断復旧テスト (Red-First)
-- [x] 2. RunnerAdapter の設計（抽象インターフェース・Mock・CommandRunner）と単体テスト
-- [x] 3. Orchestrator メインループへの統合（Maker起動・再試行・Checker査読・State同期）
-- [x] 4. 中断復旧（Resume）とエンドツーエンド自律走行の受入テスト検証
+- [x] 1. MorningReporter 刷新の受入テスト作成 (Red-First)
+- [x] 2. MorningReporter の意思決定支援型レポート（Morning Brief）実装
+- [x] 3. CLI サブコマンド morning-brief の実装と表示テスト
+- [x] 4. 受入テスト全通過とローカル検証・コミット
 
 ## 止まっていること・判断待ち
 - なし

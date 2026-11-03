@@ -554,7 +554,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertEqual(len(final_state.completed_tasks), 2)
 
     def test_feature_f_morning_report_generation(self):
-        """機能F: NIGHTLY_REPORT.md が所定のスキーマで生成される。"""
+        """機能F刷新: NIGHTLY_REPORT.md が意思決定支援型 Morning Brief として生成される。"""
         import tempfile
         with tempfile.TemporaryDirectory() as tmp_dir:
             reporter = MorningReporter()
@@ -572,7 +572,9 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 ],
                 "quarantined_task": {
                     "task_id": "2",
+                    "title": "API認証処理",
                     "phase": "VERIFIER_ERROR",
+                    "quarantined_branch": "quarantine/task-2-1793705000",
                     "log_path": "logs/nightly/task_2_failure.log",
                     "root_cause_summary": "AssertionError: expected 200 but got 500",
                 },
@@ -582,12 +584,55 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
             self.assertTrue(report_file.exists())
             content = report_file.read_text(encoding="utf-8")
-            self.assertIn("# Nightly Execution Report", content)
-            self.assertIn("* **Status**: STOPPED (FAIL-FAST)", content)
-            self.assertIn("| task-1 | 基盤設定 | `def5678` |", content)
-            self.assertIn("* **Failed Task ID**: task-2", content)
-            self.assertIn("logs/nightly/task_2_failure.log", content)
+            self.assertIn("# AUTO DEVELOPER / MORNING BRIEF", content)
+            self.assertIn("STOPPED (FAIL-FAST)", content)
+            self.assertIn("今回の成果", content)
+            self.assertIn("基盤設定", content)
+            self.assertIn("`def5678`", content)
+            self.assertIn("要確認・隔離事項", content)
+            self.assertIn("quarantine/task-2-1793705000", content)
             self.assertIn("AssertionError: expected 200 but got 500", content)
+            self.assertIn("あなたに判断してほしいこと", content)
+            self.assertIn("git diff", content)
+            self.assertIn("--resume", content)
+
+    def test_cli_morning_brief_subcommand(self):
+        """CLI サブコマンド morning-brief によるコンソールブリーフィング表示の検証。"""
+        import sys
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir()
+            state_file = repo_dir / ".dev" / "job_state.json"
+            state = JobState(
+                job_id="job-brief-test",
+                status="STOPPED_FAIL_FAST",
+                current_task_id="2",
+                checkpoint_hash="c0ffee1",
+                completed_tasks=[{"task_id": "1", "title": "初期タスク", "commit": "c0ffee1"}],
+                quarantined_task={
+                    "task_id": "2",
+                    "title": "障害タスク",
+                    "phase": "VERIFIER_ERROR",
+                    "quarantined_branch": "quarantine/task-2-12345",
+                    "log_path": "logs/nightly/task_2_failure.log",
+                    "root_cause_summary": "AssertionError: expected 1 got 2",
+                },
+            )
+            state.save(state_file)
+
+            script_path = Path(__file__).parents[1] / "scripts" / "nightly_orchestrator.py"
+            proc = subprocess.run(
+                [sys.executable, str(script_path), "--state-file", str(state_file), "morning-brief"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 0, f"morning-brief failed: {proc.stderr}")
+            self.assertIn("AUTO DEVELOPER / MORNING BRIEF", proc.stdout)
+            self.assertIn("STOPPED_FAIL_FAST", proc.stdout)
+            self.assertIn("quarantine/task-2-12345", proc.stdout)
+            self.assertIn("--resume", proc.stdout)
 
 
 if __name__ == "__main__":
