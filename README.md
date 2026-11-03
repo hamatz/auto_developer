@@ -1,9 +1,11 @@
 # Auto Developer: 自律型開発実行基盤 (Trustworthy Autonomous Runner)
 
 [![Verify CI](https://github.com/google/auto_developer/actions/workflows/verify.yml/badge.svg)](.github/workflows/verify.yml)
+[![Antigravity Plugin](https://img.shields.io/badge/Antigravity-Plugin-brightgreen.svg)](plugin.json)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 > **Auto Developer は、人間が不在の間も、合意された仕様と客観的な検証条件に従って開発作業を進め、成功も失敗も検証可能な形で人間に引き渡す自律型開発実行基盤です。**
+> Antigravity プラグイン（`/nightly-setup`, `/nightly-run`）または独立した CLI ツール（`auto-dev`）として、あらゆる既存・新規プロジェクトに導入できます。
 
 Google Antigravity および [Agent Harness Kit 論文](https://github.com/hamatz/agent-harness-kit/blob/main/docs/paper.md) で提唱される Elephant-Goldfish Model（EGM）の設計規律に基づき、**「人間が一時的に仕事から離れること」** を開発プロセスの正常系として扱います。
 
@@ -56,39 +58,61 @@ flowchart TD
 
 ## 📦 インストールと外部プロジェクトでの利用
 
-Auto Developer は、本リポジトリ内だけでなく、**あなたの既存プロジェクトや新しい作業フォルダにプラグインまたは CLI として導入**して利用できます。
+Auto Developer は、本リポジトリ内だけでなく、**「Antigravity プラグイン」** または **「スタンドアロン CLI (`auto-dev`)」** のいずれの形態でも、あなたの既存プロジェクトや新しい作業フォルダに導入して利用できます。
 
-### 1. グローバルまたはローカル環境へのインストール
+---
+
+### 方式 A: Antigravity プラグインとして利用する（推奨）
+
+Antigravity のプラグインディレクトリにシンボリックリンクを作成することで、任意のワークスペースから Antigravity スキル（`/nightly-setup`, `/nightly-run`）として呼び出せるようになります。
+
 ```bash
-# 本リポジトリを editable モードでインストール（開発中または常用）
+# 1. プラグインディレクトリへ登録（初回のみ）
+mkdir -p ~/.gemini/config/plugins
+ln -s /path/to/auto_developer ~/.gemini/config/plugins/auto-developer
+
+# 2. CLI も使えるように editable インストール
 pip install -e /path/to/auto_developer
-
-# またはパッケージとしてインストール
-# pip install auto-developer
 ```
-インストールすると、`auto-dev` コマンドが利用可能になります。
 
-### 2. 任意の外部プロジェクトでの初期化
-新しい作業フォルダや既存リポジトリで初期化します：
+#### Antigravity チャットでの利用フロー：
+1. **プロジェクト初期化**:
+   新しいプロジェクトフォルダを Antigravity で開き、チャットで以下を実行します：
+   ```text
+   /nightly-setup
+   ```
+   EGM 規律ファイル群（`PLAN.md`, `SPEC.md`, `scripts/verify_local.sh`, `.gitignore`）が自動生成されます。
+2. **夜間・無人自律実行**:
+   `PLAN.md` にタスクを書いたら、離席時や就寝前にチャットで以下を実行します：
+   ```text
+   /nightly-run
+   ```
+   Antigravity エージェントがオーケストレーターと連携し、**[Maker実装 → 物理保護検査 → 確定検証 → 独立Checker査読 → 証跡ゲートコミット]** の厳格なサイクルを自動で直列実行します。
+
+---
+
+### 方式 B: スタンドアロン CLI (`auto-dev`) として利用する
+
+ターミナルや外部エージェント CLI（Codex, Claude Code など）と組み合わせて動かす場合：
+
 ```bash
+# 1. パッケージのインストール
+pip install -e /path/to/auto_developer
+```
+
+#### ターミナルでの利用フロー：
+```bash
+# 1. 任意の作業フォルダで初期化
 cd /path/to/your-project
 auto-dev init
-```
-これにより、以下のEGM規律ファイル群が自動作成（または `.gitignore` に追記）されます：
-- `PLAN.md`: 自律タスク実行計画
-- `SPEC.md`: 仕様および不変条件定義
-- `scripts/verify_local.sh`: ローカル確定検証ゲート（実行権限付き）
-- `.gitignore`: `.dev/`, `logs/`, `NIGHTLY_REPORT.md` を自動登録
 
-### 3. 自律開発の実行と確認
-```bash
-# 自律パイプラインを実行
+# 2. 自律パイプラインを実行
 auto-dev run
 
-# または Antigravity 内でスキルを実行
-# /nightly-run
+# 外部エージェント CLI を Maker / Checker に指定する場合:
+# auto-dev run --maker-cmd "..." --checker-cmd "..."
 
-# 翌朝または作業後のブリーフィング表示
+# 3. 翌朝、ブリーフィングを確認
 auto-dev brief
 ```
 
