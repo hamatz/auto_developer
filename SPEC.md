@@ -14,12 +14,12 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
 
 ## 2. コア要件 (MVP Scope)
 <!-- 受入テストと1対1に対応させる -->
-- [ ] 機能A (直列タスク抽出と状態更新): `PLAN.md` から未実行タスク（`- [ ]`）を上から順に1件ずつ取得し、完了時は `- [x]`、失敗時は `- [ ] Task **[FAILED]**` に更新する。
-- [ ] 機能B (クリーンツリー事前検証): 起動時に `git status --porcelain` を検査し、未コミットの変更が存在する場合は Exit 2 で起動を拒否する。
-- [ ] 機能C (外部不変条件検査): 各タスクのMaker実装後、検証スクリプト実行前に `git diff --name-only <checkpoint>` を検査し、保護対象（`.github/**`, `SPEC.md`, `scripts/verify_local.sh`, `tests/immunity/**`）への変更を検知した場合はテスト実行を行わず直ちにQuarantine（隔離ロールバック）を発動する。
-- [ ] 機能D (ローカル検証ゲート実行): `scripts/verify_local.sh` を実行し、型検査・リンター・単体テストがすべて Exit 0 で通過した時のみ合格と判定する。
-- [ ] 機能E (Strict Fail-Fast & クリーンロールバック): 同一タスクで2回失敗した場合、`git reset --hard <checkpoint> && git clean -fd` を実行して未追跡ファイル含めて初期化し、`logs/nightly/task_<id>_failure.log` にエラーダンプを保存してパイプライン全体を即座に安全停止する（Exit 1）。
-- [ ] 機能F (朝次レポート生成): 正常完了時およびFail-Fast停止時に、完了タスク一覧・失敗理由・残タスクをまとめた `NIGHTLY_REPORT.md` を自動生成する。
+- [x] 機能A (直列タスク抽出と状態更新): `PLAN.md` から未実行タスク（`- [ ]`）を上から順に1件ずつ取得し、完了時は `- [x]`、失敗時は `- [ ] Task **[FAILED]**` に更新する。
+- [x] 機能B (クリーンツリー事前検証): 起動時に `git status --porcelain` を検査し、未コミットの変更が存在する場合は Exit 2 で起動を拒否する。
+- [x] 機能C (外部不変条件検査): 各タスクのMaker実装後、検証スクリプト実行前に `git diff --name-only <checkpoint>` を検査し、保護対象（`.github/**`, `SPEC.md`, `scripts/verify_local.sh`, `tests/immunity/**`）への変更を検知した場合はテスト実行を行わず直ちにQuarantine（隔離ロールバック）を発動する。
+- [x] 機能D (ローカル検証ゲート実行): `scripts/verify_local.sh` を実行し、型検査・リンター・単体テストがすべて Exit 0 で通過した時のみ合格と判定する。
+- [x] 機能E (Strict Fail-Fast & クリーンロールバック): 同一タスクで2回失敗した場合、`git reset --hard <checkpoint> && git clean -fd` を実行して未追跡ファイル含めて初期化し、`logs/nightly/task_<id>_failure.log` にエラーダンプを保存してパイプライン全体を即座に安全停止する（Exit 1）。
+- [x] 機能F (朝次レポート生成): 正常完了時およびFail-Fast停止時に、完了タスク一覧・失敗理由・残タスクをまとめた `NIGHTLY_REPORT.md` を自動生成する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
