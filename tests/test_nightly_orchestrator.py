@@ -16,6 +16,7 @@ from scripts.nightly_orchestrator import (
     RunnerAdapter,
     MockRunnerAdapter,
     CommandRunnerAdapter,
+    NightlyOrchestrator,
 )
 
 
@@ -382,6 +383,78 @@ class TestNightlyOrchestrator(unittest.TestCase):
         app, rsn = cmd_runner.run_checker(task, diff="+ new code", spec_content="spec")
         self.assertTrue(app)
         self.assertIn("Looks solid", rsn)
+
+    def test_autonomous_orchestrator_full_cycle(self):
+        """オーケストレーター自律走行: Maker起動 -> 検証 -> Checker査読 -> コミット -> State更新。"""
+        import sys
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_dir = Path(tmp_dir) / "repo"
+            repo_dir.mkdir()
+            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
+
+            plan_file = repo_dir / "PLAN.md"
+            plan_file.write_text("- [ ] 1. 自動実装タスク\n", encoding="utf-8")
+            spec_file = repo_dir / "SPEC.md"
+            spec_file.write_text("# SPEC\nMust create feature.py with hello()\n", encoding="utf-8")
+            python_bin = sys.executable
+            verify_script = repo_dir / "verify.sh"
+            verify_script.write_text(
+                f"#!/usr/bin/env bash\n{python_bin} -c 'import feature; assert feature.hello() == \"world\"'\n",
+                encoding="utf-8",
+            )
+            verify_script.chmod(0o755)
+
+            subprocess.run(["git", "add", "PLAN.md", "SPEC.md", "verify.sh"], cwd=repo_dir, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True)
+
+            # Maker 実装を行うカスタム RunnerAdapter
+            class CodeGeneratingRunner(RunnerAdapter):
+                def run_maker(self, task: Task, context: dict):
+                    (repo_dir / "feature.py").write_text('def hello(): return "world"\n', encoding="utf-8")
+                    return 0, "Created feature.py"
+
+                def run_checker(self, task: Task, diff: str, spec_content: str):
+                    if "feature.py" in diff:
+                        return True, "APPROVE: feature.py correctly implemented"
+                    return False, "REJECT: feature.py missing"
+
+            state_file = repo_dir / ".dev" / "job_state.json"
+            report_file = repo_dir / "NIGHTLY_REPORT.md"
+
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo_dir,
+                plan_path=plan_file,
+                spec_path=spec_file,
+                verify_script=verify_script,
+                report_path=report_file,
+                state_path=state_file,
+                runner_adapter=CodeGeneratingRunner(),
+            )
+
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 0)
+
+            # 1. PLAN.md が [x] になっていること
+            updated_plan = plan_file.read_text(encoding="utf-8")
+            self.assertIn("- [x] 1. 自動実装タスク", updated_plan)
+
+            # 2. Git コミットが作成されていること
+            log_proc = subprocess.run(
+                ["git", "log", "-1", "--oneline"], cwd=repo_dir, capture_output=True, text=True, check=True
+            )
+            self.assertIn("feat: 自動実装タスク", log_proc.stdout)
+
+            # 3. JobState が COMPLETED になっていること
+            saved_state = JobState.load(state_file)
+            self.assertEqual(saved_state.status, "COMPLETED")
+            self.assertEqual(len(saved_state.completed_tasks), 1)
+
+            # 4. レポートが生成されていること
+            self.assertTrue(report_file.exists())
+            self.assertIn("COMPLETED", report_file.read_text(encoding="utf-8"))
 
     def test_feature_f_morning_report_generation(self):
         """機能F: NIGHTLY_REPORT.md が所定のスキーマで生成される。"""

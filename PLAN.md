@@ -12,7 +12,7 @@
 ## ステップ
 - [x] 1. JobState クラスの設計と永続化・中断復旧テスト (Red-First)
 - [x] 2. RunnerAdapter の設計（抽象インターフェース・Mock・CommandRunner）と単体テスト
-- [ ] 3. Orchestrator メインループへの統合（Maker起動・再試行・Checker査読・State同期）
+- [x] 3. Orchestrator メインループへの統合（Maker起動・再試行・Checker査読・State同期）
 - [ ] 4. 中断復旧（Resume）とエンドツーエンド自律走行の受入テスト検証
 
 ## 止まっていること・判断待ち
