@@ -61,11 +61,12 @@ class CommandRunnerAdapter(RunnerAdapter):
     def run_maker(self, task: Task, context: dict[str, Any]) -> tuple[int, str]:
         if not self.maker_cmd_template:
             return 1, "ERROR: No maker_cmd_template configured (Fail-Closed)"
-        cmd_str = self.maker_cmd_template.format(
-            task_id=task.task_id,
-            task_title=task.title,
-            attempt=context.get("attempt", 1),
-            prev_error=context.get("prev_error", ""),
+        cmd_str = (
+            self.maker_cmd_template
+            .replace("{task_id}", str(task.task_id))
+            .replace("{task_title}", task.title)
+            .replace("{attempt}", str(context.get("attempt", 1)))
+            .replace("{prev_error}", str(context.get("prev_error", "")))
         )
         try:
             proc = subprocess.run(
@@ -84,9 +85,10 @@ class CommandRunnerAdapter(RunnerAdapter):
     def run_checker(self, task: Task, diff: str, spec_content: str) -> tuple[bool, str]:
         if not self.checker_cmd_template:
             return False, "ERROR: No checker_cmd_template configured (Fail-Closed)"
-        cmd_str = self.checker_cmd_template.format(
-            task_id=task.task_id,
-            task_title=task.title,
+        cmd_str = (
+            self.checker_cmd_template
+            .replace("{task_id}", str(task.task_id))
+            .replace("{task_title}", task.title)
         )
         try:
             proc = subprocess.run(
@@ -100,7 +102,26 @@ class CommandRunnerAdapter(RunnerAdapter):
             output = proc.stdout + "\n" + proc.stderr
             if proc.returncode != 0:
                 return False, f"Checker process failed with exit {proc.returncode}:\n{output}"
-            is_approved = "APPROVE" in output.upper() and "REJECT" not in output.upper()
+
+            # 1. 構造化 JSON パースを試行
+            import json
+            import re
+            json_match = re.search(r"\{.*\}", output, re.DOTALL)
+            if json_match:
+                try:
+                    data = json.loads(json_match.group(0))
+                    if isinstance(data, dict) and "decision" in data:
+                        dec = str(data["decision"]).strip().upper()
+                        findings = data.get("findings", [])
+                        findings_str = f" | Findings: {findings}" if findings else ""
+                        return dec == "APPROVE", f"Structured JSON: {dec}{findings_str}"
+                except json.JSONDecodeError:
+                    pass
+
+            # 2. テキスト判定 (厳格な否定語検知)
+            up = output.upper()
+            has_rejection = any(w in up for w in ("REJECT", "NOT APPROVED", "DISAPPROVED", "DECLINE"))
+            is_approved = ("APPROVE" in up or "PASS" in up) and not has_rejection
             return is_approved, output.strip()
         except subprocess.TimeoutExpired:
             return False, f"Checker timed out after {self.timeout_sec}s"

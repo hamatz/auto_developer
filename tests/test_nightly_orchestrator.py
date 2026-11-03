@@ -953,6 +953,34 @@ class TestNightlyOrchestrator(unittest.TestCase):
                 "Ignored file 'critical_data.ignored' must be preserved either in quarantine branch or in physical snapshot archive!",
             )
 
+    def test_feature_k_checker_rejects_not_approved_text(self):
+        """機能K-1: Checker が 'NOT APPROVED' を出力した場合に誤って承認せず REJECT と判定すること。"""
+        task = Task("1", "テストタスク", 1, False, False)
+        # 'NOT APPROVED' という否定を含むテキストを出力する Checker コマンド
+        runner = CommandRunnerAdapter(
+            checker_cmd_template="echo 'NOT APPROVED: The spec is violated.'",
+        )
+        approved, explanation = runner.run_checker(task, diff="some diff", spec_content="some spec")
+        self.assertFalse(approved, f"'NOT APPROVED' must NOT be evaluated as approved! Got approved={approved}, explanation={explanation}")
+
+    def test_feature_k_checker_parses_structured_json(self):
+        """機能K-2: Checker が JSON 形式で decision を返した場合に構造化判定できること。"""
+        task = Task("1", "テストタスク", 1, False, False)
+        # APPROVE json
+        runner_approve = CommandRunnerAdapter(
+            checker_cmd_template="""echo '{"decision": "APPROVE", "findings": []}'""",
+        )
+        approved, _ = runner_approve.run_checker(task, diff="diff", spec_content="spec")
+        self.assertTrue(approved)
+
+        # REJECT json
+        runner_reject = CommandRunnerAdapter(
+            checker_cmd_template="""echo '{"decision": "REJECT", "findings": ["Missing tests"]}'""",
+        )
+        approved2, expl2 = runner_reject.run_checker(task, diff="diff", spec_content="spec")
+        self.assertFalse(approved2)
+        self.assertIn("Missing tests", expl2)
+
 
 if __name__ == "__main__":
     unittest.main()

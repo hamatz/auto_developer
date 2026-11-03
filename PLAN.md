@@ -13,7 +13,7 @@
 - [x] 1. Gate & Runner の Fail-Closed 化（DEFAULT_VERIFY_SH の || true 削除、Runner未設定時の拒否、Maker差分なし時の安全停止）(Red-First)
 - [x] 2. Evidence Binding（Git Tree SHA, Spec SHA, Checker判定を証跡に拘束し、確定時に再照合）(Red-First)
 - [x] 3. Safe Quarantine（無視ファイルや未追跡ファイルを完全保護し、退避確認前にリセットしない）(Red-First)
-- [ ] 4. Checker の構造化（JSON判定）と CI 検査範囲拡大 (Red-First)
+- [x] 4. Checker の構造化（JSON判定）と CI 検査範囲拡大 (Red-First)
 - [ ] 5. JobState 状態遷移と安全なクラッシュ復旧 (Red-First)
 
 ## 止まっていること・判断待ち
