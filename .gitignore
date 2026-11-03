@@ -6,10 +6,18 @@
 *.key
 credentials.json
 
-# 検証アーティファクト（Playwright の慣習に合わせる）
+# 検証・実行アーティファクト
 test-results/
 NIGHTLY_REPORT.md
 logs/
+
+# EGM (Elephant-Goldfish Model) 中間アーティファクト
+concepts_brief.md
+design_draft.md
+*_report.md
+.dev/
+!.dev/README.md
+!docs/designs/**
 
 node_modules/
 
