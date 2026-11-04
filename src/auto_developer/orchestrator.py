@@ -118,9 +118,12 @@ class NightlyOrchestrator:
                 self.git_guard.quarantine_and_restore(
                     job_state.checkpoint_hash, task_id=job_state.current_task_id or "interrupted"
                 )
+                if not job_state.base_branch:
+                    job_state.base_branch = self.git_guard.get_current_branch()
         else:
             job_id = f"job-{int(time.time())}"
-            job_state = JobState(job_id=job_id, status="RUNNING")
+            current_branch = self.git_guard.get_current_branch()
+            job_state = JobState(job_id=job_id, status="RUNNING", base_branch=current_branch)
             if not self.dry_run:
                 job_state.save(self.state_path)
 

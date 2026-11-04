@@ -7,22 +7,21 @@
 -->
 
 ## 現在の目標
-- Phase 3: Pilot 03 フィードバックに基づく失敗回復・監査履歴・クリーン復元強化 (機能S, 機能T, 機能U)
+- Phase 4: Pilot 04 フィードバックに基づくクラッシュ耐性・トランザクション復旧基盤 (機能V, 機能W, 機能X)
+  - Scenario 03: コミット直後クラッシュからのコミット再利用・JobState自動前進補正 (P0-1)
+  - Scenario 04: Quarantine途中クラッシュからの安全復帰・隔離完了 (P0-2)
+  - 診断・計画・適用の分離型 CLI (`auto-dev recover inspect|plan|apply`)
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- `test_feature_h_maker_no_diff_fails_and_quarantines` (line 854) および `test_feature_p_task_failure_preserves_uncompleted_and_stops_safely` (line 1572) は、本線の `PLAN.md` に `[FAILED]` の未コミット差分が残ることをアサートしていた。
-  - しかし、Pilot 03 P1 課題（機能S）にて、本線 Git 作業ツリーが dirty だと次回起動時のクリーンツリー検査 `assert_clean_working_tree()` と衝突することが判明した。
-  - そのため、本線ツリーは checkpoint に完全クリーン復元（差分ゼロ）し、タスク失敗の正本は `job_state.json` / `NIGHTLY_REPORT.md` / Quarantine ブランチ側に保全する仕様へ進化させる。これに伴いアサートを本線クリーン検証および `job_state.json` 照合へ更新。
-- `test_cli_morning_brief_subcommand` (line 648) および `test_feature_f_morning_report_generation` (line 609) は、隔離時 Morning Brief に `--resume` が含まれることをアサートしていた。
-  - しかし、Pilot 03 P1 課題（機能T）にて、FAILED ジョブに対して `--resume` を実行すると安全策により起動拒否されるため、実行不可能な案内となっていた。
-  - そのため、隔離時は実行不可能な `--resume` を排除し、実行可能な手動引き継ぎ手順（`git checkout {branch}`）を案内する仕様へ更新。アサート対象を `git checkout` に更新する。
+- （現時点で既存テストの変更予定なし。新規リカバリテスト・モジュールを追加）
 
 ## ステップ
-- [x] 1. 失敗隔離時の本線完全クリーン復元の実装 (機能S)
-- [x] 2. Morning Brief 復旧案内の刷新（実行不可能な --resume 排除）(機能T)
-- [x] 3. 試行単位 Attempts 履歴の完全監査記録の実装 (機能U)
-- [x] 4. 総合回帰検証 (全単体テスト・静的型検査・統合テスト)
+- [x] 1. `JobState` への `base_branch` 追跡と永続化の実装 (機能V)
+- [ ] 2. `RecoveryEngine.inspect()` によるクラッシュ不整合診断の実装 (機能W)
+- [ ] 3. `RecoveryEngine.plan()` & `apply()` による復旧計画生成と自動適用 (機能X)
+- [ ] 4. CLI への `auto-dev recover` (inspect / plan / apply) サブコマンド統合
+- [ ] 5. 総合回帰検証 (Pilot 04 Golden Master を含む全単体テスト・型検査・リンター)
 
 ## 止まっていること・判断待ち
-- なし (全ステップ完了・検証ゲート Exit 0 通過)
+- なし (Step 2 に着手)
 

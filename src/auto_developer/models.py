@@ -35,6 +35,7 @@ class JobState:
     completed_tasks: list[dict[str, Any]] = None  # type: ignore
     quarantined_task: dict[str, Any] | None = None
     last_updated_at: float = 0.0
+    base_branch: str = ""
 
     def __post_init__(self) -> None:
         if self.completed_tasks is None:
@@ -75,6 +76,7 @@ class JobState:
             "completed_tasks": self.completed_tasks,
             "quarantined_task": self.quarantined_task,
             "last_updated_at": self.last_updated_at,
+            "base_branch": self.base_branch,
         }
         tmp_path = path.with_suffix(".tmp")
         tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -98,4 +100,5 @@ class JobState:
             completed_tasks=data.get("completed_tasks", []),
             quarantined_task=data.get("quarantined_task"),
             last_updated_at=data.get("last_updated_at", 0.0),
+            base_branch=data.get("base_branch", ""),
         )
