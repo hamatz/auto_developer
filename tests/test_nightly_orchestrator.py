@@ -606,7 +606,8 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertIn("AssertionError: expected 200 but got 500", content)
             self.assertIn("あなたに判断してほしいこと", content)
             self.assertIn("git diff", content)
-            self.assertIn("--resume", content)
+            self.assertIn("git checkout quarantine/task-2-1793705000", content)
+            self.assertNotIn("--resume", content)
 
     def test_cli_morning_brief_subcommand(self):
         """CLI サブコマンド morning-brief によるコンソールブリーフィング表示の検証。"""
@@ -645,7 +646,8 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertIn("AUTO DEVELOPER / MORNING BRIEF", proc.stdout)
             self.assertIn("STOPPED_FAIL_FAST", proc.stdout)
             self.assertIn("quarantine/task-2-12345", proc.stdout)
-            self.assertIn("--resume", proc.stdout)
+            self.assertIn("git checkout quarantine/task-2-12345", proc.stdout)
+            self.assertNotIn("--resume", proc.stdout)
 
     def test_cli_init_command(self):
         """auto-dev init コマンドによるプロジェクトひな形生成の受入検証。"""
@@ -1942,6 +1944,43 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertEqual(state_data["status"], "FAILED")
             self.assertIsNotNone(state_data.get("quarantined_task"))
             self.assertEqual(state_data["quarantined_task"]["task_id"], "1")
+
+    def test_feature_t_quarantine_brief_provides_executable_actions_without_invalid_resume(self):
+        """機能T: 隔離時の Morning Brief が実行不可能な --resume を含めず、実行可能な手動引き継ぎ等の手順を案内すること。"""
+        from auto_developer.reporter import MorningReporter
+
+        reporter = MorningReporter()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "NIGHTLY_REPORT.md"
+            summary_data = {
+                "status": "FAILED",
+                "total_tasks": 2,
+                "succeeded_count": 0,
+                "quarantined_count": 1,
+                "checkpoint": "chk123",
+                "quarantined_task": {
+                    "task_id": "1",
+                    "title": "失敗タスク",
+                    "phase": "VERIFIER_ERROR",
+                    "quarantined_branch": "quarantine/task-1-12345",
+                    "log_path": "logs/nightly/task_1_failure.log",
+                    "root_cause_summary": "Exit 87 in tests",
+                },
+            }
+            reporter.write_report(report_path, summary_data)
+            content = report_path.read_text(encoding="utf-8")
+
+            # 実行拒否される --resume が含まれていないこと
+            self.assertNotIn("--resume", content, "Quarantine Morning Brief must NOT suggest invalid --resume")
+
+            # 実行可能な手動引き継ぎコマンド（git checkout）が含まれていること
+            self.assertIn("git checkout quarantine/task-1-12345", content)
+            self.assertIn("git diff chk123..quarantine/task-1-12345", content)
+
+            # コンソール用 Brief も同様であること
+            console_brief = reporter.format_console_brief(summary_data)
+            self.assertNotIn("--resume", console_brief, "Console brief must NOT suggest invalid --resume")
+            self.assertIn("git checkout quarantine/task-1-12345", console_brief)
 
 
 if __name__ == "__main__":
