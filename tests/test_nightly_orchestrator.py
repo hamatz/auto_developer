@@ -1982,6 +1982,146 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertNotIn("--resume", console_brief, "Console brief must NOT suggest invalid --resume")
             self.assertIn("git checkout quarantine/task-1-12345", console_brief)
 
+    def test_feature_u_attempts_history_recorded_in_evidence_and_failure_log(self):
+        """機能U: 試行単位 (Attempts) の完全履歴が Evidence Record (成功時) および Failure Log (隔離時) に記録されること。"""
+        import json
+        from auto_developer.orchestrator import NightlyOrchestrator
+        from auto_developer.runner import CommandRunnerAdapter
+        from auto_developer.evidence import EvidenceStore
+
+        # Case 1: Scenario A (Attempt 1 verify fail -> Attempt 2 verify pass -> Success with attempts in Evidence Record)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\nlogs/\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("# SPEC\nCore spec.\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. 再試行成功タスク\n", encoding="utf-8")
+            (repo / "src.py").write_text("initial = 1\n", encoding="utf-8")
+
+            # verify script: 1回目は exit 86, 2回目は exit 0
+            verify_counter = repo / ".verify_count"
+            verify_counter.write_text("0", encoding="utf-8")
+            verify_sh = repo / "verify.sh"
+            verify_sh.write_text(
+                "#!/usr/bin/env bash\n"
+                "COUNT=$(cat .verify_count)\n"
+                "if [ \"$COUNT\" -eq \"0\" ]; then\n"
+                "  echo 1 > .verify_count\n"
+                "  echo 'Temporary Flake Exit 86' >&2\n"
+                "  exit 86\n"
+                "fi\n"
+                "echo 'All tests passed'\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            verify_sh.chmod(0o755)
+
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            class RetryMakerRunner(CommandRunnerAdapter):
+                def __init__(self):
+                    self.maker_calls = []
+
+                def run_maker(self, task, context):
+                    self.maker_calls.append(context)
+                    (repo / "src.py").write_text(f"val = {len(self.maker_calls)}\n", encoding="utf-8")
+                    return 0, f"maker attempt {len(self.maker_calls)}"
+
+                def run_checker(self, task, diff, spec_content):
+                    return True, "APPROVE: looks good"
+
+            runner = RetryMakerRunner()
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=verify_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=repo / ".dev" / "job_state.json",
+                runner_adapter=runner,
+                dry_run=False,
+            )
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 0, "Scenario A must succeed after retry")
+
+            # Evidence Record に attempts 履歴が保存されていること
+            evidence_store = EvidenceStore(repo)
+            record = evidence_store.get_record("1")
+            self.assertIsNotNone(record, "Evidence record for task 1 must exist")
+            self.assertIn("attempts", record, "Evidence record must contain 'attempts' field")
+            attempts = record["attempts"]
+            self.assertEqual(len(attempts), 2, f"Must have 2 attempts recorded, got: {attempts}")
+            self.assertEqual(attempts[0]["attempt"], 1)
+            self.assertEqual(attempts[0]["exit_code"], 86)
+            self.assertEqual(attempts[1]["attempt"], 2)
+            self.assertEqual(attempts[1]["exit_code"], 0)
+
+        # Case 2: Scenario B (Attempt 1 fail -> Attempt 2 fail -> Failure log contains both attempt 1 and 2 logs)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\nlogs/\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("# SPEC\nCore spec.\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. 2回連続失敗タスク\n", encoding="utf-8")
+            (repo / "src.py").write_text("initial = 1\n", encoding="utf-8")
+
+            # verify script: 常に exit 87
+            verify_sh = repo / "verify.sh"
+            verify_sh.write_text(
+                "#!/usr/bin/env bash\n"
+                "echo 'Persistent Failure Exit 87' >&2\n"
+                "exit 87\n",
+                encoding="utf-8",
+            )
+            verify_sh.chmod(0o755)
+
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            class AlwaysFailingMaker(CommandRunnerAdapter):
+                def __init__(self):
+                    self.calls = 0
+
+                def run_maker(self, task, context):
+                    self.calls += 1
+                    (repo / "src.py").write_text(f"val = {self.calls}\n", encoding="utf-8")
+                    return 0, f"maker attempt output {self.calls}"
+
+                def run_checker(self, task, diff, spec_content):
+                    return True, "APPROVE"
+
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=verify_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=repo / ".dev" / "job_state.json",
+                runner_adapter=AlwaysFailingMaker(),
+                dry_run=False,
+            )
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 1, "Scenario B must exit with 1")
+
+            # failure log に ATTEMPT 1 と ATTEMPT 2 のログがそれぞれ記録されていること
+            log_path = repo / "logs" / "nightly" / "task_1_failure.log"
+            self.assertTrue(log_path.exists(), f"Failure log {log_path} must exist")
+            log_content = log_path.read_text(encoding="utf-8")
+            self.assertIn("--- ATTEMPT 1 LOG ---", log_content)
+            self.assertIn("--- ATTEMPT 2 LOG ---", log_content)
+            # attempt 2 のログが (none) ではなく、実際の失敗ログが入っていること
+            attempt_2_section = log_content.split("--- ATTEMPT 2 LOG ---")[1].split("--- WORKSPACE")[0]
+            self.assertIn("Exit 87", attempt_2_section)
+            self.assertNotEqual(attempt_2_section.strip(), "(none)")
+
+
 
 if __name__ == "__main__":
     unittest.main()

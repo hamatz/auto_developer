@@ -163,12 +163,27 @@ class NightlyOrchestrator:
             job_state.transition_phase("MAKER", attempt=1)
             job_state.save(self.state_path)
 
+            # タスクごとの試行単位履歴
+            task_attempts: list[dict[str, Any]] = []
+            attempt_1_log: str = ""
+            attempt_2_log: str = ""
+
             # Phase A: Maker 実装呼び出し
             print(f"  [Phase A: Maker] Running Maker for task {task.task_id}...")
             maker_code, maker_out = self.runner_adapter.run_maker(task, context={"attempt": 1})
             if maker_code != 0:
                 print(f"  Maker failed with exit {maker_code}:\n{maker_out}", file=sys.stderr)
-                return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "MAKER_CRASH", maker_out)
+                return self._handle_failure(
+                    task,
+                    checkpoint,
+                    total_tasks,
+                    succeeded_tasks,
+                    job_state,
+                    "MAKER_CRASH",
+                    maker_out,
+                    attempt_1_log=maker_out,
+                    attempts=[{"attempt": 1, "phase": "MAKER", "exit_code": maker_code, "output_summary": maker_out.splitlines()[-5:]}],
+                )
 
             # Phase A-2: 差分存在検査 (No-Op Reject)
             if not self.git_guard.has_changes_since(checkpoint):
@@ -181,12 +196,22 @@ class NightlyOrchestrator:
                     job_state,
                     "MAKER_NO_DIFF",
                     "Maker completed with exit 0 but produced no changes (diff or new files)",
+                    attempt_1_log=maker_out,
                 )
 
             # Phase B: 不変条件検査 (Circuit Breaker)
             if not self.git_guard.check_protected_files_untouched(checkpoint):
                 print(f"  CIRCUIT BREAKER: Protected file modified in task {task.task_id}!", file=sys.stderr)
-                return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "INVARIANT_BREACH", "Protected file modification detected")
+                return self._handle_failure(
+                    task,
+                    checkpoint,
+                    total_tasks,
+                    succeeded_tasks,
+                    job_state,
+                    "INVARIANT_BREACH",
+                    "Protected file modification detected",
+                    attempt_1_log=maker_out,
+                )
 
             # 確定対象のツリーを検証前に反映（PLAN.md のタスク状態を completed に更新）
             self.dispatcher.mark_task_status(self.plan_path, task, status="completed")
@@ -196,6 +221,15 @@ class NightlyOrchestrator:
             code, out = self.verifier.run_verification(
                 self.verify_script, timeout_sec=self.timeout_sec, cwd=self.repo_dir
             )
+            last_out_lines = [l.strip() for l in out.strip().splitlines() if l.strip()]
+            task_attempts.append({
+                "attempt": 1,
+                "phase": "VERIFY",
+                "exit_code": code,
+                "output_summary": last_out_lines[-10:] if last_out_lines else [],
+            })
+            attempt_1_log = f"Maker (Attempt 1) exit {maker_code}\n{maker_out}\n\nVerifier (Attempt 1) exit {code}\n{out}"
+
             if code != 0:
                 print(f"  Verification failed on attempt 1 (Exit {code}). Attempting 1 retry with Maker...", file=sys.stderr)
                 job_state.transition_phase("MAKER", attempt=2)
@@ -204,7 +238,24 @@ class NightlyOrchestrator:
                 # Attempt 2: Maker retry with verification failure output
                 maker_code2, maker_out2 = self.runner_adapter.run_maker(task, context={"attempt": 2, "prev_error": out})
                 if maker_code2 != 0:
-                    return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "MAKER_CRASH", maker_out2)
+                    task_attempts.append({
+                        "attempt": 2,
+                        "phase": "MAKER",
+                        "exit_code": maker_code2,
+                        "output_summary": maker_out2.splitlines()[-5:],
+                    })
+                    return self._handle_failure(
+                        task,
+                        checkpoint,
+                        total_tasks,
+                        succeeded_tasks,
+                        job_state,
+                        "MAKER_CRASH",
+                        maker_out2,
+                        attempt_1_log=attempt_1_log,
+                        attempt_2_log=maker_out2,
+                        attempts=task_attempts,
+                    )
 
                 if not self.git_guard.has_changes_since(checkpoint):
                     return self._handle_failure(
@@ -215,18 +266,52 @@ class NightlyOrchestrator:
                         job_state,
                         "MAKER_NO_DIFF",
                         "Maker retry produced no changes",
+                        attempt_1_log=attempt_1_log,
+                        attempt_2_log=maker_out2,
+                        attempts=task_attempts,
                     )
 
                 if not self.git_guard.check_protected_files_untouched(checkpoint):
-                    return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "INVARIANT_BREACH", "Protected file modified on retry")
+                    return self._handle_failure(
+                        task,
+                        checkpoint,
+                        total_tasks,
+                        succeeded_tasks,
+                        job_state,
+                        "INVARIANT_BREACH",
+                        "Protected file modified on retry",
+                        attempt_1_log=attempt_1_log,
+                        attempt_2_log=maker_out2,
+                        attempts=task_attempts,
+                    )
 
                 self.dispatcher.mark_task_status(self.plan_path, task, status="completed")
                 code, out = self.verifier.run_verification(
                     self.verify_script, timeout_sec=self.timeout_sec, cwd=self.repo_dir
                 )
+                last_out_lines2 = [l.strip() for l in out.strip().splitlines() if l.strip()]
+                task_attempts.append({
+                    "attempt": 2,
+                    "phase": "VERIFY",
+                    "exit_code": code,
+                    "output_summary": last_out_lines2[-10:] if last_out_lines2 else [],
+                })
+                attempt_2_log = f"Maker (Attempt 2) exit {maker_code2}\n{maker_out2}\n\nVerifier (Attempt 2) exit {code}\n{out}"
+
                 if code != 0:
                     print(f"  Verification failed on attempt 2 (Exit {code}). Strict Fail-Fast triggered.", file=sys.stderr)
-                    return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "VERIFIER_ERROR", out)
+                    return self._handle_failure(
+                        task,
+                        checkpoint,
+                        total_tasks,
+                        succeeded_tasks,
+                        job_state,
+                        "VERIFIER_ERROR",
+                        out,
+                        attempt_1_log=attempt_1_log,
+                        attempt_2_log=attempt_2_log,
+                        attempts=task_attempts,
+                    )
 
             # Phase D: 独立査読 (Checker Review)
             print("  [Phase D: Checker] Running independent review...")
@@ -256,7 +341,18 @@ class NightlyOrchestrator:
             approved, checker_reason = self.runner_adapter.run_checker(task, diff=diff_text, spec_content=spec_text)
             if not approved:
                 print(f"  Checker REJECTED task {task.task_id}: {checker_reason}", file=sys.stderr)
-                return self._handle_failure(task, checkpoint, total_tasks, succeeded_tasks, job_state, "CHECKER_REJECT", checker_reason)
+                return self._handle_failure(
+                    task,
+                    checkpoint,
+                    total_tasks,
+                    succeeded_tasks,
+                    job_state,
+                    "CHECKER_REJECT",
+                    checker_reason,
+                    attempt_1_log=attempt_1_log,
+                    attempt_2_log=attempt_2_log,
+                    attempts=task_attempts,
+                )
 
             # Phase E: 確定とコミット (Evidence & Commit)
             print("  [Phase E: Commit] Checker approved. Finalizing plan and issuing evidence...")
@@ -280,6 +376,7 @@ class NightlyOrchestrator:
                 details={
                     "checker_decision": checker_reason,
                     "verification": verification_meta,
+                    "attempts": task_attempts,
                 },
             )
 
@@ -307,7 +404,7 @@ class NightlyOrchestrator:
                 )
                 return 3
 
-            # 6. 永続監査レコード（Evidence Record）の保存 (機能N / P1-1)
+            # 6. 永続監査レコード（Evidence Record）の保存 (機能N / P1-1, 機能U)
             self.evidence_store.archive_record(
                 task_id=task.task_id,
                 status="COMPLETED",
@@ -321,6 +418,7 @@ class NightlyOrchestrator:
                     "reason": checker_reason,
                 },
                 verification_info=verification_meta,
+                attempts=task_attempts,
             )
 
             task_info = {
@@ -394,6 +492,9 @@ class NightlyOrchestrator:
         job_state: JobState,
         phase: str,
         reason: str,
+        attempt_1_log: str | None = None,
+        attempt_2_log: str | None = None,
+        attempts: list[dict[str, Any]] | None = None,
     ) -> int:
         self.evidence_store.clear_evidence(task.task_id)
         job_state.status = "FAILED"
@@ -409,7 +510,9 @@ class NightlyOrchestrator:
                 "title": task.title,
                 "checkpoint": checkpoint,
                 "quarantined_branch": quarantine_branch,
-                "attempt_1_log": reason,
+                "attempt_1_log": attempt_1_log or reason,
+                "attempt_2_log": attempt_2_log or "(none)",
+                "attempts": attempts or [],
             },
         )
         quarantined_info = {
@@ -418,6 +521,7 @@ class NightlyOrchestrator:
             "quarantined_branch": quarantine_branch,
             "log_path": str(log_path),
             "root_cause_summary": reason[:300],
+            "attempts": attempts or [],
         }
         job_state.quarantined_task = quarantined_info
         job_state.save(self.state_path)
