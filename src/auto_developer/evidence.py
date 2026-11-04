@@ -91,6 +91,7 @@ class EvidenceStore:
         commit_info: dict[str, Any] | None = None,
         checker_info: dict[str, Any] | None = None,
         verification_info: dict[str, Any] | None = None,
+        attempts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """コミット完了後に監査レコードを最終更新する。"""
         import json
@@ -115,6 +116,17 @@ class EvidenceStore:
                 and "verification" in data["details"]
             ):
                 data["verification"] = data["details"]["verification"]
+
+            if attempts is not None:
+                data["attempts"] = attempts
+            elif (
+                "attempts" not in data
+                and "details" in data
+                and isinstance(data["details"], dict)
+                and "attempts" in data["details"]
+            ):
+                data["attempts"] = data["details"]["attempts"]
+
             record_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2),
                 encoding="utf-8",

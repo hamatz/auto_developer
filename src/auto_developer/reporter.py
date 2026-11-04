@@ -155,9 +155,9 @@ class MorningReporter:
                     "   ```bash",
                     f"   cat {log_p}",
                     "   ```",
-                    "3. **安全な環境で修正を再試行する**:",
+                    "3. **隔離ブランチの作業成果を引き継ぐ / 手動修正する**:",
                     "   ```bash",
-                    "   python3 scripts/nightly_orchestrator.py --resume",
+                    f"   git checkout {branch}",
                     "   ```",
                     "4. **今回は保留し、隔離ブランチを破棄する**:",
                     "   ```bash",
@@ -229,10 +229,10 @@ class MorningReporter:
                     f"    {quarantined.get('root_cause_summary', 'N/A')[:120]}...",
                     "------------------------------------------------------------",
                     " [Next Choices for Developer]",
-                    f"  1. Diff:   git diff {checkpoint}..{branch}",
-                    f"  2. Log:    cat {log_p}",
-                    "  3. Resume: python3 scripts/nightly_orchestrator.py --resume",
-                    f"  4. Drop:   git branch -D {branch}",
+                    f"  1. Diff:     git diff {checkpoint}..{branch}",
+                    f"  2. Log:      cat {log_p}",
+                    f"  3. Checkout: git checkout {branch}",
+                    f"  4. Drop:     git branch -D {branch}",
                 ]
             )
         else:
