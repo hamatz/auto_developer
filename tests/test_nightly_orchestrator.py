@@ -1,5 +1,6 @@
 """Acceptance test suite for Antigravity Autonomous Pipeline Orchestrator (SPEC.md)."""
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -1886,7 +1887,6 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
     def test_feature_s_quarantine_leaves_clean_working_tree(self):
         """機能S: タスク失敗隔離後、本線作業ツリーは未コミットの差分を一切残さず完全にクリーンであること。"""
-        import json
         from auto_developer.orchestrator import NightlyOrchestrator
         from auto_developer.runner import CommandRunnerAdapter
 
@@ -1984,10 +1984,9 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
     def test_feature_u_attempts_history_recorded_in_evidence_and_failure_log(self):
         """機能U: 試行単位 (Attempts) の完全履歴が Evidence Record (成功時) および Failure Log (隔離時) に記録されること。"""
-        import json
+        from auto_developer.evidence import EvidenceStore
         from auto_developer.orchestrator import NightlyOrchestrator
         from auto_developer.runner import CommandRunnerAdapter
-        from auto_developer.evidence import EvidenceStore
 
         # Case 1: Scenario A (Attempt 1 verify fail -> Attempt 2 verify pass -> Success with attempts in Evidence Record)
         with tempfile.TemporaryDirectory() as tmpdir:
