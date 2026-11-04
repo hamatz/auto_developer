@@ -409,9 +409,10 @@ def main(argv: list[str] | None = None) -> int:
         target = next((t for t in tasks if t.task_id == args.task_id), None)
         task_id = target.task_id if target else args.task_id
         evidence_store.clear_evidence(task_id=task_id)
-        quarantine_branch = git_guard.quarantine_and_restore(args.checkpoint, task_id=task_id)
         if target:
             dispatcher.mark_task_status(plan_path, target, status="failed")
+        quarantine_branch = git_guard.quarantine_and_restore(args.checkpoint, task_id=task_id)
+        if target:
             log_path = work_dir / "logs" / "nightly" / f"task_{target.task_id}_failure.log"
             reporter.write_failure_log(
                 log_path,

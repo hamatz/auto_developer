@@ -57,6 +57,14 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
 - [x] 機能R (Morning Brief のデュアルコマンド案内とチェックポイント分離表示):
   1. Morning Brief の「動作確認コマンド」において、「検証コマンド (Verify)」と「成果物利用コマンド (Run)」を明確に分離して提示する。
   2. レポートの概要テーブルにおいて、開発開始時の「初期チェックポイント (Initial Checkpoint)」と完了時の「最新コミット (Final Commit)」を区別して表示する。
+- [x] 機能S (失敗隔離時の本線完全クリーン復元):
+  1. タスク失敗時（Quarantine 発動時）、本線 Git 作業ツリー（`PLAN.md` 含む）に未コミットの差分を残さず、直前のクリーンチェックポイントに完全復元（`git status --porcelain` が空）する。
+  2. 失敗タスク情報（`**[FAILED]**`）は `job_state.json`、`NIGHTLY_REPORT.md`、および隔離ブランチ側の `PLAN.md` に保全する。
+- [ ] 機能T (実行可能な復旧案内への刷新):
+  1. `NIGHTLY_REPORT.md` において、`FAILED` / 隔離時の案内から、実行拒否される `--resume` を排除し、隔離ブランチの確認・引き継ぎ・破棄などの実行可能な手順を提示する。
+- [ ] 機能U (試行単位 Attempts 履歴の完全監査記録):
+  1. タスク実行における各 Attempt（試行番号、フェーズ、終了コード、出力要約）の履歴を配列として追跡・保存する。
+  2. 成功時は Evidence Record に `attempts` を記録し、失敗時は `logs/nightly/task_<id>_failure.log` に各 Attempt のログを漏れなく出力する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

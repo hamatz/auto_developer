@@ -398,8 +398,8 @@ class NightlyOrchestrator:
         self.evidence_store.clear_evidence(task.task_id)
         job_state.status = "FAILED"
         job_state.transition_phase("QUARANTINE")
-        quarantine_branch = self.git_guard.quarantine_and_restore(checkpoint, task_id=task.task_id)
         self.dispatcher.mark_task_status(self.plan_path, task, status="failed")
+        quarantine_branch = self.git_guard.quarantine_and_restore(checkpoint, task_id=task.task_id)
 
         log_path = self.repo_dir / "logs" / "nightly" / f"task_{task.task_id}_failure.log"
         self.reporter.write_failure_log(

@@ -819,6 +819,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
     def test_feature_h_maker_no_diff_fails_and_quarantines(self):
         """機能H-3: Maker が成功終了しても作業ツリーに差分が一切ない場合、タスク未達成として隔離・停止する。"""
+        import json
         import tempfile
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
@@ -849,9 +850,11 @@ class TestNightlyOrchestrator(unittest.TestCase):
             )
             exit_code = orchestrator.run()
             self.assertEqual(exit_code, 1, "Must exit with code 1 when Maker produces no diff")
-            # PLAN.md should mark task as failed
-            plan_text = (repo / "PLAN.md").read_text(encoding="utf-8")
-            self.assertIn("[FAILED]", plan_text)
+            # 本線作業ツリーはクリーンに復元され、失敗情報は job_state.json に正本として保全される (機能S)
+            status_out = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(status_out, "", "Working tree must be clean after quarantine")
+            state_data = json.loads((repo / ".dev" / "job_state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state_data["status"], "FAILED")
 
     def test_feature_i_evidence_binding_detects_tampered_tree_after_verify(self):
         """機能I: verify-step 通過後に作業ツリーが改ざんされた場合、commit-step はコミットを拒否 (Exit 3) する。"""
@@ -1524,6 +1527,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
     def test_feature_p_task_failure_preserves_uncompleted_and_stops_safely(self):
         """機能P-3: 検証失敗時はタスクが[x]にならず[FAILED]となり、後続タスクを実行せず安全に停止すること。"""
+        import json
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
@@ -1567,11 +1571,14 @@ class TestNightlyOrchestrator(unittest.TestCase):
             # タスク2は実行されていないこと
             self.assertNotIn("2", maker_calls, "Subsequent task 2 must NOT be executed after task 1 failure")
 
-            # PLAN.md の状態検査
+            # 本線作業ツリーがクリーンであり、失敗タスクが [x] になっていないこと (機能S)
+            status_out = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(status_out, "", "Working tree must be clean after quarantine")
             plan_text = (repo / "PLAN.md").read_text(encoding="utf-8")
-            self.assertIn("**[FAILED]**", plan_text)
             self.assertNotIn("- [x]", plan_text, "Failed task must NOT be marked [x]")
             self.assertIn("- [ ] 2. 後続タスク", plan_text)
+            state_data = json.loads((repo / ".dev" / "job_state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state_data["status"], "FAILED")
 
             # HEAD は checkpoint のままであること
             current_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
@@ -1874,6 +1881,67 @@ class TestNightlyOrchestrator(unittest.TestCase):
             # チェックポイント分離表示
             self.assertIn("| **初期チェックポイント** | `003fd387092bab02` |", content)
             self.assertIn("| **最新コミット (HEAD)** | `84f864138968304a` |", content)
+
+    def test_feature_s_quarantine_leaves_clean_working_tree(self):
+        """機能S: タスク失敗隔離後、本線作業ツリーは未コミットの差分を一切残さず完全にクリーンであること。"""
+        import json
+        from auto_developer.orchestrator import NightlyOrchestrator
+        from auto_developer.runner import CommandRunnerAdapter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("# SPEC\nCore spec.\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("- [ ] 1. 失敗するタスク\n", encoding="utf-8")
+
+            scripts_dir = repo / "scripts"
+            scripts_dir.mkdir(parents=True, exist_ok=True)
+            verify_sh = scripts_dir / "verify_local.sh"
+            verify_sh.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+            verify_sh.chmod(0o755)
+
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            class FailingRunner(CommandRunnerAdapter):
+                def run_maker(self, task, context):
+                    (repo / "module.py").write_text("broken implementation\n", encoding="utf-8")
+                    return 0, "maker output"
+
+                def run_checker(self, task, diff, spec_content):
+                    return False, '{"decision": "REJECT"}'
+
+            orchestrator = NightlyOrchestrator(
+                repo_dir=repo,
+                plan_path=repo / "PLAN.md",
+                spec_path=repo / "SPEC.md",
+                verify_script=verify_sh,
+                report_path=repo / "NIGHTLY_REPORT.md",
+                state_path=repo / ".dev" / "job_state.json",
+                runner_adapter=FailingRunner(),
+                dry_run=False,
+            )
+            exit_code = orchestrator.run()
+            self.assertEqual(exit_code, 1, "Must exit with code 1 on failure")
+
+            # 1. 本線作業ツリーが完全にクリーンであること (git status --porcelain が空)
+            status_proc = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=True)
+            self.assertEqual(status_proc.stdout.strip(), "", f"Working tree must be completely clean after quarantine, but had:\n{status_proc.stdout}")
+
+            # 2. 本線 HEAD が直前の checkpoint と完全一致すること
+            head_proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True)
+            self.assertEqual(head_proc.stdout.strip(), checkpoint)
+
+            # 3. job_state.json に FAILED 状態と隔離タスク情報が正本として記録されていること
+            state_data = json.loads((repo / ".dev" / "job_state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state_data["status"], "FAILED")
+            self.assertIsNotNone(state_data.get("quarantined_task"))
+            self.assertEqual(state_data["quarantined_task"]["task_id"], "1")
 
 
 if __name__ == "__main__":
