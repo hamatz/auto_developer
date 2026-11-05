@@ -168,7 +168,22 @@ class RecoveryEngine:
                 recommended_action="Inspect state file manually.",
             )
 
-        base_branch = job_state.base_branch or current_branch
+        base_branch = job_state.base_branch
+        if not base_branch or base_branch.startswith("quarantine/"):
+            # quarantine/ ブランチはベースブランチではないため、main / master などの既存ブランチから安全に特定
+            branches_proc = self.git_guard._run_git(["branch", "--list"])
+            branch_names = [
+                b.strip().lstrip("* ").strip()
+                for b in branches_proc.stdout.splitlines()
+                if b.strip()
+            ]
+            for candidate in ("main", "master", "develop"):
+                if candidate in branch_names:
+                    base_branch = candidate
+                    break
+            else:
+                non_quarantine = [b for b in branch_names if not b.startswith("quarantine/")]
+                base_branch = non_quarantine[0] if non_quarantine else (current_branch or "main")
         checkpoint = job_state.checkpoint_hash or head_commit
         task_id = job_state.current_task_id
 
