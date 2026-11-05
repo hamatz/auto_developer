@@ -195,7 +195,7 @@ class GitGuard:
 
         if has_changes:
             # 1. 物理スナップショットの安全作成 (Manifest 連携)
-            archive_path = self.create_quarantine_snapshot(task_id=task_id, checkpoint=checkpoint, job_id=job_id)
+            self.create_quarantine_snapshot(task_id=task_id, checkpoint=checkpoint, job_id=job_id)
 
             # 2. 隔離ブランチへの安全なステージとコミット (追跡済みファイルのみ add -u でステージし、未追跡の秘密ファイル混入を物理遮断)
             quarantine_branch = f"quarantine/{clean_id}-{timestamp}"

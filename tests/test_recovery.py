@@ -720,6 +720,7 @@ class TestRecoveryCLI(unittest.TestCase):
         """機能X (P0-2): recover apply の処理中、auto_developer.lock の排他ロックが終始保持されていること。"""
         import fcntl
         from unittest.mock import patch
+
         from auto_developer.evidence import EvidenceStore
         from auto_developer.recovery import RecoveryEngine
 
@@ -789,6 +790,7 @@ class TestRecoveryCLI(unittest.TestCase):
     def test_concurrent_two_processes_recover_apply_mutual_exclusion(self):
         """機能X (P0-2): 2つの recover apply が同時に実行された場合、片方のみが適用され他方は安全に拒否されること。"""
         import concurrent.futures
+
         from auto_developer.evidence import EvidenceStore
         from auto_developer.recovery import RecoveryEngine
 
@@ -836,8 +838,7 @@ class TestRecoveryCLI(unittest.TestCase):
 
             # 1つが成功、もう1つが排他拒否（または1つ成功後に完了済みでHealthy/無変更）
             success_count = sum(1 for r in results if r.success and r.resulting_state in ("COMPLETED", "RUNNING", "FAILED", "RESET_FOR_RETRY"))
-            # 少なくとも一方は成功し、二重実行で壊れていないこと
-            self.assertTrue(any(r.success for r in results), "At least one apply must succeed")
+            self.assertGreaterEqual(success_count, 1, "At least one apply must succeed")
             # 適用後の整合性が保たれていること
             post_report = engine1.inspect()
             self.assertEqual(post_report.diagnosis.value, "HEALTHY")
@@ -846,7 +847,8 @@ class TestRecoveryCLI(unittest.TestCase):
         """機能X (P1): 無関係な古い tar アーカイブが存在する場合、今回の復旧証拠として誤採用せず、Manifest に基づいて今回のタスクのスナップショットを特定・生成すること。"""
         import json
         import tarfile
-        from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
+
+        from auto_developer.recovery import RecoveryEngine
 
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
@@ -913,6 +915,7 @@ class TestRecoveryCLI(unittest.TestCase):
     def test_recovery_apply_interruption_and_subsequent_retry_is_idempotent(self):
         """機能X: 復旧処理 (apply) が途中で中断 (SIGKILL/例外) されても、再実行時に二重確定や成果消失を起こさず健全に復旧できること (冪等性)。"""
         from unittest.mock import patch
+
         from auto_developer.evidence import EvidenceStore
         from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
 
@@ -953,9 +956,11 @@ class TestRecoveryCLI(unittest.TestCase):
             engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
 
             # 1回目の apply 実行中に証拠アーカイブのタイミングで SIGKILL (シミュレーション例外)
-            with patch.object(EvidenceStore, "archive_record", side_effect=RuntimeError("Simulated SIGKILL during recovery apply")):
-                with self.assertRaises(RuntimeError):
-                    engine.apply()
+            with (
+                patch.object(EvidenceStore, "archive_record", side_effect=RuntimeError("Simulated SIGKILL during recovery apply")),
+                self.assertRaises(RuntimeError),
+            ):
+                engine.apply()
 
             # 中断直後でもロックが正常に解放されていること（再起動時のブロック防止）
             lock_file = repo / ".dev" / "auto_developer.lock"
