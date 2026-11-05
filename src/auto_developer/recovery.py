@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tarfile
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -173,8 +174,15 @@ class RecoveryEngine:
 
         # 1. Quarantine 途中クラッシュ (Scenario 04 相当)
         # 現在のブランチが quarantine/ で始まっている、または base_branch と異なり quarantine ブランチが存在
-        quarantine_snapshots = list(self.repo_dir.glob(".dev/quarantines/snapshot_task_*.tar.gz"))
-        latest_snapshot = str(quarantine_snapshots[-1]) if quarantine_snapshots else None
+        quarantine_snapshots = sorted(self.repo_dir.glob(".dev/quarantines/snapshot_task_*.tar.gz"))
+        valid_snapshots: list[str] = []
+        for s in quarantine_snapshots:
+            try:
+                if tarfile.is_tarfile(s):
+                    valid_snapshots.append(str(s))
+            except (OSError, tarfile.TarError):
+                continue
+        latest_snapshot = valid_snapshots[-1] if valid_snapshots else None
 
         if current_branch.startswith("quarantine/") or (
             job_state.base_branch and current_branch != job_state.base_branch and "quarantine" in current_branch
@@ -457,18 +465,63 @@ class RecoveryEngine:
                 message=f"Successfully advanced JobState to COMPLETED with verified commit {report.head_commit[:7]}.",
             )
 
-        # 2. Scenario 04 復旧: ベースブランチ復帰と安全隔離の完了
+        # 2. Scenario 04 復旧: 隔離ブランチへのコミット確定、tar検証、ベースブランチ復帰 (P0-2)
         if report.diagnosis == RecoveryDiagnosis.QUARANTINE_INCOMPLETE:
-            # 2-1. ベースブランチへの復帰
+            # 2-1. 隔離ブランチ上で未コミット成果（未追跡ファイル・変更）が存在する場合、まず隔離ブランチに確実にコミット
+            status_proc = self.git_guard._run_git(["status", "--porcelain"])
+            has_uncommitted = bool(status_proc.stdout.strip())
+            if has_uncommitted:
+                self.git_guard._run_git(["add", "-A"])
+                self.git_guard._run_git([
+                    "commit",
+                    "-m",
+                    f"quarantine: preserve interrupted work for task {report.task_id or 'unknown'}",
+                ])
+                applied.append(f"Committed uncommitted work to quarantine branch '{report.current_branch}'")
+
+            # 2-2. tar アーカイブの整合性を検証。無効または未作成なら正規 tar アーカイブを生成
+            quarantine_dir = self.repo_dir / ".dev" / "quarantines"
+            quarantine_dir.mkdir(parents=True, exist_ok=True)
+            snapshots = sorted(quarantine_dir.glob("snapshot_task_*.tar.gz"))
+            valid_snapshot = None
+            for s in snapshots:
+                try:
+                    if tarfile.is_tarfile(s):
+                        with tarfile.open(s, "r:gz") as tar:
+                            tar.getmembers()
+                        valid_snapshot = s
+                except (OSError, tarfile.TarError):
+                    continue
+
+            if not valid_snapshot:
+                # アーカイブが存在しないか破損しているため、新規にスナップショットを生成
+                import time
+
+                new_snap_path = quarantine_dir / f"snapshot_task_{report.task_id or 'recovered'}_{int(time.time())}.tar.gz"
+                with tarfile.open(new_snap_path, "w:gz") as tar:
+                    for p in sorted(self.repo_dir.rglob("*")):
+                        if not p.is_file():
+                            continue
+                        rel_path = p.relative_to(self.repo_dir)
+                        str_rel = str(rel_path)
+                        if str_rel.startswith(".git") or str_rel.startswith(".dev"):
+                            continue
+                        tar.add(p, arcname=str_rel)
+                valid_snapshot = new_snap_path
+                applied.append(f"Created verified quarantine archive at {new_snap_path.name}")
+            else:
+                applied.append(f"Verified quarantine archive integrity at {valid_snapshot.name}")
+
+            # 2-3. コミット・アーカイブの保全が確認できてから、ベースブランチへの復帰
             self.git_guard._run_git(["checkout", report.base_branch])
             applied.append(f"Switched branch to base branch '{report.base_branch}'")
 
-            # 2-2. 本線作業ツリーを checkpoint に完全クリーン復元
+            # 2-4. 本線作業ツリーを checkpoint に完全クリーン復元
             self.git_guard._run_git(["checkout", report.checkpoint_commit, "--", "."])
             self.git_guard._run_git(["clean", "-fd"])
             applied.append(f"Cleanly restored base branch to checkpoint {report.checkpoint_commit[:7]}")
 
-            # 2-3. JobState を FAILED / QUARANTINE 完了として保存
+            # 2-5. JobState を FAILED / QUARANTINE 完了として保存
             job_state = JobState.load(self.state_path)
             job_state.status = "FAILED"
             job_state.transition_phase("QUARANTINE")
@@ -486,7 +539,7 @@ class RecoveryEngine:
                 success=True,
                 applied_actions=applied,
                 resulting_state="FAILED",
-                message=f"Safely restored base branch '{report.base_branch}' and finalized quarantine state.",
+                message=f"Safely preserved quarantine work to '{report.current_branch}' and restored base branch.",
             )
 
         # 3. Scenario 01 & 02 復旧: 実行中クラッシュからのクリーン復元

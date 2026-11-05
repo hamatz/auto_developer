@@ -161,7 +161,9 @@ class TestRecoveryInspect(unittest.TestCase):
             quarantine_dir = repo / ".dev" / "quarantines"
             quarantine_dir.mkdir(parents=True, exist_ok=True)
             snapshot_file = quarantine_dir / "snapshot_task_1_1793812132.tar.gz"
-            snapshot_file.write_bytes(b"dummy tar")
+            import tarfile
+            with tarfile.open(snapshot_file, "w:gz") as tar:
+                tar.add(repo / "probe.py", arcname="probe.py")
 
             # JobState は MAKER Attempt 2 のまま（Quarantine 保存前にクラッシュ）
             state_file = repo / ".dev" / "job_state.json"
@@ -377,7 +379,9 @@ class TestRecoveryPlanAndApply(unittest.TestCase):
             quarantine_dir = repo / ".dev" / "quarantines"
             quarantine_dir.mkdir(parents=True, exist_ok=True)
             snapshot_file = quarantine_dir / "snapshot_task_1_1793812132.tar.gz"
-            snapshot_file.write_bytes(b"dummy tar")
+            import tarfile
+            with tarfile.open(snapshot_file, "w:gz") as tar:
+                tar.add(repo / "probe.py", arcname="probe.py")
 
             state_file = repo / ".dev" / "job_state.json"
             job_state = JobState(
@@ -420,6 +424,26 @@ class TestRecoveryPlanAndApply(unittest.TestCase):
             self.assertEqual(recovered_state.status, "FAILED")
             self.assertIsNotNone(recovered_state.quarantined_task)
             self.assertEqual(recovered_state.quarantined_task["task_id"], "1")
+
+            # 5. 隔離ブランチ (quarantine/1-1793812132) 側に probe.py が確実にコミットされていること！ (P0-2)
+            quarantine_tree_files = subprocess.run(
+                ["git", "ls-tree", "-r", "--name-only", quarantine_branch],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+            self.assertIn("probe.py", quarantine_tree_files, f"probe.py must be committed to quarantine branch, got: {quarantine_tree_files}")
+
+            # 6. 有効な tar アーカイブが生成・検証され、probe.py が含まれていること！ (P0-2)
+            import tarfile
+            snapshots = list((repo / ".dev" / "quarantines").glob("snapshot_task_*.tar.gz"))
+            self.assertTrue(len(snapshots) > 0, "Valid tar snapshot must exist")
+            valid_snapshots = [s for s in snapshots if tarfile.is_tarfile(s)]
+            self.assertTrue(len(valid_snapshots) > 0, "Snapshot must be a valid tarfile")
+            with tarfile.open(valid_snapshots[-1], "r:gz") as tar:
+                tar_names = tar.getnames()
+                self.assertTrue(any("probe.py" in n for n in tar_names), f"probe.py must be in valid tar archive, got: {tar_names}")
 
     def test_plan_and_apply_scenario_01_crashed_in_flight_preserves_uncommitted_files(self):
         """機能X (P0-1): CRASHED_IN_FLIGHT の復旧時、未コミット・未追跡ファイルが消失せずアーカイブとブランチに完全保全されること。"""
