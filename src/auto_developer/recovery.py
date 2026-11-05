@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -151,7 +153,7 @@ class RecoveryEngine:
 
         try:
             job_state = JobState.load(self.state_path)
-        except Exception as e:
+        except (OSError, json.JSONDecodeError, ValueError) as e:
             return InspectionReport(
                 diagnosis=RecoveryDiagnosis.UNKNOWN_INCONSISTENCY,
                 can_auto_recover=False,
@@ -207,11 +209,9 @@ class RecoveryEngine:
                 token_path = self.evidence_store.evidence_dir / f"task_{task_id}.json"
                 if token_path.exists():
                     try:
-                        import json
-
                         evidence_rec = json.loads(token_path.read_text(encoding="utf-8"))
-                    except Exception:
-                        pass
+                    except (OSError, json.JSONDecodeError, ValueError):
+                        evidence_rec = None
 
             committed_tree = self.git_guard.get_commit_tree_sha("HEAD")
             evidence_tree = (
@@ -227,7 +227,7 @@ class RecoveryEngine:
                     parent_proc = self.git_guard._run_git(["rev-parse", "HEAD^"])
                     parent_sha = parent_proc.stdout.strip()
                     parent_matches = (parent_sha == checkpoint)
-                except Exception:
+                except subprocess.SubprocessError:
                     parent_matches = False
 
                 if parent_matches:
@@ -256,13 +256,12 @@ class RecoveryEngine:
                     )
 
         # 3. コミット前実行中クラッシュ (Scenario 01 & 02 相当)
-        if job_state.status == "RUNNING":
-            if head_commit == checkpoint:
-                return InspectionReport(
-                    diagnosis=RecoveryDiagnosis.CRASHED_IN_FLIGHT,
-                    can_auto_recover=True,
-                    current_branch=current_branch,
-                    base_branch=base_branch,
+        if job_state.status == "RUNNING" and head_commit == checkpoint:
+            return InspectionReport(
+                diagnosis=RecoveryDiagnosis.CRASHED_IN_FLIGHT,
+                can_auto_recover=True,
+                current_branch=current_branch,
+                base_branch=base_branch,
                     head_commit=head_commit,
                     checkpoint_commit=checkpoint,
                     tree_clean=tree_clean,

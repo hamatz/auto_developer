@@ -20,8 +20,8 @@
 - [x] 2. `RecoveryEngine.inspect()` によるクラッシュ不整合診断の実装 (機能W)
 - [x] 3. `RecoveryEngine.plan()` & `apply()` による復旧計画生成と自動適用 (機能X)
 - [x] 4. CLI への `auto-dev recover` (inspect / plan / apply) サブコマンド統合
-- [ ] 5. 総合回帰検証 (Pilot 04 Golden Master を含む全単体テスト・型検査・リンター)
+- [x] 5. 総合回帰検証 (Pilot 04 Golden Master を含む全単体テスト・型検査・リンター)
 
 ## 止まっていること・判断待ち
-- なし (Step 5 総合回帰検証に着手)
+- なし (全ステップ完了・検証ゲート Exit 0 通過)
 

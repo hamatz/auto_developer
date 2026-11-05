@@ -42,11 +42,6 @@ class GitGuard:
         proc = self._run_git(["rev-parse", "HEAD"])
         return proc.stdout.strip()
 
-    def get_current_branch(self) -> str:
-        """現在のブランチ名を取得する (git rev-parse --abbrev-ref HEAD)。"""
-        proc = self._run_git(["rev-parse", "--abbrev-ref", "HEAD"])
-        return proc.stdout.strip()
-
     def get_working_tree_sha(self) -> str:
         """現在の作業ツリーのステージ済み Git Tree SHA を取得する (git write-tree)。"""
         self._run_git(["add", "-A"])

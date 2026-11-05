@@ -509,19 +509,19 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         elif args.action == "apply":
-            result = engine.apply()
+            rec_result = engine.apply()
             if as_json:
-                print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+                print(json.dumps(rec_result.to_dict(), ensure_ascii=False, indent=2))
             else:
                 print("=== AUTO DEVELOPER / RECOVERY APPLY ===")
-                print(f" Success:         {result.success}")
-                print(f" Resulting State: {result.resulting_state}")
-                print(f" Message:         {result.message}")
-                if result.applied_actions:
+                print(f" Success:         {rec_result.success}")
+                print(f" Resulting State: {rec_result.resulting_state}")
+                print(f" Message:         {rec_result.message}")
+                if rec_result.applied_actions:
                     print(" Applied Actions:")
-                    for act_msg in result.applied_actions:
+                    for act_msg in rec_result.applied_actions:
                         print(f"  ✓ {act_msg}")
-            return 0 if result.success else 1
+            return 0 if rec_result.success else 1
 
     # Default Autonomous Loop ("run" or no subcommand):
     is_mock = getattr(args, "mock", False)

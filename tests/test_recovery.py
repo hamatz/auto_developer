@@ -1,7 +1,7 @@
-import tempfile
-import unittest
 import subprocess
 import sys
+import tempfile
+import unittest
 from pathlib import Path
 
 src_dir = str(Path(__file__).resolve().parents[1] / "src")
@@ -9,7 +9,6 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 from auto_developer.models import JobState
-from auto_developer.guard import GitGuard
 from auto_developer.orchestrator import NightlyOrchestrator
 from auto_developer.runner import CommandRunnerAdapter
 
@@ -75,8 +74,8 @@ class TestRecoveryBaseBranch(unittest.TestCase):
 class TestRecoveryInspect(unittest.TestCase):
     def test_inspect_scenario_03_committed_ahead_of_state(self):
         """機能W: Gitコミット成功直後にクラッシュした場合、COMMITTED_AHEAD_OF_STATE と診断すること。"""
-        from auto_developer.recovery import RecoveryEngine, RecoveryDiagnosis
         from auto_developer.evidence import EvidenceStore
+        from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
 
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
@@ -99,6 +98,7 @@ class TestRecoveryInspect(unittest.TestCase):
             committed_tree = subprocess.run(["git", "write-tree"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
             subprocess.run(["git", "commit", "-m", "feat: task 1"], cwd=repo, check=True)
             head_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertNotEqual(head_commit, checkpoint)
 
             # Evidence を発行し、Phase E の commit 前に verify_and_consume で消費
             evidence_store = EvidenceStore(repo)
@@ -138,7 +138,7 @@ class TestRecoveryInspect(unittest.TestCase):
 
     def test_inspect_scenario_04_quarantine_incomplete(self):
         """機能W: Quarantine処理の途中でクラッシュした場合、QUARANTINE_INCOMPLETE と診断すること。"""
-        from auto_developer.recovery import RecoveryEngine, RecoveryDiagnosis
+        from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
 
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
@@ -187,7 +187,7 @@ class TestRecoveryInspect(unittest.TestCase):
 
     def test_inspect_scenario_01_02_crashed_in_flight(self):
         """機能W: Maker実行中や検証直後にクラッシュした場合、CRASHED_IN_FLIGHT と診断すること。"""
-        from auto_developer.recovery import RecoveryEngine, RecoveryDiagnosis
+        from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
 
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
@@ -227,8 +227,8 @@ class TestRecoveryInspect(unittest.TestCase):
 class TestRecoveryPlanAndApply(unittest.TestCase):
     def test_plan_and_apply_scenario_03_committed_ahead(self):
         """機能X: Scenario 03 の状態から plan を生成し、apply でコミットを再利用して JobState を COMPLETED に前進させること。"""
-        from auto_developer.recovery import RecoveryEngine, RecoveryDiagnosis
         from auto_developer.evidence import EvidenceStore
+        from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
 
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
@@ -252,6 +252,7 @@ class TestRecoveryPlanAndApply(unittest.TestCase):
             committed_tree = subprocess.run(["git", "write-tree"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
             subprocess.run(["git", "commit", "-m", "feat: task 1"], cwd=repo, check=True)
             head_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertNotEqual(head_commit, checkpoint)
 
             # Evidence を発行し消費
             evidence_store = EvidenceStore(repo)
@@ -308,7 +309,7 @@ class TestRecoveryPlanAndApply(unittest.TestCase):
 
     def test_plan_and_apply_scenario_04_quarantine_incomplete(self):
         """機能X: Scenario 04 の状態から plan を生成し、apply でベースブランチ復帰と安全隔離を完了させること。"""
-        from auto_developer.recovery import RecoveryEngine, RecoveryDiagnosis
+        from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
 
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
@@ -379,7 +380,6 @@ class TestRecoveryPlanAndApply(unittest.TestCase):
 class TestRecoveryCLI(unittest.TestCase):
     def test_cli_recover_inspect_plan_apply(self):
         """機能X: auto-dev recover inspect / plan / apply サブコマンドが正常に動作すること。"""
-        import json
         from auto_developer.cli import main
         from auto_developer.evidence import EvidenceStore
 
@@ -401,6 +401,7 @@ class TestRecoveryCLI(unittest.TestCase):
             committed_tree = subprocess.run(["git", "write-tree"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
             subprocess.run(["git", "commit", "-m", "feat: task 1"], cwd=repo, check=True)
             head_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertNotEqual(head_commit, checkpoint)
 
             # Evidence
             evidence_store = EvidenceStore(repo)
@@ -440,6 +441,7 @@ class TestRecoveryCLI(unittest.TestCase):
         import io
         import json
         from unittest.mock import patch
+
         from auto_developer.cli import main
 
         with tempfile.TemporaryDirectory() as tmpdir:
