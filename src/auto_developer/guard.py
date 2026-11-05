@@ -182,6 +182,13 @@ class GitGuard:
         archive_path = quarantine_dir / f"snapshot_task_{clean_id}_{timestamp}.tar.gz"
         manifest_path = quarantine_dir / f"manifest_task_{clean_id}_{timestamp}.json"
 
+        # 同一秒内の作成でも既存アーカイブを上書きしないようユニーク性を保証
+        counter = 1
+        while archive_path.exists() or manifest_path.exists():
+            archive_path = quarantine_dir / f"snapshot_task_{clean_id}_{timestamp}_{counter}.tar.gz"
+            manifest_path = quarantine_dir / f"manifest_task_{clean_id}_{timestamp}_{counter}.json"
+            counter += 1
+
         manifest_files = []
         with tarfile.open(archive_path, "w:gz") as tar:
             for item in sorted(self.repo_dir.rglob("*")):

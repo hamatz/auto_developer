@@ -279,29 +279,33 @@ class RecoveryEngine:
                     )
 
         # 3. コミット前実行中クラッシュ (Scenario 01 & 02 相当)
-        if job_state.status == "RUNNING" and head_commit == checkpoint:
+        # フェーズが仕掛かり中 (MAKER/VERIFIER等) であるか、または作業ツリーに未コミット変更が残っている場合にクラッシュと判定
+        is_in_flight = (job_state.current_phase != "INIT") or (not tree_clean)
+        if job_state.status == "RUNNING" and head_commit == checkpoint and is_in_flight:
             return InspectionReport(
                 diagnosis=RecoveryDiagnosis.CRASHED_IN_FLIGHT,
                 can_auto_recover=True,
                 current_branch=current_branch,
                 base_branch=base_branch,
-                    head_commit=head_commit,
-                    checkpoint_commit=checkpoint,
-                    tree_clean=tree_clean,
-                    uncommitted_files=uncommitted_files,
-                    task_id=task_id,
-                    explanation=(
-                        f"Process crashed during phase {job_state.current_phase} (Attempt {job_state.current_attempt}) "
-                        f"for task {task_id}. Git HEAD matches checkpoint ({checkpoint[:7]})."
-                    ),
-                    recommended_action=(
-                        "Isolate uncommitted changes to quarantine branch if dirty, reset cleanly "
-                        f"to checkpoint ({checkpoint[:7]}), and mark job ready for safe retry."
-                    ),
-                )
+                head_commit=head_commit,
+                checkpoint_commit=checkpoint,
+                tree_clean=tree_clean,
+                uncommitted_files=uncommitted_files,
+                task_id=task_id,
+                explanation=(
+                    f"Process crashed during phase {job_state.current_phase} (Attempt {job_state.current_attempt}) "
+                    f"for task {task_id}. Git HEAD matches checkpoint ({checkpoint[:7]})."
+                ),
+                recommended_action=(
+                    "Isolate uncommitted changes to quarantine branch if dirty, reset cleanly "
+                    f"to checkpoint ({checkpoint[:7]}), and mark job ready for safe retry."
+                ),
+            )
 
-        # 4. 正常な状態 (JobState が正常完了または失敗ステータスであり、作業ツリー・ブランチ・コミットが整合)
-        is_job_finished = job_state.status in ("COMPLETED", "FAILED")
+        # 4. 正常な状態 (JobState が正常完了、失敗、または安全にリセットされた待機状態であり、作業ツリー・ブランチ・コミットが整合)
+        is_job_ready_or_finished = job_state.status in ("COMPLETED", "FAILED") or (
+            job_state.status == "RUNNING" and job_state.current_phase == "INIT"
+        )
         last_completed_commit = (
             job_state.completed_tasks[-1].get("commit")
             if job_state.completed_tasks
@@ -309,7 +313,7 @@ class RecoveryEngine:
         )
         is_commit_consistent = (head_commit == last_completed_commit) or (head_commit == checkpoint)
 
-        if is_job_finished and tree_clean and current_branch == base_branch and is_commit_consistent:
+        if is_job_ready_or_finished and tree_clean and current_branch == base_branch and is_commit_consistent:
             return InspectionReport(
                 diagnosis=RecoveryDiagnosis.HEALTHY,
                 can_auto_recover=False,
@@ -633,14 +637,30 @@ class RecoveryEngine:
                     if not tarfile.is_tarfile(s):
                         continue
 
-                    # 対応する Manifest が存在することを必須とし、SHA-256 を完全照合 (P1-A)
+                    # 対応する Manifest が存在することを必須とし、job_id, task_id, checkpoint を厳格照合 (P1-1)
                     manifest_file = s.parent / s.name.replace("snapshot_task_", "manifest_task_").replace(".tar.gz", ".json")
                     if not manifest_file.exists():
                         continue
                     m_data = json.loads(manifest_file.read_text(encoding="utf-8"))
-                    if str(m_data.get("task_id")) != str(report.task_id or "1"):
+
+                    expected_task_id = str(report.task_id or job_state.current_task_id or "1")
+                    expected_job_id = str(job_state.job_id or "")
+                    expected_checkpoint = str(report.checkpoint_commit or job_state.checkpoint_hash or "")
+
+                    m_task_id = str(m_data.get("task_id") or "")
+                    m_job_id = str(m_data.get("job_id") or "")
+                    m_checkpoint = str(m_data.get("checkpoint") or "")
+
+                    # 1. task_id 必須照合
+                    if not m_task_id or m_task_id != expected_task_id:
                         continue
-                    if m_data.get("checkpoint") and report.checkpoint_commit and m_data.get("checkpoint") != report.checkpoint_commit:
+
+                    # 2. job_id 必須照合 (空文字不許可、別ジョブの残骸を完全排除)
+                    if not m_job_id or (expected_job_id and m_job_id != expected_job_id):
+                        continue
+
+                    # 3. checkpoint 必須照合 (空文字不許可、完全一致)
+                    if not m_checkpoint or (expected_checkpoint and m_checkpoint != expected_checkpoint):
                         continue
 
                     import hashlib
