@@ -590,6 +590,7 @@ class RecoveryEngine:
             has_uncommitted = bool(status_proc.stdout.strip())
             if has_uncommitted:
                 self.git_guard._run_git(["add", "-u"])
+                self.git_guard.sanitize_staged_changes()
                 self.git_guard._run_git([
                     "commit",
                     "--allow-empty",

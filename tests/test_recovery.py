@@ -1056,6 +1056,53 @@ class TestRecoveryCLI(unittest.TestCase):
             latest_map = {f["path"]: f["sha256"] for f in latest_manifest["files"]}
             self.assertEqual(latest_map["mypackage/nested/worker.py"], expected_sha)
 
+    def test_quarantine_excludes_tracked_file_with_secret_content(self):
+        """機能X (P1-B): 追跡済みファイルであっても、内容にシークレット (APIキー等) が書き込まれた場合、隔離コミットおよびアーカイブから除外されること。"""
+        import tarfile
+        from auto_developer.guard import GitGuard
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. タスク\n", encoding="utf-8")
+            # 追跡済みファイル config.py
+            (repo / "config.py").write_text("DEBUG = True\n", encoding="utf-8")
+            (repo / "safe_code.py").write_text("x = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # Maker が追跡済みファイル config.py に API キーを誤って書き込んだ！
+            dummy_token = "sk-" + "live_" + "abcdef1234567890abcdef1234567890"  # gitleaks:allow
+            (repo / "config.py").write_text(f'OPENAI_API_KEY = "{dummy_token}"\n', encoding="utf-8")  # gitleaks:allow
+            (repo / "safe_code.py").write_text("x = 2\n", encoding="utf-8")
+
+            guard = GitGuard(repo)
+            quarantine_branch = guard.quarantine_and_restore(checkpoint=checkpoint, task_id="1")
+
+            # 1. 隔離ブランチのコミットツリーに config.py の変更 (APIキー) が入っていないこと！
+            diff_out = subprocess.run(
+                ["git", "diff", checkpoint, quarantine_branch],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+            self.assertNotIn("live_abcdef", diff_out, "Secret content must NOT be committed to quarantine git branch")
+            self.assertIn("safe_code.py", diff_out, "Safe modifications must be committed to quarantine branch")
+
+            # 2. スナップショットアーカイブにも config.py が入っていないこと！
+            snapshots = list((repo / ".dev" / "quarantines").glob("snapshot_task_*.tar.gz"))
+            self.assertTrue(len(snapshots) > 0)
+            with tarfile.open(snapshots[-1], "r:gz") as tar:
+                names = [m.name for m in tar.getmembers()]
+                self.assertNotIn("config.py", names, "File with secret content must be excluded from snapshot archive")
+                self.assertIn("safe_code.py", names, "Safe files must be in snapshot archive")
+
     def test_quarantine_recovery_excludes_untracked_secrets_from_git_and_archive(self):
         """機能X (P0-1): Quarantine 復旧時、未追跡の秘密ファイルが隔離ブランチの Git 履歴やアーカイブに絶対混入しないこと。"""
         import tarfile
@@ -1083,8 +1130,8 @@ class TestRecoveryCLI(unittest.TestCase):
             (repo / "app.py").write_text("print('modified in task 1')\n", encoding="utf-8")
 
             # 危険な未追跡の秘密ファイルが作成された状態（APIトークン、秘密鍵、.envなど）
-            (repo / ".env").write_text("SECRET_API_KEY=supersecret123\n", encoding="utf-8")
-            (repo / "secret_token.key").write_text("private_key_data\n", encoding="utf-8")
+            (repo / ".env").write_text("APP_TEST_ENV=test_value_1234\n", encoding="utf-8")  # gitleaks:allow
+            (repo / "secret_token.key").write_text("dummy_key_content\n", encoding="utf-8")  # gitleaks:allow
 
             state_file = repo / ".dev" / "job_state.json"
             job_state = JobState(
