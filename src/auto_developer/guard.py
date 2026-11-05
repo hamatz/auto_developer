@@ -117,10 +117,49 @@ class GitGuard:
         re.compile(r"(secret|token|credential)", re.IGNORECASE),
     )
 
+    SECRET_CONTENT_PATTERNS = (
+        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),  # gitleaks:allow
+        re.compile(r"\bsk-[a-zA-Z0-9]{20,}\b"),  # gitleaks:allow
+        re.compile(r"\bAIza[0-9A-Za-z-_]{35}\b"),  # gitleaks:allow
+        re.compile(r"\bya29\.[0-9A-Za-z-_]+\b"),  # gitleaks:allow
+        re.compile(r"\bgh[pousr]_[0-9A-Za-z]{36,}\b"),  # gitleaks:allow
+        re.compile(r"\bxox[baprs]-[0-9A-Za-z-]+\b"),  # gitleaks:allow
+        re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # gitleaks:allow
+        re.compile(r"(api[_-]?key|secret[_-]?key|private[_-]?key|auth[_-]?token)\s*[:=]\s*['\"][a-zA-Z0-9_\-]{16,}['\"]", re.IGNORECASE),  # gitleaks:allow
+    )
+
     def is_secret_file(self, filename: str) -> bool:
         """シークレット・認証情報ファイル名パターンに合致するか判定する。"""
         base_name = Path(filename).name
         return any(pattern.search(base_name) for pattern in self.SECRET_EXCLUDE_PATTERNS)
+
+    def has_secret_content(self, content: bytes | str) -> bool:
+        """テキストまたはバイナリ内に認証情報・秘密鍵パターンが含まれているか検査する。"""
+        if isinstance(content, bytes):
+            try:
+                text = content.decode("utf-8", errors="ignore")
+            except UnicodeDecodeError:
+                return False
+        else:
+            text = content
+        return any(pattern.search(text) for pattern in self.SECRET_CONTENT_PATTERNS)
+
+    def sanitize_staged_changes(self) -> list[str]:
+        """ステージされたファイルの内容を検査し、シークレットを含むファイルをステージから除外する。"""
+        proc = self._run_git(["diff", "--cached", "--name-only"])
+        staged_files = [f.strip() for f in proc.stdout.splitlines() if f.strip()]
+        excluded = []
+        for file_rel in staged_files:
+            file_path = self.repo_dir / file_rel
+            if file_path.exists() and file_path.is_file():
+                try:
+                    content = file_path.read_bytes()
+                    if self.has_secret_content(content):
+                        self._run_git(["reset", "HEAD", "--", file_rel])
+                        excluded.append(file_rel)
+                except OSError:
+                    pass
+        return excluded
 
     def create_quarantine_snapshot(
         self,
@@ -145,23 +184,24 @@ class GitGuard:
 
         manifest_files = []
         with tarfile.open(archive_path, "w:gz") as tar:
-            for item in sorted(self.repo_dir.iterdir()):
-                if item.name in (".git", ".dev"):
+            for item in sorted(self.repo_dir.rglob("*")):
+                if not item.is_file():
                     continue
-                if self.is_secret_file(item.name):
+                rel_path = item.relative_to(self.repo_dir)
+                rel_posix = rel_path.as_posix()
+                if rel_posix.startswith((".git", ".dev")):
                     continue
-                if item.is_file():
-                    try:
-                        content = item.read_bytes()
-                        file_sha = hashlib.sha256(content).hexdigest()
-                        manifest_files.append({"path": item.name, "sha256": file_sha})
-                    except OSError:
-                        pass
-                tar.add(
-                    item,
-                    arcname=item.name,
-                    filter=lambda tarinfo: None if self.is_secret_file(Path(tarinfo.name).name) else tarinfo,
-                )
+                if self.is_secret_file(item.name) or any(self.is_secret_file(p) for p in rel_path.parts):
+                    continue
+                try:
+                    content = item.read_bytes()
+                    if self.has_secret_content(content):
+                        continue
+                    file_sha = hashlib.sha256(content).hexdigest()
+                    manifest_files.append({"path": rel_posix, "sha256": file_sha})
+                    tar.add(item, arcname=rel_posix)
+                except OSError:
+                    pass
 
         if not archive_path.exists() or archive_path.stat().st_size == 0:
             raise RuntimeError(f"Quarantine aborted: Failed to create snapshot archive at {archive_path}")
@@ -197,10 +237,11 @@ class GitGuard:
             # 1. 物理スナップショットの安全作成 (Manifest 連携)
             self.create_quarantine_snapshot(task_id=task_id, checkpoint=checkpoint, job_id=job_id)
 
-            # 2. 隔離ブランチへの安全なステージとコミット (追跡済みファイルのみ add -u でステージし、未追跡の秘密ファイル混入を物理遮断)
+            # 2. 隔離ブランチへの安全なステージとコミット (追跡済みファイルのみ add -u でステージし、シークレット検査を実施)
             quarantine_branch = f"quarantine/{clean_id}-{timestamp}"
             self._run_git(["checkout", "-b", quarantine_branch])
             self._run_git(["add", "-u"])
+            self.sanitize_staged_changes()
             self._run_git(["commit", "--allow-empty", "-m", f"quarantine: save failed work for task {task_id} before rollback"])
 
             # 3. 元のブランチに戻る

@@ -168,7 +168,22 @@ class RecoveryEngine:
                 recommended_action="Inspect state file manually.",
             )
 
-        base_branch = job_state.base_branch or current_branch
+        base_branch = job_state.base_branch
+        if not base_branch or base_branch.startswith("quarantine/"):
+            # quarantine/ ブランチはベースブランチではないため、main / master などの既存ブランチから安全に特定
+            branches_proc = self.git_guard._run_git(["branch", "--list"])
+            branch_names = [
+                b.strip().lstrip("* ").strip()
+                for b in branches_proc.stdout.splitlines()
+                if b.strip()
+            ]
+            for candidate in ("main", "master", "develop"):
+                if candidate in branch_names:
+                    base_branch = candidate
+                    break
+            else:
+                non_quarantine = [b for b in branch_names if not b.startswith("quarantine/")]
+                base_branch = non_quarantine[0] if non_quarantine else (current_branch or "main")
         checkpoint = job_state.checkpoint_hash or head_commit
         task_id = job_state.current_task_id
 
@@ -590,6 +605,7 @@ class RecoveryEngine:
             has_uncommitted = bool(status_proc.stdout.strip())
             if has_uncommitted:
                 self.git_guard._run_git(["add", "-u"])
+                self.git_guard.sanitize_staged_changes()
                 self.git_guard._run_git([
                     "commit",
                     "--allow-empty",
@@ -616,17 +632,36 @@ class RecoveryEngine:
                 try:
                     if not tarfile.is_tarfile(s):
                         continue
-                    with tarfile.open(s, "r:gz") as tar:
-                        tar.getmembers()
 
-                    # 対応する Manifest が存在すればタスクIDとチェックポイントを照合
+                    # 対応する Manifest が存在することを必須とし、SHA-256 を完全照合 (P1-A)
                     manifest_file = s.parent / s.name.replace("snapshot_task_", "manifest_task_").replace(".tar.gz", ".json")
-                    if manifest_file.exists():
-                        m_data = json.loads(manifest_file.read_text(encoding="utf-8"))
-                        if str(m_data.get("task_id")) != str(report.task_id or "1"):
+                    if not manifest_file.exists():
+                        continue
+                    m_data = json.loads(manifest_file.read_text(encoding="utf-8"))
+                    if str(m_data.get("task_id")) != str(report.task_id or "1"):
+                        continue
+                    if m_data.get("checkpoint") and report.checkpoint_commit and m_data.get("checkpoint") != report.checkpoint_commit:
+                        continue
+
+                    import hashlib
+                    manifest_map = {f["path"]: f["sha256"] for f in m_data.get("files", [])}
+                    with tarfile.open(s, "r:gz") as tar:
+                        members = [m for m in tar.getmembers() if m.isfile()]
+                        if set(manifest_map.keys()) != {m.name for m in members}:
                             continue
-                        if m_data.get("checkpoint") and report.checkpoint_commit and m_data.get("checkpoint") != report.checkpoint_commit:
+                        hash_mismatch = False
+                        for m in members:
+                            extracted = tar.extractfile(m)
+                            if extracted is None:
+                                hash_mismatch = True
+                                break
+                            actual_sha = hashlib.sha256(extracted.read()).hexdigest()
+                            if actual_sha != manifest_map.get(m.name):
+                                hash_mismatch = True
+                                break
+                        if hash_mismatch:
                             continue
+
                     valid_snapshot = s
                 except (OSError, tarfile.TarError, json.JSONDecodeError):
                     continue
