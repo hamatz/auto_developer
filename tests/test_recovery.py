@@ -993,6 +993,7 @@ class TestRecoveryCLI(unittest.TestCase):
         """機能X (P1-A): Manifest がサブディレクトリ内のファイルも含めて再帰的に SHA-256 を記録し、復旧時に全件照合・検証すること。"""
         import hashlib
         import json
+
         from auto_developer.guard import GitGuard
         from auto_developer.recovery import RecoveryEngine
 
@@ -1059,6 +1060,7 @@ class TestRecoveryCLI(unittest.TestCase):
     def test_quarantine_excludes_tracked_file_with_secret_content(self):
         """機能X (P1-B): 追跡済みファイルであっても、内容にシークレット (APIキー等) が書き込まれた場合、隔離コミットおよびアーカイブから除外されること。"""
         import tarfile
+
         from auto_developer.guard import GitGuard
 
         with tempfile.TemporaryDirectory() as tmpdir:

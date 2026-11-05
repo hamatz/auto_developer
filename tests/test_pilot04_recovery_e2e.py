@@ -6,12 +6,11 @@ ChatGPT 6.1-sol 氏のレビュー推奨に基づき、実物のクラッシュ�
 """
 
 import json
-from pathlib import Path
-import shutil
 import subprocess
 import tempfile
 import unittest
 import zipfile
+from pathlib import Path
 
 from auto_developer.models import JobState
 from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine

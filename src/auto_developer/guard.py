@@ -138,7 +138,7 @@ class GitGuard:
         if isinstance(content, bytes):
             try:
                 text = content.decode("utf-8", errors="ignore")
-            except Exception:
+            except UnicodeDecodeError:
                 return False
         else:
             text = content
