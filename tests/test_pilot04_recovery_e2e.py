@@ -84,9 +84,14 @@ class TestPilot04RecoveryE2E(unittest.TestCase):
         self.assertEqual(state.status, "RUNNING")
         self.assertEqual(state.current_phase, "INIT")
 
-        # 4. Apply (2回目: 冪等性検証)
+        # 適用後 inspect が HEALTHY に遷移していること
+        post_report = engine.inspect()
+        self.assertEqual(post_report.diagnosis, RecoveryDiagnosis.HEALTHY)
+
+        # 4. Apply (2回目: 冪等性検証で UNCHANGED となること)
         result2 = engine.apply()
         self.assertTrue(result2.success)
+        self.assertEqual(result2.resulting_state, "UNCHANGED")
         self.assertEqual(self._get_head(repo), initial_head)
         self.assertTrue(self._is_tree_clean(repo))
 
@@ -118,9 +123,14 @@ class TestPilot04RecoveryE2E(unittest.TestCase):
         quarantines = list((repo / ".dev" / "quarantines").glob("snapshot_task_*.tar.gz"))
         self.assertTrue(len(quarantines) > 0)
 
-        # 4. Apply (2回目: 冪等性)
+        # 適用後 inspect が HEALTHY に遷移していること
+        post_report = engine.inspect()
+        self.assertEqual(post_report.diagnosis, RecoveryDiagnosis.HEALTHY)
+
+        # 4. Apply (2回目: 冪等性検証で UNCHANGED となること)
         result2 = engine.apply()
         self.assertTrue(result2.success)
+        self.assertEqual(result2.resulting_state, "UNCHANGED")
         self.assertEqual(self._get_head(repo), initial_head)
 
     def test_e2e_scenario_after_commit_committed_ahead_of_state(self):

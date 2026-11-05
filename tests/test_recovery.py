@@ -1057,6 +1057,73 @@ class TestRecoveryCLI(unittest.TestCase):
             latest_map = {f["path"]: f["sha256"] for f in latest_manifest["files"]}
             self.assertEqual(latest_map["mypackage/nested/worker.py"], expected_sha)
 
+    def test_manifest_requires_job_id_task_id_and_checkpoint_strict_match(self):
+        """機能X (P1-1): Manifest 照合で job_id, task_id, checkpoint が必須照合項目であり、1つでも不一致または空ならアーカイブが再利用されないこと。"""
+        import json
+
+        from auto_developer.guard import GitGuard
+        from auto_developer.recovery import RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            quarantine_branch = "quarantine/1-1793812132"
+            subprocess.run(["git", "checkout", "-b", quarantine_branch], cwd=repo, check=True)
+            (repo / "artifact.txt").write_text("work done\n", encoding="utf-8")
+
+            guard = GitGuard(repo)
+            # 古い別ジョブのアーカイブを作成 (job_id: old-job)
+            archive_path = guard.create_quarantine_snapshot(task_id="1", checkpoint=checkpoint, job_id="old-job")
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="current-job",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="MAKER",
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            # ケース1: job_id が異なる場合、古いアーカイブは再利用されず、新ジョブのアーカイブが生成されること
+            engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+            result = engine.apply()
+            self.assertTrue(result.success)
+
+            manifests = sorted(archive_path.parent.glob("manifest_task_1_*.json"))
+            self.assertGreaterEqual(len(manifests), 2, "New snapshot manifest must be created when job_id differs")
+            latest_manifest = json.loads(manifests[-1].read_text(encoding="utf-8"))
+            self.assertEqual(latest_manifest["job_id"], "current-job")
+
+            # ケース2: Manifest の checkpoint が空文字列の場合も再利用されないこと
+            latest_manifest["checkpoint"] = ""
+            manifests[-1].write_text(json.dumps(latest_manifest), encoding="utf-8")
+
+            # 再度隔離ブランチで変更がある状態で検証
+            subprocess.run(["git", "checkout", "-b", "quarantine/1-1793812999"], cwd=repo, check=True)
+            (repo / "new_work.txt").write_text("more work\n", encoding="utf-8")
+            job_state.status = "RUNNING"
+            job_state.save(state_file)
+
+            engine2 = RecoveryEngine(repo_dir=repo, state_path=state_file)
+            result2 = engine2.apply()
+            self.assertTrue(result2.success)
+
+            manifests_after = sorted(archive_path.parent.glob("manifest_task_1_*.json"))
+            latest_m2 = json.loads(manifests_after[-1].read_text(encoding="utf-8"))
+            self.assertEqual(latest_m2["checkpoint"], checkpoint, "Checkpoint must be populated and verified")
+
+
     def test_quarantine_excludes_tracked_file_with_secret_content(self):
         """機能X (P1-B): 追跡済みファイルであっても、内容にシークレット (APIキー等) が書き込まれた場合、隔離コミットおよびアーカイブから除外されること。"""
         import tarfile
