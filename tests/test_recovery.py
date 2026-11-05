@@ -448,6 +448,7 @@ class TestRecoveryPlanAndApply(unittest.TestCase):
     def test_plan_and_apply_scenario_01_crashed_in_flight_preserves_uncommitted_files(self):
         """機能X (P0-1): CRASHED_IN_FLIGHT の復旧時、未コミット・未追跡ファイルが消失せずアーカイブとブランチに完全保全されること。"""
         import tarfile
+
         from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -590,7 +591,7 @@ class TestRecoveryCLI(unittest.TestCase):
     def test_plan_and_apply_scenario_03_multitask_keeps_job_running_for_remaining_tasks(self):
         """機能X (P1-1): 複数タスクの途中コミットでクラッシュした場合、後続タスクのためにRUNNINGと新checkpointを維持すること。"""
         from auto_developer.evidence import EvidenceStore
-        from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
+        from auto_developer.recovery import RecoveryEngine
 
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
@@ -642,6 +643,7 @@ class TestRecoveryCLI(unittest.TestCase):
     def test_recover_apply_rejects_when_orchestrator_process_is_actively_running(self):
         """機能X (P1-2): オーケストレータープロセスが現在実行中の場合、recover apply は排他制御により拒否すること。"""
         import os
+
         from auto_developer.recovery import RecoveryEngine
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -676,6 +678,7 @@ class TestRecoveryCLI(unittest.TestCase):
     def test_recover_apply_rejects_when_lock_is_held_by_flock(self):
         """機能X (P1-2): auto_developer.lock が flock で排他ロックされている場合、recover apply は拒否すること。"""
         import fcntl
+
         from auto_developer.recovery import RecoveryEngine
 
         with tempfile.TemporaryDirectory() as tmpdir:

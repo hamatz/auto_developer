@@ -572,7 +572,7 @@ class RecoveryEngine:
                             continue
                         rel_path = p.relative_to(self.repo_dir)
                         str_rel = str(rel_path)
-                        if str_rel.startswith(".git") or str_rel.startswith(".dev"):
+                        if str_rel.startswith((".git", ".dev")):
                             continue
                         tar.add(p, arcname=str_rel)
                 valid_snapshot = new_snap_path
