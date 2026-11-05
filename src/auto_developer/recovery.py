@@ -408,6 +408,43 @@ class RecoveryEngine:
 
     def apply(self) -> RecoveryResult:
         """計画された復旧操作を安全・アトミック・冪等に適用する。"""
+        # 排他制御: オーケストレータープロセスが現在実行中か検査 (P1-2)
+        import fcntl
+        import os
+
+        for lock_name in ("auto_developer.lock", "orchestrator.lock"):
+            lock_file = self.repo_dir / ".dev" / lock_name
+            if lock_file.exists():
+                # 1. PID チェック
+                try:
+                    raw = lock_file.read_text(encoding="utf-8").strip()
+                    if raw:
+                        pid = int(raw)
+                        os.kill(pid, 0)
+                        return RecoveryResult(
+                            success=False,
+                            applied_actions=[],
+                            resulting_state="UNCHANGED",
+                            message=f"Orchestrator process (PID: {pid}) is actively running. Recovery apply rejected.",
+                        )
+                except (ProcessLookupError, ValueError):
+                    pass
+                except OSError:
+                    pass
+
+                # 2. flock 排他ロックチェック
+                try:
+                    with open(lock_file, "a+") as f:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                except (BlockingIOError, OSError):
+                    return RecoveryResult(
+                        success=False,
+                        applied_actions=[],
+                        resulting_state="UNCHANGED",
+                        message="Orchestrator process is actively running (exclusive lock held). Recovery apply rejected.",
+                    )
+
         report = self.inspect()
         applied: list[str] = []
 
@@ -427,7 +464,7 @@ class RecoveryEngine:
                 message=f"Cannot auto-recover from {report.diagnosis.value}: {report.explanation}",
             )
 
-        # 1. Scenario 03 復旧: コミットを再利用して JobState を COMPLETED に前進
+        # 1. Scenario 03 復旧: コミットを再利用して JobState を前進 (P1-1)
         if report.diagnosis == RecoveryDiagnosis.COMMITTED_AHEAD_OF_STATE:
             job_state = JobState.load(self.state_path)
             task_info = {
@@ -441,8 +478,36 @@ class RecoveryEngine:
             # 重複追加を避ける
             if not any(t.get("task_id") == report.task_id for t in job_state.completed_tasks):
                 job_state.completed_tasks.append(task_info)
-            job_state.status = "COMPLETED"
-            job_state.transition_phase("COMMIT")
+
+            # PLAN.md の確定タスクを考慮し、後続未完了タスクを確認 (P1-1)
+            plan_path = self.repo_dir / "PLAN.md"
+            from auto_developer.dispatcher import TaskDispatcher
+
+            dispatcher = TaskDispatcher()
+            pending_tasks = []
+            if plan_path.exists():
+                all_tasks = dispatcher.parse_plan(plan_path)
+                # report.task_id はコミット確定済みのため pending から除外
+                pending_tasks = [
+                    t for t in all_tasks
+                    if t.task_id != report.task_id and not t.is_completed and not t.is_failed
+                ]
+
+            if pending_tasks:
+                job_state.status = "RUNNING"
+                job_state.transition_phase("INIT")
+                job_state.checkpoint_hash = report.head_commit
+                resulting_state = "RUNNING"
+                applied.append(
+                    f"Advanced task {report.task_id} with commit {report.head_commit[:7]}; "
+                    f"{len(pending_tasks)} task(s) remaining."
+                )
+            else:
+                job_state.status = "COMPLETED"
+                job_state.transition_phase("COMMIT")
+                resulting_state = "COMPLETED"
+                applied.append(f"Advanced task {report.task_id} with commit {report.head_commit[:7]}; all tasks completed.")
+
             job_state.save(self.state_path)
             applied.append(f"Updated job_state.json with commit {report.head_commit[:7]}")
 
@@ -458,11 +523,14 @@ class RecoveryEngine:
                 )
                 applied.append(f"Archived evidence record for task {report.task_id}")
 
+            # HEAD コミットと作業ツリーを完全同期してクリーン性を保証
+            self.git_guard._run_git(["checkout", report.head_commit, "--", "."])
+
             return RecoveryResult(
                 success=True,
                 applied_actions=applied,
-                resulting_state="COMPLETED",
-                message=f"Successfully advanced JobState to COMPLETED with verified commit {report.head_commit[:7]}.",
+                resulting_state=resulting_state,
+                message=f"Successfully advanced task {report.task_id} with verified commit {report.head_commit[:7]}.",
             )
 
         # 2. Scenario 04 復旧: 隔離ブランチへのコミット確定、tar検証、ベースブランチ復帰 (P0-2)

@@ -587,6 +587,129 @@ class TestRecoveryCLI(unittest.TestCase):
                 data = json.loads(mock_out.getvalue())
                 self.assertEqual(data["diagnosis"], "HEALTHY")
 
+    def test_plan_and_apply_scenario_03_multitask_keeps_job_running_for_remaining_tasks(self):
+        """機能X (P1-1): 複数タスクの途中コミットでクラッシュした場合、後続タスクのためにRUNNINGと新checkpointを維持すること。"""
+        from auto_developer.evidence import EvidenceStore
+        from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. タスク1\n- [ ] 2. タスク2\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # タスク1の実装コミット
+            (repo / "code1.py").write_text("x = 1\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [x] 1. タスク1\n- [ ] 2. タスク2\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            committed_tree = subprocess.run(["git", "write-tree"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            subprocess.run(["git", "commit", "-m", "feat: task 1"], cwd=repo, check=True)
+            head_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # Evidence
+            evidence_store = EvidenceStore(repo)
+            evidence_store.issue_evidence(task_id="1", checkpoint=checkpoint, tree_sha=committed_tree)
+            evidence_store.verify_and_consume(task_id="1", checkpoint=checkpoint, expected_tree_sha=committed_tree)
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-multitask",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="CHECKER",
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+            result = engine.apply()
+            self.assertTrue(result.success)
+
+            # 後続タスク2が残っているため、ジョブ全体は COMPLETED ではなく RUNNING を維持し、
+            # 次の checkpoint はタスク1のコミット (head_commit) に更新されていること！ (P1-1)
+            recovered_state = JobState.load(state_file)
+            self.assertEqual(recovered_state.status, "RUNNING")
+            self.assertEqual(recovered_state.checkpoint_hash, head_commit)
+            self.assertEqual(len(recovered_state.completed_tasks), 1)
+
+    def test_recover_apply_rejects_when_orchestrator_process_is_actively_running(self):
+        """機能X (P1-2): オーケストレータープロセスが現在実行中の場合、recover apply は排他制御により拒否すること。"""
+        import os
+        from auto_developer.recovery import RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-running",
+                status="RUNNING",
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            # 現在生存している自分自身の PID をロックファイルに記録
+            lock_file = repo / ".dev" / "orchestrator.lock"
+            lock_file.write_text(str(os.getpid()), encoding="utf-8")
+
+            engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+            result = engine.apply()
+
+            # 実行中プロセスがあるため、apply は拒否されなければならない
+            self.assertFalse(result.success, "Must reject recovery apply while process is actively running")
+            self.assertIn("actively running", result.message)
+
+    def test_recover_apply_rejects_when_lock_is_held_by_flock(self):
+        """機能X (P1-2): auto_developer.lock が flock で排他ロックされている場合、recover apply は拒否すること。"""
+        import fcntl
+        from auto_developer.recovery import RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-running-lock",
+                status="RUNNING",
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            lock_file = repo / ".dev" / "auto_developer.lock"
+            with open(lock_file, "w") as lock_fd:
+                # 排他ロックを取得したまま保持
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+                result = engine.apply()
+
+                # 排他ロック保持中のため拒否されること
+                self.assertFalse(result.success, "Must reject recovery apply while flock is held")
+                self.assertIn("exclusive lock held", result.message)
+
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+
 
 if __name__ == "__main__":
     unittest.main()
