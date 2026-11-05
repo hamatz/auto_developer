@@ -54,12 +54,18 @@ class NightlyOrchestrator:
 
         # 0. プロセス排他ロック (同一ワークスペースでの二重起動防止)
         import fcntl
+        import os
+
         lock_file = self.repo_dir / ".dev" / "auto_developer.lock"
         lock_file.parent.mkdir(parents=True, exist_ok=True)
         try:
             with open(lock_file, "a+") as lock_fd:
                 try:
                     fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    lock_fd.seek(0)
+                    lock_fd.truncate()
+                    lock_fd.write(str(os.getpid()))
+                    lock_fd.flush()
                 except (BlockingIOError, OSError):
                     print(
                         f"CONCURRENCY ERROR: Another auto-dev process is currently executing in {self.repo_dir}.\n"
@@ -72,6 +78,8 @@ class NightlyOrchestrator:
                     return self._run_loop()
                 finally:
                     try:
+                        lock_fd.seek(0)
+                        lock_fd.truncate()
                         fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
                     except OSError:
                         pass

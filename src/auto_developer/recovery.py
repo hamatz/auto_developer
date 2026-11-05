@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tarfile
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -173,8 +174,15 @@ class RecoveryEngine:
 
         # 1. Quarantine 途中クラッシュ (Scenario 04 相当)
         # 現在のブランチが quarantine/ で始まっている、または base_branch と異なり quarantine ブランチが存在
-        quarantine_snapshots = list(self.repo_dir.glob(".dev/quarantines/snapshot_task_*.tar.gz"))
-        latest_snapshot = str(quarantine_snapshots[-1]) if quarantine_snapshots else None
+        quarantine_snapshots = sorted(self.repo_dir.glob(".dev/quarantines/snapshot_task_*.tar.gz"))
+        valid_snapshots: list[str] = []
+        for s in quarantine_snapshots:
+            try:
+                if tarfile.is_tarfile(s):
+                    valid_snapshots.append(str(s))
+            except (OSError, tarfile.TarError):
+                continue
+        latest_snapshot = valid_snapshots[-1] if valid_snapshots else None
 
         if current_branch.startswith("quarantine/") or (
             job_state.base_branch and current_branch != job_state.base_branch and "quarantine" in current_branch
@@ -277,8 +285,16 @@ class RecoveryEngine:
                     ),
                 )
 
-        # 4. 正常な状態
-        if tree_clean and current_branch == base_branch:
+        # 4. 正常な状態 (JobState が正常完了または失敗ステータスであり、作業ツリー・ブランチ・コミットが整合)
+        is_job_finished = job_state.status in ("COMPLETED", "FAILED")
+        last_completed_commit = (
+            job_state.completed_tasks[-1].get("commit")
+            if job_state.completed_tasks
+            else checkpoint
+        )
+        is_commit_consistent = (head_commit == last_completed_commit) or (head_commit == checkpoint)
+
+        if is_job_finished and tree_clean and current_branch == base_branch and is_commit_consistent:
             return InspectionReport(
                 diagnosis=RecoveryDiagnosis.HEALTHY,
                 can_auto_recover=False,
@@ -293,6 +309,17 @@ class RecoveryEngine:
                 recommended_action="None",
             )
 
+        explanation = "Unrecognized state inconsistency detected."
+        if job_state.status == "RUNNING" and head_commit != checkpoint:
+            explanation = (
+                f"JobState is RUNNING with checkpoint {checkpoint[:7]}, but Git HEAD has advanced "
+                f"to {head_commit[:7]} without matching verified evidence. Auto-recovery refused for safety."
+            )
+        elif job_state.status == "RUNNING":
+            explanation = (
+                f"JobState is unexpectedly RUNNING for task {task_id} with unexplained inconsistency."
+            )
+
         return InspectionReport(
             diagnosis=RecoveryDiagnosis.UNKNOWN_INCONSISTENCY,
             can_auto_recover=False,
@@ -303,8 +330,8 @@ class RecoveryEngine:
             tree_clean=tree_clean,
             uncommitted_files=uncommitted_files,
             task_id=task_id,
-            explanation="Unrecognized state inconsistency detected.",
-            recommended_action="Manual inspection required.",
+            explanation=explanation,
+            recommended_action="Manual inspection required. Do not force auto-recovery.",
         )
 
     def plan(self) -> RecoveryPlan:
@@ -381,6 +408,43 @@ class RecoveryEngine:
 
     def apply(self) -> RecoveryResult:
         """計画された復旧操作を安全・アトミック・冪等に適用する。"""
+        # 排他制御: オーケストレータープロセスが現在実行中か検査 (P1-2)
+        import fcntl
+        import os
+
+        for lock_name in ("auto_developer.lock", "orchestrator.lock"):
+            lock_file = self.repo_dir / ".dev" / lock_name
+            if lock_file.exists():
+                # 1. PID チェック
+                try:
+                    raw = lock_file.read_text(encoding="utf-8").strip()
+                    if raw:
+                        pid = int(raw)
+                        os.kill(pid, 0)
+                        return RecoveryResult(
+                            success=False,
+                            applied_actions=[],
+                            resulting_state="UNCHANGED",
+                            message=f"Orchestrator process (PID: {pid}) is actively running. Recovery apply rejected.",
+                        )
+                except (ProcessLookupError, ValueError):
+                    pass
+                except OSError:
+                    pass
+
+                # 2. flock 排他ロックチェック
+                try:
+                    with open(lock_file, "a+") as f:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                except (BlockingIOError, OSError):
+                    return RecoveryResult(
+                        success=False,
+                        applied_actions=[],
+                        resulting_state="UNCHANGED",
+                        message="Orchestrator process is actively running (exclusive lock held). Recovery apply rejected.",
+                    )
+
         report = self.inspect()
         applied: list[str] = []
 
@@ -400,7 +464,7 @@ class RecoveryEngine:
                 message=f"Cannot auto-recover from {report.diagnosis.value}: {report.explanation}",
             )
 
-        # 1. Scenario 03 復旧: コミットを再利用して JobState を COMPLETED に前進
+        # 1. Scenario 03 復旧: コミットを再利用して JobState を前進 (P1-1)
         if report.diagnosis == RecoveryDiagnosis.COMMITTED_AHEAD_OF_STATE:
             job_state = JobState.load(self.state_path)
             task_info = {
@@ -414,8 +478,36 @@ class RecoveryEngine:
             # 重複追加を避ける
             if not any(t.get("task_id") == report.task_id for t in job_state.completed_tasks):
                 job_state.completed_tasks.append(task_info)
-            job_state.status = "COMPLETED"
-            job_state.transition_phase("COMMIT")
+
+            # PLAN.md の確定タスクを考慮し、後続未完了タスクを確認 (P1-1)
+            plan_path = self.repo_dir / "PLAN.md"
+            from auto_developer.dispatcher import TaskDispatcher
+
+            dispatcher = TaskDispatcher()
+            pending_tasks = []
+            if plan_path.exists():
+                all_tasks = dispatcher.parse_plan(plan_path)
+                # report.task_id はコミット確定済みのため pending から除外
+                pending_tasks = [
+                    t for t in all_tasks
+                    if t.task_id != report.task_id and not t.is_completed and not t.is_failed
+                ]
+
+            if pending_tasks:
+                job_state.status = "RUNNING"
+                job_state.transition_phase("INIT")
+                job_state.checkpoint_hash = report.head_commit
+                resulting_state = "RUNNING"
+                applied.append(
+                    f"Advanced task {report.task_id} with commit {report.head_commit[:7]}; "
+                    f"{len(pending_tasks)} task(s) remaining."
+                )
+            else:
+                job_state.status = "COMPLETED"
+                job_state.transition_phase("COMMIT")
+                resulting_state = "COMPLETED"
+                applied.append(f"Advanced task {report.task_id} with commit {report.head_commit[:7]}; all tasks completed.")
+
             job_state.save(self.state_path)
             applied.append(f"Updated job_state.json with commit {report.head_commit[:7]}")
 
@@ -431,25 +523,73 @@ class RecoveryEngine:
                 )
                 applied.append(f"Archived evidence record for task {report.task_id}")
 
+            # HEAD コミットと作業ツリーを完全同期してクリーン性を保証
+            self.git_guard._run_git(["checkout", report.head_commit, "--", "."])
+
             return RecoveryResult(
                 success=True,
                 applied_actions=applied,
-                resulting_state="COMPLETED",
-                message=f"Successfully advanced JobState to COMPLETED with verified commit {report.head_commit[:7]}.",
+                resulting_state=resulting_state,
+                message=f"Successfully advanced task {report.task_id} with verified commit {report.head_commit[:7]}.",
             )
 
-        # 2. Scenario 04 復旧: ベースブランチ復帰と安全隔離の完了
+        # 2. Scenario 04 復旧: 隔離ブランチへのコミット確定、tar検証、ベースブランチ復帰 (P0-2)
         if report.diagnosis == RecoveryDiagnosis.QUARANTINE_INCOMPLETE:
-            # 2-1. ベースブランチへの復帰
+            # 2-1. 隔離ブランチ上で未コミット成果（未追跡ファイル・変更）が存在する場合、まず隔離ブランチに確実にコミット
+            status_proc = self.git_guard._run_git(["status", "--porcelain"])
+            has_uncommitted = bool(status_proc.stdout.strip())
+            if has_uncommitted:
+                self.git_guard._run_git(["add", "-A"])
+                self.git_guard._run_git([
+                    "commit",
+                    "-m",
+                    f"quarantine: preserve interrupted work for task {report.task_id or 'unknown'}",
+                ])
+                applied.append(f"Committed uncommitted work to quarantine branch '{report.current_branch}'")
+
+            # 2-2. tar アーカイブの整合性を検証。無効または未作成なら正規 tar アーカイブを生成
+            quarantine_dir = self.repo_dir / ".dev" / "quarantines"
+            quarantine_dir.mkdir(parents=True, exist_ok=True)
+            snapshots = sorted(quarantine_dir.glob("snapshot_task_*.tar.gz"))
+            valid_snapshot = None
+            for s in snapshots:
+                try:
+                    if tarfile.is_tarfile(s):
+                        with tarfile.open(s, "r:gz") as tar:
+                            tar.getmembers()
+                        valid_snapshot = s
+                except (OSError, tarfile.TarError):
+                    continue
+
+            if not valid_snapshot:
+                # アーカイブが存在しないか破損しているため、新規にスナップショットを生成
+                import time
+
+                new_snap_path = quarantine_dir / f"snapshot_task_{report.task_id or 'recovered'}_{int(time.time())}.tar.gz"
+                with tarfile.open(new_snap_path, "w:gz") as tar:
+                    for p in sorted(self.repo_dir.rglob("*")):
+                        if not p.is_file():
+                            continue
+                        rel_path = p.relative_to(self.repo_dir)
+                        str_rel = str(rel_path)
+                        if str_rel.startswith((".git", ".dev")):
+                            continue
+                        tar.add(p, arcname=str_rel)
+                valid_snapshot = new_snap_path
+                applied.append(f"Created verified quarantine archive at {new_snap_path.name}")
+            else:
+                applied.append(f"Verified quarantine archive integrity at {valid_snapshot.name}")
+
+            # 2-3. コミット・アーカイブの保全が確認できてから、ベースブランチへの復帰
             self.git_guard._run_git(["checkout", report.base_branch])
             applied.append(f"Switched branch to base branch '{report.base_branch}'")
 
-            # 2-2. 本線作業ツリーを checkpoint に完全クリーン復元
+            # 2-4. 本線作業ツリーを checkpoint に完全クリーン復元
             self.git_guard._run_git(["checkout", report.checkpoint_commit, "--", "."])
             self.git_guard._run_git(["clean", "-fd"])
             applied.append(f"Cleanly restored base branch to checkpoint {report.checkpoint_commit[:7]}")
 
-            # 2-3. JobState を FAILED / QUARANTINE 完了として保存
+            # 2-5. JobState を FAILED / QUARANTINE 完了として保存
             job_state = JobState.load(self.state_path)
             job_state.status = "FAILED"
             job_state.transition_phase("QUARANTINE")
@@ -467,14 +607,22 @@ class RecoveryEngine:
                 success=True,
                 applied_actions=applied,
                 resulting_state="FAILED",
-                message=f"Safely restored base branch '{report.base_branch}' and finalized quarantine state.",
+                message=f"Safely preserved quarantine work to '{report.current_branch}' and restored base branch.",
             )
 
         # 3. Scenario 01 & 02 復旧: 実行中クラッシュからのクリーン復元
         if report.diagnosis == RecoveryDiagnosis.CRASHED_IN_FLIGHT:
-            self.git_guard._run_git(["checkout", report.checkpoint_commit, "--", "."])
-            self.git_guard._run_git(["clean", "-fd"])
-            applied.append(f"Cleaned uncommitted changes back to checkpoint {report.checkpoint_commit[:7]}")
+            # 未コミット差分や未追跡ファイルが存在する場合、先に確実に quarantine 退避する (P0-1)
+            if not report.tree_clean:
+                quarantine_branch = self.git_guard.quarantine_and_restore(
+                    checkpoint=report.checkpoint_commit,
+                    task_id=report.task_id or "crashed",
+                )
+                applied.append(f"Preserved uncommitted in-flight work to branch '{quarantine_branch}' and snapshot")
+            else:
+                self.git_guard._run_git(["checkout", report.checkpoint_commit, "--", "."])
+                self.git_guard._run_git(["clean", "-fd"])
+                applied.append(f"Confirmed clean working tree at checkpoint {report.checkpoint_commit[:7]}")
 
             job_state = JobState.load(self.state_path)
             job_state.status = "RUNNING"
@@ -486,7 +634,7 @@ class RecoveryEngine:
                 success=True,
                 applied_actions=applied,
                 resulting_state="RESET_FOR_RETRY",
-                message="Cleanly restored working tree to checkpoint and prepared job for retry.",
+                message="Safely preserved in-flight work to quarantine and restored clean working tree.",
             )
 
         return RecoveryResult(
