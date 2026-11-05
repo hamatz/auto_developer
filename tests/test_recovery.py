@@ -421,6 +421,64 @@ class TestRecoveryPlanAndApply(unittest.TestCase):
             self.assertIsNotNone(recovered_state.quarantined_task)
             self.assertEqual(recovered_state.quarantined_task["task_id"], "1")
 
+    def test_plan_and_apply_scenario_01_crashed_in_flight_preserves_uncommitted_files(self):
+        """機能X (P0-1): CRASHED_IN_FLIGHT の復旧時、未コミット・未追跡ファイルが消失せずアーカイブとブランチに完全保全されること。"""
+        import tarfile
+        from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # Maker が作成した未追跡ファイルと変更ファイル
+            (repo / "feature.py").write_text("class Feature:\n    pass\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. タスク (wip)\n", encoding="utf-8")
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-crashed-in-flight",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="MAKER",
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+            plan = engine.plan()
+
+            self.assertEqual(plan.diagnosis, RecoveryDiagnosis.CRASHED_IN_FLIGHT)
+            self.assertTrue(plan.can_auto_recover)
+
+            # 復旧適用
+            result = engine.apply()
+            self.assertTrue(result.success, f"Recovery apply failed: {result.message}")
+
+            # 1. 本線作業ツリーはクリーンに checkpoint に復元されていること
+            status_out = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(status_out, "", f"Working tree must be clean, but got: {status_out}")
+            self.assertFalse((repo / "feature.py").exists(), "feature.py must not remain on base branch")
+
+            # 2. しかし退避アーカイブ (.tar.gz) が存在し、feature.py が確実に含まれていること！ (P0-1)
+            snapshots = list((repo / ".dev" / "quarantines").glob("snapshot_task_*.tar.gz"))
+            self.assertTrue(len(snapshots) > 0, "Quarantine snapshot must be created before resetting work")
+            with tarfile.open(snapshots[-1], "r:gz") as tar:
+                names = tar.getnames()
+                self.assertTrue(any("feature.py" in n for n in names), f"feature.py must be preserved in tar, got: {names}")
+
+            # 3. 隔離ブランチが作成され、成果がコミットされていること！
+            branches = subprocess.run(["git", "branch"], cwd=repo, capture_output=True, text=True, check=True).stdout
+            self.assertIn("quarantine/", branches, f"Quarantine branch must exist, got: {branches}")
+
 
 class TestRecoveryCLI(unittest.TestCase):
     def test_cli_recover_inspect_plan_apply(self):

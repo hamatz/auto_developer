@@ -491,9 +491,17 @@ class RecoveryEngine:
 
         # 3. Scenario 01 & 02 復旧: 実行中クラッシュからのクリーン復元
         if report.diagnosis == RecoveryDiagnosis.CRASHED_IN_FLIGHT:
-            self.git_guard._run_git(["checkout", report.checkpoint_commit, "--", "."])
-            self.git_guard._run_git(["clean", "-fd"])
-            applied.append(f"Cleaned uncommitted changes back to checkpoint {report.checkpoint_commit[:7]}")
+            # 未コミット差分や未追跡ファイルが存在する場合、先に確実に quarantine 退避する (P0-1)
+            if not report.tree_clean:
+                quarantine_branch = self.git_guard.quarantine_and_restore(
+                    checkpoint=report.checkpoint_commit,
+                    task_id=report.task_id or "crashed",
+                )
+                applied.append(f"Preserved uncommitted in-flight work to branch '{quarantine_branch}' and snapshot")
+            else:
+                self.git_guard._run_git(["checkout", report.checkpoint_commit, "--", "."])
+                self.git_guard._run_git(["clean", "-fd"])
+                applied.append(f"Confirmed clean working tree at checkpoint {report.checkpoint_commit[:7]}")
 
             job_state = JobState.load(self.state_path)
             job_state.status = "RUNNING"
@@ -505,7 +513,7 @@ class RecoveryEngine:
                 success=True,
                 applied_actions=applied,
                 resulting_state="RESET_FOR_RETRY",
-                message="Cleanly restored working tree to checkpoint and prepared job for retry.",
+                message="Safely preserved in-flight work to quarantine and restored clean working tree.",
             )
 
         return RecoveryResult(
