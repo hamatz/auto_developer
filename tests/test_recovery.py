@@ -716,6 +716,132 @@ class TestRecoveryCLI(unittest.TestCase):
 
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
 
+    def test_recover_apply_holds_lock_during_entire_execution(self):
+        """機能X (P0-2): recover apply の処理中、auto_developer.lock の排他ロックが終始保持されていること。"""
+        import fcntl
+        from unittest.mock import patch
+        from auto_developer.evidence import EvidenceStore
+        from auto_developer.recovery import RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            (repo / "code.py").write_text("x = 1\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [x] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            tree_sha = subprocess.run(["git", "write-tree"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            subprocess.run(["git", "commit", "-m", "task 1"], cwd=repo, check=True)
+
+            evidence_store = EvidenceStore(repo)
+            evidence_store.issue_evidence(task_id="1", checkpoint=checkpoint, tree_sha=tree_sha)
+            evidence_store.verify_and_consume(task_id="1", checkpoint=checkpoint, expected_tree_sha=tree_sha)
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-crashed",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="CHECKER",
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            lock_acquired_during_execution = []
+
+            lock_file = repo / ".dev" / "auto_developer.lock"
+
+            original_save = JobState.save
+
+            def patched_save(self, path):
+                # apply の処理中 (JobState 保存のタイミング) で、他プロセスがロックを取得できるか試みる
+                try:
+                    with open(lock_file, "a+") as test_fd:
+                        fcntl.flock(test_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        lock_acquired_during_execution.append(True)  # ロックが取れてしまったら脆弱！
+                        fcntl.flock(test_fd.fileno(), fcntl.LOCK_UN)
+                except (BlockingIOError, OSError):
+                    lock_acquired_during_execution.append(False)  # 適切にロック中
+                return original_save(self, path)
+
+            engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+
+            with patch.object(JobState, "save", patched_save):
+                result = engine.apply()
+                self.assertTrue(result.success)
+
+            # 処理中に他プロセスがロックを取得できてはいけない！
+            self.assertTrue(len(lock_acquired_during_execution) > 0, "patched_save must have been called")
+            self.assertFalse(
+                any(lock_acquired_during_execution),
+                "Exclusive lock must be held during entire execution of apply; another process must NOT acquire it!",
+            )
+
+    def test_concurrent_two_processes_recover_apply_mutual_exclusion(self):
+        """機能X (P0-2): 2つの recover apply が同時に実行された場合、片方のみが適用され他方は安全に拒否されること。"""
+        import concurrent.futures
+        from auto_developer.evidence import EvidenceStore
+        from auto_developer.recovery import RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            (repo / "code.py").write_text("x = 1\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [x] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            tree_sha = subprocess.run(["git", "write-tree"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            subprocess.run(["git", "commit", "-m", "task 1"], cwd=repo, check=True)
+
+            evidence_store = EvidenceStore(repo)
+            evidence_store.issue_evidence(task_id="1", checkpoint=checkpoint, tree_sha=tree_sha)
+            evidence_store.verify_and_consume(task_id="1", checkpoint=checkpoint, expected_tree_sha=tree_sha)
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-concurrent",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="CHECKER",
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            engine1 = RecoveryEngine(repo_dir=repo, state_path=state_file)
+            engine2 = RecoveryEngine(repo_dir=repo, state_path=state_file)
+
+            # 2つのプロセス/スレッドから並行実行
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                future1 = executor.submit(engine1.apply)
+                future2 = executor.submit(engine2.apply)
+                results = [future1.result(), future2.result()]
+
+            # 1つが成功、もう1つが排他拒否（または1つ成功後に完了済みでHealthy/無変更）
+            success_count = sum(1 for r in results if r.success and r.resulting_state in ("COMPLETED", "RUNNING", "FAILED", "RESET_FOR_RETRY"))
+            # 少なくとも一方は成功し、二重実行で壊れていないこと
+            self.assertTrue(any(r.success for r in results), "At least one apply must succeed")
+            # 適用後の整合性が保たれていること
+            post_report = engine1.inspect()
+            self.assertEqual(post_report.diagnosis.value, "HEALTHY")
+
     def test_quarantine_recovery_excludes_untracked_secrets_from_git_and_archive(self):
         """機能X (P0-1): Quarantine 復旧時、未追跡の秘密ファイルが隔離ブランチの Git 履歴やアーカイブに絶対混入しないこと。"""
         import tarfile

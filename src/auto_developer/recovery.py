@@ -407,36 +407,65 @@ class RecoveryEngine:
         )
 
     def apply(self) -> RecoveryResult:
-        """計画された復旧操作を安全・アトミック・冪等に適用する。"""
-        # 排他制御: オーケストレータープロセスが現在実行中か検査 (P1-2)
+        """計画された復旧操作を安全・アトミック・冪等に適用する。
+        復旧処理の全期間にわたって auto_developer.lock の排他ロックを保持し、
+        他のオーケストレーターや復旧プロセスの並行実行・状態破壊を物理的に遮断する (P0-2)。
+        """
         import fcntl
         import os
 
-        for lock_name in ("auto_developer.lock", "orchestrator.lock"):
-            lock_file = self.repo_dir / ".dev" / lock_name
-            if lock_file.exists():
-                # 1. PID チェック
+        # 0. 外部ロック (orchestrator.lock) の生存PIDチェック
+        aux_lock = self.repo_dir / ".dev" / "orchestrator.lock"
+        if aux_lock.exists():
+            try:
+                raw = aux_lock.read_text(encoding="utf-8").strip()
+                if raw:
+                    pid = int(raw)
+                    os.kill(pid, 0)
+                    return RecoveryResult(
+                        success=False,
+                        applied_actions=[],
+                        resulting_state="UNCHANGED",
+                        message=f"Orchestrator process (PID: {pid}) is actively running. Recovery apply rejected.",
+                    )
+            except (ProcessLookupError, ValueError):
+                pass
+            except OSError:
+                pass
+
+        # 1. auto_developer.lock の排他ロックを取得し、処理終了まで保持 (P0-2: TOCTOU 排除)
+        lock_file = self.repo_dir / ".dev" / "auto_developer.lock"
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with open(lock_file, "a+") as lock_fd:
+                # 1-1. 既存 PID チェック
                 try:
-                    raw = lock_file.read_text(encoding="utf-8").strip()
-                    if raw:
-                        pid = int(raw)
+                    lock_fd.seek(0)
+                    raw_pid = lock_fd.read().strip()
+                    if raw_pid:
+                        pid = int(raw_pid)
                         os.kill(pid, 0)
-                        return RecoveryResult(
-                            success=False,
-                            applied_actions=[],
-                            resulting_state="UNCHANGED",
-                            message=f"Orchestrator process (PID: {pid}) is actively running. Recovery apply rejected.",
-                        )
+                        # 自分自身のPIDでなければ拒否
+                        if pid != os.getpid():
+                            return RecoveryResult(
+                                success=False,
+                                applied_actions=[],
+                                resulting_state="UNCHANGED",
+                                message=f"Orchestrator process (PID: {pid}) is actively running. Recovery apply rejected.",
+                            )
                 except (ProcessLookupError, ValueError):
                     pass
                 except OSError:
                     pass
 
-                # 2. flock 排他ロックチェック
+                # 1-2. 排他ロック取得
                 try:
-                    with open(lock_file, "a+") as f:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    lock_fd.seek(0)
+                    lock_fd.truncate()
+                    lock_fd.write(str(os.getpid()))
+                    lock_fd.flush()
                 except (BlockingIOError, OSError):
                     return RecoveryResult(
                         success=False,
@@ -444,6 +473,27 @@ class RecoveryEngine:
                         resulting_state="UNCHANGED",
                         message="Orchestrator process is actively running (exclusive lock held). Recovery apply rejected.",
                     )
+
+                try:
+                    return self._apply_locked()
+                finally:
+                    try:
+                        lock_fd.seek(0)
+                        lock_fd.truncate()
+                        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+        except OSError as e:
+            return RecoveryResult(
+                success=False,
+                applied_actions=[],
+                resulting_state="UNCHANGED",
+                message=f"Could not acquire lock file {lock_file}: {e}",
+            )
+
+    def _apply_locked(self) -> RecoveryResult:
+        """排他ロック保持下で実行される復旧実処理。"""
+        import tarfile
 
         report = self.inspect()
         applied: list[str] = []
