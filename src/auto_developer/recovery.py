@@ -277,8 +277,16 @@ class RecoveryEngine:
                     ),
                 )
 
-        # 4. 正常な状態
-        if tree_clean and current_branch == base_branch:
+        # 4. 正常な状態 (JobState が正常完了または失敗ステータスであり、作業ツリー・ブランチ・コミットが整合)
+        is_job_finished = job_state.status in ("COMPLETED", "FAILED")
+        last_completed_commit = (
+            job_state.completed_tasks[-1].get("commit")
+            if job_state.completed_tasks
+            else checkpoint
+        )
+        is_commit_consistent = (head_commit == last_completed_commit) or (head_commit == checkpoint)
+
+        if is_job_finished and tree_clean and current_branch == base_branch and is_commit_consistent:
             return InspectionReport(
                 diagnosis=RecoveryDiagnosis.HEALTHY,
                 can_auto_recover=False,
@@ -293,6 +301,17 @@ class RecoveryEngine:
                 recommended_action="None",
             )
 
+        explanation = "Unrecognized state inconsistency detected."
+        if job_state.status == "RUNNING" and head_commit != checkpoint:
+            explanation = (
+                f"JobState is RUNNING with checkpoint {checkpoint[:7]}, but Git HEAD has advanced "
+                f"to {head_commit[:7]} without matching verified evidence. Auto-recovery refused for safety."
+            )
+        elif job_state.status == "RUNNING":
+            explanation = (
+                f"JobState is unexpectedly RUNNING for task {task_id} with unexplained inconsistency."
+            )
+
         return InspectionReport(
             diagnosis=RecoveryDiagnosis.UNKNOWN_INCONSISTENCY,
             can_auto_recover=False,
@@ -303,8 +322,8 @@ class RecoveryEngine:
             tree_clean=tree_clean,
             uncommitted_files=uncommitted_files,
             task_id=task_id,
-            explanation="Unrecognized state inconsistency detected.",
-            recommended_action="Manual inspection required.",
+            explanation=explanation,
+            recommended_action="Manual inspection required. Do not force auto-recovery.",
         )
 
     def plan(self) -> RecoveryPlan:

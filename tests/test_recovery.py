@@ -223,6 +223,51 @@ class TestRecoveryInspect(unittest.TestCase):
             self.assertEqual(report.checkpoint_commit, checkpoint)
             self.assertFalse(report.tree_clean)
 
+    def test_inspect_unexplained_head_advance_is_unknown_inconsistency(self):
+        """機能W (P0-3): Evidenceのない未説明のHEAD前進は HEALTHY と誤判定せず UNKNOWN_INCONSISTENCY と診断すること。"""
+        from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # 不明なコミットを作成して HEAD を前進させる（Evidence Record は作成しない）
+            (repo / "unexplained.py").write_text("x = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "unexplained commit"], cwd=repo, check=True)
+            head_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertNotEqual(head_commit, checkpoint)
+
+            # JobState は RUNNING のまま
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-unexplained",
+                status="RUNNING",
+                current_task_id="1",
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+            report = engine.inspect()
+
+            # HEALTHY ではなく UNKNOWN_INCONSISTENCY と判定されること
+            self.assertEqual(
+                report.diagnosis,
+                RecoveryDiagnosis.UNKNOWN_INCONSISTENCY,
+                f"Unexplained HEAD advance must NOT be diagnosed as HEALTHY, got: {report.diagnosis}",
+            )
+            self.assertFalse(report.can_auto_recover, "Must NOT allow auto recovery for unexplained HEAD advance")
+
 
 class TestRecoveryPlanAndApply(unittest.TestCase):
     def test_plan_and_apply_scenario_03_committed_ahead(self):

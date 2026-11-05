@@ -7,21 +7,23 @@
 -->
 
 ## 現在の目標
-- Phase 4: Pilot 04 フィードバックに基づくクラッシュ耐性・トランザクション復旧基盤 (機能V, 機能W, 機能X)
-  - Scenario 03: コミット直後クラッシュからのコミット再利用・JobState自動前進補正 (P0-1)
-  - Scenario 04: Quarantine途中クラッシュからの安全復帰・隔離完了 (P0-2)
-  - 診断・計画・適用の分離型 CLI (`auto-dev recover inspect|plan|apply`)
+- Phase 5: Pilot 04 レビューフィードバックに基づく Recovery Engine の安全性強化 (P0-1, P0-2, P0-3, P1-1, P1-2)
+  - P0-1: `CRASHED_IN_FLIGHT` 復旧時の未追跡・未コミット成果の完全退避（消失防止）
+  - P0-2: `QUARANTINE_INCOMPLETE` 復旧時の隔離ブランチコミット確定 & tarアーカイブ整合性検証
+  - P0-3: 不明なHEAD前進・不整合時の `HEALTHY` 誤判定防止 (`UNKNOWN_INCONSISTENCY` 厳格化)
+  - P1-1: コミット復旧時のタスク確定とジョブ完了の分離（後続タスク残存判定）
+  - P1-2: Recovery 実行時の排他制御（二重操作防止）
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- （現時点で既存テストの変更予定なし。新規リカバリテスト・モジュールを追加）
+- なし
 
 ## ステップ
-- [x] 1. `JobState` への `base_branch` 追跡と永続化の実装 (機能V)
-- [x] 2. `RecoveryEngine.inspect()` によるクラッシュ不整合診断の実装 (機能W)
-- [x] 3. `RecoveryEngine.plan()` & `apply()` による復旧計画生成と自動適用 (機能X)
-- [x] 4. CLI への `auto-dev recover` (inspect / plan / apply) サブコマンド統合
-- [x] 5. 総合回帰検証 (Pilot 04 Golden Master を含む全単体テスト・型検査・リンター)
+- [x] 1. 不明なHEAD前進・不整合時の `HEALTHY` 誤判定防止と厳格診断 (P0-3)
+- [ ] 2. `CRASHED_IN_FLIGHT` 復旧における未確定・未追跡成果の事前退避と保全検証 (P0-1)
+- [ ] 3. `QUARANTINE_INCOMPLETE` 復旧における隔離ブランチコミット確定と tar アーカイブ検証 (P0-2)
+- [ ] 4. 複数タスク時のタスク確定とジョブ完了の分離 & 排他制御 (P1-1, P1-2)
+- [ ] 5. 総合回帰検証 (全単体テスト・型検査・リンター)
 
 ## 止まっていること・判断待ち
-- なし (全ステップ完了・検証ゲート Exit 0 通過)
+- なし (Step 2 に着手)
 
