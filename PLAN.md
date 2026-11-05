@@ -19,9 +19,9 @@
 - [x] 1. `JobState` への `base_branch` 追跡と永続化の実装 (機能V)
 - [x] 2. `RecoveryEngine.inspect()` によるクラッシュ不整合診断の実装 (機能W)
 - [x] 3. `RecoveryEngine.plan()` & `apply()` による復旧計画生成と自動適用 (機能X)
-- [ ] 4. CLI への `auto-dev recover` (inspect / plan / apply) サブコマンド統合
+- [x] 4. CLI への `auto-dev recover` (inspect / plan / apply) サブコマンド統合
 - [ ] 5. 総合回帰検証 (Pilot 04 Golden Master を含む全単体テスト・型検査・リンター)
 
 ## 止まっていること・判断待ち
-- なし (Step 4 に着手)
+- なし (Step 5 総合回帰検証に着手)
 

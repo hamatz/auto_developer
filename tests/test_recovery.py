@@ -376,5 +376,88 @@ class TestRecoveryPlanAndApply(unittest.TestCase):
             self.assertEqual(recovered_state.quarantined_task["task_id"], "1")
 
 
+class TestRecoveryCLI(unittest.TestCase):
+    def test_cli_recover_inspect_plan_apply(self):
+        """機能X: auto-dev recover inspect / plan / apply サブコマンドが正常に動作すること。"""
+        import json
+        from auto_developer.cli import main
+        from auto_developer.evidence import EvidenceStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. タスク1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # タスクコミット
+            (repo / "code.py").write_text("val = 1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            committed_tree = subprocess.run(["git", "write-tree"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            subprocess.run(["git", "commit", "-m", "feat: task 1"], cwd=repo, check=True)
+            head_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # Evidence
+            evidence_store = EvidenceStore(repo)
+            evidence_store.issue_evidence(task_id="1", checkpoint=checkpoint, tree_sha=committed_tree)
+            evidence_store.verify_and_consume(task_id="1", checkpoint=checkpoint, expected_tree_sha=committed_tree)
+
+            # Scenario 03 JobState
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-crashed-cli",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="CHECKER",
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            # 1. auto-dev recover inspect
+            exit_code = main(["--work-dir", str(repo), "recover", "inspect"])
+            self.assertEqual(exit_code, 1, "inspect should return 1 when inconsistency is diagnosed")
+
+            # 2. auto-dev recover plan
+            exit_code = main(["--work-dir", str(repo), "recover", "plan"])
+            self.assertEqual(exit_code, 0)
+
+            # 3. auto-dev recover apply
+            exit_code = main(["--work-dir", str(repo), "recover", "apply"])
+            self.assertEqual(exit_code, 0)
+
+            # 4. apply 後の再 inspect は HEALTHY (exit 0) になること
+            exit_code = main(["--work-dir", str(repo), "recover", "inspect"])
+            self.assertEqual(exit_code, 0, "inspect should return 0 after successful recovery")
+
+    def test_cli_recover_json_output(self):
+        """機能X: auto-dev recover --json で有効なJSON文字列が出力されること。"""
+        import io
+        import json
+        from unittest.mock import patch
+        from auto_developer.cli import main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            with patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+                exit_code = main(["--work-dir", str(repo), "recover", "inspect", "--json"])
+                self.assertEqual(exit_code, 0)
+                data = json.loads(mock_out.getvalue())
+                self.assertEqual(data["diagnosis"], "HEALTHY")
+
+
 if __name__ == "__main__":
     unittest.main()

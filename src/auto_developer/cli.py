@@ -263,6 +263,21 @@ def main(argv: list[str] | None = None) -> int:
     rollback_parser.add_argument("--task-id", type=str, required=True, help="Task ID to mark failed")
     rollback_parser.add_argument("--reason", type=str, default="Verification failed", help="Failure reason")
 
+    # Subcommand: recover
+    recover_parser = subparsers.add_parser("recover", help="Crash recovery and consistency tools")
+    recover_parser.add_argument(
+        "action",
+        choices=["inspect", "plan", "apply"],
+        default="inspect",
+        nargs="?",
+        help="Recovery action: inspect (diagnose), plan (show plan), apply (execute recovery)",
+    )
+    recover_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output diagnosis or plan in JSON format",
+    )
+
     args = parser.parse_args(argv)
 
     work_dir = args.work_dir.resolve()
@@ -447,6 +462,66 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print("No execution state or report found. Have you run the orchestrator yet?", file=sys.stderr)
             return 1
+
+    elif args.subcommand == "recover":
+        from auto_developer.recovery import RecoveryEngine
+        engine = RecoveryEngine(
+            repo_dir=work_dir,
+            state_path=state_file,
+            evidence_store=evidence_store,
+            git_guard=git_guard,
+        )
+        as_json = getattr(args, "json", False)
+
+        if args.action == "inspect":
+            report = engine.inspect()
+            if as_json:
+                print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+            else:
+                print("=== AUTO DEVELOPER / CRASH RECOVERY INSPECTION ===")
+                print(f" Diagnosis:          {report.diagnosis.value}")
+                print(f" Can Auto-Recover:   {report.can_auto_recover}")
+                print(f" Current Branch:     {report.current_branch} (base: {report.base_branch})")
+                print(f" Current HEAD:       {report.head_commit[:7]}")
+                print(f" Checkpoint:         {report.checkpoint_commit[:7]}")
+                print(f" Working Tree Clean: {report.tree_clean}")
+                if report.uncommitted_files:
+                    print(f" Uncommitted Files:  {', '.join(report.uncommitted_files)}")
+                print(f" Explanation:        {report.explanation}")
+                print(f" Recommended Action: {report.recommended_action}")
+            return 0 if report.diagnosis.value == "HEALTHY" else 1
+
+        elif args.action == "plan":
+            plan = engine.plan()
+            if as_json:
+                print(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2))
+            else:
+                print("=== AUTO DEVELOPER / RECOVERY PLAN ===")
+                print(f" Diagnosis:        {plan.diagnosis.value}")
+                print(f" Can Auto-Recover: {plan.can_auto_recover}")
+                print(f" Explanation:      {plan.explanation}")
+                print(" Actions to Apply:")
+                if plan.actions:
+                    for i, act in enumerate(plan.actions, 1):
+                        print(f"  {i}. [{act.action_type}] {act.description}")
+                else:
+                    print("  (None - System is healthy)")
+            return 0
+
+        elif args.action == "apply":
+            result = engine.apply()
+            if as_json:
+                print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+            else:
+                print("=== AUTO DEVELOPER / RECOVERY APPLY ===")
+                print(f" Success:         {result.success}")
+                print(f" Resulting State: {result.resulting_state}")
+                print(f" Message:         {result.message}")
+                if result.applied_actions:
+                    print(" Applied Actions:")
+                    for act_msg in result.applied_actions:
+                        print(f"  ✓ {act_msg}")
+            return 0 if result.success else 1
 
     # Default Autonomous Loop ("run" or no subcommand):
     is_mock = getattr(args, "mock", False)
