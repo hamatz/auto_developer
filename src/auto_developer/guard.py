@@ -145,23 +145,22 @@ class GitGuard:
 
         manifest_files = []
         with tarfile.open(archive_path, "w:gz") as tar:
-            for item in sorted(self.repo_dir.iterdir()):
-                if item.name in (".git", ".dev"):
+            for item in sorted(self.repo_dir.rglob("*")):
+                if not item.is_file():
                     continue
-                if self.is_secret_file(item.name):
+                rel_path = item.relative_to(self.repo_dir)
+                rel_posix = rel_path.as_posix()
+                if rel_posix.startswith((".git", ".dev")):
                     continue
-                if item.is_file():
-                    try:
-                        content = item.read_bytes()
-                        file_sha = hashlib.sha256(content).hexdigest()
-                        manifest_files.append({"path": item.name, "sha256": file_sha})
-                    except OSError:
-                        pass
-                tar.add(
-                    item,
-                    arcname=item.name,
-                    filter=lambda tarinfo: None if self.is_secret_file(Path(tarinfo.name).name) else tarinfo,
-                )
+                if self.is_secret_file(item.name) or any(self.is_secret_file(p) for p in rel_path.parts):
+                    continue
+                try:
+                    content = item.read_bytes()
+                    file_sha = hashlib.sha256(content).hexdigest()
+                    manifest_files.append({"path": rel_posix, "sha256": file_sha})
+                    tar.add(item, arcname=rel_posix)
+                except OSError:
+                    pass
 
         if not archive_path.exists() or archive_path.stat().st_size == 0:
             raise RuntimeError(f"Quarantine aborted: Failed to create snapshot archive at {archive_path}")

@@ -989,6 +989,73 @@ class TestRecoveryCLI(unittest.TestCase):
             final_report = engine.inspect()
             self.assertEqual(final_report.diagnosis, RecoveryDiagnosis.HEALTHY)
 
+    def test_quarantine_snapshot_manifest_records_subdirectories_and_verifies_sha256(self):
+        """機能X (P1-A): Manifest がサブディレクトリ内のファイルも含めて再帰的に SHA-256 を記録し、復旧時に全件照合・検証すること。"""
+        import hashlib
+        import json
+        from auto_developer.guard import GitGuard
+        from auto_developer.recovery import RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            quarantine_branch = "quarantine/1-1793812132"
+            subprocess.run(["git", "checkout", "-b", quarantine_branch], cwd=repo, check=True)
+
+            # サブディレクトリ構造の成果物
+            pkg_dir = repo / "mypackage" / "nested"
+            pkg_dir.mkdir(parents=True, exist_ok=True)
+            sub_file = pkg_dir / "worker.py"
+            sub_content = b"def work(): pass\n"
+            sub_file.write_bytes(sub_content)
+            expected_sha = hashlib.sha256(sub_content).hexdigest()
+
+            guard = GitGuard(repo)
+            archive_path = guard.create_quarantine_snapshot(task_id="1", checkpoint=checkpoint, job_id="job-sha")
+
+            # 1. Manifest の files にサブディレクトリの "mypackage/nested/worker.py" が正確に記録されていること！
+            manifest_path = archive_path.parent / archive_path.name.replace("snapshot_task_", "manifest_task_").replace(".tar.gz", ".json")
+            self.assertTrue(manifest_path.exists())
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+            files_map = {f["path"]: f["sha256"] for f in manifest["files"]}
+            self.assertIn("mypackage/nested/worker.py", files_map, "Subdirectory files must be recursively indexed in manifest")
+            self.assertEqual(files_map["mypackage/nested/worker.py"], expected_sha)
+
+            # 2. もし Manifest の SHA-256 が改ざんされていた場合、RecoveryEngine は不整合を検知してそのアーカイブを破棄/再生成すること
+            manifest["files"][0]["sha256"] = "corrupted_hash"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-sha",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="MAKER",
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+            result = engine.apply()
+            self.assertTrue(result.success)
+
+            # 改ざんされたアーカイブではなく、再生成された正規のアーカイブ・Manifestが作成されていること
+            valid_manifests = sorted(archive_path.parent.glob("manifest_task_1_*.json"))
+            latest_manifest = json.loads(valid_manifests[-1].read_text(encoding="utf-8"))
+            latest_map = {f["path"]: f["sha256"] for f in latest_manifest["files"]}
+            self.assertEqual(latest_map["mypackage/nested/worker.py"], expected_sha)
+
     def test_quarantine_recovery_excludes_untracked_secrets_from_git_and_archive(self):
         """機能X (P0-1): Quarantine 復旧時、未追跡の秘密ファイルが隔離ブランチの Git 履歴やアーカイブに絶対混入しないこと。"""
         import tarfile
