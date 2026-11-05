@@ -224,5 +224,157 @@ class TestRecoveryInspect(unittest.TestCase):
             self.assertFalse(report.tree_clean)
 
 
+class TestRecoveryPlanAndApply(unittest.TestCase):
+    def test_plan_and_apply_scenario_03_committed_ahead(self):
+        """機能X: Scenario 03 の状態から plan を生成し、apply でコミットを再利用して JobState を COMPLETED に前進させること。"""
+        from auto_developer.recovery import RecoveryEngine, RecoveryDiagnosis
+        from auto_developer.evidence import EvidenceStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("# SPEC\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. タスク1\n", encoding="utf-8")
+            (repo / "code.py").write_text("initial = 1\n", encoding="utf-8")
+
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # タスク1の実装コミット（Git側は正常に確定）
+            (repo / "code.py").write_text("initial = 2\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [x] 1. タスク1\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            committed_tree = subprocess.run(["git", "write-tree"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            subprocess.run(["git", "commit", "-m", "feat: task 1"], cwd=repo, check=True)
+            head_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # Evidence を発行し消費
+            evidence_store = EvidenceStore(repo)
+            evidence_store.issue_evidence(
+                task_id="1",
+                checkpoint=checkpoint,
+                tree_sha=committed_tree,
+                spec_sha="spec_sha",
+            )
+            evidence_store.verify_and_consume(
+                task_id="1",
+                checkpoint=checkpoint,
+                expected_tree_sha=committed_tree,
+            )
+
+            # JobState は CHECKER フェーズで停止（コミット直後に SIGKILL された Scenario 03 の状態）
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-crashed-03",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="CHECKER",
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+                completed_tasks=[],
+            )
+            job_state.save(state_file)
+
+            engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+            plan = engine.plan()
+
+            self.assertEqual(plan.diagnosis, RecoveryDiagnosis.COMMITTED_AHEAD_OF_STATE)
+            self.assertTrue(plan.can_auto_recover)
+            self.assertTrue(len(plan.actions) > 0)
+
+            # 復旧適用
+            result = engine.apply()
+            self.assertTrue(result.success, f"Recovery apply failed: {result.message}")
+            self.assertEqual(result.resulting_state, "COMPLETED")
+
+            # 適用後の検証
+            recovered_state = JobState.load(state_file)
+            self.assertEqual(recovered_state.status, "COMPLETED")
+            self.assertEqual(len(recovered_state.completed_tasks), 1)
+            self.assertEqual(recovered_state.completed_tasks[0]["commit"], head_commit)
+
+            # コミットが巻き戻されていないこと
+            current_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(current_head, head_commit)
+
+            # 再度 inspect すると HEALTHY になっていること（冪等性）
+            post_report = engine.inspect()
+            self.assertEqual(post_report.diagnosis, RecoveryDiagnosis.HEALTHY)
+
+    def test_plan_and_apply_scenario_04_quarantine_incomplete(self):
+        """機能X: Scenario 04 の状態から plan を生成し、apply でベースブランチ復帰と安全隔離を完了させること。"""
+        from auto_developer.recovery import RecoveryEngine, RecoveryDiagnosis
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\nlogs/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. 失敗タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # Quarantine ブランチを作成して checkout
+            quarantine_branch = "quarantine/1-1793812132"
+            subprocess.run(["git", "checkout", "-b", quarantine_branch], cwd=repo, check=True)
+
+            # 未コミットの変更・未追跡ファイルが残存
+            (repo / "probe.py").write_text("# dirty file\n", encoding="utf-8")
+            quarantine_dir = repo / ".dev" / "quarantines"
+            quarantine_dir.mkdir(parents=True, exist_ok=True)
+            snapshot_file = quarantine_dir / "snapshot_task_1_1793812132.tar.gz"
+            snapshot_file.write_bytes(b"dummy tar")
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-crashed-04",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="MAKER",
+                current_attempt=2,
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+            plan = engine.plan()
+
+            self.assertEqual(plan.diagnosis, RecoveryDiagnosis.QUARANTINE_INCOMPLETE)
+            self.assertTrue(plan.can_auto_recover)
+
+            # 復旧適用
+            result = engine.apply()
+            self.assertTrue(result.success, f"Recovery apply failed: {result.message}")
+            self.assertEqual(result.resulting_state, "FAILED")
+
+            # 適用後の検証
+            # 1. カレントブランチが main に復帰していること
+            current_branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(current_branch, "main")
+
+            # 2. 作業ツリーが完全にクリーンであること
+            status_out = subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(status_out, "", f"Working tree must be clean, but got: {status_out}")
+
+            # 3. HEAD が checkpoint と一致していること
+            current_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(current_head, checkpoint)
+
+            # 4. JobState が FAILED となり、quarantined_task が設定されていること
+            recovered_state = JobState.load(state_file)
+            self.assertEqual(recovered_state.status, "FAILED")
+            self.assertIsNotNone(recovered_state.quarantined_task)
+            self.assertEqual(recovered_state.quarantined_task["task_id"], "1")
+
+
 if __name__ == "__main__":
     unittest.main()
