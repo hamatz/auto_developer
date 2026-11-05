@@ -535,19 +535,20 @@ class RecoveryEngine:
 
         # 2. Scenario 04 復旧: 隔離ブランチへのコミット確定、tar検証、ベースブランチ復帰 (P0-2)
         if report.diagnosis == RecoveryDiagnosis.QUARANTINE_INCOMPLETE:
-            # 2-1. 隔離ブランチ上で未コミット成果（未追跡ファイル・変更）が存在する場合、まず隔離ブランチに確実にコミット
+            # 2-1. 隔離ブランチ上で未コミット成果が存在する場合、追跡済みファイルのみコミット (git add -u で秘密混入を物理遮断)
             status_proc = self.git_guard._run_git(["status", "--porcelain"])
             has_uncommitted = bool(status_proc.stdout.strip())
             if has_uncommitted:
-                self.git_guard._run_git(["add", "-A"])
+                self.git_guard._run_git(["add", "-u"])
                 self.git_guard._run_git([
                     "commit",
+                    "--allow-empty",
                     "-m",
                     f"quarantine: preserve interrupted work for task {report.task_id or 'unknown'}",
                 ])
-                applied.append(f"Committed uncommitted work to quarantine branch '{report.current_branch}'")
+                applied.append(f"Committed tracked uncommitted work to quarantine branch '{report.current_branch}'")
 
-            # 2-2. tar アーカイブの整合性を検証。無効または未作成なら正規 tar アーカイブを生成
+            # 2-2. tar アーカイブの整合性を検証。無効または未作成なら正規 tar アーカイブを安全生成 (秘密除外)
             quarantine_dir = self.repo_dir / ".dev" / "quarantines"
             quarantine_dir.mkdir(parents=True, exist_ok=True)
             snapshots = sorted(quarantine_dir.glob("snapshot_task_*.tar.gz"))
@@ -562,19 +563,8 @@ class RecoveryEngine:
                     continue
 
             if not valid_snapshot:
-                # アーカイブが存在しないか破損しているため、新規にスナップショットを生成
-                import time
-
-                new_snap_path = quarantine_dir / f"snapshot_task_{report.task_id or 'recovered'}_{int(time.time())}.tar.gz"
-                with tarfile.open(new_snap_path, "w:gz") as tar:
-                    for p in sorted(self.repo_dir.rglob("*")):
-                        if not p.is_file():
-                            continue
-                        rel_path = p.relative_to(self.repo_dir)
-                        str_rel = str(rel_path)
-                        if str_rel.startswith((".git", ".dev")):
-                            continue
-                        tar.add(p, arcname=str_rel)
+                # アーカイブが存在しないか破損しているため、新規にスナップショットを安全生成
+                new_snap_path = self.git_guard.create_quarantine_snapshot(task_id=report.task_id or "recovered")
                 valid_snapshot = new_snap_path
                 applied.append(f"Created verified quarantine archive at {new_snap_path.name}")
             else:
