@@ -910,6 +910,80 @@ class TestRecoveryCLI(unittest.TestCase):
             self.assertEqual(manifest_data["job_id"], "job-target-1")
             self.assertEqual(manifest_data["checkpoint"], checkpoint)
 
+    def test_recovery_apply_interruption_and_subsequent_retry_is_idempotent(self):
+        """機能X: 復旧処理 (apply) が途中で中断 (SIGKILL/例外) されても、再実行時に二重確定や成果消失を起こさず健全に復旧できること (冪等性)。"""
+        from unittest.mock import patch
+        from auto_developer.evidence import EvidenceStore
+        from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            (repo / "code.py").write_text("x = 1\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [x] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            tree_sha = subprocess.run(["git", "write-tree"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            subprocess.run(["git", "commit", "-m", "task 1"], cwd=repo, check=True)
+            head_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            evidence_store = EvidenceStore(repo)
+            evidence_store.issue_evidence(task_id="1", checkpoint=checkpoint, tree_sha=tree_sha)
+            evidence_store.verify_and_consume(task_id="1", checkpoint=checkpoint, expected_tree_sha=tree_sha)
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-retry-crash",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="CHECKER",
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+
+            # 1回目の apply 実行中に証拠アーカイブのタイミングで SIGKILL (シミュレーション例外)
+            with patch.object(EvidenceStore, "archive_record", side_effect=RuntimeError("Simulated SIGKILL during recovery apply")):
+                with self.assertRaises(RuntimeError):
+                    engine.apply()
+
+            # 中断直後でもロックが正常に解放されていること（再起動時のブロック防止）
+            lock_file = repo / ".dev" / "auto_developer.lock"
+            import fcntl
+            with open(lock_file, "a+") as test_fd:
+                # ロックが取得できること
+                fcntl.flock(test_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(test_fd.fileno(), fcntl.LOCK_UN)
+
+            # 2回目の apply 再実行
+            second_result = engine.apply()
+            self.assertTrue(second_result.success)
+
+            # 再実行後の検証:
+            # - completed_tasks にタスク1が重複して二重登録されていないこと (冪等性)
+            recovered_state = JobState.load(state_file)
+            self.assertEqual(len(recovered_state.completed_tasks), 1)
+            self.assertEqual(recovered_state.completed_tasks[0]["commit"], head_commit)
+            self.assertEqual(recovered_state.status, "COMPLETED")
+
+            # - HEAD コミットが失われていないこと
+            current_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(current_head, head_commit)
+
+            # - 最終的に HEALTHY であること
+            final_report = engine.inspect()
+            self.assertEqual(final_report.diagnosis, RecoveryDiagnosis.HEALTHY)
+
     def test_quarantine_recovery_excludes_untracked_secrets_from_git_and_archive(self):
         """機能X (P0-1): Quarantine 復旧時、未追跡の秘密ファイルが隔離ブランチの Git 履歴やアーカイブに絶対混入しないこと。"""
         import tarfile
