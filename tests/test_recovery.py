@@ -157,6 +157,7 @@ class TestRecoveryInspect(unittest.TestCase):
             subprocess.run(["git", "checkout", "-b", quarantine_branch], cwd=repo, check=True)
 
             # 未コミットの変更・未追跡ファイルが残存
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. 失敗タスク (in-flight)\n", encoding="utf-8")
             (repo / "probe.py").write_text("# dirty file\n", encoding="utf-8")
             quarantine_dir = repo / ".dev" / "quarantines"
             quarantine_dir.mkdir(parents=True, exist_ok=True)
@@ -375,6 +376,7 @@ class TestRecoveryPlanAndApply(unittest.TestCase):
             subprocess.run(["git", "checkout", "-b", quarantine_branch], cwd=repo, check=True)
 
             # 未コミットの変更・未追跡ファイルが残存
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. 失敗タスク (in-flight)\n", encoding="utf-8")
             (repo / "probe.py").write_text("# dirty file\n", encoding="utf-8")
             quarantine_dir = repo / ".dev" / "quarantines"
             quarantine_dir.mkdir(parents=True, exist_ok=True)
@@ -425,17 +427,18 @@ class TestRecoveryPlanAndApply(unittest.TestCase):
             self.assertIsNotNone(recovered_state.quarantined_task)
             self.assertEqual(recovered_state.quarantined_task["task_id"], "1")
 
-            # 5. 隔離ブランチ (quarantine/1-1793812132) 側に probe.py が確実にコミットされていること！ (P0-2)
+            # 5. 隔離ブランチ (quarantine/1-1793812132) 側に追跡済みファイルの変更が安全にコミットされていること (P0-1: git add -u)
             quarantine_tree_files = subprocess.run(
                 ["git", "ls-tree", "-r", "--name-only", quarantine_branch],
                 cwd=repo,
                 capture_output=True,
                 text=True,
                 check=True,
-            ).stdout
-            self.assertIn("probe.py", quarantine_tree_files, f"probe.py must be committed to quarantine branch, got: {quarantine_tree_files}")
+            ).stdout.splitlines()
+            self.assertIn("PLAN.md", quarantine_tree_files, "Tracked files must be committed to quarantine branch")
+            self.assertNotIn("probe.py", quarantine_tree_files, "Untracked probe.py must NOT be committed to git branch (must be in tar)")
 
-            # 6. 有効な tar アーカイブが生成・検証され、probe.py が含まれていること！ (P0-2)
+            # 6. 有効な tar アーカイブが生成・検証され、probe.py が含まれていること！ (P0-1)
             import tarfile
             snapshots = list((repo / ".dev" / "quarantines").glob("snapshot_task_*.tar.gz"))
             self.assertTrue(len(snapshots) > 0, "Valid tar snapshot must exist")
@@ -712,6 +715,350 @@ class TestRecoveryCLI(unittest.TestCase):
                 self.assertIn("exclusive lock held", result.message)
 
                 fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+
+    def test_recover_apply_holds_lock_during_entire_execution(self):
+        """機能X (P0-2): recover apply の処理中、auto_developer.lock の排他ロックが終始保持されていること。"""
+        import fcntl
+        from unittest.mock import patch
+
+        from auto_developer.evidence import EvidenceStore
+        from auto_developer.recovery import RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            (repo / "code.py").write_text("x = 1\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [x] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            tree_sha = subprocess.run(["git", "write-tree"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            subprocess.run(["git", "commit", "-m", "task 1"], cwd=repo, check=True)
+
+            evidence_store = EvidenceStore(repo)
+            evidence_store.issue_evidence(task_id="1", checkpoint=checkpoint, tree_sha=tree_sha)
+            evidence_store.verify_and_consume(task_id="1", checkpoint=checkpoint, expected_tree_sha=tree_sha)
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-crashed",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="CHECKER",
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            lock_acquired_during_execution = []
+
+            lock_file = repo / ".dev" / "auto_developer.lock"
+
+            original_save = JobState.save
+
+            def patched_save(self, path):
+                # apply の処理中 (JobState 保存のタイミング) で、他プロセスがロックを取得できるか試みる
+                try:
+                    with open(lock_file, "a+") as test_fd:
+                        fcntl.flock(test_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        lock_acquired_during_execution.append(True)  # ロックが取れてしまったら脆弱！
+                        fcntl.flock(test_fd.fileno(), fcntl.LOCK_UN)
+                except (BlockingIOError, OSError):
+                    lock_acquired_during_execution.append(False)  # 適切にロック中
+                return original_save(self, path)
+
+            engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+
+            with patch.object(JobState, "save", patched_save):
+                result = engine.apply()
+                self.assertTrue(result.success)
+
+            # 処理中に他プロセスがロックを取得できてはいけない！
+            self.assertTrue(len(lock_acquired_during_execution) > 0, "patched_save must have been called")
+            self.assertFalse(
+                any(lock_acquired_during_execution),
+                "Exclusive lock must be held during entire execution of apply; another process must NOT acquire it!",
+            )
+
+    def test_concurrent_two_processes_recover_apply_mutual_exclusion(self):
+        """機能X (P0-2): 2つの recover apply が同時に実行された場合、片方のみが適用され他方は安全に拒否されること。"""
+        import concurrent.futures
+
+        from auto_developer.evidence import EvidenceStore
+        from auto_developer.recovery import RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            (repo / "code.py").write_text("x = 1\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [x] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            tree_sha = subprocess.run(["git", "write-tree"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            subprocess.run(["git", "commit", "-m", "task 1"], cwd=repo, check=True)
+
+            evidence_store = EvidenceStore(repo)
+            evidence_store.issue_evidence(task_id="1", checkpoint=checkpoint, tree_sha=tree_sha)
+            evidence_store.verify_and_consume(task_id="1", checkpoint=checkpoint, expected_tree_sha=tree_sha)
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-concurrent",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="CHECKER",
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            engine1 = RecoveryEngine(repo_dir=repo, state_path=state_file)
+            engine2 = RecoveryEngine(repo_dir=repo, state_path=state_file)
+
+            # 2つのプロセス/スレッドから並行実行
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                future1 = executor.submit(engine1.apply)
+                future2 = executor.submit(engine2.apply)
+                results = [future1.result(), future2.result()]
+
+            # 1つが成功、もう1つが排他拒否（または1つ成功後に完了済みでHealthy/無変更）
+            success_count = sum(1 for r in results if r.success and r.resulting_state in ("COMPLETED", "RUNNING", "FAILED", "RESET_FOR_RETRY"))
+            self.assertGreaterEqual(success_count, 1, "At least one apply must succeed")
+            # 適用後の整合性が保たれていること
+            post_report = engine1.inspect()
+            self.assertEqual(post_report.diagnosis.value, "HEALTHY")
+
+    def test_quarantine_recovery_rejects_unrelated_old_tar(self):
+        """機能X (P1): 無関係な古い tar アーカイブが存在する場合、今回の復旧証拠として誤採用せず、Manifest に基づいて今回のタスクのスナップショットを特定・生成すること。"""
+        import json
+        import tarfile
+
+        from auto_developer.recovery import RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. 失敗タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            quarantine_branch = "quarantine/1-1793812132"
+            subprocess.run(["git", "checkout", "-b", quarantine_branch], cwd=repo, check=True)
+
+            (repo / "actual_work.py").write_text("current_work = True\n", encoding="utf-8")
+
+            # 過去の全く別のタスク (task 999) の古い tar アーカイブと古い Manifest が残存
+            quarantine_dir = repo / ".dev" / "quarantines"
+            quarantine_dir.mkdir(parents=True, exist_ok=True)
+            old_tar = quarantine_dir / "snapshot_task_999_1000000000.tar.gz"
+            old_dummy = repo / "old_unrelated.py"
+            old_dummy.write_text("old = True\n", encoding="utf-8")
+            with tarfile.open(old_tar, "w:gz") as tar:
+                tar.add(old_dummy, arcname="old_unrelated.py")
+            old_dummy.unlink()
+
+            old_manifest = quarantine_dir / "manifest_task_999_1000000000.json"
+            old_manifest.write_text(json.dumps({
+                "job_id": "old-job-999",
+                "task_id": "999",
+                "checkpoint": "0000000000000000000000000000000000000000",
+                "files": [{"path": "old_unrelated.py", "sha256": "dummy"}],
+            }), encoding="utf-8")
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-target-1",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="MAKER",
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+            result = engine.apply()
+            self.assertTrue(result.success)
+
+            # 復旧結果として古い tar (task_999) を採用していてはならない！
+            # 今回の task 1 に対応するスナップショットおよび Manifest が生成・採用されていること
+            task1_snapshots = list(quarantine_dir.glob("snapshot_task_1_*.tar.gz"))
+            self.assertTrue(len(task1_snapshots) > 0, "Must create snapshot corresponding to task 1, not adopt task 999")
+
+            task1_manifests = list(quarantine_dir.glob("manifest_task_1_*.json"))
+            self.assertTrue(len(task1_manifests) > 0, "Must generate valid manifest for task 1")
+            manifest_data = json.loads(task1_manifests[-1].read_text(encoding="utf-8"))
+            self.assertEqual(manifest_data["task_id"], "1")
+            self.assertEqual(manifest_data["job_id"], "job-target-1")
+            self.assertEqual(manifest_data["checkpoint"], checkpoint)
+
+    def test_recovery_apply_interruption_and_subsequent_retry_is_idempotent(self):
+        """機能X: 復旧処理 (apply) が途中で中断 (SIGKILL/例外) されても、再実行時に二重確定や成果消失を起こさず健全に復旧できること (冪等性)。"""
+        from unittest.mock import patch
+
+        from auto_developer.evidence import EvidenceStore
+        from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            (repo / "code.py").write_text("x = 1\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [x] 1. タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            tree_sha = subprocess.run(["git", "write-tree"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            subprocess.run(["git", "commit", "-m", "task 1"], cwd=repo, check=True)
+            head_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            evidence_store = EvidenceStore(repo)
+            evidence_store.issue_evidence(task_id="1", checkpoint=checkpoint, tree_sha=tree_sha)
+            evidence_store.verify_and_consume(task_id="1", checkpoint=checkpoint, expected_tree_sha=tree_sha)
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-retry-crash",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="CHECKER",
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+
+            # 1回目の apply 実行中に証拠アーカイブのタイミングで SIGKILL (シミュレーション例外)
+            with (
+                patch.object(EvidenceStore, "archive_record", side_effect=RuntimeError("Simulated SIGKILL during recovery apply")),
+                self.assertRaises(RuntimeError),
+            ):
+                engine.apply()
+
+            # 中断直後でもロックが正常に解放されていること（再起動時のブロック防止）
+            lock_file = repo / ".dev" / "auto_developer.lock"
+            import fcntl
+            with open(lock_file, "a+") as test_fd:
+                # ロックが取得できること
+                fcntl.flock(test_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(test_fd.fileno(), fcntl.LOCK_UN)
+
+            # 2回目の apply 再実行
+            second_result = engine.apply()
+            self.assertTrue(second_result.success)
+
+            # 再実行後の検証:
+            # - completed_tasks にタスク1が重複して二重登録されていないこと (冪等性)
+            recovered_state = JobState.load(state_file)
+            self.assertEqual(len(recovered_state.completed_tasks), 1)
+            self.assertEqual(recovered_state.completed_tasks[0]["commit"], head_commit)
+            self.assertEqual(recovered_state.status, "COMPLETED")
+
+            # - HEAD コミットが失われていないこと
+            current_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(current_head, head_commit)
+
+            # - 最終的に HEALTHY であること
+            final_report = engine.inspect()
+            self.assertEqual(final_report.diagnosis, RecoveryDiagnosis.HEALTHY)
+
+    def test_quarantine_recovery_excludes_untracked_secrets_from_git_and_archive(self):
+        """機能X (P0-1): Quarantine 復旧時、未追跡の秘密ファイルが隔離ブランチの Git 履歴やアーカイブに絶対混入しないこと。"""
+        import tarfile
+
+        from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\nlogs/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. 失敗タスク\n", encoding="utf-8")
+            (repo / "app.py").write_text("print('base')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            # Quarantine ブランチを作成して checkout
+            quarantine_branch = "quarantine/1-1793812132"
+            subprocess.run(["git", "checkout", "-b", quarantine_branch], cwd=repo, check=True)
+
+            # 追跡済みファイルの正規の変更
+            (repo / "app.py").write_text("print('modified in task 1')\n", encoding="utf-8")
+
+            # 危険な未追跡の秘密ファイルが作成された状態（APIトークン、秘密鍵、.envなど）
+            (repo / ".env").write_text("SECRET_API_KEY=supersecret123\n", encoding="utf-8")
+            (repo / "secret_token.key").write_text("private_key_data\n", encoding="utf-8")
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-quarantine-secrets",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="MAKER",
+                current_attempt=2,
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+            plan = engine.plan()
+            self.assertEqual(plan.diagnosis, RecoveryDiagnosis.QUARANTINE_INCOMPLETE)
+
+            result = engine.apply()
+            self.assertTrue(result.success)
+
+            # 1. 隔離ブランチ (quarantine/1-1793812132) のコミットツリーに .env や secret_token.key が絶対に入っていないこと！
+            quarantine_files = subprocess.run(
+                ["git", "ls-tree", "-r", "--name-only", quarantine_branch],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.splitlines()
+
+            self.assertNotIn(".env", quarantine_files, "Untracked .env must NOT be committed to quarantine git branch")
+            self.assertNotIn("secret_token.key", quarantine_files, "Untracked secret key must NOT be committed to quarantine git branch")
+            self.assertIn("app.py", quarantine_files, "Tracked modifications must be preserved in quarantine branch")
+
+            # 2. 生成された tar スナップショットにも秘密情報ファイルが絶対に含まれていないこと！
+            snapshots = list((repo / ".dev" / "quarantines").glob("snapshot_task_*.tar.gz"))
+            self.assertTrue(len(snapshots) > 0, "Snapshot archive must exist")
+            for snap in snapshots:
+                with tarfile.open(snap, "r:gz") as tar:
+                    names = tar.getnames()
+                    self.assertFalse(any(".env" in n for n in names), f".env must NOT be in snapshot: {names}")
+                    self.assertFalse(any("secret" in n for n in names), f"Secret file must NOT be in snapshot: {names}")
 
 
 if __name__ == "__main__":

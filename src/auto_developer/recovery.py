@@ -407,36 +407,65 @@ class RecoveryEngine:
         )
 
     def apply(self) -> RecoveryResult:
-        """計画された復旧操作を安全・アトミック・冪等に適用する。"""
-        # 排他制御: オーケストレータープロセスが現在実行中か検査 (P1-2)
+        """計画された復旧操作を安全・アトミック・冪等に適用する。
+        復旧処理の全期間にわたって auto_developer.lock の排他ロックを保持し、
+        他のオーケストレーターや復旧プロセスの並行実行・状態破壊を物理的に遮断する (P0-2)。
+        """
         import fcntl
         import os
 
-        for lock_name in ("auto_developer.lock", "orchestrator.lock"):
-            lock_file = self.repo_dir / ".dev" / lock_name
-            if lock_file.exists():
-                # 1. PID チェック
+        # 0. 外部ロック (orchestrator.lock) の生存PIDチェック
+        aux_lock = self.repo_dir / ".dev" / "orchestrator.lock"
+        if aux_lock.exists():
+            try:
+                raw = aux_lock.read_text(encoding="utf-8").strip()
+                if raw:
+                    pid = int(raw)
+                    os.kill(pid, 0)
+                    return RecoveryResult(
+                        success=False,
+                        applied_actions=[],
+                        resulting_state="UNCHANGED",
+                        message=f"Orchestrator process (PID: {pid}) is actively running. Recovery apply rejected.",
+                    )
+            except (ProcessLookupError, ValueError):
+                pass
+            except OSError:
+                pass
+
+        # 1. auto_developer.lock の排他ロックを取得し、処理終了まで保持 (P0-2: TOCTOU 排除)
+        lock_file = self.repo_dir / ".dev" / "auto_developer.lock"
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with open(lock_file, "a+") as lock_fd:
+                # 1-1. 既存 PID チェック
                 try:
-                    raw = lock_file.read_text(encoding="utf-8").strip()
-                    if raw:
-                        pid = int(raw)
+                    lock_fd.seek(0)
+                    raw_pid = lock_fd.read().strip()
+                    if raw_pid:
+                        pid = int(raw_pid)
                         os.kill(pid, 0)
-                        return RecoveryResult(
-                            success=False,
-                            applied_actions=[],
-                            resulting_state="UNCHANGED",
-                            message=f"Orchestrator process (PID: {pid}) is actively running. Recovery apply rejected.",
-                        )
+                        # 自分自身のPIDでなければ拒否
+                        if pid != os.getpid():
+                            return RecoveryResult(
+                                success=False,
+                                applied_actions=[],
+                                resulting_state="UNCHANGED",
+                                message=f"Orchestrator process (PID: {pid}) is actively running. Recovery apply rejected.",
+                            )
                 except (ProcessLookupError, ValueError):
                     pass
                 except OSError:
                     pass
 
-                # 2. flock 排他ロックチェック
+                # 1-2. 排他ロック取得
                 try:
-                    with open(lock_file, "a+") as f:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    lock_fd.seek(0)
+                    lock_fd.truncate()
+                    lock_fd.write(str(os.getpid()))
+                    lock_fd.flush()
                 except (BlockingIOError, OSError):
                     return RecoveryResult(
                         success=False,
@@ -444,6 +473,27 @@ class RecoveryEngine:
                         resulting_state="UNCHANGED",
                         message="Orchestrator process is actively running (exclusive lock held). Recovery apply rejected.",
                     )
+
+                try:
+                    return self._apply_locked()
+                finally:
+                    try:
+                        lock_fd.seek(0)
+                        lock_fd.truncate()
+                        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+        except OSError as e:
+            return RecoveryResult(
+                success=False,
+                applied_actions=[],
+                resulting_state="UNCHANGED",
+                message=f"Could not acquire lock file {lock_file}: {e}",
+            )
+
+    def _apply_locked(self) -> RecoveryResult:
+        """排他ロック保持下で実行される復旧実処理。"""
+        import tarfile
 
         report = self.inspect()
         applied: list[str] = []
@@ -535,46 +585,59 @@ class RecoveryEngine:
 
         # 2. Scenario 04 復旧: 隔離ブランチへのコミット確定、tar検証、ベースブランチ復帰 (P0-2)
         if report.diagnosis == RecoveryDiagnosis.QUARANTINE_INCOMPLETE:
-            # 2-1. 隔離ブランチ上で未コミット成果（未追跡ファイル・変更）が存在する場合、まず隔離ブランチに確実にコミット
+            # 2-1. 隔離ブランチ上で未コミット成果が存在する場合、追跡済みファイルのみコミット (git add -u で秘密混入を物理遮断)
             status_proc = self.git_guard._run_git(["status", "--porcelain"])
             has_uncommitted = bool(status_proc.stdout.strip())
             if has_uncommitted:
-                self.git_guard._run_git(["add", "-A"])
+                self.git_guard._run_git(["add", "-u"])
                 self.git_guard._run_git([
                     "commit",
+                    "--allow-empty",
                     "-m",
                     f"quarantine: preserve interrupted work for task {report.task_id or 'unknown'}",
                 ])
-                applied.append(f"Committed uncommitted work to quarantine branch '{report.current_branch}'")
+                applied.append(f"Committed tracked uncommitted work to quarantine branch '{report.current_branch}'")
 
-            # 2-2. tar アーカイブの整合性を検証。無効または未作成なら正規 tar アーカイブを生成
+            # 2-2. tar アーカイブと Manifest の整合性を検証 (P1)
+            # 現在のタスクIDに合致するスナップショットを特定し、無関係な古い tar を排除
+            import json
+            import re
+
             quarantine_dir = self.repo_dir / ".dev" / "quarantines"
             quarantine_dir.mkdir(parents=True, exist_ok=True)
-            snapshots = sorted(quarantine_dir.glob("snapshot_task_*.tar.gz"))
+
+            task_clean = re.sub(r"[^a-zA-Z0-9_\-]", "_", report.task_id or "1")
+            task_snapshots = sorted(quarantine_dir.glob(f"snapshot_task_{task_clean}_*.tar.gz"))
+
+            job_state = JobState.load(self.state_path)
             valid_snapshot = None
-            for s in snapshots:
+
+            for s in task_snapshots:
                 try:
-                    if tarfile.is_tarfile(s):
-                        with tarfile.open(s, "r:gz") as tar:
-                            tar.getmembers()
-                        valid_snapshot = s
-                except (OSError, tarfile.TarError):
+                    if not tarfile.is_tarfile(s):
+                        continue
+                    with tarfile.open(s, "r:gz") as tar:
+                        tar.getmembers()
+
+                    # 対応する Manifest が存在すればタスクIDとチェックポイントを照合
+                    manifest_file = s.parent / s.name.replace("snapshot_task_", "manifest_task_").replace(".tar.gz", ".json")
+                    if manifest_file.exists():
+                        m_data = json.loads(manifest_file.read_text(encoding="utf-8"))
+                        if str(m_data.get("task_id")) != str(report.task_id or "1"):
+                            continue
+                        if m_data.get("checkpoint") and report.checkpoint_commit and m_data.get("checkpoint") != report.checkpoint_commit:
+                            continue
+                    valid_snapshot = s
+                except (OSError, tarfile.TarError, json.JSONDecodeError):
                     continue
 
             if not valid_snapshot:
-                # アーカイブが存在しないか破損しているため、新規にスナップショットを生成
-                import time
-
-                new_snap_path = quarantine_dir / f"snapshot_task_{report.task_id or 'recovered'}_{int(time.time())}.tar.gz"
-                with tarfile.open(new_snap_path, "w:gz") as tar:
-                    for p in sorted(self.repo_dir.rglob("*")):
-                        if not p.is_file():
-                            continue
-                        rel_path = p.relative_to(self.repo_dir)
-                        str_rel = str(rel_path)
-                        if str_rel.startswith((".git", ".dev")):
-                            continue
-                        tar.add(p, arcname=str_rel)
+                # アーカイブが存在しないか破損しているため、新規にスナップショットとManifestを安全生成
+                new_snap_path = self.git_guard.create_quarantine_snapshot(
+                    task_id=report.task_id or "recovered",
+                    checkpoint=report.checkpoint_commit,
+                    job_id=job_state.job_id,
+                )
                 valid_snapshot = new_snap_path
                 applied.append(f"Created verified quarantine archive at {new_snap_path.name}")
             else:
@@ -612,11 +675,13 @@ class RecoveryEngine:
 
         # 3. Scenario 01 & 02 復旧: 実行中クラッシュからのクリーン復元
         if report.diagnosis == RecoveryDiagnosis.CRASHED_IN_FLIGHT:
+            job_state = JobState.load(self.state_path)
             # 未コミット差分や未追跡ファイルが存在する場合、先に確実に quarantine 退避する (P0-1)
             if not report.tree_clean:
                 quarantine_branch = self.git_guard.quarantine_and_restore(
                     checkpoint=report.checkpoint_commit,
                     task_id=report.task_id or "crashed",
+                    job_id=job_state.job_id,
                 )
                 applied.append(f"Preserved uncommitted in-flight work to branch '{quarantine_branch}' and snapshot")
             else:
@@ -624,7 +689,7 @@ class RecoveryEngine:
                 self.git_guard._run_git(["clean", "-fd"])
                 applied.append(f"Confirmed clean working tree at checkpoint {report.checkpoint_commit[:7]}")
 
-            job_state = JobState.load(self.state_path)
+            job_state.status = "RUNNING"
             job_state.status = "RUNNING"
             job_state.transition_phase("INIT")
             job_state.save(self.state_path)

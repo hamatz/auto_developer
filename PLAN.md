@@ -7,21 +7,21 @@
 -->
 
 ## 現在の目標
-- Phase 5: Pilot 04 レビューフィードバックに基づく Recovery Engine の安全性強化 (P0-1, P0-2, P0-3, P1-1, P1-2)
-  - P0-1: `CRASHED_IN_FLIGHT` 復旧時の未追跡・未コミット成果の完全退避（消失防止）
-  - P0-2: `QUARANTINE_INCOMPLETE` 復旧時の隔離ブランチコミット確定 & tarアーカイブ整合性検証
-  - P0-3: 不明なHEAD前進・不整合時の `HEALTHY` 誤判定防止 (`UNKNOWN_INCONSISTENCY` 厳格化)
-  - P1-1: コミット復旧時のタスク確定とジョブ完了の分離（後続タスク残存判定）
-  - P1-2: Recovery 実行時の排他制御（二重操作防止）
+- Phase 5 (追補): ChatGPT 6.1-sol 氏の追加レビューに基づく Recovery Apply 安全性強化
+  - P0-1: Quarantine 復旧における秘密情報保護（Git隔離コミットの `git add -u` 限定、スナップショット作成時の秘密除外共通化）
+  - P0-2: 排他ロックの復旧処理中保持（TOCTOU 排除、apply 全体を排他ロック保持下でアトミックに実行）
+  - P1: Quarantine アーカイブの Manifest 生成と照合（job_id/task_id/checkpoint の照合、無関係な古い tar 採用防止）
+  - 回帰テスト: 秘密情報混入防止、同時 2 プロセス実行の排他、無関係な古い tar 拒否、復旧再クラッシュ耐性
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- なし
+- `tests/test_recovery.py` (`test_plan_and_apply_scenario_04_quarantine_incomplete`):
+  - 理由: 未追跡ファイル `probe.py` を `git add -A` で隔離ブランチにコミットすることを期待していたアサーションを、ChatGPT 6.1-sol 氏のレビュー指摘に基づき、追跡済みファイルの `git add -u` コミット（秘密情報混入防止）と未追跡ファイルの tar スナップショット保全の明確な分離方針に合わせて修正。未追跡ファイルは Git 隔離履歴ではなく tar スナップショットに保全されることを検証する。
 
 ## ステップ
-- [x] 1. 不明なHEAD前進・不整合時の `HEALTHY` 誤判定防止と厳格診断 (P0-3)
-- [x] 2. `CRASHED_IN_FLIGHT` 復旧における未確定・未追跡成果の事前退避と保全検証 (P0-1)
-- [x] 3. `QUARANTINE_INCOMPLETE` 復旧における隔離ブランチコミット確定と tar アーカイブ検証 (P0-2)
-- [x] 4. 複数タスク時のタスク確定とジョブ完了の分離 & 排他制御 (P1-1, P1-2)
+- [x] 1. Quarantine 復旧における秘密情報保護（`git add -u` 限定 & スナップショット秘密除外共通化）
+- [x] 2. 復旧処理中における排他ロックの完全保持（TOCTOU 競合防止 & 多重 apply 排他）
+- [x] 3. Quarantine スナップショットの Manifest 生成と復旧時照合（無関係な古い tar 採用拒否）
+- [x] 4. 復旧再実行・クラッシュ耐性の回帰テスト
 - [x] 5. 総合回帰検証 (全単体テスト・型検査・リンター)
 
 ## 止まっていること・判断待ち
