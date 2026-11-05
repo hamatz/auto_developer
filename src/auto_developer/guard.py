@@ -122,10 +122,17 @@ class GitGuard:
         base_name = Path(filename).name
         return any(pattern.search(base_name) for pattern in self.SECRET_EXCLUDE_PATTERNS)
 
-    def create_quarantine_snapshot(self, task_id: str) -> Path:
-        """作業ツリーの変更・未追跡ファイルを物理アーカイブへ安全に退避する。
+    def create_quarantine_snapshot(
+        self,
+        task_id: str,
+        checkpoint: str = "",
+        job_id: str = "",
+    ) -> Path:
+        """作業ツリーの変更・未追跡ファイルを物理アーカイブへ安全に退避し、照合用 Manifest を生成する。
         秘密情報 (.env や鍵) はスナップショットから厳格に除外される。
         """
+        import hashlib
+        import json
         import tarfile
         import time
 
@@ -134,13 +141,22 @@ class GitGuard:
         quarantine_dir = self.repo_dir / ".dev" / "quarantines"
         quarantine_dir.mkdir(parents=True, exist_ok=True)
         archive_path = quarantine_dir / f"snapshot_task_{clean_id}_{timestamp}.tar.gz"
+        manifest_path = quarantine_dir / f"manifest_task_{clean_id}_{timestamp}.json"
 
+        manifest_files = []
         with tarfile.open(archive_path, "w:gz") as tar:
-            for item in self.repo_dir.iterdir():
+            for item in sorted(self.repo_dir.iterdir()):
                 if item.name in (".git", ".dev"):
                     continue
                 if self.is_secret_file(item.name):
                     continue
+                if item.is_file():
+                    try:
+                        content = item.read_bytes()
+                        file_sha = hashlib.sha256(content).hexdigest()
+                        manifest_files.append({"path": item.name, "sha256": file_sha})
+                    except OSError:
+                        pass
                 tar.add(
                     item,
                     arcname=item.name,
@@ -150,9 +166,19 @@ class GitGuard:
         if not archive_path.exists() or archive_path.stat().st_size == 0:
             raise RuntimeError(f"Quarantine aborted: Failed to create snapshot archive at {archive_path}")
 
+        manifest_data = {
+            "job_id": job_id,
+            "task_id": str(task_id),
+            "checkpoint": checkpoint,
+            "created_at": timestamp,
+            "archive_name": archive_path.name,
+            "files": manifest_files,
+        }
+        manifest_path.write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
+
         return archive_path
 
-    def quarantine_and_restore(self, checkpoint: str, task_id: str) -> str:
+    def quarantine_and_restore(self, checkpoint: str, task_id: str, job_id: str = "") -> str:
         """作業ツリーの変更を破棄せず物理アーカイブおよび隔離ブランチへ退避し、退避確認後に本線をチェックポイントに復元する。
         秘密情報 (.env や鍵) は Git 隔離ブランチおよびスナップショットから厳格に除外される。
         """
@@ -168,8 +194,8 @@ class GitGuard:
         current_branch = self.get_current_branch()
 
         if has_changes:
-            # 1. 物理スナップショットの安全作成 (共通機能)
-            archive_path = self.create_quarantine_snapshot(task_id)
+            # 1. 物理スナップショットの安全作成 (Manifest 連携)
+            archive_path = self.create_quarantine_snapshot(task_id=task_id, checkpoint=checkpoint, job_id=job_id)
 
             # 2. 隔離ブランチへの安全なステージとコミット (追跡済みファイルのみ add -u でステージし、未追跡の秘密ファイル混入を物理遮断)
             quarantine_branch = f"quarantine/{clean_id}-{timestamp}"

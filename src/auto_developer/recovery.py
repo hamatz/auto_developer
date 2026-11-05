@@ -598,23 +598,46 @@ class RecoveryEngine:
                 ])
                 applied.append(f"Committed tracked uncommitted work to quarantine branch '{report.current_branch}'")
 
-            # 2-2. tar アーカイブの整合性を検証。無効または未作成なら正規 tar アーカイブを安全生成 (秘密除外)
+            # 2-2. tar アーカイブと Manifest の整合性を検証 (P1)
+            # 現在のタスクIDに合致するスナップショットを特定し、無関係な古い tar を排除
+            import json
+            import re
+
             quarantine_dir = self.repo_dir / ".dev" / "quarantines"
             quarantine_dir.mkdir(parents=True, exist_ok=True)
-            snapshots = sorted(quarantine_dir.glob("snapshot_task_*.tar.gz"))
+
+            task_clean = re.sub(r"[^a-zA-Z0-9_\-]", "_", report.task_id or "1")
+            task_snapshots = sorted(quarantine_dir.glob(f"snapshot_task_{task_clean}_*.tar.gz"))
+
+            job_state = JobState.load(self.state_path)
             valid_snapshot = None
-            for s in snapshots:
+
+            for s in task_snapshots:
                 try:
-                    if tarfile.is_tarfile(s):
-                        with tarfile.open(s, "r:gz") as tar:
-                            tar.getmembers()
-                        valid_snapshot = s
-                except (OSError, tarfile.TarError):
+                    if not tarfile.is_tarfile(s):
+                        continue
+                    with tarfile.open(s, "r:gz") as tar:
+                        tar.getmembers()
+
+                    # 対応する Manifest が存在すればタスクIDとチェックポイントを照合
+                    manifest_file = s.parent / s.name.replace("snapshot_task_", "manifest_task_").replace(".tar.gz", ".json")
+                    if manifest_file.exists():
+                        m_data = json.loads(manifest_file.read_text(encoding="utf-8"))
+                        if str(m_data.get("task_id")) != str(report.task_id or "1"):
+                            continue
+                        if m_data.get("checkpoint") and report.checkpoint_commit and m_data.get("checkpoint") != report.checkpoint_commit:
+                            continue
+                    valid_snapshot = s
+                except (OSError, tarfile.TarError, json.JSONDecodeError):
                     continue
 
             if not valid_snapshot:
-                # アーカイブが存在しないか破損しているため、新規にスナップショットを安全生成
-                new_snap_path = self.git_guard.create_quarantine_snapshot(task_id=report.task_id or "recovered")
+                # アーカイブが存在しないか破損しているため、新規にスナップショットとManifestを安全生成
+                new_snap_path = self.git_guard.create_quarantine_snapshot(
+                    task_id=report.task_id or "recovered",
+                    checkpoint=report.checkpoint_commit,
+                    job_id=job_state.job_id,
+                )
                 valid_snapshot = new_snap_path
                 applied.append(f"Created verified quarantine archive at {new_snap_path.name}")
             else:
@@ -652,11 +675,13 @@ class RecoveryEngine:
 
         # 3. Scenario 01 & 02 復旧: 実行中クラッシュからのクリーン復元
         if report.diagnosis == RecoveryDiagnosis.CRASHED_IN_FLIGHT:
+            job_state = JobState.load(self.state_path)
             # 未コミット差分や未追跡ファイルが存在する場合、先に確実に quarantine 退避する (P0-1)
             if not report.tree_clean:
                 quarantine_branch = self.git_guard.quarantine_and_restore(
                     checkpoint=report.checkpoint_commit,
                     task_id=report.task_id or "crashed",
+                    job_id=job_state.job_id,
                 )
                 applied.append(f"Preserved uncommitted in-flight work to branch '{quarantine_branch}' and snapshot")
             else:
@@ -664,7 +689,7 @@ class RecoveryEngine:
                 self.git_guard._run_git(["clean", "-fd"])
                 applied.append(f"Confirmed clean working tree at checkpoint {report.checkpoint_commit[:7]}")
 
-            job_state = JobState.load(self.state_path)
+            job_state.status = "RUNNING"
             job_state.status = "RUNNING"
             job_state.transition_phase("INIT")
             job_state.save(self.state_path)

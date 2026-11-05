@@ -842,6 +842,74 @@ class TestRecoveryCLI(unittest.TestCase):
             post_report = engine1.inspect()
             self.assertEqual(post_report.diagnosis.value, "HEALTHY")
 
+    def test_quarantine_recovery_rejects_unrelated_old_tar(self):
+        """機能X (P1): 無関係な古い tar アーカイブが存在する場合、今回の復旧証拠として誤採用せず、Manifest に基づいて今回のタスクのスナップショットを特定・生成すること。"""
+        import json
+        import tarfile
+        from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text("# PLAN\n- [ ] 1. 失敗タスク\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init checkpoint"], cwd=repo, check=True)
+            checkpoint = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+            quarantine_branch = "quarantine/1-1793812132"
+            subprocess.run(["git", "checkout", "-b", quarantine_branch], cwd=repo, check=True)
+
+            (repo / "actual_work.py").write_text("current_work = True\n", encoding="utf-8")
+
+            # 過去の全く別のタスク (task 999) の古い tar アーカイブと古い Manifest が残存
+            quarantine_dir = repo / ".dev" / "quarantines"
+            quarantine_dir.mkdir(parents=True, exist_ok=True)
+            old_tar = quarantine_dir / "snapshot_task_999_1000000000.tar.gz"
+            old_dummy = repo / "old_unrelated.py"
+            old_dummy.write_text("old = True\n", encoding="utf-8")
+            with tarfile.open(old_tar, "w:gz") as tar:
+                tar.add(old_dummy, arcname="old_unrelated.py")
+            old_dummy.unlink()
+
+            old_manifest = quarantine_dir / "manifest_task_999_1000000000.json"
+            old_manifest.write_text(json.dumps({
+                "job_id": "old-job-999",
+                "task_id": "999",
+                "checkpoint": "0000000000000000000000000000000000000000",
+                "files": [{"path": "old_unrelated.py", "sha256": "dummy"}],
+            }), encoding="utf-8")
+
+            state_file = repo / ".dev" / "job_state.json"
+            job_state = JobState(
+                job_id="job-target-1",
+                status="RUNNING",
+                current_task_id="1",
+                current_phase="MAKER",
+                checkpoint_hash=checkpoint,
+                base_branch="main",
+            )
+            job_state.save(state_file)
+
+            engine = RecoveryEngine(repo_dir=repo, state_path=state_file)
+            result = engine.apply()
+            self.assertTrue(result.success)
+
+            # 復旧結果として古い tar (task_999) を採用していてはならない！
+            # 今回の task 1 に対応するスナップショットおよび Manifest が生成・採用されていること
+            task1_snapshots = list(quarantine_dir.glob("snapshot_task_1_*.tar.gz"))
+            self.assertTrue(len(task1_snapshots) > 0, "Must create snapshot corresponding to task 1, not adopt task 999")
+
+            task1_manifests = list(quarantine_dir.glob("manifest_task_1_*.json"))
+            self.assertTrue(len(task1_manifests) > 0, "Must generate valid manifest for task 1")
+            manifest_data = json.loads(task1_manifests[-1].read_text(encoding="utf-8"))
+            self.assertEqual(manifest_data["task_id"], "1")
+            self.assertEqual(manifest_data["job_id"], "job-target-1")
+            self.assertEqual(manifest_data["checkpoint"], checkpoint)
+
     def test_quarantine_recovery_excludes_untracked_secrets_from_git_and_archive(self):
         """機能X (P0-1): Quarantine 復旧時、未追跡の秘密ファイルが隔離ブランチの Git 履歴やアーカイブに絶対混入しないこと。"""
         import tarfile
