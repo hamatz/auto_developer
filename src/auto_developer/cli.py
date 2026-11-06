@@ -15,7 +15,7 @@ from auto_developer.reporter import MorningReporter
 from auto_developer.runner import CommandRunnerAdapter, MockRunnerAdapter, RunnerAdapter
 from auto_developer.verifier import DeterministicVerifier
 
-VERSION = "0.3.0"
+VERSION = "0.2.0"
 
 DEFAULT_VERIFY_SH = """#!/usr/bin/env bash
 set -euo pipefail

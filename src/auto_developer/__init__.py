@@ -22,7 +22,7 @@ from auto_developer.runner import (
 )
 from auto_developer.verifier import DeterministicVerifier
 
-__version__ = "0.3.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "CommandRunnerAdapter",
