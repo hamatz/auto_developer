@@ -1,6 +1,6 @@
 {
   "name": "auto-developer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Auto Developer: Trustworthy autonomous development orchestrator. Executes sequential PLAN.md tasks overnight with verification gates, quarantine preservation, and morning briefs.",
   "repository": {
     "type": "git",
