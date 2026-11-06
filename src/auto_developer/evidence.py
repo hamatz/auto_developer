@@ -99,9 +99,20 @@ class EvidenceStore:
         self.records_dir.mkdir(parents=True, exist_ok=True)
         record_path = self.records_dir / f"task_{task_id}.json"
         if not record_path.exists():
-            return None
+            import time
+
+            data = {
+                "task_id": task_id,
+                "status": status,
+                "created_at": int(time.time()),
+            }
+        else:
+            try:
+                data = cast(dict[str, Any], json.loads(record_path.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                data = {"task_id": task_id, "status": status}
+
         try:
-            data = cast(dict[str, Any], json.loads(record_path.read_text(encoding="utf-8")))
             data["status"] = status
             if commit_info is not None:
                 data["commit"] = commit_info

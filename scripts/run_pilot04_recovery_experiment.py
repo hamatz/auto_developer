@@ -57,7 +57,7 @@ def verify_scenario(scenario_name: str, src_path: Path, dest_dir: Path) -> dict:
     git_head_pre = run_cmd(["git", "rev-parse", "HEAD"], scenario_dir).stdout.strip()
     git_branch_pre = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], scenario_dir).stdout.strip()
     status_pre = run_cmd(["git", "status", "--porcelain"], scenario_dir).stdout.strip()
-    uncommitted_pre = [line[3:].strip() for line in status_pre.splitlines() if line.strip()]
+    uncommitted_pre = [line[2:].strip() for line in status_pre.splitlines() if line.strip()]
 
     # auto-dev recover inspect --json
     inspect_pre_proc = run_cmd([python_bin, "-m", "auto_developer.cli", "recover", "inspect", "--json"], scenario_dir)
@@ -176,6 +176,7 @@ def verify_scenario(scenario_name: str, src_path: Path, dest_dir: Path) -> dict:
             inspect_post1.get("diagnosis") == "HEALTHY"
             and status_post1 == ""
             and not secret_leaked
+            and (all(preserved_uncommitted) if preserved_uncommitted else True)
             and idempotency_passed
         ),
     }

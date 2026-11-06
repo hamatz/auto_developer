@@ -589,6 +589,10 @@ class RecoveryEngine:
                         "tree_sha": report.committed_tree_sha,
                         "tree_verified": True,
                     },
+                    checker_info={
+                        "status": "UNRECOVERABLE_POST_COMMIT_CRASH",
+                        "note": "Commit was verified and created before SIGKILL crash, but in-flight Checker review record could not be reconstructed",
+                    },
                 )
                 applied.append(f"Archived evidence record for task {report.task_id}")
 
@@ -655,12 +659,12 @@ class RecoveryEngine:
                     if not m_task_id or m_task_id != expected_task_id:
                         continue
 
-                    # 2. job_id 必須照合 (空文字不許可、別ジョブの残骸を完全排除)
-                    if not m_job_id or (expected_job_id and m_job_id != expected_job_id):
+                    # 2. job_id 必須照合 (Manifest側・期待側ともに空文字不許可、完全一致)
+                    if not m_job_id or not expected_job_id or m_job_id != expected_job_id:
                         continue
 
-                    # 3. checkpoint 必須照合 (空文字不許可、完全一致)
-                    if not m_checkpoint or (expected_checkpoint and m_checkpoint != expected_checkpoint):
+                    # 3. checkpoint 必須照合 (Manifest側・期待側ともに空文字不許可、完全一致)
+                    if not m_checkpoint or not expected_checkpoint or m_checkpoint != expected_checkpoint:
                         continue
 
                     import hashlib
