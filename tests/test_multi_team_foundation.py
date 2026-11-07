@@ -225,6 +225,8 @@ class TestMultiTeamFoundation(unittest.TestCase):
         self.assertFalse(res_no_ev.is_valid, "Bundle without evidence records must not be allowed to integrate")
 
         # 4. 承認済み Evidence Record を配置して再バンドル -> VERIFIED (統合許可)
+        res_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_dir, capture_output=True, text=True, check=True)
+        head_commit = res_commit.stdout.strip()
         res_tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo_dir, capture_output=True, text=True, check=True)
         head_tree = res_tree.stdout.strip()
         spec_sha = hashlib.sha256((self.repo_dir / "SPEC.md").read_bytes()).hexdigest()
@@ -235,6 +237,7 @@ class TestMultiTeamFoundation(unittest.TestCase):
             json.dumps({
                 "task_id": "1",
                 "checkpoint": "chk1",
+                "commit": head_commit,
                 "tree_sha": head_tree,
                 "spec_sha": spec_sha,
                 "checker": {"decision": "APPROVE", "reason": "Deterministic verify pass"},

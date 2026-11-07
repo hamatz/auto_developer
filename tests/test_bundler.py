@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import subprocess
@@ -34,6 +36,11 @@ class TestEvidenceBundler(unittest.TestCase):
         subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
         subprocess.run(["git", "commit", "-m", "initial commit"], cwd=self.repo, check=True)
 
+        res_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True
+        )
+        head_commit = res_commit.stdout.strip()
+
         res_tree = subprocess.run(
             ["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo, capture_output=True, text=True, check=True
         )
@@ -48,6 +55,7 @@ class TestEvidenceBundler(unittest.TestCase):
             json.dumps({
                 "task_id": "1",
                 "checkpoint": "chk1",
+                "commit": head_commit,
                 "tree_sha": head_tree,
                 "spec_sha": spec_hash,
                 "checker": {"decision": "APPROVE", "reason": "All good"},
@@ -116,6 +124,8 @@ class TestEvidenceBundler(unittest.TestCase):
 
     def test_verify_bundle_success(self):
         # 実際の HEAD Tree と SPEC ハッシュを反映させた証跡を作成
+        res_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True)
+        head_commit = res_commit.stdout.strip()
         res_tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo, capture_output=True, text=True, check=True)
         head_tree = res_tree.stdout.strip()
         import hashlib
@@ -126,11 +136,11 @@ class TestEvidenceBundler(unittest.TestCase):
             json.dumps({
                 "task_id": "1",
                 "checkpoint": "chk1",
+                "commit": head_commit,
                 "tree_sha": head_tree,
                 "spec_sha": spec_hash,
                 "checker": {"decision": "APPROVE", "reason": "All checks passed"},
                 "status": "COMPLETED",
-                "commit": {"tree_sha": head_tree},
             }),
             encoding="utf-8",
         )
@@ -214,6 +224,8 @@ class TestEvidenceBundler(unittest.TestCase):
 
     def test_verify_bundle_three_way_audit(self):
         # 1. 証跡ありで完全合格 -> VERIFIED
+        res_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True)
+        head_commit = res_commit.stdout.strip()
         res_tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo, capture_output=True, text=True, check=True)
         head_tree = res_tree.stdout.strip()
         import hashlib
@@ -224,6 +236,7 @@ class TestEvidenceBundler(unittest.TestCase):
             json.dumps({
                 "task_id": "1",
                 "checkpoint": "chk1",
+                "commit": head_commit,
                 "tree_sha": head_tree,
                 "spec_sha": spec_hash,
                 "checker": {"decision": "APPROVE", "reason": "All good"},
@@ -294,6 +307,100 @@ class TestEvidenceBundler(unittest.TestCase):
             any("tree_sha" in err.lower() for err in res_synth.errors),
             f"Expected tree_sha validation error in: {res_synth.errors}",
         )
+
+    def _repack_with_updated_manifest(self, base_zip: Path, out_zip: Path, file_updates: dict[str, bytes | None]) -> None:
+        """指定ZIPのファイルを更新/削除し、Manifestのハッシュも再計算して整合したZIPを再生成するヘルパー。"""
+        import hashlib
+        extracted = {}
+        with zipfile.ZipFile(base_zip, "r") as zf:
+            for name in zf.namelist():
+                extracted[name] = zf.read(name)
+
+        # 更新または削除
+        for name, content in file_updates.items():
+            if content is None:
+                extracted.pop(name, None)
+            else:
+                extracted[name] = content
+
+        # bundle_manifest.json の更新
+        manifest = json.loads(extracted["bundle_manifest.json"].decode("utf-8"))
+        new_hashes = {}
+        for name, data in extracted.items():
+            if name != "bundle_manifest.json":
+                new_hashes[name] = hashlib.sha256(data).hexdigest()
+        manifest["file_hashes"] = new_hashes
+        extracted["bundle_manifest.json"] = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+
+        with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for name, data in extracted.items():
+                zf.writestr(name, data)
+
+    def test_verify_bundle_rejects_corrupted_git_bundle_fail_closed(self):
+        """P0: Git Bundle が不正・クローン不能な場合、Warning に留めず必ず INVALID で遮断すること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        base_zip = bundler.create_bundle(dest_path=self.repo / "base1.zip")
+
+        corrupted_zip = self.repo / "corrupted_git.zip"
+        self._repack_with_updated_manifest(base_zip, corrupted_zip, {"git_bundle.bundle": b"not a valid git bundle"})
+
+        res = bundler.verify_bundle(corrupted_zip)
+        self.assertEqual(res.status, "INVALID", "Corrupted git bundle must be INVALID")
+        self.assertFalse(res.is_valid)
+        self.assertTrue(any("git" in err.lower() for err in res.errors))
+
+    def test_verify_bundle_rejects_nonexistent_or_mismatched_commit_sha(self):
+        """P1: Evidence Record の commit SHA が実在しない、または Tree と不一致なら必ず INVALID で遮断すること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        base_zip = bundler.create_bundle(dest_path=self.repo / "base2.zip")
+
+        # task_1.json の commit を存在しない架空の SHA に改ざん
+        with zipfile.ZipFile(base_zip, "r") as zf:
+            ev_data = json.loads(zf.read("evidence/task_1.json").decode("utf-8"))
+        ev_data["commit"] = "1111222233334444555566667777888899990000"
+
+        tampered_ev_zip = self.repo / "tampered_commit.zip"
+        self._repack_with_updated_manifest(
+            base_zip, tampered_ev_zip, {"evidence/task_1.json": json.dumps(ev_data).encode("utf-8")}
+        )
+
+        res = bundler.verify_bundle(tampered_ev_zip)
+        self.assertEqual(res.status, "INVALID", "Non-existent commit in evidence must be INVALID")
+        self.assertFalse(res.is_valid)
+        self.assertTrue(any("commit" in err.lower() for err in res.errors))
+
+    def test_verify_bundle_rejects_missing_evidence_files_against_manifest(self):
+        """P1: Manifest にタスクが記載されているが Evidence ファイルが削除された場合、必ず INVALID で遮断すること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        base_zip = bundler.create_bundle(dest_path=self.repo / "base3.zip")
+
+        missing_ev_zip = self.repo / "missing_ev.zip"
+        self._repack_with_updated_manifest(base_zip, missing_ev_zip, {"evidence/task_1.json": None})
+
+        res = bundler.verify_bundle(missing_ev_zip)
+        self.assertEqual(res.status, "INVALID", "Missing evidence record must be INVALID")
+        self.assertFalse(res.is_valid)
+
+    def test_verify_bundle_rejects_fake_head_commit_in_manifest(self):
+        """P0: Manifest の head_commit が Git Bundle の実 HEAD と不一致の場合、必ず INVALID で遮断すること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        base_zip = bundler.create_bundle(dest_path=self.repo / "base4.zip")
+
+        with zipfile.ZipFile(base_zip, "r") as zf:
+            manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+        manifest["head_commit"] = "9999888877776666555544443333222211110000"
+
+        fake_head_zip = self.repo / "fake_head.zip"
+        with zipfile.ZipFile(base_zip, "r") as zf, zipfile.ZipFile(fake_head_zip, "w") as out_zf:
+            for name in zf.namelist():
+                if name == "bundle_manifest.json":
+                    out_zf.writestr(name, json.dumps(manifest).encode("utf-8"))
+                else:
+                    out_zf.writestr(name, zf.read(name))
+
+        res = bundler.verify_bundle(fake_head_zip)
+        self.assertEqual(res.status, "INVALID", "Fake HEAD commit in manifest must be INVALID")
+        self.assertFalse(res.is_valid)
 
     def test_cli_bundle_and_verify_bundle(self):
         from auto_developer.cli import main

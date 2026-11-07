@@ -18,7 +18,7 @@
 
 ## ステップ
 - [x] 1. `WorktreeManager` の未コミット退避時機密サニタイズおよび Git status Fail-Closed 実装（`src/auto_developer/worktree.py`）と単体テスト
-- [ ] 2. `EvidenceBundler.verify_bundle()` の完全 Fail-Closed 化（Git Bundleクローン失敗遮断、Manifest HEAD/Tree照合、Commit 1対1 物理照合、Manifestタスク完全性）（`src/auto_developer/bundler.py`）と単体テスト
+- [x] 2. `EvidenceBundler.verify_bundle()` の完全 Fail-Closed 化（Git Bundleクローン失敗遮断、Manifest HEAD/Tree照合、Commit 1対1 物理照合、Manifestタスク完全性）（`src/auto_developer/bundler.py`）と単体テスト
 - [ ] 3. Sol 氏再現の異常系ストレステストおよび Quarantine サニタイズの決定論的受入テスト（`tests/test_bundler.py`, `tests/test_worktree.py`, `tests/test_multi_team_foundation.py`）
 
 ## 止まっていること・判断待ち

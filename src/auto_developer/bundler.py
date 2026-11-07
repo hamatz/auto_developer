@@ -337,10 +337,16 @@ class EvidenceBundler:
             spec_file = inspect_dir / "SPEC.md"
             spec_hash = self._calc_sha256(spec_file) if spec_file.exists() else ""
 
-            # 4. Git bundle の展開と Tree SHA 解決
+            # 4. Git bundle の展開と HEAD / Commit / Tree SHA 解決
             git_bundle_file = inspect_dir / "git_bundle.bundle"
             valid_trees: set[str] = set()
-            if git_bundle_file.exists():
+            commit_to_tree: dict[str, str] = {}
+            actual_head_commit = ""
+            actual_head_tree = ""
+
+            if not git_bundle_file.exists():
+                result.errors.append("git_bundle.bundle is missing from bundle")
+            else:
                 clone_dir = inspect_dir / "_git_verify_repo"
                 clone_res = subprocess.run(
                     ["git", "clone", str(git_bundle_file), str(clone_dir)],
@@ -348,7 +354,32 @@ class EvidenceBundler:
                     capture_output=True,
                     text=True,
                 )
-                if clone_res.returncode == 0:
+                if clone_res.returncode != 0:
+                    # clone 失敗時は Warning ではなく必ず errors に追加して INVALID (P0 Fail-Closed)
+                    result.errors.append(
+                        f"Failed to clone/verify git_bundle.bundle: {clone_res.stderr.strip() or clone_res.stdout.strip()}"
+                    )
+                else:
+                    rev_res = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=clone_dir,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if rev_res.returncode == 0:
+                        actual_head_commit = rev_res.stdout.strip()
+
+                    rev_tree_res = subprocess.run(
+                        ["git", "rev-parse", "HEAD^{tree}"],
+                        cwd=clone_dir,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if rev_tree_res.returncode == 0:
+                        actual_head_tree = rev_tree_res.stdout.strip()
+
                     log_res = subprocess.run(
                         ["git", "log", "--format=%H %T", "--all"],
                         cwd=clone_dir,
@@ -360,17 +391,50 @@ class EvidenceBundler:
                         for line in log_res.stdout.splitlines():
                             parts = line.strip().split()
                             if len(parts) >= 2:
+                                commit_to_tree[parts[0]] = parts[1]
                                 valid_trees.add(parts[1])
-                else:
-                    # 外部環境で共通コミットが見つからない場合もあるため警告として扱う
-                    result.warnings.append(
-                        f"git bundle verify note: {clone_res.stderr.strip() or clone_res.stdout.strip()}"
-                    )
-            else:
-                result.errors.append("git_bundle.bundle is missing from bundle")
 
-            # 5. Evidence Record と Checker 判定および物理 Git Tree / SPEC 拘束の検証
+                    if not commit_to_tree:
+                        result.errors.append("git_bundle.bundle contains no valid commits")
+
+            # Manifest HEAD の実 Git オブジェクト照合 (P0)
+            expected_head_commit = str(manifest_data.get("head_commit", "")).strip()
+            expected_head_tree = str(manifest_data.get("head_tree_sha", "")).strip()
+            if actual_head_commit and expected_head_commit and expected_head_commit != actual_head_commit:
+                result.errors.append(
+                    f"Manifest head_commit mismatch: manifest has '{expected_head_commit}', git bundle HEAD is '{actual_head_commit}'"
+                )
+            if actual_head_tree and expected_head_tree and expected_head_tree != actual_head_tree:
+                result.errors.append(
+                    f"Manifest head_tree_sha mismatch: manifest has '{expected_head_tree}', git bundle HEAD^{{tree}} is '{actual_head_tree}'"
+                )
+
+            # 5. Manifest タスクと Evidence ファイルの完全性検証 (P1)
+            manifest_tasks = list(manifest_data.get("tasks", []))
+            manifest_task_ids = {str(t.get("task_id", "")).strip() for t in manifest_tasks if t.get("task_id") is not None}
+
             evidence_dir = inspect_dir / "evidence"
+            evidence_files = list(evidence_dir.glob("task_*.json")) if evidence_dir.exists() else []
+            file_task_ids: set[str] = set()
+
+            for rec_file in evidence_files:
+                try:
+                    data = json.loads(rec_file.read_text(encoding="utf-8"))
+                    tid = str(data.get("task_id", "")).strip()
+                    if tid:
+                        file_task_ids.add(tid)
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            missing_in_files = manifest_task_ids - file_task_ids
+            if missing_in_files:
+                result.errors.append(f"Evidence files missing for manifest tasks: {sorted(missing_in_files)}")
+
+            extra_files = file_task_ids - manifest_task_ids
+            if extra_files:
+                result.errors.append(f"Unexpected unmanifested evidence files: {sorted(extra_files)}")
+
+            # 6. Evidence Record と Checker 判定および物理 Git Tree / Commit / SPEC 拘束の検証
             approved_records_count = 0
             if evidence_dir.exists():
                 for rec_file in sorted(evidence_dir.glob("task_*.json")):
@@ -380,6 +444,13 @@ class EvidenceBundler:
                         status = rec_data.get("status", "")
                         spec_sha = str(rec_data.get("spec_sha", "")).strip()
                         tree_sha = str(rec_data.get("tree_sha", "")).strip()
+
+                        # Commit SHA 取得 (dict または string)
+                        commit_field = rec_data.get("commit")
+                        if isinstance(commit_field, dict):
+                            commit_sha = str(commit_field.get("hash", commit_field.get("commit_sha", ""))).strip()
+                        else:
+                            commit_sha = str(commit_field or "").strip()
 
                         # Checker 判定の検証
                         checker = rec_data.get("checker", {})
@@ -403,12 +474,28 @@ class EvidenceBundler:
                                 f"Task {task_id} SPEC hash mismatch: Evidence has '{spec_sha}', bundle SPEC.md is '{spec_hash}'"
                             )
 
-                        # Tree SHA 物理拘束の厳格検証 (P0: 架空 Evidence 遮断)
+                        # Commit SHA と Tree SHA の 1対1 物理照合 (P1)
+                        if not commit_sha or commit_sha == "0000000000000000000000000000000000000000" or len(commit_sha) < 40:
+                            result.errors.append(
+                                f"Task {task_id} has missing or invalid commit SHA: '{commit_sha}'"
+                            )
+                        elif commit_to_tree and commit_sha not in commit_to_tree:
+                            result.errors.append(
+                                f"Task {task_id} commit '{commit_sha}' does not exist in git_bundle.bundle"
+                            )
+                        elif commit_to_tree and commit_sha in commit_to_tree:
+                            actual_tree_for_commit = commit_to_tree[commit_sha]
+                            if tree_sha != actual_tree_for_commit:
+                                result.errors.append(
+                                    f"Task {task_id} commit/tree mismatch: commit {commit_sha} has tree '{actual_tree_for_commit}', but evidence claims '{tree_sha}'"
+                                )
+
+                        # Tree SHA 物理拘束の厳格検証 (P0)
                         if not tree_sha or tree_sha == "0000000000000000000000000000000000000000" or len(tree_sha) < 40:
                             result.errors.append(
                                 f"Task {task_id} has invalid or synthetic tree_sha: '{tree_sha}'"
                             )
-                        elif valid_trees and tree_sha not in valid_trees:
+                        elif not valid_trees or tree_sha not in valid_trees:
                             result.errors.append(
                                 f"Task {task_id} tree_sha '{tree_sha}' does not match any commit in git_bundle.bundle"
                             )
@@ -418,10 +505,11 @@ class EvidenceBundler:
                             and status == "COMPLETED"
                             and bool(spec_hash)
                             and spec_sha == spec_hash
-                            and (not valid_trees or tree_sha in valid_trees)
-                            and bool(tree_sha)
-                            and tree_sha != "0000000000000000000000000000000000000000"
-                            and len(tree_sha) >= 40
+                            and bool(valid_trees)
+                            and tree_sha in valid_trees
+                            and bool(commit_sha)
+                            and commit_sha in commit_to_tree
+                            and commit_to_tree.get(commit_sha) == tree_sha
                         )
                         if is_record_valid:
                             approved_records_count += 1
