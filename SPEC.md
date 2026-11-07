@@ -120,7 +120,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 架空 Evidence 注入ケース（Sol氏再現シナリオ）に対する `INVALID` 遮断テスト。
      - 未コミット変更 Worktree 削除時の自動 Quarantine 保全テスト。
      - 未統合ブランチの `purge_unmerged` ガードテスト。
-- [ ] 機能Ω (Stage 1 最終完成・厳格 Fail-Closed ハードニング Stage 1 Final Completion & Strict Fail-Closed Hardening):
+- [x] 機能Ω (Stage 1 最終完成・厳格 Fail-Closed ハードニング Stage 1 Final Completion & Strict Fail-Closed Hardening):
   1. Git Bundle 検証失敗時の完全 Fail-Closed（P0）:
      - `git_bundle.bundle` のクローンまたは検証が失敗した場合、またはコミット履歴が空の場合は即座に `INVALID`（Exit 1）として遮断する。
      - `valid_trees` が空の場合は検証スルーを許さず、必ず拒否する（Fail-Open 脆弱性の完全撤廃）。
@@ -135,6 +135,18 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   5. 決定論的受入テストの追加:
      - Sol 氏再現の 4 つの異常系ストレステスト（Git Bundle 偽造、Commit 不正、Evidence ファイル欠落、HEAD 偽造）がすべて確実に `INVALID` で弾かれることを検証するテスト。
      - 機密ファイル除外と `git status` 異常終了時の安全停止テスト。
+- [ ] 機能Ψ (Stage 1 完全防衛・機密スキャン & 厳格マニフェスト照合 Stage 1 Ultimate Defense: Deep Secret Scanning & Strict Manifest Verification):
+  1. Worktree 隔離における秘密情報内容スキャン & SHA-256 Manifest 読み戻し検証（P0）:
+     - ファイル名だけでなくファイル内容（APIキー、シークレットトークン等）をディープスキャンし、秘密情報が検出された場合は意図しない機密漏洩・破壊を防ぐため Worktree 削除を安全に停止（Fail-Closed）する。
+     - 安全な変更の場合は各ファイルの SHA-256 ハッシュ付き Manifest を生成し、アーカイブ作成後に読み戻し整合性検証を行い、保全が物理的に確認できた場合のみ Worktree 削除を許可する。
+  2. Bundle Manifest の必須項目厳格化・HEAD 欠落拒否・ZIP 未知ファイル排除（P1）:
+     - Manifest 内の `head_commit`, `head_tree_sha`, `job_id` 等の必須項目が空文字・欠落・無効形式の場合は即座に `INVALID` で遮断する。
+     - ZIP 内の全ファイルエントリ集合が Manifest 記載ファイル集合 + `manifest.json` と完全一致することを検証し、未知の追加ファイル（`mystery.txt` 等）やパストラバーサルを即座に拒否する。
+  3. Manifest タスク情報と Evidence Record 内容の完全照合（P1）:
+     - Manifest の `tasks` リストにおけるタスクID重複を排除する。
+     - 各タスクの `task_id`, `commit`, `tree_sha`, `spec_sha`, `status`, `checker` を同梱された Evidence Record と 1対1 で完全一致照合し、フィールド改変や不整合を即座に `INVALID` として拒否する。
+  4. 決定論的受入テストの拡充:
+     - Sol 氏再現シナリオ（HEAD空文字、Manifestタスク改変、ZIP内未知ファイル追加、config.json内APIキー混入時のWorktree削除停止）の決定論的テストを追加。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
