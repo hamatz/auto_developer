@@ -95,9 +95,56 @@ class TestTeamManifest(unittest.TestCase):
             "version": 1,
             "project": "test",
             "teams": [
-                {"id": "teamA", "owns": ["a/**"], "depends_on": ["teamB"]},
-                {"id": "teamB", "owns": ["b/**"], "depends_on": ["teamA"]},
+                {"id": "team-a", "owns": ["a/**"], "depends_on": ["team-b"]},
+                {"id": "team-b", "owns": ["b/**"], "depends_on": ["team-a"]},
             ],
+        }
+        with self.assertRaises(ManifestValidationError):
+            TeamManifest.from_dict(data)
+
+    def test_invalid_team_id_format_raises(self):
+        invalid_ids = ["TeamA", "team/core", "team@core", "-invalid", "1team", "", "   "]
+        for t_id in invalid_ids:
+            data = {
+                "version": 1,
+                "project": "test",
+                "teams": [{"id": t_id, "owns": ["a/**"]}],
+            }
+            with self.subTest(team_id=t_id), self.assertRaises(ManifestValidationError):
+                TeamManifest.from_dict(data)
+
+    def test_empty_or_invalid_owns_raises(self):
+        cases = [
+            [],  # 空リスト
+            [""],  # 空文字列
+            [123],  # 非文字列
+        ]
+        for owns in cases:
+            data = {
+                "version": 1,
+                "project": "test",
+                "teams": [{"id": "team-a", "owns": owns}],
+            }
+            with self.subTest(owns=owns), self.assertRaises(ManifestValidationError):
+                TeamManifest.from_dict(data)
+
+    def test_invalid_max_parallel_tasks_raises(self):
+        for val in [0, -1, "1", None]:
+            data = {
+                "version": 1,
+                "project": "test",
+                "teams": [{"id": "team-a", "owns": ["a/**"], "max_parallel_tasks": val}],
+            }
+            with self.subTest(max_parallel_tasks=val), self.assertRaises(ManifestValidationError):
+                TeamManifest.from_dict(data)
+
+    def test_boolean_type_safety_raises(self):
+        # 文字列 "false" や "true" は厳格に拒否するべき
+        data = {
+            "version": 1,
+            "project": "test",
+            "base": {"ref": "main", "require_clean": "false"},
+            "teams": [{"id": "team-a", "owns": ["a/**"]}],
         }
         with self.assertRaises(ManifestValidationError):
             TeamManifest.from_dict(data)
