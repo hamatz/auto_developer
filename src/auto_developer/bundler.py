@@ -337,7 +337,39 @@ class EvidenceBundler:
             spec_file = inspect_dir / "SPEC.md"
             spec_hash = self._calc_sha256(spec_file) if spec_file.exists() else ""
 
-            # 4. Evidence Record と Checker 判定の検証
+            # 4. Git bundle の展開と Tree SHA 解決
+            git_bundle_file = inspect_dir / "git_bundle.bundle"
+            valid_trees: set[str] = set()
+            if git_bundle_file.exists():
+                clone_dir = inspect_dir / "_git_verify_repo"
+                clone_res = subprocess.run(
+                    ["git", "clone", str(git_bundle_file), str(clone_dir)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if clone_res.returncode == 0:
+                    log_res = subprocess.run(
+                        ["git", "log", "--format=%H %T", "--all"],
+                        cwd=clone_dir,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if log_res.returncode == 0:
+                        for line in log_res.stdout.splitlines():
+                            parts = line.strip().split()
+                            if len(parts) >= 2:
+                                valid_trees.add(parts[1])
+                else:
+                    # 外部環境で共通コミットが見つからない場合もあるため警告として扱う
+                    result.warnings.append(
+                        f"git bundle verify note: {clone_res.stderr.strip() or clone_res.stdout.strip()}"
+                    )
+            else:
+                result.errors.append("git_bundle.bundle is missing from bundle")
+
+            # 5. Evidence Record と Checker 判定および物理 Git Tree / SPEC 拘束の検証
             evidence_dir = inspect_dir / "evidence"
             approved_records_count = 0
             if evidence_dir.exists():
@@ -346,10 +378,8 @@ class EvidenceBundler:
                         rec_data = json.loads(rec_file.read_text(encoding="utf-8"))
                         task_id = str(rec_data.get("task_id", ""))
                         status = rec_data.get("status", "")
-                        spec_sha = rec_data.get("spec_sha", "")
-                        tree_sha = rec_data.get("tree_sha", "")
-                        if not tree_sha:
-                            result.warnings.append(f"Task {task_id} Evidence has empty tree_sha")
+                        spec_sha = str(rec_data.get("spec_sha", "")).strip()
+                        tree_sha = str(rec_data.get("tree_sha", "")).strip()
 
                         # Checker 判定の検証
                         checker = rec_data.get("checker", {})
@@ -358,38 +388,48 @@ class EvidenceBundler:
                             result.errors.append(
                                 f"Task {task_id} has invalid Checker decision: {decision} (expected APPROVE)"
                             )
-                        else:
-                            approved_records_count += 1
 
-                        # SPEC 整合性
-                        if spec_hash and spec_sha and spec_hash != spec_sha:
+                        # Status の検証
+                        if status != "COMPLETED":
                             result.errors.append(
-                                f"Task {task_id} SPEC hash mismatch: Evidence has {spec_sha}, bundle SPEC.md is {spec_hash}"
+                                f"Task {task_id} status is invalid: '{status}' (expected COMPLETED)"
                             )
 
-                        if status != "COMPLETED":
-                            result.warnings.append(f"Task {task_id} status is {status} (not COMPLETED)")
+                        # SPEC 整合性の厳格検証
+                        if not spec_hash:
+                            result.errors.append(f"Task {task_id}: SPEC.md is missing from bundle")
+                        elif not spec_sha or spec_sha != spec_hash:
+                            result.errors.append(
+                                f"Task {task_id} SPEC hash mismatch: Evidence has '{spec_sha}', bundle SPEC.md is '{spec_hash}'"
+                            )
+
+                        # Tree SHA 物理拘束の厳格検証 (P0: 架空 Evidence 遮断)
+                        if not tree_sha or tree_sha == "0000000000000000000000000000000000000000" or len(tree_sha) < 40:
+                            result.errors.append(
+                                f"Task {task_id} has invalid or synthetic tree_sha: '{tree_sha}'"
+                            )
+                        elif valid_trees and tree_sha not in valid_trees:
+                            result.errors.append(
+                                f"Task {task_id} tree_sha '{tree_sha}' does not match any commit in git_bundle.bundle"
+                            )
+
+                        is_record_valid = (
+                            decision == "APPROVE"
+                            and status == "COMPLETED"
+                            and bool(spec_hash)
+                            and spec_sha == spec_hash
+                            and (not valid_trees or tree_sha in valid_trees)
+                            and bool(tree_sha)
+                            and tree_sha != "0000000000000000000000000000000000000000"
+                            and len(tree_sha) >= 40
+                        )
+                        if is_record_valid:
+                            approved_records_count += 1
 
                     except (json.JSONDecodeError, OSError) as e:
                         result.errors.append(f"Failed to read evidence record {rec_file.name}: {e}")
             else:
                 result.warnings.append("No evidence/ directory found in bundle")
-
-            # 5. Git bundle の健全性チェック
-            git_bundle_file = inspect_dir / "git_bundle.bundle"
-            if git_bundle_file.exists():
-                try:
-                    verify_res = subprocess.run(
-                        ["git", "bundle", "verify", str(git_bundle_file)],
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                    )
-                    if verify_res.returncode != 0:
-                        # 外部環境で共通コミットが見つからない場合もあるため警告として扱う
-                        result.warnings.append(f"git bundle verify note: {verify_res.stderr.strip() or verify_res.stdout.strip()}")
-                except OSError:
-                    pass
 
         if result.errors:
             result.status = "INVALID"

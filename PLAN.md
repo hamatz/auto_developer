@@ -17,7 +17,7 @@
 
 ## ステップ
 - [x] 1. `WorktreeManager` の未コミット変更自動 Quarantine 退避および `purge_unmerged` ガード実装（`src/auto_developer/worktree.py`）と単体テスト
-- [ ] 2. `EvidenceBundler.verify_bundle()` の物理 `git_bundle.bundle` 照合と Git Tree SHA / SPEC SHA 厳格拘束（`src/auto_developer/bundler.py`）と単体テスト
+- [x] 2. `EvidenceBundler.verify_bundle()` の物理 `git_bundle.bundle` 照合と Git Tree SHA / SPEC SHA 厳格拘束（`src/auto_developer/bundler.py`）と単体テスト
 - [ ] 3. 架空 Evidence 注入遮断および成果保全の決定論的受入テスト（`tests/test_bundler.py`, `tests/test_worktree.py`, `tests/test_multi_team_foundation.py`）
 
 ## 止まっていること・判断待ち
