@@ -7,18 +7,19 @@
 -->
 
 ## 現在の目標
-- Phase 17: Stage 1 Invincibility & Complete Safeguard (Git status 独立の全ファイル事前秘密情報スキャン)
-  - P0: Worktree 削除時、`git status --porcelain` の判定前に実ファイルを走査し、`.gitignore` で無視された `.env` 等の秘密情報が存在する場合でも削除を拒否し物理保全する（Fail-Closed 保全）。
-  - P0: 決定論的受入テストの追加（`.gitignore` で無視された `.env` のみが存在する Worktree において `remove_worktree(force=True)` が確実に削除を拒否し `.env` が物理保全されること）。
+- Phase 18: Stage 1 Absolute Zero-Loss (Git無視通常ファイルの包括的Quarantine保全 & レポート鮮度保証)
+  - P0: Git無視通常ファイル（`local-notes.txt`等）の存在を検知し、`force=False` では削除拒否、`force=True` では Quarantine スナップショットへ確実に退避保全してから削除する（成果消失の完全排除）
+  - P1: Morning Brief (NIGHTLY_REPORT.md) の最新鮮度保証
+  - P0/P1: 決定論的受入テスト（`local-notes.txt` 退避保全）および全体検証ゲート合格確認
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - なし
 
 ## ステップ
-- [x] 1. Git status 独立の実ファイル事前スキャン（`src/auto_developer/worktree.py`）および単体テスト（Red-First）
-- [x] 2. 決定論的受入テストの追加（`tests/test_multi_team_foundation.py`）および全検証ゲート合格確認
+- [x] 1. Git無視通常ファイル（`local-notes.txt`等）の検出と Quarantine 退避保全（`src/auto_developer/worktree.py`）および単体テスト（Red-First）
+- [x] 2. 決定論的受入テストおよび Morning Brief 鮮度保証（`tests/test_multi_team_foundation.py`, `src/auto_developer/bundler.py`）と全検証ゲート合格確認
 
 ## 止まっていること・判断待ち
-- なし（Phase 17 全ステップ完了。公式 Evidence Record 発行および Evidence Bundle 生成へ）
+- なし（Phase 18 全ステップ完了。公式 Evidence Record 発行および Evidence Bundle 生成へ）
 
 

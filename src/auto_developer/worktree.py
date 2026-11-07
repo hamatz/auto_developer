@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import subprocess
 import sys
+import tarfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -177,10 +181,12 @@ class WorktreeManager:
 
         # 未コミット変更の残存検査と成果保全
         if target_dir.exists():
-            # 1. 実ファイルの事前スキャン（Git status 判定の前に行い、.gitignore された機密ファイルや機密内容の消失・漏洩を防止）
+            # 1. 実ファイルの事前スキャン（Git status 判定の前に行い、機密ファイルの消失・漏洩防止および全実成果の把握）
             from auto_developer.guard import GitGuard
 
             sensitive_files_found: list[str] = []
+            candidate_work_files: list[tuple[Path, str, str]] = []  # (item, rel_posix, sha256)
+
             for item in sorted(target_dir.rglob("*")):
                 if not item.is_file():
                     continue
@@ -212,12 +218,25 @@ class WorktreeManager:
                         "Aborting removal to prevent secret leakage or unverified data loss."
                     )
 
+                file_sha = hashlib.sha256(content).hexdigest()
+                candidate_work_files.append((item, rel_posix, file_sha))
+
             if sensitive_files_found:
                 sample_files = ", ".join(sorted(sensitive_files_found)[:3])
                 raise WorktreeError(
                     f"Worktree '{team_id}' contains sensitive files excluded from quarantine ({sample_files}); "
                     "removal refused to prevent data loss. Please commit, move, or clean up sensitive files before removal."
                 )
+
+            # Git追跡ファイル一覧の取得
+            ls_res = subprocess.run(
+                ["git", "ls-files"],
+                cwd=target_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            tracked_files = set(ls_res.stdout.splitlines()) if ls_res.returncode == 0 else set()
 
             status_res = subprocess.run(
                 ["git", "status", "--porcelain"],
@@ -231,21 +250,20 @@ class WorktreeManager:
                     f"git status failed in worktree '{team_id}': {status_res.stderr.strip()}. "
                     "Aborting removal to prevent unverified data loss."
                 )
-            has_uncommitted = bool(status_res.stdout.strip())
+
+            # Git status に未コミット変更があるか、または Git追跡外（.gitignoreされた非機密通常ファイル等）が存在するか
+            has_untracked_or_ignored_work = any(
+                rel_posix not in tracked_files for _, rel_posix, _ in candidate_work_files
+            )
+            has_uncommitted = bool(status_res.stdout.strip()) or has_untracked_or_ignored_work
+
             if has_uncommitted:
                 if not force:
                     raise WorktreeError(
                         f"Cannot remove worktree '{team_id}' with uncommitted changes without force. "
                         "Preserving uncommitted work."
                     )
-                # force=True の場合でも直接破壊せず Quarantine スナップショットを作成して退避保全 (機密サニタイズ・内容検査・Manifest検証)
-                import hashlib
-                import json
-                import tarfile
-                import time
-
-                from auto_developer.guard import GitGuard
-
+                # force=True の場合でも直接破壊せず Quarantine スナップショットを作成して退避保全
                 quarantines_dir = self.repo_dir / ".dev" / "quarantines"
                 quarantines_dir.mkdir(parents=True, exist_ok=True)
                 timestamp = int(time.time())
@@ -263,53 +281,12 @@ class WorktreeManager:
                     manifest_path = quarantines_dir / manifest_name
                     counter += 1
 
-                # 1. 退避対象ファイルの事前スキャンと機密内容検査
-                files_to_archive: list[tuple[Path, str, str]] = []  # (file_path, arcname, sha256)
-                excluded_sensitive_files: list[str] = []
-                for item in sorted(target_dir.rglob("*")):
-                    if not item.is_file():
-                        continue
-                    rel_to_wt = item.relative_to(target_dir)
-                    rel_posix = rel_to_wt.as_posix()
+                files_to_archive = [
+                    (item, f"{team_id}/{rel_posix}", file_sha)
+                    for item, rel_posix, file_sha in candidate_work_files
+                ]
 
-                    # Git管理ディレクトリやノイズファイルは除外 (再生成可能なため削除を阻害しない)
-                    if rel_posix.startswith(".git") or "/.git" in rel_posix:
-                        continue
-                    if any(pat.search(rel_posix) for pat in NOISE_PATTERNS):
-                        continue
-
-                    # 既知のシークレットファイル名パターンは検知して記録 (アーカイブには含めない)
-                    if GitGuard.is_secret_file(item.name) or any(
-                        pat.search(item.name) for pat in SECRET_PATTERNS
-                    ):
-                        excluded_sensitive_files.append(rel_posix)
-                        continue
-
-                    # 通常ファイルの内容ディープスキャン
-                    try:
-                        content = item.read_bytes()
-                    except OSError as err:
-                        raise WorktreeError(f"Failed to read file '{rel_posix}' for quarantine: {err}") from err
-
-                    if GitGuard.has_secret_content(content):
-                        raise WorktreeError(
-                            f"Secret content detected in worktree file '{rel_posix}'. "
-                            "Aborting removal to prevent secret leakage or unverified data loss."
-                        )
-
-                    file_sha = hashlib.sha256(content).hexdigest()
-                    arcname = f"{team_id}/{rel_posix}"
-                    files_to_archive.append((item, arcname, file_sha))
-
-                # P0: 機密ファイルが未保存で消失するのを防ぐため、削除を拒否 (Fail-Closed 保全)
-                if excluded_sensitive_files:
-                    sample_files = ", ".join(sorted(excluded_sensitive_files)[:3])
-                    raise WorktreeError(
-                        f"Worktree '{team_id}' contains sensitive files excluded from quarantine ({sample_files}); "
-                        "removal refused to prevent data loss. Please commit, move, or clean up sensitive files before removal."
-                    )
-
-                # 2. アーカイブと Manifest の物理生成
+                # アーカイブと Manifest の物理生成
                 with tarfile.open(snapshot_path, "w:gz") as tar:
                     for item, arcname, _ in files_to_archive:
                         tar.add(item, arcname=arcname)
@@ -325,7 +302,7 @@ class WorktreeManager:
                 with open(manifest_path, "w", encoding="utf-8") as f:
                     json.dump(manifest_data, f, indent=2)
 
-                # 3. 読み戻し検証 (アーカイブの完全性とハッシュの一致を物理確認)
+                # 読み戻し検証 (アーカイブの完全性とハッシュの一致を物理確認)
                 try:
                     with tarfile.open(snapshot_path, "r:gz") as tar:
                         tar_names = set(tar.getnames())

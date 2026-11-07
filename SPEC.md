@@ -155,12 +155,20 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   3. 決定論的受入テストの拡充:
      - `.env` 存在時の Worktree 削除拒否・保全テスト。
      - Manifest タスクの `commit` 空文字、`spec_sha` 不一致に対する `INVALID` 遮断テスト。
-- [ ] 機能Χ (Stage 1 完全無欠・Git status 独立の全ファイル秘密情報スキャン Stage 1 Invincibility: Git-Status-Independent Secret Scanning):
+- [x] 機能Χ (Stage 1 完全無欠・Git status 独立の全ファイル秘密情報スキャン Stage 1 Invincibility: Git-Status-Independent Secret Scanning):
   1. Git status 独立の実ファイル事前スキャン（P0）:
      - Worktree 削除時、`git status --porcelain` の判定前に Worktree 内の実ファイルを走査する。
      - `.gitignore` に含まれている等の理由で Git status が空（変更なし）であっても、`.env` や秘密鍵、または秘密情報を含むファイルが存在する場合は即座に `WorktreeError` を送出して削除を拒否し、設定・成果の物理的消失を絶対に防止する。
   2. 決定論的受入テスト:
      - `.gitignore` で無視された `.env` のみが存在する Worktree において、`remove_worktree(force=True)` が確実に削除を拒否し、`.env` が物理保全されることの実証テスト。
+- [ ] 機能Ψ (Stage 1 完全無欠・Git無視通常ファイルの包括的退避保全 & レポート鮮度保証 Stage 1 Absolute Zero-Loss: Ignored File Quarantine & Report Freshness):
+  1. Git無視通常ファイル（`local-notes.txt` 等）の Quarantine 包括退避保全（P0）:
+     - Worktree 削除時、ノイズパターン（`.git/`, `__pycache__`, `.DS_Store` 等）以外の通常ファイル（`.gitignore` で無視されたファイルを含む）が存在する場合を検出する。
+     - `git status --porcelain` が空であっても、これらのファイルが存在する場合は未コミット成果（`has_uncommitted = True`）として扱い、`force=False` では削除拒否、`force=True` では Quarantine アーカイブへ確実に退避・保全してから削除する。
+  2. Morning Brief (NIGHTLY_REPORT.md) の最新鮮度保証（P1）:
+     - Bundle 生成時に、現行ジョブの最新コミットおよびタスク実績が反映されたレポートを確実に同梱・整合させる。
+  3. 決定論的受入テスト:
+     - `.gitignore` で無視された `local-notes.txt` が `remove_worktree(force=True)` で Quarantine スナップショットに退避され、中身がハッシュ一致で復元・保全可能であることの実証テスト。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

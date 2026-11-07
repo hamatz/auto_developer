@@ -248,6 +248,10 @@ class EvidenceBundler:
             # (F) 主要ドキュメント (NIGHTLY_REPORT.md, PLAN.md, SPEC.md)
             for doc_name in ["NIGHTLY_REPORT.md", "PLAN.md", "SPEC.md"]:
                 doc_path = self.repo_dir / doc_name
+                if doc_name == "NIGHTLY_REPORT.md":
+                    job_report_path = self.repo_dir / ".dev" / "job_report.md"
+                    if job_report_path.exists():
+                        doc_path = job_report_path
                 if doc_path.exists() and not self.is_sanitized_out(doc_name):
                     items_to_zip.append((doc_path, doc_name))
 
@@ -646,6 +650,20 @@ class EvidenceBundler:
                         result.errors.append(f"Failed to read evidence record {rec_file.name}: {e}")
             else:
                 result.warnings.append("No evidence/ directory found in bundle")
+
+            # 7. レポート鮮度・整合性検査 (NIGHTLY_REPORT.md がある場合)
+            if "NIGHTLY_REPORT.md" in file_hashes and expected_head_commit and len(expected_head_commit) >= 7:
+                report_file = inspect_dir / "NIGHTLY_REPORT.md"
+                if report_file.exists():
+                    try:
+                        report_text = report_file.read_text(encoding="utf-8")
+                        short_head = expected_head_commit[:7]
+                        if "最新コミット" in report_text and short_head not in report_text:
+                            result.warnings.append(
+                                f"NIGHTLY_REPORT.md may be stale: current HEAD '{short_head}' not found in report"
+                            )
+                    except OSError:
+                        pass
 
         if result.errors:
             result.status = "INVALID"
