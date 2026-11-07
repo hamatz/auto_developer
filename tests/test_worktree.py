@@ -132,6 +132,63 @@ class TestWorktreeManager(unittest.TestCase):
         )
         self.assertEqual(res.stdout.strip(), "feature/team-a")
 
+    def test_remove_worktree_force_quarantines_uncommitted_work(self) -> None:
+        """force=True で未コミット変更がある場合、直接破壊せず Quarantine スナップショットを作成して保全すること。"""
+        import tarfile
+
+        wt_path = self.manager.create_worktree(team_id="team-a")
+        (wt_path / "dirty.txt").write_text("critical uncommitted thoughts\n", encoding="utf-8")
+
+        # force=True で削除
+        self.manager.remove_worktree(team_id="team-a", force=True)
+        self.assertFalse(wt_path.exists())
+
+        # .dev/quarantines にスナップショットが生成されていること
+        quarantines_dir = self.repo_dir / ".dev" / "quarantines"
+        self.assertTrue(quarantines_dir.exists())
+        snapshots = list(quarantines_dir.glob("snapshot_worktree_team-a_*.tar.gz"))
+        self.assertTrue(len(snapshots) > 0, "Quarantine snapshot must be created before forced removal!")
+
+        # スナップショット内に未コミットファイルが存在することを確認
+        with tarfile.open(snapshots[0], "r:gz") as tar:
+            names = tar.getnames()
+            self.assertTrue(any("dirty.txt" in n for n in names))
+
+    def test_remove_worktree_force_requires_purge_unmerged_to_delete_unmerged_branch(self) -> None:
+        """force=True, delete_branch=True でも purge_unmerged=False なら未マージブランチを保全すること。"""
+        wt_path = self.manager.create_worktree(team_id="team-a")
+        (wt_path / "work.txt").write_text("unmerged work\n", encoding="utf-8")
+        subprocess.run(["git", "add", "work.txt"], cwd=wt_path, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: unmerged commit"], cwd=wt_path, check=True)
+
+        # 1. force=True, delete_branch=True (purge_unmerged=False)
+        deleted = self.manager.remove_worktree(
+            team_id="team-a", force=True, delete_branch=True, purge_unmerged=False
+        )
+        self.assertFalse(deleted, "Unmerged branch must not be deleted even with force=True unless purge_unmerged=True")
+        res = subprocess.run(
+            ["git", "branch", "--list", "feature/team-a"],
+            cwd=self.repo_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res.stdout.strip(), "feature/team-a")
+
+        # 2. purge_unmerged=True を明示した場合は削除を許可
+        deleted_purged = self.manager.remove_worktree(
+            team_id="team-a", force=True, delete_branch=True, purge_unmerged=True
+        )
+        self.assertTrue(deleted_purged)
+        res_after = subprocess.run(
+            ["git", "branch", "--list", "feature/team-a"],
+            cwd=self.repo_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res_after.stdout.strip(), "")
+
     def test_cleanup_all(self) -> None:
         self.manager.create_worktree(team_id="team-a")
         self.manager.create_worktree(team_id="team-b")

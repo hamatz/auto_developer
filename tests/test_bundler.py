@@ -34,6 +34,11 @@ class TestEvidenceBundler(unittest.TestCase):
         subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
         subprocess.run(["git", "commit", "-m", "initial commit"], cwd=self.repo, check=True)
 
+        res_tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo, capture_output=True, text=True, check=True
+        )
+        head_tree = res_tree.stdout.strip()
+
         # .git/nightly_evidence/records
         records_dir = self.repo / ".git" / "nightly_evidence" / "records"
         records_dir.mkdir(parents=True, exist_ok=True)
@@ -43,7 +48,7 @@ class TestEvidenceBundler(unittest.TestCase):
             json.dumps({
                 "task_id": "1",
                 "checkpoint": "chk1",
-                "tree_sha": "tree123",
+                "tree_sha": head_tree,
                 "spec_sha": spec_hash,
                 "checker": {"decision": "APPROVE", "reason": "All good"},
                 "status": "COMPLETED",
@@ -261,6 +266,34 @@ class TestEvidenceBundler(unittest.TestCase):
         res_rejected = bundler.verify_bundle(rejected_zip)
         self.assertEqual(res_rejected.status, "INVALID")
         self.assertFalse(res_rejected.is_valid)
+
+    def test_verify_bundle_rejects_synthetic_or_unbound_tree_sha(self):
+        """Sol氏の再現シナリオ: 架空の Evidence Record (実在しない Tree SHA / SPEC SHA) を注入した場合、確実に INVALID と判定されること。"""
+        records_dir = self.repo / ".git" / "nightly_evidence" / "records"
+        records_dir.mkdir(parents=True, exist_ok=True)
+
+        # 架空の Evidence Record (Tree SHA が 0000..., SPEC SHA が空)
+        (records_dir / "task_synthetic.json").write_text(
+            json.dumps({
+                "task_id": "synthetic",
+                "status": "COMPLETED",
+                "checker": {"decision": "APPROVE"},
+                "tree_sha": "0000000000000000000000000000000000000000",
+                "spec_sha": "",
+            }),
+            encoding="utf-8",
+        )
+
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        synth_zip = bundler.create_bundle(dest_path=self.repo / "synthetic_bundle.zip")
+
+        res_synth = bundler.verify_bundle(synth_zip)
+        self.assertEqual(res_synth.status, "INVALID", "Synthetic evidence must be INVALID, not VERIFIED!")
+        self.assertFalse(res_synth.is_valid)
+        self.assertTrue(
+            any("tree_sha" in err.lower() for err in res_synth.errors),
+            f"Expected tree_sha validation error in: {res_synth.errors}",
+        )
 
     def test_cli_bundle_and_verify_bundle(self):
         from auto_developer.cli import main

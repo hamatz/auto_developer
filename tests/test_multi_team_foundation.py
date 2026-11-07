@@ -249,6 +249,33 @@ class TestMultiTeamFoundation(unittest.TestCase):
         self.assertEqual(res_verified.status, "VERIFIED")
         self.assertTrue(res_verified.is_valid, "Bundle with valid evidence and APPROVE must pass verification")
 
+        # 5. 架空 Evidence 注入ケース (Sol 氏再現シナリオ) の検証 -> INVALID (物理遮断)
+        (records_dir / "task_synthetic.json").write_text(
+            json.dumps({
+                "task_id": "synthetic",
+                "status": "COMPLETED",
+                "checker": {"decision": "APPROVE"},
+                "tree_sha": "0000000000000000000000000000000000000000",
+                "spec_sha": "",
+            }),
+            encoding="utf-8",
+        )
+        synth_bundle = bundler.create_bundle(dest_path=self.repo_dir / "audit_test_synth.zip")
+        res_synth = bundler.verify_bundle(synth_bundle)
+        self.assertEqual(res_synth.status, "INVALID")
+        self.assertFalse(res_synth.is_valid, "Synthetic evidence must be blocked as INVALID")
+        self.assertTrue(any("tree_sha" in err.lower() for err in res_synth.errors))
+
+        # 6. 未コミット変更の Worktree 削除時における自動 Quarantine 保全の検証
+        q_wt = self.wt_manager.create_worktree(team_id="team-quarantine")
+        (q_wt / "uncommitted.py").write_text("# critical uncommitted logic\n", encoding="utf-8")
+        self.wt_manager.remove_worktree(team_id="team-quarantine", force=True)
+        self.assertFalse(q_wt.exists())
+
+        quarantines_dir = self.repo_dir / ".dev" / "quarantines"
+        q_snapshots = list(quarantines_dir.glob("snapshot_worktree_team-quarantine_*.tar.gz"))
+        self.assertTrue(len(q_snapshots) > 0, "Quarantine snapshot must be created for uncommitted work")
+
 
 if __name__ == "__main__":
     unittest.main()

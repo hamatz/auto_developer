@@ -7,22 +7,20 @@
 -->
 
 ## 現在の目標
-- Phase 12: Stage 1 Finalization & Strict Audit (Worktree成果保護とEvidence Bundle厳格監査)
-  - P1: `WorktreeManager` の非破壊的一括クリーンアップと未マージブランチ保全（`force=False` デフォルト化、未マージブランチ削除拒否）
-  - P2: `EvidenceBundler` の物理 Evidence Record 同梱強化（`.git/nightly_evidence/archive/` と `.dev/evidence/` の完全集約）
-  - P3: `verify-bundle` の 3値監査判定（`VERIFIED` / `INTEGRITY_ONLY` / `INVALID`）実装と未承認統合の物理遮断
-  - P4: 未マージ成果保護と 3値監査判定の決定論的受入テスト
+- Phase 13: Stage 1 Complete Hardening & Git Tree Binding (物理Git Tree SHA拘束とWorktree成果完全保全)
+  - P0-1: `EvidenceBundler.verify_bundle()` による物理 Git Tree SHA 照合と架空 Evidence 遮断
+  - P0-2: `WorktreeManager.remove_worktree()` による未コミット変更の自動 Quarantine 退避保全と `purge_unmerged` ガード
+  - P0-3: Sol 氏再現シナリオ（架空 Evidence 注入・未コミット削除・未統合ブランチ保護）の決定論的受入テスト
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - なし
 
 ## ステップ
-- [x] 1. `WorktreeManager` の非破壊的クリーンアップと未マージブランチ保全（`src/auto_developer/worktree.py`）および単体テスト
-- [x] 2. `EvidenceBundler` の物理 Evidence Record 同梱強化（`src/auto_developer/bundler.py`）
-- [x] 3. `auto-dev verify-bundle` の 3値監査判定（`VERIFIED` / `INTEGRITY_ONLY` / `INVALID`）実装（`src/auto_developer/bundler.py`, `cli.py`）および単体テスト
-- [x] 4. 未マージブランチ保全と 3値監査判定の決定論的受入テスト（`tests/test_bundler.py`, `tests/test_worktree.py`）
+- [x] 1. `WorktreeManager` の未コミット変更自動 Quarantine 退避および `purge_unmerged` ガード実装（`src/auto_developer/worktree.py`）と単体テスト
+- [x] 2. `EvidenceBundler.verify_bundle()` の物理 `git_bundle.bundle` 照合と Git Tree SHA / SPEC SHA 厳格拘束（`src/auto_developer/bundler.py`）と単体テスト
+- [x] 3. 架空 Evidence 注入遮断および成果保全の決定論的受入テスト（`tests/test_bundler.py`, `tests/test_worktree.py`, `tests/test_multi_team_foundation.py`）
 
 ## 止まっていること・判断待ち
-- なし（Phase 12: Stage 1 最終確定と厳格監査 完了）
+- なし（Phase 13: Stage 1 Complete Hardening & Git Tree Binding 完了）
 
 
