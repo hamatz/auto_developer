@@ -98,6 +98,18 @@ pip install -e /path/to/auto_developer
    /nightly-run
    ```
    Antigravity エージェントがオーケストレーターと連携し、**[Maker実装 → 物理保護検査 → 確定検証 → 独立Checker査読 → 証跡ゲートコミット]** の厳格なサイクルを自動で直列実行します。
+3. **成果提出パッケージの生成 (Evidence Bundle)**:
+   開発成果や監査ログを第三者・クライアントに提出する際、チャットで以下を実行します：
+   ```text
+   /nightly-bundle
+   ```
+   機密情報（`.env` 等）を排除した完全な提出用 ZIP アーカイブが生成されます。
+4. **提出成果物の独立監査・検証**:
+   受け取った ZIP アーカイブの改ざんや承認状態を第三者として監査する場合：
+   ```text
+   /nightly-verify <path-to-bundle.zip>
+   ```
+   チェックサム整合性、Git Tree SHA 拘束、独立Checker の承認ログを自動監査してレポートします。
 
 ---
 

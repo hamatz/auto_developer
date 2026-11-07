@@ -17,4 +17,12 @@ When the user runs `/nightly-run` (or invokes `auto-dev run` / `python3 scripts/
    - **Step C (Deterministic Verification & Evidence)**: Run `auto-dev verify-step --checkpoint <checkpoint> --task-id <task_id>` (or `python3 scripts/nightly_orchestrator.py verify-step ...`). This checks invariants, executes `scripts/verify_local.sh`, and issues a cryptographic Evidence Token on success. If it fails on the 1st attempt, feed the stderr back to Maker for 1 retry. If it fails a 2nd time, run `rollback-step` to safely quarantine work into a `quarantine/task-<id>-*` branch and halt immediately (Strict Fail-Fast).
    - **Step D (Stateless Checker Review)**: Spawn a fresh stateless subagent using the **Checker Prompt** from `PROMPTS.md`. Pass only `SPEC.md`, `git diff <checkpoint>`, and the verification output. Checker must return strictly `APPROVE` or `REJECT`.
    - **Step E (Evidence-gated Commit & Advance)**: On approval, commit via `auto-dev commit-step --task-id <task_id> --checkpoint <checkpoint>`. The orchestrator verifies and consumes the Evidence Token, commits the changes, and marks the task as `- [x]` in `PLAN.md`.
-3. **Morning Handoff**: Generate `NIGHTLY_REPORT.md` (Morning Brief) at the project root and output an actionable summary with next choices for the human developer. The developer can also run `auto-dev brief` (or `python3 scripts/nightly_orchestrator.py morning-brief`) anytime from the terminal.
+3. **Morning Handoff & Evidence Bundle**:
+   - Generate `NIGHTLY_REPORT.md` (Morning Brief) at the project root with verified evidence records.
+   - Automatically package the entire run into a sanitized, audit-ready Evidence Bundle via `auto-dev bundle` (saved to `.dev/bundles/bundle_<job_id>.zip`).
+   - Output an actionable summary in chat containing:
+     - Executive summary and task progress
+     - Verified Tree SHA and independent Checker decisions
+     - Direct file link to the generated Evidence Bundle ZIP
+     - Guidance on third-party verification via `/nightly-verify` or `auto-dev verify-bundle <path>`
+     - Quick run/verify commands for the human developer

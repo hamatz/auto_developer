@@ -7,20 +7,21 @@
 -->
 
 ## 現在の目標
-- Phase 8: Morning Brief の実証跡連動・フェイルセーフ化
-  - P1: 実 Evidence Record の直接照合（レコード不在時は APPROVE を表示せず UNVERIFIED (No Evidence Record) と表示）
-  - P2: Tree SHA 改ざんや Checker REJECT 時の明示的フラグ付け
-  - P3: 全体サマリー（Executive Summary）の証跡ガード（未検証タスク混入時の警告）
-  - P4: Git リモート（origin）設定有無に応じた操作案内（未設定時の git push 抑止）
+- Phase 9: Antigravity プラグインとしての Evidence Bundle 統合・スキル拡充
+  - P1: `skills/nightly-run/SKILL.md` の Morning Handoff における Evidence Bundle 出力と提示の明文化
+  - P2: 新規スキル `skills/nightly-bundle/SKILL.md` の作成（チャットからワンタップでバンドル生成）
+  - P3: 新規スキル `skills/nightly-verify/SKILL.md` の作成（チャットでバンドルZIPを監査・レポート）
+  - P4: `plugin.json` の `suggestedPrompts` 拡充と総合検証
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - なし
 
 ## ステップ
-- [x] 1. MorningReporter の Evidence Record 照合テスト（レコードなしで APPROVE 詐称不可、改ざん検知、リモート未設定時の案内）の作成（Red）
-- [x] 2. `MorningReporter`（`src/auto_developer/reporter.py`）の実装（実レコード照合、フェイルセーフ判定、リモート検出）
-- [x] 3. `NightlyOrchestrator`（`src/auto_developer/orchestrator.py`）との結合確認
-- [x] 4. 総合検証（`scripts/verify_local.sh`）とコミット
+- [x] 1. `skills/nightly-run/SKILL.md` に Evidence Bundle 生成とチャット提示ステップを追加
+- [x] 2. `skills/nightly-bundle/SKILL.md` の新規作成（成果提出パッケージ生成スキル）
+- [x] 3. `skills/nightly-verify/SKILL.md` の新規作成（提出バンドルの独立検証・監査スキル）
+- [x] 4. `plugin.json` の更新（`suggestedPrompts` に `/nightly-bundle`, `/nightly-verify` を追加）
+- [x] 5. 総合検証（`scripts/verify_local.sh`, `ruff`, `mypy`）とコミット
 
 ## 止まっていること・判断待ち
 - なし (全ステップ完了)
