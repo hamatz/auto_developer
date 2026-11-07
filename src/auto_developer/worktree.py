@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -153,8 +154,11 @@ class WorktreeManager:
         team_id: str,
         force: bool = False,
         delete_branch: bool = False,
-    ) -> None:
-        """チーム専用の Git Worktree を安全に削除する。未コミット成果の強制抹消は行わない。"""
+    ) -> bool:
+        """チーム専用の Git Worktree を安全に削除する。
+        未コミット成果の強制抹消は行わず、未マージブランチは delete_branch=True でも破棄せず保全する。
+        戻り値: ブランチが実際に削除された場合は True、保全・スキップされた場合は False。
+        """
         target_dir = self._validate_team_id(team_id)
 
         # force=False の場合、未コミット変更の残存を検査して安全停止
@@ -194,19 +198,39 @@ class WorktreeManager:
 
         subprocess.run(["git", "worktree", "prune"], cwd=self.repo_dir, check=False, capture_output=True)
 
+        branch_deleted = False
         if delete_branch and branch_to_delete:
-            subprocess.run(
-                ["git", "branch", "-D", branch_to_delete],
+            # 未マージコミットの保護検査
+            merged_res = subprocess.run(
+                ["git", "branch", "--merged", "HEAD"],
                 cwd=self.repo_dir,
                 check=False,
                 capture_output=True,
+                text=True,
             )
+            merged_branches = {b.strip().lstrip("* ") for b in merged_res.stdout.splitlines()}
+            if branch_to_delete not in merged_branches and not force:
+                print(
+                    f"Preserving unmerged branch '{branch_to_delete}' (not merged into HEAD).",
+                    file=sys.stderr,
+                )
+            else:
+                del_flag = "-D" if force else "-d"
+                del_res = subprocess.run(
+                    ["git", "branch", del_flag, branch_to_delete],
+                    cwd=self.repo_dir,
+                    check=False,
+                    capture_output=True,
+                )
+                branch_deleted = (del_res.returncode == 0)
 
-    def cleanup_all(self, force: bool = True) -> None:
-        """管理下の全 Worktree をクリーンアップする。"""
+        return branch_deleted
+
+    def cleanup_all(self, force: bool = False, delete_branches: bool = False) -> None:
+        """管理下の全 Worktree を安全にクリーンアップする。デフォルトではブランチを保全する。"""
         worktrees = self.list_worktrees()
         for wt in worktrees:
-            self.remove_worktree(team_id=wt.team_id, force=force, delete_branch=True)
+            self.remove_worktree(team_id=wt.team_id, force=force, delete_branch=delete_branches)
 
         subprocess.run(["git", "worktree", "prune"], cwd=self.repo_dir, check=False, capture_output=True)
         if self.worktree_base.exists():
