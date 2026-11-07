@@ -463,7 +463,9 @@ class NightlyOrchestrator:
                 task_id=task.task_id,
                 status="COMPLETED",
                 commit_info={
+                    "hash": commit_hash,
                     "sha": commit_hash,
+                    "commit_sha": commit_hash,
                     "tree_sha": committed_tree_sha,
                     "tree_verified": True,
                 },

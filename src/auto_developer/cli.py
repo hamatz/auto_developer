@@ -425,7 +425,9 @@ def main(argv: list[str] | None = None) -> int:
             task_id=args.task_id,
             status="COMPLETED",
             commit_info={
+                "hash": commit_hash,
                 "sha": commit_hash,
+                "commit_sha": commit_hash,
                 "tree_sha": committed_tree,
                 "tree_verified": True,
             },

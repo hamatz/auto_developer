@@ -201,7 +201,12 @@ class EvidenceBundler:
                         data = json.loads(rec_file.read_text(encoding="utf-8"))
                         commit_val = data.get("commit", "")
                         if isinstance(commit_val, dict):
-                            commit_str = str(commit_val.get("hash", commit_val.get("commit_sha", ""))).strip()
+                            commit_str = str(
+                                commit_val.get(
+                                    "sha",
+                                    commit_val.get("hash", commit_val.get("commit_sha", "")),
+                                )
+                            ).strip()
                         else:
                             commit_str = str(commit_val or "").strip()
 
@@ -498,9 +503,17 @@ class EvidenceBundler:
 
                 # 1. Commit 比較 (40文字 hex 必須)
                 m_commit_raw = m_task.get("commit")
-                m_commit = str(m_commit_raw.get("hash", "") if isinstance(m_commit_raw, dict) else (m_commit_raw or "")).strip()
+                m_commit = str(
+                    m_commit_raw.get("sha", m_commit_raw.get("hash", m_commit_raw.get("commit_sha", "")))
+                    if isinstance(m_commit_raw, dict)
+                    else (m_commit_raw or "")
+                ).strip()
                 e_commit_raw = e_task.get("commit")
-                e_commit = str(e_commit_raw.get("hash", "") if isinstance(e_commit_raw, dict) else (e_commit_raw or "")).strip()
+                e_commit = str(
+                    e_commit_raw.get("sha", e_commit_raw.get("hash", e_commit_raw.get("commit_sha", "")))
+                    if isinstance(e_commit_raw, dict)
+                    else (e_commit_raw or "")
+                ).strip()
                 if not m_commit or len(m_commit) != 40:
                     result.errors.append(f"Task '{tid}' manifest missing or invalid required 'commit': '{m_commit}'")
                 if not e_commit or len(e_commit) != 40:
@@ -580,7 +593,12 @@ class EvidenceBundler:
                         # Commit SHA 取得 (dict または string)
                         commit_field = rec_data.get("commit")
                         if isinstance(commit_field, dict):
-                            commit_sha = str(commit_field.get("hash", commit_field.get("commit_sha", ""))).strip()
+                            commit_sha = str(
+                                commit_field.get(
+                                    "sha",
+                                    commit_field.get("hash", commit_field.get("commit_sha", "")),
+                                )
+                            ).strip()
                         else:
                             commit_sha = str(commit_field or "").strip()
 

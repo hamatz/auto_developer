@@ -169,12 +169,24 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - Bundle 生成時に、現行ジョブの最新コミットおよびタスク実績が反映されたレポートを確実に同梱・整合させる。
   3. 決定論的受入テスト:
      - `.gitignore` で無視された `local-notes.txt` が `remove_worktree(force=True)` で Quarantine スナップショットに退避され、中身がハッシュ一致で復元・保全可能であることの実証テスト。
-- [ ] 機能Ω (Stage 1 完全無欠・管理済み設定ファイル誤検知防止 & クリーンWorktree正常削除 Stage 1 Perfect Close: Tracked Config Exemption):
+- [x] 機能Ω (Stage 1 完全無欠・管理済み設定ファイル誤検知防止 & クリーンWorktree正常削除 Stage 1 Perfect Close: Tracked Config Exemption):
   1. Git管理済み・未変更ファイル（`.env.example` 等）の事前スキャン免除（P1）:
      - Worktree 削除時、事前スキャンおよび機密性検査の対象を「未コミット・未追跡・無視ファイル等の未保存成果」に限定する。
      - リポジトリに管理済みで未変更（`tracked` かつ clean）のファイル（`.env.example` 等）は、Worktree 削除によって失われる成果ではないため、機密検査で誤検出せず通常削除を許可する。
   2. 決定論的受入テスト:
      - `.env.example` がコミットされている状態で、クリーンな Worktree を作成し、編集なしで `remove_worktree()` が正常に削除を完了することの実証テスト。
+- [ ] 機能AA (Stage 2: 独立自律チーム統合ゲート IntegrationGate):
+  1. チーム Bundle & ブランチの事前監査:
+     - 統合対象となる全チームの Evidence Bundle を `EvidenceBundler.verify_bundle()` により独立監査し、改ざんや未承認（APPROVE 以外）が存在する場合は即座に統合を拒否（Fail-Closed）。
+  2. 統合用一時ブランチの作成と順次マージ:
+     - ベースコミットから新規の統合ブランチ（`integration/{job_id}`）をチェックアウトし、各チームのフィーチャーブランチ（またはコミット）を順次マージ。
+  3. マージ競合の Fail-Closed 遮断:
+     - ファイル競合（コンフリクト）が発生した場合、推測による自動解決は一切行わず、即座に統合失敗として処理を中断し、統合ブランチを隔離（main は一切汚染しない）。
+  4. 統合後全体検証ゲート (Post-Integration Gate):
+     - マージ完了後の作業ツリー上で、プロジェクトの全体検証スクリプト（`verify_local.sh` 等）を実行。
+     - 全チェック通過時のみ Release Candidate（RC）または統合確定とし、失敗時は隔離ロールバック。
+  5. 決定論的受入テスト:
+     - 2チーム（Core & UI）の正常結合成功シナリオ、および競合発生時の安全隔離シナリオを実証するテストスイート。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

@@ -585,7 +585,9 @@ class RecoveryEngine:
                     task_id=report.task_id,
                     status="COMPLETED",
                     commit_info={
+                        "hash": report.head_commit,
                         "sha": report.head_commit,
+                        "commit_sha": report.head_commit,
                         "tree_sha": report.committed_tree_sha,
                         "tree_verified": True,
                     },
