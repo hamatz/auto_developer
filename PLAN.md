@@ -7,20 +7,20 @@
 -->
 
 ## 現在の目標
-- Phase 6 (最終合格実証): Pilot 04 Recovery 適用検証と Manifest 照合必須化
-  - P1-1: Manifest 照合の必須化（job_id, task_id, checkpoint を必須項目とし、空文字を許容せず完全一致するアーカイブのみ採用）
-  - P1-2: 実クラッシュ 4 シナリオ（pilot04_results）に対する実復旧適用（inspect -> plan -> apply -> inspect -> 2nd apply）とフォレンジック受入検証
-  - 成果物 ZIP（実復旧前後ログ・JSON・レポート）の作成と提示
+- Phase 8: Morning Brief の実証跡連動・フェイルセーフ化
+  - P1: 実 Evidence Record の直接照合（レコード不在時は APPROVE を表示せず UNVERIFIED (No Evidence Record) と表示）
+  - P2: Tree SHA 改ざんや Checker REJECT 時の明示的フラグ付け
+  - P3: 全体サマリー（Executive Summary）の証跡ガード（未検証タスク混入時の警告）
+  - P4: Git リモート（origin）設定有無に応じた操作案内（未設定時の git push 抑止）
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - なし
 
 ## ステップ
-- [x] 1. Manifest 照合における job_id, task_id, checkpoint 必須照合の実装と単体テスト (P1-1)
-- [x] 2. Pilot 04 実クラッシュ 4 シナリオに対する E2E 復旧実証スクリプトの作成と実行 (P1-2)
-- [x] 3. 復旧適用前後のフォレンジック記録（tar成果保全、秘密混入排除、作業ツリー・HEAD、冪等性）の検証とレポート生成
-- [x] 4. 総合回帰検証 (全単体テスト・型検査・リンター) と成果物パッケージング
-- [x] 5. Git コミットとプッシュ準備
+- [x] 1. MorningReporter の Evidence Record 照合テスト（レコードなしで APPROVE 詐称不可、改ざん検知、リモート未設定時の案内）の作成（Red）
+- [x] 2. `MorningReporter`（`src/auto_developer/reporter.py`）の実装（実レコード照合、フェイルセーフ判定、リモート検出）
+- [x] 3. `NightlyOrchestrator`（`src/auto_developer/orchestrator.py`）との結合確認
+- [x] 4. 総合検証（`scripts/verify_local.sh`）とコミット
 
 ## 止まっていること・判断待ち
 - なし (全ステップ完了)

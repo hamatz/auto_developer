@@ -1,0 +1,199 @@
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+
+src_dir = str(Path(__file__).resolve().parents[1] / "src")
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
+from auto_developer.bundler import EvidenceBundler
+
+
+class TestEvidenceBundler(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmpdir.name)
+
+        # Git リポジトリ初期化
+        subprocess.run(["git", "init"], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=self.repo, check=True)
+
+        # 基本ファイル作成
+        (self.repo / "SPEC.md").write_text("# Spec\nImmutable requirements", encoding="utf-8")
+        (self.repo / "PLAN.md").write_text("# Plan\n- [x] Task 1", encoding="utf-8")
+        (self.repo / "NIGHTLY_REPORT.md").write_text("# Morning Brief\nTask 1 APPROVE", encoding="utf-8")
+        (self.repo / ".gitignore").write_text(".dev/\nlogs/\n*.key\n.env\n", encoding="utf-8")
+        (self.repo / "app.py").write_text("print('hello')", encoding="utf-8")
+
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "initial commit"], cwd=self.repo, check=True)
+
+        # .git/nightly_evidence/records
+        records_dir = self.repo / ".git" / "nightly_evidence" / "records"
+        records_dir.mkdir(parents=True, exist_ok=True)
+        import hashlib
+        spec_hash = hashlib.sha256((self.repo / "SPEC.md").read_bytes()).hexdigest()
+        (records_dir / "task_1.json").write_text(
+            json.dumps({
+                "task_id": "1",
+                "checkpoint": "chk1",
+                "tree_sha": "tree123",
+                "spec_sha": spec_hash,
+                "checker": {"decision": "APPROVE", "reason": "All good"},
+                "status": "COMPLETED",
+            }),
+            encoding="utf-8",
+        )
+
+        # .dev/job_state.json
+        dev_dir = self.repo / ".dev"
+        dev_dir.mkdir(parents=True, exist_ok=True)
+        (dev_dir / "job_state.json").write_text(
+            json.dumps({"job_id": "job-test-1", "status": "COMPLETED"}),
+            encoding="utf-8",
+        )
+
+        # logs/nightly
+        logs_dir = self.repo / "logs" / "nightly"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        (logs_dir / "task_1.log").write_text("Task 1 completed successfully", encoding="utf-8")
+
+        # 機密ファイルと macOS ゴミファイルの配置 (除外テスト用)
+        (self.repo / ".env").write_text("API_KEY=super_secret", encoding="utf-8")
+        (self.repo / "private.key").write_text("PRIVATE_KEY_DATA", encoding="utf-8")
+        (self.repo / ".DS_Store").write_bytes(b"\x00\x00\x00\x01")
+        (logs_dir / ".DS_Store").write_bytes(b"\x00\x00\x00\x01")
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_bundle_creation_and_sanitization(self):
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        out_zip = bundler.create_bundle(dest_path=self.repo / "test_bundle.zip")
+
+        self.assertTrue(out_zip.exists())
+        self.assertTrue(zipfile.is_zipfile(out_zip))
+
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            namelist = zf.namelist()
+
+            # 必須成果物・証跡の同梱確認
+            self.assertIn("bundle_manifest.json", namelist)
+            self.assertIn("NIGHTLY_REPORT.md", namelist)
+            self.assertIn("job_state.json", namelist)
+            self.assertIn("evidence/task_1.json", namelist)
+            self.assertIn("logs/task_1.log", namelist)
+            self.assertIn("git_bundle.bundle", namelist)
+
+            # 機密・ゴミファイルの除外確認
+            for name in namelist:
+                self.assertFalse(name.endswith(".env"), f"Secret file {name} should be excluded!")
+                self.assertFalse(name.endswith(".key"), f"Secret file {name} should be excluded!")
+                self.assertFalse(name.endswith(".DS_Store"), f"Noise file {name} should be excluded!")
+                self.assertFalse("__MACOSX" in name, f"Noise dir {name} should be excluded!")
+
+            # Manifest 検証
+            manifest_data = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+            self.assertEqual(manifest_data["bundle_version"], "1.0")
+            self.assertEqual(manifest_data["job_id"], "job-test-1")
+            self.assertIn("file_hashes", manifest_data)
+            self.assertIn("evidence/task_1.json", manifest_data["file_hashes"])
+            self.assertIn("tasks", manifest_data)
+            self.assertEqual(len(manifest_data["tasks"]), 1)
+            self.assertEqual(manifest_data["tasks"][0]["task_id"], "1")
+            self.assertEqual(manifest_data["tasks"][0]["checker_decision"], "APPROVE")
+
+    def test_verify_bundle_success(self):
+        # 実際の HEAD Tree と SPEC ハッシュを反映させた証跡を作成
+        res_tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo, capture_output=True, text=True, check=True)
+        head_tree = res_tree.stdout.strip()
+        import hashlib
+        spec_hash = hashlib.sha256((self.repo / "SPEC.md").read_bytes()).hexdigest()
+
+        records_dir = self.repo / ".git" / "nightly_evidence" / "records"
+        (records_dir / "task_1.json").write_text(
+            json.dumps({
+                "task_id": "1",
+                "checkpoint": "chk1",
+                "tree_sha": head_tree,
+                "spec_sha": spec_hash,
+                "checker": {"decision": "APPROVE", "reason": "All checks passed"},
+                "status": "COMPLETED",
+                "commit": {"tree_sha": head_tree},
+            }),
+            encoding="utf-8",
+        )
+
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        out_zip = bundler.create_bundle(dest_path=self.repo / "valid_bundle.zip")
+
+        result = bundler.verify_bundle(out_zip)
+        self.assertTrue(result.is_valid, f"Verification failed with errors: {result.errors}")
+        self.assertEqual(result.job_id, "job-test-1")
+        self.assertEqual(len(result.errors), 0)
+        self.assertEqual(len(result.tasks), 1)
+        self.assertEqual(result.tasks[0]["task_id"], "1")
+        self.assertEqual(result.tasks[0]["checker_decision"], "APPROVE")
+
+    def test_verify_bundle_tampered_fails(self):
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        out_zip = bundler.create_bundle(dest_path=self.repo / "tampered_bundle.zip")
+
+        # ZIP を開き、中身のファイルを改ざんして再圧縮
+        temp_dir = tempfile.TemporaryDirectory()
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            zf.extractall(temp_dir.name)
+
+        # NIGHTLY_REPORT.md を改ざん
+        report_path = Path(temp_dir.name) / "NIGHTLY_REPORT.md"
+        report_path.write_text("TAMPERED REPORT CONTENT", encoding="utf-8")
+
+        tampered_zip = self.repo / "tampered_result.zip"
+        with zipfile.ZipFile(tampered_zip, "w") as zf:
+            for root, _, files in os.walk(temp_dir.name):
+                for file in files:
+                    full_p = Path(root) / file
+                    arcname = full_p.relative_to(temp_dir.name).as_posix()
+                    zf.write(full_p, arcname=arcname)
+        temp_dir.cleanup()
+
+        result = bundler.verify_bundle(tampered_zip)
+        self.assertFalse(result.is_valid)
+        self.assertTrue(any("Hash mismatch" in err for err in result.errors))
+
+    def test_cli_bundle_and_verify_bundle(self):
+        from auto_developer.cli import main
+
+        bundle_zip = self.repo / "cli_bundle.zip"
+        # 1. auto-dev bundle 実行
+        exit_code = main(["--work-dir", str(self.repo), "bundle", "--out", str(bundle_zip)])
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(bundle_zip.exists())
+
+        # 2. auto-dev verify-bundle 実行
+        exit_code_verify = main(["--work-dir", str(self.repo), "verify-bundle", str(bundle_zip)])
+        self.assertEqual(exit_code_verify, 0)
+
+        # 3. auto-dev verify-bundle --json 実行
+        import io
+        import sys
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = captured
+            exit_code_json = main(["--work-dir", str(self.repo), "verify-bundle", str(bundle_zip), "--json"])
+        finally:
+            sys.stdout = old_stdout
+        self.assertEqual(exit_code_json, 0)
+        parsed = json.loads(captured.getvalue())
+        self.assertTrue(parsed["is_valid"])
+
+
+if __name__ == "__main__":
+    unittest.main()

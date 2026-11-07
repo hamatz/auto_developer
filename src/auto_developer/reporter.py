@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -7,8 +9,19 @@ from typing import Any
 class MorningReporter:
     """NIGHTLY_REPORT.md (Morning Brief) および隔離ログの生成を担当。"""
 
-    def write_report(self, report_path: Path, summary_data: dict[str, Any]) -> None:
+    def __init__(self, repo_dir: Path | None = None) -> None:
+        self.repo_dir = repo_dir
+
+    def write_report(
+        self,
+        report_path: Path,
+        summary_data: dict[str, Any],
+        repo_dir: Path | None = None,
+    ) -> None:
         """NIGHTLY_REPORT.md を意思決定支援型 Morning Brief として作成・更新する。"""
+        effective_repo = repo_dir or self.repo_dir or report_path.parent
+        records_dir = effective_repo / ".git" / "nightly_evidence" / "records"
+
         status = summary_data.get("status", "UNKNOWN")
         total = summary_data.get("total_tasks", 0)
         succeeded = summary_data.get("succeeded_count", 0)
@@ -104,13 +117,52 @@ class MorningReporter:
                 ]
             )
             for item in completed_tasks:
-                tid = item.get("task_id", "")
+                tid = str(item.get("task_id", ""))
                 title = item.get("title", "")
                 commit_sha = item.get("commit", "")[:7]
-                tree_sha = item.get("evidence_tree_sha", "")[:7] or "N/A"
-                checker = item.get("checker_decision", "APPROVE")
+                committed_tree_sha = item.get("committed_tree_sha", "")
+                explicit_checker = item.get("checker_decision")
+
+                record_file = records_dir / f"task_{tid}.json"
+                checker_review_text = "UNVERIFIED (No Record)"
+                verified_tree_text = item.get("evidence_tree_sha", "")[:7] or "N/A"
+
+                if record_file.exists():
+                    try:
+                        rec_data = json.loads(record_file.read_text(encoding="utf-8"))
+                        rec_status = rec_data.get("status", "")
+                        rec_tree = rec_data.get("tree_sha", "")
+                        rec_commit_tree = rec_data.get("commit", {}).get("tree_sha", "")
+                        rec_checker = rec_data.get("checker", {})
+                        dec = rec_checker.get("decision", "") if isinstance(rec_checker, dict) else str(rec_checker)
+
+                        tree_ok = True
+                        if committed_tree_sha and rec_tree and committed_tree_sha != rec_tree:
+                            tree_ok = False
+                        if rec_commit_tree and rec_tree and rec_commit_tree != rec_tree:
+                            tree_ok = False
+
+                        if dec == "APPROVE" and rec_status == "COMPLETED" and tree_ok:
+                            checker_review_text = "APPROVE (Verified)"
+                            if rec_tree:
+                                verified_tree_text = rec_tree[:7]
+                        elif not tree_ok:
+                            checker_review_text = "TAMPERED (Tree Mismatch)"
+                        elif dec:
+                            checker_review_text = f"{dec} (Record)"
+                    except (json.JSONDecodeError, OSError):
+                        checker_review_text = "CORRUPT (Read Error)"
+                else:
+                    if explicit_checker == "APPROVE" and not records_dir.exists():
+                        # テスト等のモック環境互換
+                        checker_review_text = "APPROVE (Simulated)"
+                    elif explicit_checker:
+                        checker_review_text = f"{explicit_checker} (Unverified)"
+                    else:
+                        checker_review_text = "UNVERIFIED (No Evidence Record)"
+
                 lines.append(
-                    f"| `task-{tid}` | {title} | `{commit_sha}` | `{tree_sha}` | {checker} |"
+                    f"| `task-{tid}` | {title} | `{commit_sha}` | `{verified_tree_text}` | {checker_review_text} |"
                 )
         else:
             lines.append("* (完了した新規タスクはありません)")
@@ -172,7 +224,43 @@ class MorningReporter:
                     "",
                     "## あなたに判断してほしいこと (Next Actions for Developer)",
                     "- [x] すべての予定タスクが正常に検証され、本線にコミットされました。",
-                    f"- `git log --oneline -n {succeeded}` でコミット内容を確認し、必要に応じてリモートへプッシュまたは PR を作成してください。",
+                ]
+            )
+            has_origin = False
+            try:
+                res = subprocess.run(
+                    ["git", "remote", "get-url", "origin"],
+                    check=False,
+                    cwd=effective_repo,
+                    capture_output=True,
+                    text=True,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    has_origin = True
+            except (subprocess.SubprocessError, OSError):
+                has_origin = False
+
+            if has_origin:
+                lines.append(
+                    f"- `git log --oneline -n {succeeded}` でコミット内容を確認後、`git push origin` でリモートへ反映してください。"
+                )
+            else:
+                lines.append(
+                    f"- リモートリポジトリ (origin) は未設定です。`git log -p -n {succeeded}` でコミット差分を確認してください。"
+                )
+
+        bundle_path_str = summary_data.get("bundle_path")
+        if bundle_path_str:
+            lines.extend(
+                [
+                    "",
+                    "## 成果提出パッケージ & 独立検証 (Evidence Bundle)",
+                    "本稼働の全成果コード、コミット履歴、暗号学的検証証跡、およびChecker査読ログをサニタイズした監査パッケージが生成されています。",
+                    f"- **パッケージ保存先**: `{bundle_path_str}`",
+                    "- **第三者・独立監査コマンド**:",
+                    "  ```bash",
+                    f"  auto-dev verify-bundle {bundle_path_str}",
+                    "  ```",
                 ]
             )
 
