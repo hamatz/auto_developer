@@ -45,7 +45,7 @@ class NightlyOrchestrator:
         self.git_guard = GitGuard(repo_dir=self.repo_dir)
         self.dispatcher = TaskDispatcher()
         self.verifier = DeterministicVerifier()
-        self.reporter = MorningReporter()
+        self.reporter = MorningReporter(repo_dir=self.repo_dir)
         self.evidence_store = EvidenceStore(repo_dir=self.repo_dir)
 
     def run(self) -> int:
