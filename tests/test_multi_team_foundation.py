@@ -416,6 +416,36 @@ class TestMultiTeamFoundation(unittest.TestCase):
         (q_wt_ignored / ".env").unlink()
         self.wt_manager.remove_worktree(team_id="team-ignored-sec", force=True)
 
+        # 15. .gitignore で無視された非機密通常ファイル (local-notes.txt) の包括的 Quarantine 退避保全の決定論的受入テスト
+        gi_text = gitignore_file.read_text(encoding="utf-8")
+        gitignore_file.write_text(gi_text + "\nlocal-notes.txt\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".gitignore"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: ignore local-notes.txt in acceptance test"], cwd=self.repo_dir, check=True)
+
+        q_wt_notes = self.wt_manager.create_worktree(team_id="team-notes-acc")
+        notes_content = "vital product idea and meeting notes\n"
+        (q_wt_notes / "local-notes.txt").write_text(notes_content, encoding="utf-8")
+        notes_sha = hashlib.sha256(notes_content.encode("utf-8")).hexdigest()
+
+        # force=False では削除拒否されること
+        with self.assertRaises(WorktreeError):
+            self.wt_manager.remove_worktree(team_id="team-notes-acc", force=False)
+        self.assertTrue(q_wt_notes.exists())
+
+        # force=True で削除時、Quarantine スナップショットに退避されてから削除されること
+        self.wt_manager.remove_worktree(team_id="team-notes-acc", force=True)
+        self.assertFalse(q_wt_notes.exists())
+
+        note_snaps = sorted(quarantines_dir.glob("snapshot_worktree_team-notes-acc_*.tar.gz"))
+        self.assertTrue(len(note_snaps) > 0, "Quarantine snapshot must be created for ignored normal files")
+        with tarfile.open(note_snaps[-1], "r:gz") as tar:
+            tar_names = tar.getnames()
+            self.assertTrue(any("local-notes.txt" in n for n in tar_names))
+            f_ext = tar.extractfile("team-notes-acc/local-notes.txt")
+            self.assertIsNotNone(f_ext)
+            if f_ext:
+                self.assertEqual(hashlib.sha256(f_ext.read()).hexdigest(), notes_sha)
+
 
 if __name__ == "__main__":
     unittest.main()

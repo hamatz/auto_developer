@@ -17,9 +17,9 @@
 
 ## ステップ
 - [x] 1. Git無視通常ファイル（`local-notes.txt`等）の検出と Quarantine 退避保全（`src/auto_developer/worktree.py`）および単体テスト（Red-First）
-- [ ] 2. 決定論的受入テストおよび Morning Brief 鮮度保証（`tests/test_multi_team_foundation.py`, `src/auto_developer/bundler.py`）と全検証ゲート合格確認
+- [x] 2. 決定論的受入テストおよび Morning Brief 鮮度保証（`tests/test_multi_team_foundation.py`, `src/auto_developer/bundler.py`）と全検証ゲート合格確認
 
 ## 止まっていること・判断待ち
-- なし
+- なし（Phase 18 全ステップ完了。公式 Evidence Record 発行および Evidence Bundle 生成へ）
 
 
