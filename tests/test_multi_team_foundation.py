@@ -390,6 +390,32 @@ class TestMultiTeamFoundation(unittest.TestCase):
         self.assertEqual(res_spec_m.status, "INVALID")
         self.assertFalse(res_spec_m.is_valid)
 
+        # 14. .gitignore で無視された .env のみが存在する Worktree における実ファイル事前スキャン削除拒否・物理保全の決定論的受入テスト
+        gitignore_file = self.repo_dir / ".gitignore"
+        existing_gi = gitignore_file.read_text(encoding="utf-8") if gitignore_file.exists() else ""
+        gitignore_file.write_text(existing_gi + "\n.env\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".gitignore"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: ignore .env in acceptance test"], cwd=self.repo_dir, check=True)
+
+        q_wt_ignored = self.wt_manager.create_worktree(team_id="team-ignored-sec")
+        (q_wt_ignored / ".env").write_text("DATABASE_URL=sqlite:///db.sqlite3\n", encoding="utf-8")
+        status_out = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=q_wt_ignored,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(status_out, "", "Ignored .env must not appear in git status")
+
+        with self.assertRaises(WorktreeError):
+            self.wt_manager.remove_worktree(team_id="team-ignored-sec", force=True)
+        self.assertTrue(q_wt_ignored.exists(), "Worktree with ignored .env must be preserved without deletion")
+        self.assertTrue((q_wt_ignored / ".env").exists())
+        # 後続の tearDown が正常に Worktree をクリーンアップできるよう .env を解消
+        (q_wt_ignored / ".env").unlink()
+        self.wt_manager.remove_worktree(team_id="team-ignored-sec", force=True)
+
 
 if __name__ == "__main__":
     unittest.main()
