@@ -20,7 +20,7 @@
 - [x] 1. `TeamManifest` のデータモデルとパーサー実装（`src/auto_developer/manifest.py`）および単体テスト
 - [x] 2. `WorktreeManager` の作成・一覧・衝突検知・削除処理の実装（`src/auto_developer/worktree.py`）および単体テスト
 - [x] 3. `BoundaryGuard` の変更許可スコープ検査と隔離連携の実装（`src/auto_developer/boundary.py`）および単体テスト
-- [ ] 4. 複数Worktreeの共存と領空侵犯（Boundary違反）即時ロールバックの決定論的受入テスト（`tests/test_multi_team_foundation.py`）
+- [x] 4. 複数Worktreeの共存と領空侵犯（Boundary違反）即時ロールバックの決定論的受入テスト（`tests/test_multi_team_foundation.py`）
 
 ## 止まっていること・判断待ち
 - なし（`/nightly-run` 実行準備完了）
