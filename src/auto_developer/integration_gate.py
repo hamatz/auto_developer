@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -110,3 +111,48 @@ class IntegrationGate:
 
         is_valid = len(errors) == 0
         return is_valid, audits, errors
+
+    def _run_git(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=self.repo_dir,
+            capture_output=True,
+            text=True,
+            check=check,
+        )
+
+    def create_integration_branch(self, job_id: str, base_commit: str = "HEAD") -> str:
+        """ベースコミットから新規統合ブランチ integration/{job_id} を作成・チェックアウトする。"""
+        branch_name = f"integration/{job_id}"
+        self._run_git(["checkout", "-B", branch_name, base_commit])
+        return branch_name
+
+    def merge_team_branches(
+        self,
+        integration_branch: str,
+        inputs: list[TeamIntegrationInput],
+        original_branch: str | None = None,
+    ) -> tuple[bool, str | None, list[str]]:
+        """統合ブランチ上で各チームのブランチを順次マージする。
+
+        コンフリクト発生時は即座に推測なき Fail-Closed を発動し、マージを abort して
+        original_branch に安全に戻る。
+        """
+        errors: list[str] = []
+        for team_input in inputs:
+            branch = team_input.branch
+            team_id = team_input.team_id
+            msg = f"chore(integration): merge team '{team_id}' ({branch}) into {integration_branch}"
+            proc = self._run_git(["merge", "--no-ff", branch, "-m", msg], check=False)
+            if proc.returncode != 0:
+                self._run_git(["merge", "--abort"], check=False)
+                if original_branch:
+                    self._run_git(["checkout", original_branch], check=False)
+                err = (
+                    f"Merge conflict detected while merging team '{team_id}' ({branch}): "
+                    f"speculation-free Fail-Closed triggered. Output:\n{proc.stderr or proc.stdout}"
+                )
+                errors.append(err)
+                return False, team_id, errors
+
+        return True, None, []

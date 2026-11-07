@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -94,6 +95,98 @@ class TestIntegrationGateAudit(unittest.TestCase):
         is_valid, _audits, errors = gate.audit_team_inputs(inputs)
         self.assertFalse(is_valid)
         self.assertIn("not found", errors[0])
+
+
+class TestIntegrationGateMerge(unittest.TestCase):
+    """統合用ブランチの作成、順次マージ、およびマージ競合遮断の単体テスト。"""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo_dir = Path(self.temp_dir.name).resolve()
+        # Git初期化
+        self._run_git(["init", "-b", "main"])
+        self._run_git(["config", "user.name", "Tester"])
+        self._run_git(["config", "user.email", "tester@example.com"])
+        (self.repo_dir / "base.txt").write_text("base content\n", encoding="utf-8")
+        self._run_git(["add", "base.txt"])
+        self._run_git(["commit", "-m", "initial commit"])
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _run_git(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=self.repo_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    def test_create_integration_branch_and_merge_success(self) -> None:
+        # feature/core ブランチ作成
+        self._run_git(["checkout", "-b", "feature/core", "main"])
+        (self.repo_dir / "core.txt").write_text("core file\n", encoding="utf-8")
+        self._run_git(["add", "core.txt"])
+        self._run_git(["commit", "-m", "feat: core"])
+
+        # feature/ui ブランチ作成
+        self._run_git(["checkout", "-b", "feature/ui", "main"])
+        (self.repo_dir / "ui.txt").write_text("ui file\n", encoding="utf-8")
+        self._run_git(["add", "ui.txt"])
+        self._run_git(["commit", "-m", "feat: ui"])
+
+        # main に戻る
+        self._run_git(["checkout", "main"])
+
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        branch_name = gate.create_integration_branch("job-test-1", base_commit="main")
+        self.assertEqual(branch_name, "integration/job-test-1")
+
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=Path("dummy.zip"), branch="feature/core"),
+            TeamIntegrationInput(team_id="ui", bundle_path=Path("dummy.zip"), branch="feature/ui"),
+        ]
+        ok, conflict_team, errors = gate.merge_team_branches(branch_name, inputs)
+        self.assertTrue(ok)
+        self.assertIsNone(conflict_team)
+        self.assertEqual(errors, [])
+        self.assertTrue((self.repo_dir / "core.txt").exists())
+        self.assertTrue((self.repo_dir / "ui.txt").exists())
+
+    def test_merge_team_branches_conflict_fails_closed(self) -> None:
+        # feature/core ブランチで shared.txt を作成
+        self._run_git(["checkout", "-b", "feature/core", "main"])
+        (self.repo_dir / "shared.txt").write_text("core conflict line\n", encoding="utf-8")
+        self._run_git(["add", "shared.txt"])
+        self._run_git(["commit", "-m", "feat: core conflict"])
+
+        # feature/ui ブランチで shared.txt を競合内容で作成
+        self._run_git(["checkout", "-b", "feature/ui", "main"])
+        (self.repo_dir / "shared.txt").write_text("ui conflict line\n", encoding="utf-8")
+        self._run_git(["add", "shared.txt"])
+        self._run_git(["commit", "-m", "feat: ui conflict"])
+
+        # main に戻る
+        self._run_git(["checkout", "main"])
+
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        branch_name = gate.create_integration_branch("job-conflict-1", base_commit="main")
+
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=Path("dummy.zip"), branch="feature/core"),
+            TeamIntegrationInput(team_id="ui", bundle_path=Path("dummy.zip"), branch="feature/ui"),
+        ]
+        ok, conflict_team, errors = gate.merge_team_branches(branch_name, inputs, original_branch="main")
+        self.assertFalse(ok)
+        self.assertEqual(conflict_team, "ui")
+        self.assertGreaterEqual(len(errors), 1)
+        self.assertIn("conflict", errors[0].lower())
+
+        # main ブランチに安全に戻っていること（main が汚染されていないこと）
+        current_branch = self._run_git(["branch", "--show-current"]).stdout.strip()
+        self.assertEqual(current_branch, "main")
+        self.assertFalse((self.repo_dir / "shared.txt").exists())
 
 
 if __name__ == "__main__":
