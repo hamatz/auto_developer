@@ -19,7 +19,7 @@ Google Antigravity および [Agent Harness Kit 論文](https://github.com/hamat
 3. **未検証コードの混入**: 実装が完了していない、あるいは検証を通っていない変更がコミットされてしまう。
 4. **全破壊ロールバックの代償**: 失敗時に `git reset --hard` すると、エージェントが数時間かけて書いた差分や中間ログまで消滅し、人間が引き継げない。
 
-Auto Developer は、**「Job Orchestrator（親プロセスによる状態永続化）」「未追跡ファイルを含む物理防壁」「隔離退避（Quarantine Branch）」「暗号学的証跡ゲート（Evidence Gate）」「翌朝の意思決定支援（Morning Brief）」** により、人間不在でも安心して仕事を預けられる環境を提供します。
+Auto Developer は、**「Job Orchestrator（親プロセスによる状態永続化）」「未追跡ファイルを含む物理防壁」「隔離退避（Quarantine Branch）」「証跡拘束確定ゲート（Evidence Gate）」「翌朝の意思決定支援（Morning Brief）」** により、人間不在でも安心して仕事を預けられる環境を提供します。
 
 ---
 
@@ -203,6 +203,7 @@ python3 scripts/nightly_orchestrator.py morning-brief
 もしタスクが失敗した場合、**作業成果は捨てられず `quarantine/*` ブランチに保存** され、本線は直前のチェックポイントに戻ります：
 ```bash
 # 失敗するタスクを意図的に実行
+# （本リポジトリでは scripts/verify_local.sh 内の Ruff リンターが構文エラーを検知して即座に隔離されます）
 python3 scripts/nightly_orchestrator.py \
   --maker-cmd "python3 -c \"open('broken.py', 'w').write('syntax error here')\""
 
@@ -210,6 +211,12 @@ python3 scripts/nightly_orchestrator.py \
 python3 scripts/nightly_orchestrator.py morning-brief
 ```
 出力された選択肢（`git diff ...` や `--resume`）に従って、人間が簡単に判断・引き継ぎできます。
+
+> [!NOTE] 物差しの強さはテスト（検証ゲート）次第
+> 「なぜ `broken.py` の構文エラーで隔離されたのか？」
+> それは、本リポジトリの `scripts/verify_local.sh` にプロジェクト全体を走査するリンター（Ruff）が組み込まれているからです。
+> もし単体テストのみを実行し、どのテストからもインポートされていないファイルであれば、構文エラーであってもテストランナーはエラーを検知せず通過してしまいます。
+> **「検証ゲートが検査していない不具合は機械的に通過する」** という点こそが、AI自律開発における「物差しの強さは自分のテスト次第」という論文の実例です。確実に隔離させるには、仕様に対応する受入テストや静的解析をあらかじめ検証ゲート（`verify_local.sh`）に組み込んでおく必要があります。
 
 体験が終わったら元のブランチに戻ります：
 ```bash
@@ -276,8 +283,8 @@ auto-dev rollback-step --checkpoint <commit_hash> --task-id <id> --reason "原�
    - 起動時に `git status --porcelain` を検査。未コミット作業がある場合は起動を拒否し、作業破壊を防ぎます。
 2. **外部不変条件保護 (External Invariant Check)**
    - 未追跡ファイル（Untracked files）も含めて走査。保護アセット（`.github/**`, `SPEC.md`, `scripts/verify_local.sh`, 免疫テスト）の作成・変更を検知した瞬間、テスト実行前に物理遮断します。
-3. **暗号学的確定ゲート (Evidence-gated Commit)**
-   - `verify-step` 成功時に発行される Evidence Token がない限り、`commit-step` は Exit 3 でコミットを拒否。未検証コードの混入を物理的に排除します。
+3. **証跡拘束確定ゲート (Evidence-gated Commit)**
+   - `verify-step` 成功時に発行される Evidence Token（Git Tree SHA と SPEC SHA をハッシュ束縛したワンタイム証跡）がない限り、`commit-step` は Exit 3 でコミットを拒否。秘密鍵による電子署名ではなく、決定論的なハッシュ拘束とワンタイム消費によって、未検証コードの混入を物理的に排除します。
 4. **破壊的ロールバックの廃止と隔離退避 (Quarantine Preservation)**
    - 失敗時にコードを `git reset` で消し去らず、`quarantine/task-<id>-*` ブランチへ退避コミット。本線の安全性と試行錯誤ログの保存を両立します。
 5. **実行状態の永続化と中断復旧 (Crash Recovery & Resume)**

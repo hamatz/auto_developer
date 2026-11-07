@@ -55,7 +55,7 @@
 * **Decision 4 (作業成果の隔離退避: Quarantine Preservation)**:
   * 従来の `git reset --hard` & `git clean -fd` による破壊的ロールバックを廃止。タスク失敗時は作業ツリーの差分を `quarantine/task-<id>-*` ブランチへ退避コミットした上で本線を直前のチェックポイントへ復元する。本線の安全性と試行錯誤成果の保存を完全に両立する。
 * **Decision 5 (確定ゲートの厳格化: Evidence-Gated Commit)**:
-  * 未検証コードの混入を防ぐため、決定論的検証（`verify-step`）通過時に暗号学的 Evidence Token を発行。コミット処理（`commit-step`）はこの証跡を検証・ワンタイム消費しない限り Exit 3 で物理遮断する。
+  * 未検証コードの混入を防ぐため、決定論的検証（`verify-step`）通過時にハッシュ拘束された Evidence Token を発行。コミット処理（`commit-step`）はこの証跡を検証・ワンタイム消費しない限り Exit 3 で物理遮断する。
 * **Decision 6 (翌朝の意思決定支援: Actionable Morning Brief)**:
   * 単なる件数ダンプを廃止し、人間が朝戻ってきた際に3分で状況を把握し、具体的なコマンド（差分確認、ログ調査、再試行、破棄）とともに次の判断を下せる `AUTO DEVELOPER / MORNING BRIEF` および CLI コマンド `morning-brief` を提供する。
 

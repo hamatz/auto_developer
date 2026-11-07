@@ -156,6 +156,42 @@ class TestEvidenceBundler(unittest.TestCase):
         self.assertEqual(result.tasks[0]["task_id"], "1")
         self.assertEqual(result.tasks[0]["checker_decision"], "APPROVE")
 
+    def test_verify_bundle_with_orchestrator_commit_dict_format(self):
+        """オーケストレーターが生成する dict 形式 ({"sha": ...}) の commit 情報を正しく検証できること。"""
+        res_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True)
+        head_commit = res_commit.stdout.strip()
+        res_tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo, capture_output=True, text=True, check=True)
+        head_tree = res_tree.stdout.strip()
+        import hashlib
+        spec_hash = hashlib.sha256((self.repo / "SPEC.md").read_bytes()).hexdigest()
+
+        records_dir = self.repo / ".git" / "nightly_evidence" / "records"
+        # orchestrator.py / cli.py と同等の commit dict 構造
+        (records_dir / "task_1.json").write_text(
+            json.dumps({
+                "task_id": "1",
+                "checkpoint": "chk1",
+                "commit": {
+                    "sha": head_commit,
+                    "tree_sha": head_tree,
+                    "tree_verified": True,
+                },
+                "tree_sha": head_tree,
+                "spec_sha": spec_hash,
+                "checker": {"decision": "APPROVE", "reason": "All checks passed"},
+                "status": "COMPLETED",
+            }),
+            encoding="utf-8",
+        )
+
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        out_zip = bundler.create_bundle(dest_path=self.repo / "dict_commit_bundle.zip")
+
+        result = bundler.verify_bundle(out_zip)
+        self.assertTrue(result.is_valid, f"Verification failed with errors: {result.errors}")
+        self.assertEqual(result.status, "VERIFIED")
+        self.assertEqual(result.tasks[0]["commit"], head_commit)
+
     def test_verify_bundle_tampered_fails(self):
         bundler = EvidenceBundler(repo_dir=self.repo)
         out_zip = bundler.create_bundle(dest_path=self.repo / "tampered_bundle.zip")
