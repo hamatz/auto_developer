@@ -446,6 +446,19 @@ class TestMultiTeamFoundation(unittest.TestCase):
             if f_ext:
                 self.assertEqual(hashlib.sha256(f_ext.read()).hexdigest(), notes_sha)
 
+        # 16. Git管理済み・未変更の .env.example が存在するクリーンな Worktree の正常削除の決定論的受入テスト
+        env_ex_file = self.repo_dir / ".env.example"
+        env_ex_file.write_text("API_ENDPOINT=https://example.com\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".env.example"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: add tracked .env.example in acceptance test"], cwd=self.repo_dir, check=True)
+
+        q_wt_clean_env = self.wt_manager.create_worktree(team_id="team-clean-ex")
+        self.assertTrue((q_wt_clean_env / ".env.example").exists())
+
+        # 何も変更していないクリーンな状態なら、誤検知されず force=False で正常に削除できること
+        self.wt_manager.remove_worktree(team_id="team-clean-ex", force=False)
+        self.assertFalse(q_wt_clean_env.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
