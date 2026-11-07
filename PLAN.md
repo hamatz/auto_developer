@@ -7,20 +7,18 @@
 -->
 
 ## 現在の目標
-- Phase 16: Stage 1 Perfection & Complete Hardening (Worktree未保存秘密ファイル消失阻止・Manifestタスク全必須フィールド完全照合)
-  - P0: Worktree 削除時に Quarantine 除外となる未コミット秘密情報（`.env`, 秘密鍵等）が存在する場合、成果消失を防ぐため削除を拒否（Fail-Closed 保全）
-  - P1-1: Bundle Manifest タスク全必須フィールド（`commit`, `tree_sha`, `spec_sha`, `status`, `checker_decision`）の欠落不可（空文字・None 禁止）および Evidence Record との完全一致照合
-  - P0/P1-2: Sol 氏再現シナリオ（.env 存在時の削除拒否、Manifest task commit 空文字、spec_sha 不一致）の決定論的受入テスト
+- Phase 17: Stage 1 Invincibility & Complete Safeguard (Git status 独立の全ファイル事前秘密情報スキャン)
+  - P0: Worktree 削除時、`git status --porcelain` の判定前に実ファイルを走査し、`.gitignore` で無視された `.env` 等の秘密情報が存在する場合でも削除を拒否し物理保全する（Fail-Closed 保全）。
+  - P0: 決定論的受入テストの追加（`.gitignore` で無視された `.env` のみが存在する Worktree において `remove_worktree(force=True)` が確実に削除を拒否し `.env` が物理保全されること）。
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - なし
 
 ## ステップ
-- [x] 1. Worktree 削除時における未保存秘密情報（`.env`, 秘密鍵等）存在時の削除拒否（Fail-Closed 保全）（`src/auto_developer/worktree.py`）および単体テスト
-- [x] 2. Bundle Manifest タスク全必須フィールド（`commit`, `tree_sha`, `spec_sha`, `status`, `checker_decision`）の欠落不可・完全一致照合（`src/auto_developer/bundler.py`）および単体テスト
-- [x] 3. Sol 氏再現シナリオ（`.env` 存在時Worktree削除拒否、Manifestの `commit` 空文字、`spec_sha` 不一致の遮断）の決定論的受入テスト（`tests/test_bundler.py`, `tests/test_worktree.py`, `tests/test_multi_team_foundation.py`）
+- [ ] 1. Git status 独立の実ファイル事前スキャン（`src/auto_developer/worktree.py`）および単体テスト（Red-First）
+- [ ] 2. 決定論的受入テストの追加（`tests/test_multi_team_foundation.py`）および全検証ゲート合格確認
 
 ## 止まっていること・判断待ち
-- なし（Phase 16 全ステップ完了。公式 Evidence Record 発行および Evidence Bundle 生成へ）
+- なし
 
 
