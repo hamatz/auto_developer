@@ -20,9 +20,9 @@
 - [x] 1. `WorktreeManager` の非破壊的クリーンアップと未マージブランチ保全（`src/auto_developer/worktree.py`）および単体テスト
 - [x] 2. `EvidenceBundler` の物理 Evidence Record 同梱強化（`src/auto_developer/bundler.py`）
 - [x] 3. `auto-dev verify-bundle` の 3値監査判定（`VERIFIED` / `INTEGRITY_ONLY` / `INVALID`）実装（`src/auto_developer/bundler.py`, `cli.py`）および単体テスト
-- [ ] 4. 未マージブランチ保全と 3値監査判定の決定論的受入テスト（`tests/test_bundler.py`, `tests/test_worktree.py`）
+- [x] 4. 未マージブランチ保全と 3値監査判定の決定論的受入テスト（`tests/test_bundler.py`, `tests/test_worktree.py`）
 
 ## 止まっていること・判断待ち
-- なし（`/nightly-run` 実行準備完了）
+- なし（Phase 12: Stage 1 最終確定と厳格監査 完了）
 
 
