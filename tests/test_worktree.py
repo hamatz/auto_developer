@@ -86,6 +86,30 @@ class TestWorktreeManager(unittest.TestCase):
         )
         self.assertEqual(res.stdout.strip(), "")
 
+    def test_create_worktree_invalid_team_id(self) -> None:
+        invalid_ids = ["", "   ", "TeamA", "team/core", "../outside", "team@core", "-invalid", "1team"]
+        for t_id in invalid_ids:
+            with self.subTest(team_id=t_id), self.assertRaises(WorktreeError):
+                self.manager.create_worktree(team_id=t_id)
+
+    def test_remove_worktree_path_traversal(self) -> None:
+        with self.assertRaises(WorktreeError):
+            self.manager.remove_worktree(team_id="../outside")
+
+    def test_remove_worktree_with_uncommitted_changes_rejected(self) -> None:
+        wt_path = self.manager.create_worktree(team_id="team-a")
+        # 未コミットの変更を作成
+        (wt_path / "work.txt").write_text("uncommitted work", encoding="utf-8")
+        subprocess.run(["git", "add", "work.txt"], cwd=wt_path, check=True)
+
+        # force=False の場合、未コミット変更があれば削除拒否されるべき
+        with self.assertRaises(WorktreeError):
+            self.manager.remove_worktree(team_id="team-a", force=False)
+
+        # ディレクトリと成果物が破壊されずに残っていること（成果保全）
+        self.assertTrue(wt_path.exists())
+        self.assertTrue((wt_path / "work.txt").exists())
+
     def test_cleanup_all(self) -> None:
         self.manager.create_worktree(team_id="team-a")
         self.manager.create_worktree(team_id="team-b")

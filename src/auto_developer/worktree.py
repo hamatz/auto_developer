@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import shutil
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+TEAM_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 
 
 class WorktreeError(Exception):
@@ -25,6 +27,27 @@ class WorktreeManager:
         self.repo_dir = repo_dir.resolve()
         self.worktree_base = (worktree_base or (self.repo_dir / ".dev" / "worktrees")).resolve()
 
+    def _validate_team_id(self, team_id: str) -> Path:
+        """チームIDの妥当性を検証し、管理領域直下の安全なパスを返す。"""
+        if not team_id or not isinstance(team_id, str):
+            raise WorktreeError("Team ID must be a non-empty string.")
+
+        if not TEAM_ID_PATTERN.match(team_id):
+            raise WorktreeError(
+                f"Invalid team ID format: '{team_id}'. "
+                "Must start with lowercase letter, contain only [a-z0-9_-], and be 1-64 chars."
+            )
+
+        target_dir = (self.worktree_base / team_id).resolve()
+        try:
+            rel = target_dir.relative_to(self.worktree_base)
+            if len(rel.parts) != 1 or rel.parts[0] != team_id:
+                raise WorktreeError(f"Path traversal detected: '{team_id}' escapes worktree base.")
+        except ValueError as err:
+            raise WorktreeError(f"Path traversal detected: '{team_id}' escapes worktree base.") from err
+
+        return target_dir
+
     def create_worktree(
         self,
         team_id: str,
@@ -32,10 +55,7 @@ class WorktreeManager:
         branch_name: str | None = None,
     ) -> Path:
         """チーム専用の Git Worktree を安全に作成する。"""
-        if not team_id or not team_id.strip():
-            raise WorktreeError("Team ID cannot be empty.")
-
-        target_dir = (self.worktree_base / team_id).resolve()
+        target_dir = self._validate_team_id(team_id)
         if target_dir.exists():
             raise WorktreeError(f"Worktree directory for team '{team_id}' already exists: {target_dir}")
 
@@ -96,14 +116,15 @@ class WorktreeManager:
                         # 直下のディレクトリのみを対象とする
                         if len(rel.parts) == 1:
                             team_id = rel.parts[0]
-                            worktrees.append(
-                                WorktreeInfo(
-                                    team_id=team_id,
-                                    path=current_wt,
-                                    branch=current_branch,
-                                    head_commit=current_head,
+                            if TEAM_ID_PATTERN.match(team_id):
+                                worktrees.append(
+                                    WorktreeInfo(
+                                        team_id=team_id,
+                                        path=current_wt,
+                                        branch=current_branch,
+                                        head_commit=current_head,
+                                    )
                                 )
-                            )
                     except ValueError:
                         pass
                 current_wt = None
@@ -113,14 +134,15 @@ class WorktreeManager:
                 rel = current_wt.relative_to(self.worktree_base)
                 if len(rel.parts) == 1:
                     team_id = rel.parts[0]
-                    worktrees.append(
-                        WorktreeInfo(
-                            team_id=team_id,
-                            path=current_wt,
-                            branch=current_branch,
-                            head_commit=current_head,
+                    if TEAM_ID_PATTERN.match(team_id):
+                        worktrees.append(
+                            WorktreeInfo(
+                                team_id=team_id,
+                                path=current_wt,
+                                branch=current_branch,
+                                head_commit=current_head,
+                            )
                         )
-                    )
             except ValueError:
                 pass
 
@@ -132,8 +154,24 @@ class WorktreeManager:
         force: bool = False,
         delete_branch: bool = False,
     ) -> None:
-        """チーム専用の Git Worktree を安全に削除する。"""
-        target_dir = (self.worktree_base / team_id).resolve()
+        """チーム専用の Git Worktree を安全に削除する。未コミット成果の強制抹消は行わない。"""
+        target_dir = self._validate_team_id(team_id)
+
+        # force=False の場合、未コミット変更の残存を検査して安全停止
+        if not force and target_dir.exists():
+            status_res = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=target_dir,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if status_res.returncode == 0 and status_res.stdout.strip():
+                raise WorktreeError(
+                    f"Cannot remove worktree '{team_id}' with uncommitted changes without force. "
+                    "Preserving uncommitted work."
+                )
+
         branch_to_delete = f"feature/{team_id}"
 
         # 一覧から実際のブランチ名を取得
@@ -148,9 +186,11 @@ class WorktreeManager:
         cmd.append(str(target_dir))
 
         res = subprocess.run(cmd, cwd=self.repo_dir, check=False, capture_output=True, text=True)
-        # もし削除に失敗しても force かつディレクトリが存在するなら手動削除
-        if res.returncode != 0 and force and target_dir.exists():
-            shutil.rmtree(target_dir, ignore_errors=True)
+        if res.returncode != 0:
+            # shutil.rmtree などによる直接削除は行わず、安全にエラーを送出
+            raise WorktreeError(
+                f"Failed to remove worktree for team '{team_id}': {res.stderr.strip()}"
+            )
 
         subprocess.run(["git", "worktree", "prune"], cwd=self.repo_dir, check=False, capture_output=True)
 
