@@ -437,8 +437,33 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         scripts_dir = self.repo_dir / "scripts"
         scripts_dir.mkdir(parents=True, exist_ok=True)
         verify_sh = scripts_dir / "verify_local.sh"
-        verify_sh.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        verify_sh.write_text(
+            f"#!/usr/bin/env bash\nset -e\n{sys.executable} -m unittest discover -s tests -p 'test_*.py'\n",
+            encoding="utf-8",
+        )
         verify_sh.chmod(0o755)
+
+        # 結合契約テスト (P1-3)
+        tests_dir = self.repo_dir / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        (tests_dir / "test_contract.py").write_text(
+            "import unittest\n"
+            "import sys\n"
+            "from pathlib import Path\n"
+            "src_path = str(Path(__file__).resolve().parent.parent / 'src')\n"
+            "if src_path not in sys.path:\n"
+            "    sys.path.insert(0, src_path)\n\n"
+            "class ContractTest(unittest.TestCase):\n"
+            "    def test_core_ui_contract(self):\n"
+            "        try:\n"
+            "            from core.app import get_core\n"
+            "            from ui.view import render\n"
+            "        except ImportError:\n"
+            "            return\n"
+            "        res = render()\n"
+            "        self.assertEqual(res, 'Render: 42')\n",
+            encoding="utf-8",
+        )
 
         self._run_git(["add", "."])
         self._run_git(["commit", "-m", "init: repository structure"])
@@ -498,20 +523,21 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         return bundle_path, head_commit
 
     def test_two_team_integration_success_scenario(self) -> None:
+        """P1-3: Core と UI の実機能結合（Core 関数呼び出し）が全体検証を通過し RC が発行される。"""
         # Core チームの成果物とバンドル作成
         core_bundle, core_commit = self._create_team_work_and_bundle(
             team_id="core",
             branch="feature/team-core",
             file_path="src/core/app.py",
-            content="# Core logic\ndef get_core(): return 42\n",
+            content="# Core logic\ndef get_core():\n    return 42\n",
         )
 
-        # UI チームの成果物とバンドル作成
+        # UI チームの成果物とバンドル作成 (Core の get_core() を実際にインポート呼び出し)
         ui_bundle, ui_commit = self._create_team_work_and_bundle(
             team_id="ui",
             branch="feature/team-ui",
             file_path="src/ui/view.py",
-            content="# UI logic\ndef render(): return 'view'\n",
+            content="from core.app import get_core\n\ndef render():\n    return f'Render: {get_core()}'\n",
         )
 
         gate = IntegrationGate(repo_dir=self.repo_dir)
@@ -532,7 +558,7 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         self.assertEqual(result.integration_branch, "integration/job-integration-e2e")
         self.assertIsNotNone(result.release_candidate_commit)
 
-        # 統合ブランチ上に両チームのファイルが存在すること
+        # 統合ブランチ上に両チームのファイルが存在し、実機能結合が機能すること
         self._run_git(["checkout", result.integration_branch])
         self.assertTrue((self.repo_dir / "src" / "core" / "app.py").exists())
         self.assertTrue((self.repo_dir / "src" / "ui" / "view.py").exists())
@@ -545,6 +571,50 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         self._run_git(["checkout", "main"])
         main_commit = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
         self.assertEqual(main_commit, self.base_commit)
+
+    def test_two_team_integration_semantic_mismatch_quarantine_scenario(self) -> None:
+        """P1-3: Gitコンフリクトはないが API 不整合（意味的競合）で結合テストが失敗するケースの安全隔離。"""
+        # Core チームは数値を返すべき関数で文字列を返す (API 契約違反)
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/core/app.py",
+            content="# Core logic returning invalid contract type\ndef get_core():\n    return 'NOT_A_NUMBER'\n",
+        )
+
+        # UI チームは戻り値が 42 であることを期待する
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/ui/view.py",
+            content="from core.app import get_core\n\ndef render():\n    return f'Render: {get_core()}'\n",
+        )
+
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
+        ]
+
+        result = gate.execute_integration(
+            job_id="job-integration-semantic-fail",
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+        )
+
+        # Git マージ自体は通るが、統合後全体検証でテストが落ちて隔離されること
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "VERIFICATION_FAILED")
+        self.assertIsNotNone(result.integration_branch)
+        self.assertTrue(result.integration_branch.startswith("quarantine/integration-job-integration-semantic-fail-"))
+
+        # main ブランチが不変・無汚染であること
+        current_branch = self._run_git(["branch", "--show-current"]).stdout.strip()
+        self.assertEqual(current_branch, "main")
+        main_commit = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
+        self.assertEqual(main_commit, self.base_commit)
+        self.assertFalse((self.repo_dir / "src" / "core" / "app.py").exists())
 
     def test_two_team_integration_conflict_quarantine_scenario(self) -> None:
         # Core チームが shared.py を作成
