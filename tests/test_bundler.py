@@ -485,6 +485,52 @@ class TestEvidenceBundler(unittest.TestCase):
         self.assertEqual(res.status, "INVALID", "Duplicate tasks in manifest must be INVALID")
         self.assertFalse(res.is_valid)
 
+    def test_verify_bundle_rejects_empty_task_commit_in_manifest(self):
+        """P1: Manifest 側のタスク情報の commit が空文字の場合、必ず INVALID で遮断すること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        base_zip = bundler.create_bundle(dest_path=self.repo / "base_empty_commit.zip")
+
+        with zipfile.ZipFile(base_zip, "r") as zf:
+            manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+        self.assertTrue(len(manifest.get("tasks", [])) > 0)
+        # Manifest の Task 1 の commit を空文字にする (Sol氏再現ケース)
+        manifest["tasks"][0]["commit"] = ""
+
+        tampered_zip = self.repo / "empty_task_commit.zip"
+        with zipfile.ZipFile(base_zip, "r") as zf, zipfile.ZipFile(tampered_zip, "w") as out_zf:
+            for name in zf.namelist():
+                if name == "bundle_manifest.json":
+                    out_zf.writestr(name, json.dumps(manifest).encode("utf-8"))
+                else:
+                    out_zf.writestr(name, zf.read(name))
+
+        res = bundler.verify_bundle(tampered_zip)
+        self.assertEqual(res.status, "INVALID", "Empty task commit in manifest must be INVALID")
+        self.assertFalse(res.is_valid)
+
+    def test_verify_bundle_rejects_task_spec_sha_mismatch(self):
+        """P1: Manifest 側のタスク情報の spec_sha が Evidence と不一致の場合、必ず INVALID で遮断すること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        base_zip = bundler.create_bundle(dest_path=self.repo / "base_spec_mismatch.zip")
+
+        with zipfile.ZipFile(base_zip, "r") as zf:
+            manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+        self.assertTrue(len(manifest.get("tasks", [])) > 0)
+        # Manifest の Task 1 の spec_sha を不正値にする (Sol氏再現ケース)
+        manifest["tasks"][0]["spec_sha"] = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+        tampered_zip = self.repo / "mismatched_spec_sha.zip"
+        with zipfile.ZipFile(base_zip, "r") as zf, zipfile.ZipFile(tampered_zip, "w") as out_zf:
+            for name in zf.namelist():
+                if name == "bundle_manifest.json":
+                    out_zf.writestr(name, json.dumps(manifest).encode("utf-8"))
+                else:
+                    out_zf.writestr(name, zf.read(name))
+
+        res = bundler.verify_bundle(tampered_zip)
+        self.assertEqual(res.status, "INVALID", "Mismatched task spec_sha in manifest must be INVALID")
+        self.assertFalse(res.is_valid)
+
     def test_cli_bundle_and_verify_bundle(self):
         from auto_developer.cli import main
 
