@@ -487,37 +487,62 @@ class EvidenceBundler:
             if extra_files:
                 result.errors.append(f"Unexpected unmanifested evidence files: {sorted(extra_files)}")
 
-            # 共通タスクの全フィールド一致照合 (Manifest vs Evidence Record)
+            # 共通タスクの全必須フィールド一致照合 (Manifest vs Evidence Record: P1 Fail-Closed)
             for tid in sorted(seen_task_ids & set(evidence_records_by_id.keys())):
                 m_task = manifest_tasks_by_id[tid]
                 e_task = evidence_records_by_id[tid]
 
+                # 1. Commit 比較 (40文字 hex 必須)
+                m_commit_raw = m_task.get("commit")
+                m_commit = str(m_commit_raw.get("hash", "") if isinstance(m_commit_raw, dict) else (m_commit_raw or "")).strip()
+                e_commit_raw = e_task.get("commit")
+                e_commit = str(e_commit_raw.get("hash", "") if isinstance(e_commit_raw, dict) else (e_commit_raw or "")).strip()
+                if not m_commit or len(m_commit) != 40:
+                    result.errors.append(f"Task '{tid}' manifest missing or invalid required 'commit': '{m_commit}'")
+                if not e_commit or len(e_commit) != 40:
+                    result.errors.append(f"Task '{tid}' evidence missing or invalid required 'commit': '{e_commit}'")
+                if m_commit != e_commit:
+                    result.errors.append(
+                        f"Task '{tid}' commit mismatch: manifest has '{m_commit}', evidence has '{e_commit}'"
+                    )
+
+                # 2. Tree SHA 比較 (40文字 hex 必須)
                 m_tree = str(m_task.get("tree_sha", "")).strip()
                 e_tree = str(e_task.get("tree_sha", "")).strip()
+                if not m_tree or len(m_tree) != 40 or m_tree.startswith("00000000"):
+                    result.errors.append(f"Task '{tid}' manifest missing or invalid required 'tree_sha': '{m_tree}'")
+                if not e_tree or len(e_tree) != 40 or e_tree.startswith("00000000"):
+                    result.errors.append(f"Task '{tid}' evidence missing or invalid required 'tree_sha': '{e_tree}'")
                 if m_tree != e_tree:
                     result.errors.append(
                         f"Task '{tid}' tree_sha mismatch: manifest has '{m_tree}', evidence has '{e_tree}'"
                     )
 
-                # Commit 比較
-                m_commit_raw = m_task.get("commit")
-                m_commit = str(m_commit_raw.get("hash", "") if isinstance(m_commit_raw, dict) else (m_commit_raw or "")).strip()
-                e_commit_raw = e_task.get("commit")
-                e_commit = str(e_commit_raw.get("hash", "") if isinstance(e_commit_raw, dict) else (e_commit_raw or "")).strip()
-                if m_commit and e_commit and m_commit != e_commit:
+                # 3. SPEC SHA 比較 (64文字 hex 必須)
+                m_spec = str(m_task.get("spec_sha", "")).strip()
+                e_spec = str(e_task.get("spec_sha", "")).strip()
+                if not m_spec or len(m_spec) != 64:
+                    result.errors.append(f"Task '{tid}' manifest missing or invalid required 'spec_sha': '{m_spec}'")
+                if not e_spec or len(e_spec) != 64:
+                    result.errors.append(f"Task '{tid}' evidence missing or invalid required 'spec_sha': '{e_spec}'")
+                if m_spec != e_spec:
                     result.errors.append(
-                        f"Task '{tid}' commit mismatch: manifest has '{m_commit}', evidence has '{e_commit}'"
+                        f"Task '{tid}' spec_sha mismatch: manifest has '{m_spec}', evidence has '{e_spec}'"
                     )
 
-                # Status 比較
+                # 4. Status 比較 (COMPLETED 必須)
                 m_status = str(m_task.get("status", "")).strip()
                 e_status = str(e_task.get("status", "")).strip()
+                if not m_status:
+                    result.errors.append(f"Task '{tid}' manifest missing required 'status'")
+                if not e_status:
+                    result.errors.append(f"Task '{tid}' evidence missing required 'status'")
                 if m_status != e_status:
                     result.errors.append(
                         f"Task '{tid}' status mismatch: manifest has '{m_status}', evidence has '{e_status}'"
                     )
 
-                # Checker 比較
+                # 5. Checker 比較 (APPROVE 必須)
                 m_dec = (
                     m_task.get("checker_decision")
                     or (m_task.get("checker", {}).get("decision") if isinstance(m_task.get("checker"), dict) else str(m_task.get("checker", "")))
@@ -528,6 +553,10 @@ class EvidenceBundler:
                     or (e_task.get("checker", {}).get("decision") if isinstance(e_task.get("checker"), dict) else str(e_task.get("checker", "")))
                     or ""
                 ).strip()
+                if not m_dec:
+                    result.errors.append(f"Task '{tid}' manifest missing required checker decision")
+                if not e_dec:
+                    result.errors.append(f"Task '{tid}' evidence missing required checker decision")
                 if m_dec != e_dec:
                     result.errors.append(
                         f"Task '{tid}' checker decision mismatch: manifest has '{m_dec}', evidence has '{e_dec}'"
