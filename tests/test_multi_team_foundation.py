@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 import sys
 import tempfile
@@ -11,6 +13,7 @@ src_dir = str(Path(__file__).resolve().parent.parent / "src")
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
+from auto_developer.bundler import EvidenceBundler
 from auto_developer.manifest import TeamManifest
 from auto_developer.orchestrator import NightlyOrchestrator
 from auto_developer.runner import RunnerAdapter
@@ -188,6 +191,63 @@ class TestMultiTeamFoundation(unittest.TestCase):
             text=True,
         )
         self.assertEqual(status_main.stdout.strip(), "")
+
+    def test_stage1_finalization_unmerged_preservation_and_strict_audit(self) -> None:
+        """Stage 1 最終確定: 未マージ成果の非破壊的保全と 3値監査判定の統合検証。"""
+        # 1. チーム Worktree を作成し未マージ作業をコミット
+        team_wt = self.wt_manager.create_worktree(team_id="team-audit")
+        (team_wt / "src" / "ui" / "view.py").write_text("# Feature X by team-audit\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=team_wt, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: unmerged team audit work"], cwd=team_wt, check=True)
+
+        # 2. 安全デフォルト cleanup_all(force=False, delete_branches=False) の実行
+        self.wt_manager.cleanup_all(force=False, delete_branches=False)
+        self.assertFalse(team_wt.exists(), "Worktree directory should be removed")
+
+        # 未マージブランチが物理的に保持されていることを検証
+        res_br = subprocess.run(
+            ["git", "branch", "--list", "feature/team-audit"],
+            cwd=self.repo_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res_br.stdout.strip(), "feature/team-audit", "Unmerged branch must be preserved!")
+
+        # 3. 証跡レコードがない状態での Evidence Bundler 監査判定 -> INTEGRITY_ONLY (統合拒否)
+        (self.repo_dir / "SPEC.md").write_text("# Spec\nSample Spec", encoding="utf-8")
+        (self.repo_dir / "PLAN.md").write_text("# Plan\n- [ ] Task 1", encoding="utf-8")
+        bundler = EvidenceBundler(repo_dir=self.repo_dir)
+        no_ev_bundle = bundler.create_bundle(dest_path=self.repo_dir / "audit_test_no_ev.zip")
+        res_no_ev = bundler.verify_bundle(no_ev_bundle)
+
+        self.assertEqual(res_no_ev.status, "INTEGRITY_ONLY")
+        self.assertFalse(res_no_ev.is_valid, "Bundle without evidence records must not be allowed to integrate")
+
+        # 4. 承認済み Evidence Record を配置して再バンドル -> VERIFIED (統合許可)
+        res_tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo_dir, capture_output=True, text=True, check=True)
+        head_tree = res_tree.stdout.strip()
+        spec_sha = hashlib.sha256((self.repo_dir / "SPEC.md").read_bytes()).hexdigest()
+
+        records_dir = self.repo_dir / ".git" / "nightly_evidence" / "records"
+        records_dir.mkdir(parents=True, exist_ok=True)
+        (records_dir / "task_1.json").write_text(
+            json.dumps({
+                "task_id": "1",
+                "checkpoint": "chk1",
+                "tree_sha": head_tree,
+                "spec_sha": spec_sha,
+                "checker": {"decision": "APPROVE", "reason": "Deterministic verify pass"},
+                "status": "COMPLETED",
+            }),
+            encoding="utf-8",
+        )
+
+        verified_bundle = bundler.create_bundle(dest_path=self.repo_dir / "audit_test_verified.zip")
+        res_verified = bundler.verify_bundle(verified_bundle)
+
+        self.assertEqual(res_verified.status, "VERIFIED")
+        self.assertTrue(res_verified.is_valid, "Bundle with valid evidence and APPROVE must pass verification")
 
 
 if __name__ == "__main__":

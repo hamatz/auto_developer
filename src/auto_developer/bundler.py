@@ -15,6 +15,7 @@ from typing import Any
 @dataclass
 class BundleVerificationResult:
     is_valid: bool
+    status: str = "INVALID"  # "VERIFIED" | "INTEGRITY_ONLY" | "INVALID"
     job_id: str = ""
     head_commit: str = ""
     errors: list[str] = field(default_factory=list)
@@ -25,6 +26,7 @@ class BundleVerificationResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "is_valid": self.is_valid,
+            "status": self.status,
             "job_id": self.job_id,
             "head_commit": self.head_commit,
             "errors": self.errors,
@@ -156,13 +158,45 @@ class EvidenceBundler:
                     pass
 
             # (C) Evidence records 収集
-            records_dir = self.repo_dir / ".git" / "nightly_evidence" / "records"
+            candidate_dirs: list[Path] = [
+                self.repo_dir / ".git" / "nightly_evidence" / "records",
+                self.repo_dir / ".git" / "nightly_evidence" / "archive",
+                self.repo_dir / ".git" / "nightly_evidence",
+                self.repo_dir / ".dev" / "evidence",
+            ]
+
+            # Git common-dir (worktree 対応) の解決
+            try:
+                c_res = subprocess.run(
+                    ["git", "rev-parse", "--git-common-dir"],
+                    cwd=self.repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if c_res.returncode == 0 and c_res.stdout.strip():
+                    common_p = Path(c_res.stdout.strip())
+                    if not common_p.is_absolute():
+                        common_p = (self.repo_dir / common_p).resolve()
+                    candidate_dirs.extend([
+                        common_p / "nightly_evidence" / "records",
+                        common_p / "nightly_evidence" / "archive",
+                        common_p / "nightly_evidence",
+                    ])
+            except OSError:
+                pass
+
             tasks_manifest: list[dict[str, Any]] = []
-            if records_dir.exists():
-                for rec_file in sorted(records_dir.glob("task_*.json")):
+            collected_rec_names: set[str] = set()
+
+            for rec_dir in candidate_dirs:
+                if not rec_dir.exists() or not rec_dir.is_dir():
+                    continue
+                for rec_file in sorted(rec_dir.glob("task_*.json")):
+                    if rec_file.name in collected_rec_names:
+                        continue
                     if self.is_sanitized_out(rec_file.name):
                         continue
-                    items_to_zip.append((rec_file, f"evidence/{rec_file.name}"))
                     try:
                         data = json.loads(rec_file.read_text(encoding="utf-8"))
                         tasks_manifest.append({
@@ -174,6 +208,8 @@ class EvidenceBundler:
                             else str(data.get("checker", "")),
                             "status": data.get("status", ""),
                         })
+                        items_to_zip.append((rec_file, f"evidence/{rec_file.name}"))
+                        collected_rec_names.add(rec_file.name)
                     except (json.JSONDecodeError, OSError):
                         pass
 
@@ -303,6 +339,7 @@ class EvidenceBundler:
 
             # 4. Evidence Record と Checker 判定の検証
             evidence_dir = inspect_dir / "evidence"
+            approved_records_count = 0
             if evidence_dir.exists():
                 for rec_file in sorted(evidence_dir.glob("task_*.json")):
                     try:
@@ -321,6 +358,8 @@ class EvidenceBundler:
                             result.errors.append(
                                 f"Task {task_id} has invalid Checker decision: {decision} (expected APPROVE)"
                             )
+                        else:
+                            approved_records_count += 1
 
                         # SPEC 整合性
                         if spec_hash and spec_sha and spec_hash != spec_sha:
@@ -352,5 +391,17 @@ class EvidenceBundler:
                 except OSError:
                     pass
 
-        result.is_valid = len(result.errors) == 0
+        if result.errors:
+            result.status = "INVALID"
+            result.is_valid = False
+        elif approved_records_count == 0 or len(result.tasks) == 0:
+            result.status = "INTEGRITY_ONLY"
+            result.is_valid = False
+            result.warnings.append(
+                "Audit rejected: No verified Evidence Records found in bundle (Integrity preserved, but approval cannot be proven)"
+            )
+        else:
+            result.status = "VERIFIED"
+            result.is_valid = True
+
         return result

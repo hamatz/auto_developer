@@ -110,13 +110,42 @@ class TestWorktreeManager(unittest.TestCase):
         self.assertTrue(wt_path.exists())
         self.assertTrue((wt_path / "work.txt").exists())
 
+    def test_remove_worktree_preserves_unmerged_branch(self) -> None:
+        """未マージコミットがある場合、delete_branch=True でもブランチが破棄されず保全されること。"""
+        wt_path = self.manager.create_worktree(team_id="team-a")
+        (wt_path / "feature.txt").write_text("unmerged feature commit\n", encoding="utf-8")
+        subprocess.run(["git", "add", "feature.txt"], cwd=wt_path, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: unmerged work"], cwd=wt_path, check=True)
+
+        # Worktree 削除（delete_branch=True を指定）
+        deleted_branch = self.manager.remove_worktree(team_id="team-a", force=False, delete_branch=True)
+        self.assertFalse(deleted_branch, "Unmerged branch must NOT be deleted!")
+        self.assertFalse(wt_path.exists())
+
+        # ブランチがまだ存在していること（成果保全）
+        res = subprocess.run(
+            ["git", "branch", "--list", "feature/team-a"],
+            cwd=self.repo_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res.stdout.strip(), "feature/team-a")
+
     def test_cleanup_all(self) -> None:
         self.manager.create_worktree(team_id="team-a")
         self.manager.create_worktree(team_id="team-b")
         self.assertEqual(len(self.manager.list_worktrees()), 2)
 
-        self.manager.cleanup_all(force=True)
+        # デフォルト引数（force=False, delete_branches=False）での安全なクリーンアップ
+        self.manager.cleanup_all()
         self.assertEqual(len(self.manager.list_worktrees()), 0)
+
+        # ブランチは削除されずに保全されていること
+        res_a = subprocess.run(["git", "branch", "--list", "feature/team-a"], cwd=self.repo_dir, check=True, capture_output=True, text=True)
+        res_b = subprocess.run(["git", "branch", "--list", "feature/team-b"], cwd=self.repo_dir, check=True, capture_output=True, text=True)
+        self.assertEqual(res_a.stdout.strip(), "feature/team-a")
+        self.assertEqual(res_b.stdout.strip(), "feature/team-b")
 
 
 if __name__ == "__main__":
