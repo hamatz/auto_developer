@@ -175,18 +175,21 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - リポジトリに管理済みで未変更（`tracked` かつ clean）のファイル（`.env.example` 等）は、Worktree 削除によって失われる成果ではないため、機密検査で誤検出せず通常削除を許可する。
   2. 決定論的受入テスト:
      - `.env.example` がコミットされている状態で、クリーンな Worktree を作成し、編集なしで `remove_worktree()` が正常に削除を完了することの実証テスト。
-- [ ] 機能AA (Stage 2: 独立自律チーム統合ゲート IntegrationGate):
-  1. チーム Bundle & ブランチの事前監査:
-     - 統合対象となる全チームの Evidence Bundle を `EvidenceBundler.verify_bundle()` により独立監査し、改ざんや未承認（APPROVE 以外）が存在する場合は即座に統合を拒否（Fail-Closed）。
-  2. 統合用一時ブランチの作成と順次マージ:
-     - ベースコミットから新規の統合ブランチ（`integration/{job_id}`）をチェックアウトし、各チームのフィーチャーブランチ（またはコミット）を順次マージ。
-  3. マージ競合の Fail-Closed 遮断:
-     - ファイル競合（コンフリクト）が発生した場合、推測による自動解決は一切行わず、即座に統合失敗として処理を中断し、統合ブランチを隔離（main は一切汚染しない）。
-  4. 統合後全体検証ゲート (Post-Integration Gate):
-     - マージ完了後の作業ツリー上で、プロジェクトの全体検証スクリプト（`verify_local.sh` 等）を実行。
-     - 全チェック通過時のみ Release Candidate（RC）または統合確定とし、失敗時は隔離ロールバック。
-  5. 決定論的受入テスト:
-     - 2チーム（Core & UI）の正常結合成功シナリオ、および競合発生時の安全隔離シナリオを実証するテストスイート。
+- [ ] 機能AA (Stage 2: 独立自律チーム統合ゲート堅牢化 IntegrationGate Hardening & Strict Binding):
+  1. Bundle とマージ対象 Commit SHA の厳格束縛 (P0-1):
+     - `audit_team_inputs`: 各チームブランチ先端（`git rev-parse <branch>`）と Bundle の `verification.head_commit` が完全一致することを必須検証。不一致時は即座に監査拒絶（Fail-Closed）。
+     - `merge_team_branches`: ブランチ名ではなく、監査済み Commit SHA を直接指定してマージ。マージ後にマージコミットの第2親（`git rev-parse HEAD^2`）が監査済み Commit SHA と一致することを機械的検証。
+  2. 統合ブランチの保護と開始前クリーン検査 (P0-2):
+     - `execute_integration`: 実行開始時に `git status --porcelain` を検査し、未コミット変更がある場合は即座に停止。
+     - `create_integration_branch`: 既存の同名統合ブランチが存在する場合は上書きリセット（`-B`）を禁止し、Fail-Closed で拒絶。
+  3. エラーハンドリングと隔離処理の堅牢化 (P1-1):
+     - 保護ファイル検査で `git diff` 自体が異常終了した場合は Fail-Closed 遮断。全 Git 操作の終了コードを検証。
+     - 統合失敗時の隔離ブランチ名にタイムスタンプ（`quarantine/integration-<job_id>-<timestamp>`）を付与して衝突を防ぎ、元のブランチへ確実に復帰。
+  4. Release Candidate (RC) タグの冪等性と不変性 (P1-2):
+     - `git tag -f` による強制上書きを廃止。既存タグが同一コミットを指している場合は冪等成功、異なるコミットを指している場合は上書き拒絶。
+  5. 実機能結合の決定論的受入テスト (P1-3):
+     - Core チームの計算関数を UI チームがインポートして呼び出す実機能結合テストを追加し、マージ後の全体検証通過を実証。
+     - API 不整合（引数不一致など意味的競合）による統合後全体検証失敗・安全隔離シナリオを実証。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

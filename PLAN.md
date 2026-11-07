@@ -7,22 +7,20 @@
 -->
 
 ## 現在の目標
-- Phase 20: Stage 2 Two-Team Integration Gate (独立自律チーム統合ゲート IntegrationGate)
-  - P0: 複数チームの Evidence Bundle 事前監査と統合用ブランチ（`integration/{job_id}`）での安全な順次マージ
-  - P0: マージ競合検知時の Fail-Closed 隔離（推測解決の完全排除、main 不変）
-  - P0: 統合ブランチ上での全体決定論的検証ゲート実行と Release Candidate 確定
-  - P0: 2チーム統合（Core & UI）の決定論的受入テスト完備
+- Phase 21: Stage 2 IntegrationGate Hardening & Strict Binding (Sol氏レビュー対応: 成果とマージ対象の厳格拘束と実機能結合)
+  - P0-1: Evidence Bundle とマージ対象 Commit SHA の完全拘束（ブランチHEAD照合、Commit SHA直接マージ、第2親検証）
+  - P0-2: 既存統合ブランチの上書き防止（-B廃止）および実行開始前クリーンツリー検査
+  - P1-1: Git操作・保護ファイル差分エラー時の Fail-Closed 遮断およびタイムスタンプ付き隔離ブランチ退避
+  - P1-2: Release Candidate (RC) タグの冪等性（同一コミット）と不変性（異コミット上書き拒絶）
+  - P1-3: 実機能結合（Core & UI 呼び出し）受入テストおよび API 不整合による安全隔離シナリオの実証
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - なし
 
 ## ステップ
-- [x] 1. IntegrationGate 基本構造（`TeamIntegrationInput`, `IntegrationResult`）および Bundle 事前監査ロジックの実装（`src/auto_developer/integration_gate.py`）と単体テスト（Red-First）
-- [x] 2. 統合用ブランチの作成と順次マージ処理、および競合検知時の Fail-Closed 隔離ロジックの実装と単体テスト
-- [x] 3. 統合後全体検証ゲート実行と合否判定・Release Candidate 発行処理の実装と単体テスト
-- [x] 4. 2チーム統合（Core & UI）の決定論的受入テスト追加（`tests/test_integration_gate.py`）および全体検証ゲート合格確認
+- [ ] 1. Bundle とマージ対象 Commit SHA の厳格束縛（ブランチ HEAD 照合、Commit SHA 直接マージ、第2親検証）および統合ブランチ上書き防止・開始前クリーン検査の実装（P0-1, P0-2）と単体テスト（Red-First）
+- [ ] 2. エラーハンドリング・隔離処理の堅牢化（diff異常系遮断、タイムスタンプ付き隔離）および RC タグの冪等性・不変性ロジックの実装（P1-1, P1-2）と単体テスト
+- [ ] 3. 実機能結合（Core & UI 関数インポート呼び出し）決定論的受入テストおよび API 不整合（意味的競合）による隔離退避シナリオの追加（P1-3）と全体検証ゲート合格確認
 
 ## 止まっていること・判断待ち
 - なし
-
-
