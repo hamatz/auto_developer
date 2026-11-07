@@ -181,7 +181,38 @@ class WorktreeManager:
 
         # 未コミット変更の残存検査と成果保全
         if target_dir.exists():
-            # 1. 実ファイルの事前スキャン（Git status 判定の前に行い、機密ファイルの消失・漏洩防止および全実成果の把握）
+            # 1. Git状態の取得 (管理済み未変更ファイルの特定および status 検査)
+            ls_res = subprocess.run(
+                ["git", "ls-files"],
+                cwd=target_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            tracked_files = set(ls_res.stdout.splitlines()) if ls_res.returncode == 0 else set()
+
+            status_res = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=target_dir,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if status_res.returncode != 0:
+                raise WorktreeError(
+                    f"git status failed in worktree '{team_id}': {status_res.stderr.strip()}. "
+                    "Aborting removal to prevent unverified data loss."
+                )
+
+            # git status で変更・未追跡が報告されているファイル集合
+            modified_or_untracked: set[str] = set()
+            for line in status_res.stdout.splitlines():
+                parts = line.strip().split(maxsplit=1)
+                if len(parts) == 2:
+                    fpath = parts[1].split(" -> ")[-1].strip()
+                    modified_or_untracked.add(fpath)
+
+            # 2. 実ファイルの事前スキャン（管理済み未変更ファイルを除外し、未保存成果・機密を検査・把握）
             from auto_developer.guard import GitGuard
 
             sensitive_files_found: list[str] = []
@@ -197,6 +228,10 @@ class WorktreeManager:
                 if rel_posix.startswith(".git") or "/.git" in rel_posix:
                     continue
                 if any(pat.search(rel_posix) for pat in NOISE_PATTERNS):
+                    continue
+
+                # Git管理済み かつ 未変更（クリーン）のファイルはリポジトリに安全に存在するため検査・保全不要
+                if rel_posix in tracked_files and rel_posix not in modified_or_untracked:
                     continue
 
                 # 既知のシークレットファイル名パターン
@@ -226,29 +261,6 @@ class WorktreeManager:
                 raise WorktreeError(
                     f"Worktree '{team_id}' contains sensitive files excluded from quarantine ({sample_files}); "
                     "removal refused to prevent data loss. Please commit, move, or clean up sensitive files before removal."
-                )
-
-            # Git追跡ファイル一覧の取得
-            ls_res = subprocess.run(
-                ["git", "ls-files"],
-                cwd=target_dir,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            tracked_files = set(ls_res.stdout.splitlines()) if ls_res.returncode == 0 else set()
-
-            status_res = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=target_dir,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if status_res.returncode != 0:
-                raise WorktreeError(
-                    f"git status failed in worktree '{team_id}': {status_res.stderr.strip()}. "
-                    "Aborting removal to prevent unverified data loss."
                 )
 
             # Git status に未コミット変更があるか、または Git追跡外（.gitignoreされた非機密通常ファイル等）が存在するか

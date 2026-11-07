@@ -365,6 +365,20 @@ class TestWorktreeManager(unittest.TestCase):
         self.assertEqual(res_a.stdout.strip(), "feature/team-a")
         self.assertEqual(res_b.stdout.strip(), "feature/team-b")
 
+    def test_remove_clean_worktree_with_tracked_env_example(self) -> None:
+        """P1: Git管理済み・未変更の .env.example が存在していても、クリーンな Worktree は正常に削除できること。"""
+        env_ex_path = self.repo_dir / ".env.example"
+        env_ex_path.write_text("DATABASE_URL=sqlite:///example.db\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".env.example"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: add .env.example"], cwd=self.repo_dir, check=True)
+
+        wt_path = self.manager.create_worktree(team_id="team-clean-env")
+        self.assertTrue((wt_path / ".env.example").exists())
+
+        # 何も変更していないクリーンな Worktree の削除（force=False）
+        self.manager.remove_worktree(team_id="team-clean-env", force=False)
+        self.assertFalse(wt_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
