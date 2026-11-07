@@ -4,6 +4,11 @@ from auto_developer.cli import main
 from auto_developer.dispatcher import TaskDispatcher
 from auto_developer.evidence import EvidenceStore
 from auto_developer.guard import GitGuard
+from auto_developer.integration_gate import (
+    IntegrationGate,
+    IntegrationResult,
+    TeamIntegrationInput,
+)
 from auto_developer.models import ExecutionResult, JobState, Task
 from auto_developer.orchestrator import NightlyOrchestrator
 from auto_developer.recovery import (
@@ -31,6 +36,8 @@ __all__ = [
     "ExecutionResult",
     "GitGuard",
     "InspectionReport",
+    "IntegrationGate",
+    "IntegrationResult",
     "JobState",
     "MockRunnerAdapter",
     "MorningReporter",
@@ -43,5 +50,6 @@ __all__ = [
     "RunnerAdapter",
     "Task",
     "TaskDispatcher",
+    "TeamIntegrationInput",
     "main",
 ]

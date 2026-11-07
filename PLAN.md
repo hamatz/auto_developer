@@ -17,7 +17,7 @@
 - なし
 
 ## ステップ
-- [ ] 1. IntegrationGate 基本構造（`TeamIntegrationInput`, `IntegrationResult`）および Bundle 事前監査ロジックの実装（`src/auto_developer/integration_gate.py`）と単体テスト（Red-First）
+- [x] 1. IntegrationGate 基本構造（`TeamIntegrationInput`, `IntegrationResult`）および Bundle 事前監査ロジックの実装（`src/auto_developer/integration_gate.py`）と単体テスト（Red-First）
 - [ ] 2. 統合用ブランチの作成と順次マージ処理、および競合検知時の Fail-Closed 隔離ロジックの実装と単体テスト
 - [ ] 3. 統合後全体検証ゲート実行と合否判定・Release Candidate 発行処理の実装と単体テスト
 - [ ] 4. 2チーム統合（Core & UI）の決定論的受入テスト追加（`tests/test_integration_gate.py`）および全体検証ゲート合格確認
