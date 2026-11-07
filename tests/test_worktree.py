@@ -33,7 +33,7 @@ class TestWorktreeManager(unittest.TestCase):
     def tearDown(self) -> None:
         try:
             self.manager.cleanup_all(force=True)
-        except (subprocess.SubprocessError, OSError):
+        except (subprocess.SubprocessError, OSError, WorktreeError):
             pass
         self.temp_dir.cleanup()
 
@@ -178,6 +178,53 @@ class TestWorktreeManager(unittest.TestCase):
                 self.assertFalse(n.endswith(".env"), f"Secret file {n} must be excluded from quarantine!")
                 self.assertFalse(n.endswith(".key"), f"Secret file {n} must be excluded from quarantine!")
                 self.assertFalse(n.endswith(".DS_Store"), f"Noise file {n} must be excluded from quarantine!")
+
+    def test_remove_worktree_aborts_on_secret_content_in_files(self) -> None:
+        """ファイル名が通常でもファイル内容にAPIキー等を含む場合、削除を停止（Fail-Closed）すること。"""
+        import json
+
+        wt_path = self.manager.create_worktree(team_id="team-leak")
+        # Gitleaks の静的検知を回避しつつ実行時に秘密鍵パターンを生成
+        fake_key_name = "api" + "_key"
+        fake_secret_val = "sk-" + "a1b2c3d4e5f6g7h8i9j0"  # gitleaks:allow
+        (wt_path / "config.json").write_text(json.dumps({fake_key_name: fake_secret_val}) + "\n", encoding="utf-8")
+
+        with self.assertRaises(WorktreeError) as ctx:
+            self.manager.remove_worktree(team_id="team-leak", force=True)
+
+        self.assertIn("Secret content detected", str(ctx.exception))
+        # ディレクトリが保全されて残っていること
+        self.assertTrue(wt_path.exists())
+        (wt_path / "config.json").unlink()
+
+    def test_remove_worktree_creates_verified_manifest_and_reads_back(self) -> None:
+        """安全な未コミット変更の退避時、SHA-256付きManifestが生成され読み戻し検証されること。"""
+        import json
+        import tarfile
+
+        wt_path = self.manager.create_worktree(team_id="team-manifest")
+        (wt_path / "data.txt").write_text("safe content\n", encoding="utf-8")
+
+        self.manager.remove_worktree(team_id="team-manifest", force=True)
+        self.assertFalse(wt_path.exists())
+
+        quarantines_dir = self.repo_dir / ".dev" / "quarantines"
+        manifests = sorted(quarantines_dir.glob("manifest_worktree_team-manifest_*.json"))
+        snapshots = sorted(quarantines_dir.glob("snapshot_worktree_team-manifest_*.tar.gz"))
+        self.assertTrue(len(manifests) > 0, "Quarantine manifest must be generated")
+        self.assertTrue(len(snapshots) > 0, "Quarantine snapshot must be generated")
+
+        # Manifest 内容の検証
+        with open(manifests[-1], encoding="utf-8") as f:
+            manifest_data = json.load(f)
+        self.assertEqual(manifest_data["team_id"], "team-manifest")
+        self.assertTrue(any("data.txt" in entry["path"] for entry in manifest_data["files"]))
+        self.assertTrue(all(len(entry["sha256"]) == 64 for entry in manifest_data["files"]))
+
+        # 読み戻し検証
+        with tarfile.open(snapshots[-1], "r:gz") as tar:
+            names = tar.getnames()
+            self.assertTrue(any("data.txt" in n for n in names))
 
     def test_remove_worktree_fails_closed_on_status_error(self) -> None:
         """git status が失敗した場合、安全停止（Fail-Closed）し WorktreeError を送出すること。"""

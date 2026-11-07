@@ -18,11 +18,11 @@
 - なし
 
 ## ステップ
-- [ ] 1. Worktree 隔離における秘密情報内容スキャン（APIキー等）と SHA-256 Manifest 読み戻し検証（破損・漏洩時の削除停止 Fail-Closed）（`src/auto_developer/worktree.py`）および単体テスト
+- [x] 1. Worktree 隔離における秘密情報内容スキャン（APIキー等）と SHA-256 Manifest 読み戻し検証（破損・漏洩時の削除停止 Fail-Closed）（`src/auto_developer/worktree.py`）および単体テスト
 - [ ] 2. Bundle Manifest の必須項目厳格化（HEAD 欠落・空文字拒否）、ZIP 未知ファイル排除（`mystery.txt` 等の拒否）（`src/auto_developer/bundler.py`）および単体テスト
 - [ ] 3. Manifest タスク情報と Evidence Record 内容の完全照合（重複排除・改ざん拒否）および Sol 氏再現シナリオの決定論的受入テスト（`tests/test_bundler.py`, `tests/test_worktree.py`, `tests/test_multi_team_foundation.py`）
 
 ## 止まっていること・判断待ち
-- なし（ステップ 1 着手）
+- なし（ステップ 1 完了。ステップ 2 着手）
 
 

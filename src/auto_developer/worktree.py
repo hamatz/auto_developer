@@ -196,30 +196,99 @@ class WorktreeManager:
                         f"Cannot remove worktree '{team_id}' with uncommitted changes without force. "
                         "Preserving uncommitted work."
                     )
-                # force=True の場合でも直接破壊せず Quarantine スナップショットを作成して退避保全 (機密サニタイズ)
+                # force=True の場合でも直接破壊せず Quarantine スナップショットを作成して退避保全 (機密サニタイズ・内容検査・Manifest検証)
+                import hashlib
+                import json
                 import tarfile
                 import time
 
+                from auto_developer.guard import GitGuard
+
                 quarantines_dir = self.repo_dir / ".dev" / "quarantines"
                 quarantines_dir.mkdir(parents=True, exist_ok=True)
-                snapshot_name = f"snapshot_worktree_{team_id}_{int(time.time())}.tar.gz"
+                timestamp = int(time.time())
+                snapshot_name = f"snapshot_worktree_{team_id}_{timestamp}.tar.gz"
+                manifest_name = f"manifest_worktree_{team_id}_{timestamp}.json"
                 snapshot_path = quarantines_dir / snapshot_name
+                manifest_path = quarantines_dir / manifest_name
 
-                def _quarantine_filter(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo | None:
-                    normalized = tarinfo.name.replace("\\", "/")
-                    filename = Path(normalized).name
-                    for pat in SECRET_PATTERNS:
-                        if pat.search(filename):
-                            return None
-                    for pat in NOISE_PATTERNS:
-                        if pat.search(normalized):
-                            return None
-                    if "/.git" in normalized or normalized.endswith("/.git"):
-                        return None
-                    return tarinfo
+                # 同一秒内の作成でも既存ファイルを上書きしないようユニーク性を保証
+                counter = 1
+                while snapshot_path.exists() or manifest_path.exists():
+                    snapshot_name = f"snapshot_worktree_{team_id}_{timestamp}_{counter}.tar.gz"
+                    manifest_name = f"manifest_worktree_{team_id}_{timestamp}_{counter}.json"
+                    snapshot_path = quarantines_dir / snapshot_name
+                    manifest_path = quarantines_dir / manifest_name
+                    counter += 1
 
+                # 1. 退避対象ファイルの事前スキャンと機密内容検査
+                files_to_archive: list[tuple[Path, str, str]] = []  # (file_path, arcname, sha256)
+                for item in sorted(target_dir.rglob("*")):
+                    if not item.is_file():
+                        continue
+                    rel_to_wt = item.relative_to(target_dir)
+                    rel_posix = rel_to_wt.as_posix()
+
+                    # Git管理ディレクトリやノイズファイルは除外
+                    if rel_posix.startswith(".git") or "/.git" in rel_posix:
+                        continue
+                    if any(pat.search(rel_posix) for pat in NOISE_PATTERNS):
+                        continue
+
+                    # 既知のシークレットファイル名パターンは退避アーカイブから除外
+                    if GitGuard.is_secret_file(item.name) or any(
+                        pat.search(item.name) for pat in SECRET_PATTERNS
+                    ):
+                        continue
+
+                    # 通常ファイルの内容ディープスキャン
+                    try:
+                        content = item.read_bytes()
+                    except OSError as err:
+                        raise WorktreeError(f"Failed to read file '{rel_posix}' for quarantine: {err}") from err
+
+                    if GitGuard.has_secret_content(content):
+                        raise WorktreeError(
+                            f"Secret content detected in worktree file '{rel_posix}'. "
+                            "Aborting removal to prevent secret leakage or unverified data loss."
+                        )
+
+                    file_sha = hashlib.sha256(content).hexdigest()
+                    arcname = f"{team_id}/{rel_posix}"
+                    files_to_archive.append((item, arcname, file_sha))
+
+                # 2. アーカイブと Manifest の物理生成
                 with tarfile.open(snapshot_path, "w:gz") as tar:
-                    tar.add(target_dir, arcname=team_id, filter=_quarantine_filter)
+                    for item, arcname, _ in files_to_archive:
+                        tar.add(item, arcname=arcname)
+
+                manifest_data = {
+                    "team_id": team_id,
+                    "created_at": timestamp,
+                    "files": [
+                        {"path": arcname, "sha256": file_sha}
+                        for _, arcname, file_sha in files_to_archive
+                    ],
+                }
+                with open(manifest_path, "w", encoding="utf-8") as f:
+                    json.dump(manifest_data, f, indent=2)
+
+                # 3. 読み戻し検証 (アーカイブの完全性とハッシュの一致を物理確認)
+                try:
+                    with tarfile.open(snapshot_path, "r:gz") as tar:
+                        tar_names = set(tar.getnames())
+                        for _, arcname, file_sha in files_to_archive:
+                            if arcname not in tar_names:
+                                raise WorktreeError(f"Quarantine verification failed: '{arcname}' missing in archive.")
+                            member = tar.getmember(arcname)
+                            f_extracted = tar.extractfile(member)
+                            if f_extracted is None:
+                                raise WorktreeError(f"Quarantine verification failed: unable to read '{arcname}'.")
+                            extracted_bytes = f_extracted.read()
+                            if hashlib.sha256(extracted_bytes).hexdigest() != file_sha:
+                                raise WorktreeError(f"Quarantine verification failed: SHA mismatch for '{arcname}'.")
+                except Exception as err:
+                    raise WorktreeError(f"Quarantine archive readback verification failed: {err}") from err
 
         branch_to_delete = f"feature/{team_id}"
 
