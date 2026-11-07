@@ -97,6 +97,47 @@ class TestBoundaryGuard(unittest.TestCase):
         res = guard.inspect_changes()
         self.assertTrue(res.allowed)
 
+    def test_git_command_failure_fail_closed(self) -> None:
+        """Git コマンド失敗時に Fail-Open にならず例外で安全停止することを検証。"""
+        guard = BoundaryGuard(
+            repo_dir=self.repo_dir,
+            owns_patterns=["src/ui/**"],
+            base_checkpoint="invalid-non-existent-commit-hash",
+        )
+        with self.assertRaises(BoundaryViolationError):
+            guard.inspect_changes()
+
+    def test_rename_across_boundary_detected(self) -> None:
+        """リネーム時に変更前 (old) と変更後 (new) の両方が owns 検査されることを検証。"""
+        guard = BoundaryGuard(
+            repo_dir=self.repo_dir,
+            owns_patterns=["src/ui/**"],
+            base_checkpoint=self.base_commit,
+        )
+
+        # 保護領域 (core) のファイルを許可領域 (ui) へリネーム
+        subprocess.run(["git", "mv", "src/core/app.py", "src/ui/stolen_app.py"], cwd=self.repo_dir, check=True)
+
+        res = guard.inspect_changes()
+        self.assertFalse(res.allowed)
+        # 変更前 (src/core/app.py) が違反として検知されていること
+        self.assertIn("src/core/app.py", res.violations)
+
+    def test_glob_strict_root_anchoring(self) -> None:
+        """glob がリポジトリルートから厳格に評価され、他ディレクトリの部分一致を許さないことを検証。"""
+        guard = BoundaryGuard(
+            repo_dir=self.repo_dir,
+            owns_patterns=["src/ui/**"],
+            base_checkpoint=self.base_commit,
+        )
+
+        (self.repo_dir / "nested" / "src" / "ui").mkdir(parents=True)
+        (self.repo_dir / "nested" / "src" / "ui" / "view.py").write_text("# Rogue nested\n", encoding="utf-8")
+
+        res = guard.inspect_changes()
+        self.assertFalse(res.allowed)
+        self.assertIn("nested/src/ui/view.py", res.violations)
+
 
 if __name__ == "__main__":
     unittest.main()
