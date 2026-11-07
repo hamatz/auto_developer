@@ -76,7 +76,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   2. `WorktreeManager`（`src/auto_developer/worktree.py`）: 各チーム専用の独立作業ディレクトリ（`.dev/worktrees/<team_id>/`）およびブランチ（`feature/<team_id>`）をアトミックに作成、一覧、衝突検知、安全なクリーンアップを行う。Makerには作業ディレクトリのみを渡し、worktree管理権限は分離する。
   3. `BoundaryGuard`（`src/auto_developer/boundary.py`）: チームの `owns`（変更許可パターン）を逸脱したファイル作成・変更・削除を機械的に検知し、領域外編集を検知した場合は外部不変条件違反として即座にQuarantine（隔離ロールバック）を発動する。
   4. 決定論的受入テスト（`tests/test_multi_team_foundation.py`）: 独立した2つのWorktreeが競合なく共存できること、およびBoundaryGuardによる領空侵犯の即時遮断を証明する。
-- [ ] 機能X (Stage 1 堅牢化とパイプライン統合 Stage 1 Hardening & Pipeline Integration):
+- [x] 機能X (Stage 1 堅牢化とパイプライン統合 Stage 1 Hardening & Pipeline Integration):
   1. `WorktreeManager` のパス・削除安全性（P0-1, P0-2）:
      - `team_id` を正規表現 `^[a-z][a-z0-9_-]{0,63}$` に制限し、不適合なIDを拒否する。
      - 作成・削除時に、解決されたターゲットパスが `self.worktree_base` の直下であることを検証し、パストラバーサルを遮断する。
@@ -94,6 +94,19 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 領空侵犯検知時にチーム固有の隔離ブランチ（`quarantine/<team_id>-...`）へ自動退避させ、成果をアーカイブ保全した上で本線をクリーン復元する。
   5. 決定論的受入テスト（`tests/test_multi_team_foundation.py`）:
      - パストラバーサル遮断、削除時の成果保全、Fail-Closed動作、領空侵犯時の自動Quarantineと完全復元を実証する。
+- [ ] 機能Y (Stage 1 最終確定と厳格監査 Stage 1 Finalization & Strict Audit):
+  1. `WorktreeManager` の非破壊的一括クリーンアップとブランチ成果保全:
+     - `cleanup_all(force: bool = False, delete_branches: bool = False)` をデフォルト安全化。
+     - `delete_branch=True` 指定時でも、ベースブランチに未マージのコミットが存在する場合はブランチ強制削除（`git branch -D`）を拒否し、未マージ成果を安全に保全する。
+     - `remove_worktree` / `cleanup_all` のブランチ削除成否・保全状況を構造的に返却またはログ出力する。
+  2. Evidence Bundle の 3値監査判定（`VERIFIED` / `INTEGRITY_ONLY` / `INVALID`）:
+     - `verify-bundle` の検証結果として、`VERIFIED`（Exit 0 / 統合許可）、`INTEGRITY_ONLY`（Exit 2 / 承認証跡欠落、統合拒否）、`INVALID`（Exit 1 / 改ざん・破損、不許可）を厳格に判定・出力する。
+     - 承認済みの Evidence Record が 0 件またはタスク不一致の場合は `INTEGRITY_ONLY` とし、未承認成果の統合を物理遮断する。
+  3. Evidence Record の完全同梱:
+     - `EvidenceBundler` は `.git/nightly_evidence/archive/` および `.dev/evidence/` からタスクの物理 Evidence Record を漏れなく集約し、バンドル内に収録する。
+  4. 決定論的受入テストの追加:
+     - 未マージコミットを持つ Worktree のブランチ保全テスト。
+     - 証跡欠落時の `INTEGRITY_ONLY` 拒否判定テスト、および証跡完備時の `VERIFIED` 合格テスト。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
