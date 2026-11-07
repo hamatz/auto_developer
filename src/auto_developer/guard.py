@@ -225,13 +225,21 @@ class GitGuard:
 
         return archive_path
 
-    def quarantine_and_restore(self, checkpoint: str, task_id: str, job_id: str = "") -> str:
+    def quarantine_and_restore(
+        self,
+        checkpoint: str,
+        task_id: str,
+        job_id: str = "",
+        team_id: str = "",
+    ) -> str:
         """作業ツリーの変更を破棄せず物理アーカイブおよび隔離ブランチへ退避し、退避確認後に本線をチェックポイントに復元する。
         秘密情報 (.env や鍵) は Git 隔離ブランチおよびスナップショットから厳格に除外される。
         """
         import time
 
         clean_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", task_id)
+        clean_team = re.sub(r"[^a-zA-Z0-9_\-]", "_", team_id) if team_id else ""
+        team_prefix = f"{clean_team}-" if clean_team else ""
         timestamp = int(time.time())
 
         proc_status = self._run_git(["status", "--porcelain"])
@@ -242,10 +250,10 @@ class GitGuard:
 
         if has_changes:
             # 1. 物理スナップショットの安全作成 (Manifest 連携)
-            self.create_quarantine_snapshot(task_id=task_id, checkpoint=checkpoint, job_id=job_id)
+            self.create_quarantine_snapshot(task_id=f"{team_prefix}{task_id}", checkpoint=checkpoint, job_id=job_id)
 
             # 2. 隔離ブランチへの安全なステージとコミット (追跡済みファイルのみ add -u でステージし、シークレット検査を実施)
-            quarantine_branch = f"quarantine/{clean_id}-{timestamp}"
+            quarantine_branch = f"quarantine/{team_prefix}{clean_id}-{timestamp}"
             self._run_git(["checkout", "-b", quarantine_branch])
             self._run_git(["add", "-u"])
             self.sanitize_staged_changes()

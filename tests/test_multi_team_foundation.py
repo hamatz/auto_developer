@@ -5,14 +5,35 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 src_dir = str(Path(__file__).resolve().parent.parent / "src")
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from auto_developer.boundary import BoundaryGuard, BoundaryViolationError
 from auto_developer.manifest import TeamManifest
+from auto_developer.orchestrator import NightlyOrchestrator
+from auto_developer.runner import RunnerAdapter
 from auto_developer.worktree import WorktreeManager
+
+
+class RogueTeamRunnerAdapter(RunnerAdapter):
+    """領域外 (src/core/app.py) およびルートファイルを不正に変更・作成する Maker。"""
+
+    def __init__(self, repo_dir: Path) -> None:
+        self.repo_dir = repo_dir
+
+    def run_maker(self, task: Any, context: dict[str, Any]) -> tuple[int, str]:
+        # 正当な UI 変更
+        (self.repo_dir / "src" / "ui" / "view.py").write_text("# Legit UI\n", encoding="utf-8")
+        # 領空侵犯 (Core の書き換え)
+        (self.repo_dir / "src" / "core" / "app.py").write_text("# HACKED CORE\n", encoding="utf-8")
+        # 未追跡の侵入ファイル
+        (self.repo_dir / "rogue.sh").write_text("#!/bin/sh\necho rogue\n", encoding="utf-8")
+        return 0, "Modified view.py and hacked core app.py"
+
+    def run_checker(self, task: Any, diff: str, spec_content: str) -> tuple[bool, str]:
+        return True, "Looks good"
 
 
 class TestMultiTeamFoundation(unittest.TestCase):
@@ -26,7 +47,7 @@ class TestMultiTeamFoundation(unittest.TestCase):
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True)
 
         # ディレクトリ構成
-        (self.repo_dir / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+        (self.repo_dir / ".gitignore").write_text(".dev/\nNIGHTLY_REPORT.md\nlogs/\n", encoding="utf-8")
         (self.repo_dir / "src" / "core").mkdir(parents=True)
         (self.repo_dir / "src" / "ui").mkdir(parents=True)
         (self.repo_dir / "src" / "core" / "app.py").write_text("# Core Base\n", encoding="utf-8")
@@ -87,8 +108,8 @@ class TestMultiTeamFoundation(unittest.TestCase):
         self.assertEqual(core_branch, "feature/team-core")
         self.assertEqual(ui_branch, "feature/team-ui")
 
-    def test_multi_team_boundary_enforcement_and_rollback(self) -> None:
-        """BoundaryGuardによる領空侵犯検知と、安全なロールバック復元を実証。"""
+    def test_multi_team_boundary_enforcement_and_automatic_quarantine(self) -> None:
+        """BoundaryGuardと自動Quarantineの連携による領空侵犯遮断・成果保全・クリーン復元を実証。"""
         manifest_data = {
             "version": 1,
             "project": "multi-team-app",
@@ -100,32 +121,73 @@ class TestMultiTeamFoundation(unittest.TestCase):
         ui_team = manifest.teams[0]
 
         ui_wt = self.wt_manager.create_worktree(team_id="team-ui")
-        guard = BoundaryGuard(repo_dir=ui_wt, owns_patterns=ui_team.owns)
 
-        # 正当なUI変更と領空侵犯（core領域の改変およびルート侵入）
-        (ui_wt / "src" / "ui" / "view.py").write_text("# Legit UI\n", encoding="utf-8")
-        (ui_wt / "src" / "core" / "app.py").write_text("# Rogue Core Hack\n", encoding="utf-8")
-        (ui_wt / "malicious.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        # チームWorktree内にタスク計画と検証スクリプトを用意
+        (ui_wt / "PLAN.md").write_text("# PLAN\n- [ ] 1. Update UI components\n", encoding="utf-8")
+        (ui_wt / "SPEC.md").write_text("# SPEC\n", encoding="utf-8")
+        verify_script = ui_wt / "verify.sh"
+        verify_script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        verify_script.chmod(0o755)
 
-        # 領空侵犯の検知
-        res = guard.inspect_changes()
-        self.assertFalse(res.allowed)
-        self.assertIn("src/core/app.py", res.violations)
-        self.assertIn("malicious.sh", res.violations)
-        self.assertNotIn("src/ui/view.py", res.violations)
+        subprocess.run(["git", "add", "."], cwd=ui_wt, check=True)
+        subprocess.run(["git", "commit", "-m", "init ui worktree setup"], cwd=ui_wt, check=True)
 
-        with self.assertRaises(BoundaryViolationError):
-            guard.enforce()
+        # 不正侵入を行う Maker を用いてオーケストレーターをチームモードで起動
+        runner = RogueTeamRunnerAdapter(repo_dir=ui_wt)
+        orchestrator = NightlyOrchestrator(
+            repo_dir=ui_wt,
+            verify_script=verify_script,
+            runner_adapter=runner,
+            team_id=ui_team.id,
+            owns_patterns=ui_team.owns,
+        )
 
-        # ロールバックの実行（Fail-Fast隔離復元シミュレーション）
-        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=ui_wt, check=True, capture_output=True)
-        subprocess.run(["git", "clean", "-fd"], cwd=ui_wt, check=True, capture_output=True)
+        exit_code = orchestrator.run()
 
-        # 完全に侵犯前の状態に復元されていることの検証
+        # 1. 領空侵犯によりパイプラインが Exit 1 で安全停止すること
+        self.assertEqual(exit_code, 1)
+
+        # 2. 作業ツリーが侵犯前のクリーンな状態に完全復元されていること（未追跡ファイル含めて完全消去）
+        status_ui = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=ui_wt,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(status_ui.stdout.strip(), "")
+
+        # 3. 侵犯されたコアコードが元の状態に復元されていること
         restored_core = (ui_wt / "src" / "core" / "app.py").read_text(encoding="utf-8")
         self.assertEqual(restored_core, "# Core Base\n")
-        self.assertFalse((ui_wt / "malicious.sh").exists())
-        self.assertEqual(guard.inspect_changes().modified_files, [])
+        self.assertFalse((ui_wt / "rogue.sh").exists())
+
+        # 4. チーム専用の隔離ブランチ（quarantine/team-ui-1-...）が作成されていること
+        branch_res = subprocess.run(
+            ["git", "branch", "--list", "quarantine/team-ui-1-*"],
+            cwd=ui_wt,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertTrue(len(branch_res.stdout.strip()) > 0)
+
+        # 5. 成果保全用スナップショットアーカイブが存在すること
+        quarantines_dir = ui_wt / ".dev" / "quarantines"
+        snapshots = list(quarantines_dir.glob("snapshot_task_team-ui-1_*.tar.gz"))
+        self.assertTrue(len(snapshots) > 0)
+
+        # 6. メインリポジトリのブランチおよびファイルが一切汚染されていないこと
+        main_core = (self.repo_dir / "src" / "core" / "app.py").read_text(encoding="utf-8")
+        self.assertEqual(main_core, "# Core Base\n")
+        status_main = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=self.repo_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(status_main.stdout.strip(), "")
 
 
 if __name__ == "__main__":

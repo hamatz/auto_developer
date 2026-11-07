@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from auto_developer.boundary import BoundaryGuard
 from auto_developer.bundler import EvidenceBundler
 from auto_developer.dispatcher import TaskDispatcher
 from auto_developer.evidence import EvidenceStore
@@ -31,6 +32,8 @@ class NightlyOrchestrator:
         dry_run: bool = False,
         timeout_sec: int = 300,
         resume: bool = False,
+        team_id: str | None = None,
+        owns_patterns: list[str] | None = None,
     ) -> None:
         self.repo_dir = repo_dir or Path.cwd()
         self.plan_path = plan_path or (self.repo_dir / "PLAN.md")
@@ -42,6 +45,8 @@ class NightlyOrchestrator:
         self.dry_run = dry_run
         self.timeout_sec = timeout_sec
         self.resume = resume
+        self.team_id = team_id
+        self.owns_patterns = owns_patterns
 
         self.git_guard = GitGuard(repo_dir=self.repo_dir)
         self.dispatcher = TaskDispatcher()
@@ -226,6 +231,21 @@ class NightlyOrchestrator:
                     attempt_1_log=maker_out,
                 )
 
+            # Phase B-2: チーム領域（Boundary）検査
+            violations = self._check_boundary(checkpoint)
+            if violations:
+                print(f"  BOUNDARY VIOLATION: Unauthorized modifications outside team owns: {violations}", file=sys.stderr)
+                return self._handle_failure(
+                    task,
+                    checkpoint,
+                    total_tasks,
+                    succeeded_tasks,
+                    job_state,
+                    "BOUNDARY_VIOLATION",
+                    f"Unauthorized modifications outside team owns: {violations}",
+                    attempt_1_log=maker_out,
+                )
+
             # 確定対象のツリーを検証前に反映（PLAN.md のタスク状態を completed に更新）
             self.dispatcher.mark_task_status(self.plan_path, task, status="completed")
 
@@ -293,6 +313,22 @@ class NightlyOrchestrator:
                         job_state,
                         "INVARIANT_BREACH",
                         "Protected file modified on retry",
+                        attempt_1_log=attempt_1_log,
+                        attempt_2_log=maker_out2,
+                        attempts=task_attempts,
+                    )
+
+                violations2 = self._check_boundary(checkpoint)
+                if violations2:
+                    print(f"  BOUNDARY VIOLATION on retry: {violations2}", file=sys.stderr)
+                    return self._handle_failure(
+                        task,
+                        checkpoint,
+                        total_tasks,
+                        succeeded_tasks,
+                        job_state,
+                        "BOUNDARY_VIOLATION",
+                        f"Unauthorized modifications outside team owns on retry: {violations2}",
                         attempt_1_log=attempt_1_log,
                         attempt_2_log=maker_out2,
                         attempts=task_attempts,
@@ -394,6 +430,11 @@ class NightlyOrchestrator:
             )
 
             # 3. 証跡の検証と消費（ツリー整合性照合）
+            final_violations = self._check_boundary(checkpoint)
+            if final_violations:
+                print(f"  BOUNDARY ERROR: Unauthorized files detected at commit gate: {final_violations}", file=sys.stderr)
+                return 3
+
             current_tree = self.git_guard.get_working_tree_sha()
             current_spec = self.git_guard.get_spec_sha(self.spec_path)
             if not self.evidence_store.verify_and_consume(
@@ -506,6 +547,18 @@ class NightlyOrchestrator:
             print(f"\n[DRY-RUN] Execution simulation complete. {len(succeeded_tasks)} tasks simulated. Report was not modified.")
         return 0
 
+    def _check_boundary(self, checkpoint: str) -> list[str]:
+        """チーム所有スコープ（owns）が指定されている場合、領空侵犯を検査し違反ファイルリストを返す。"""
+        if not self.owns_patterns:
+            return []
+        guard = BoundaryGuard(
+            repo_dir=self.repo_dir,
+            owns_patterns=self.owns_patterns,
+            base_checkpoint=checkpoint,
+        )
+        res = guard.inspect_changes()
+        return res.violations
+
     def _handle_failure(
         self,
         task: Task,
@@ -523,7 +576,12 @@ class NightlyOrchestrator:
         job_state.status = "FAILED"
         job_state.transition_phase("QUARANTINE")
         self.dispatcher.mark_task_status(self.plan_path, task, status="failed")
-        quarantine_branch = self.git_guard.quarantine_and_restore(checkpoint, task_id=task.task_id)
+        quarantine_branch = self.git_guard.quarantine_and_restore(
+            checkpoint,
+            task_id=task.task_id,
+            job_id=job_state.job_id,
+            team_id=self.team_id or "",
+        )
 
         log_path = self.repo_dir / "logs" / "nightly" / f"task_{task.task_id}_failure.log"
         self.reporter.write_failure_log(

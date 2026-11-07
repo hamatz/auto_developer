@@ -71,11 +71,29 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   3. `auto-dev verify-bundle <path>` は、マニフェストと各ファイルの実ハッシュ、Evidence Record の Tree SHA とコミットの Tree SHA の整合性を検証し、改ざんや欠落がないかを Exit 0/1 で判定する。
   4. オーケストレーターはジョブ完了時に自動で Evidence Bundle を `.dev/bundles/` 配下に生成し、`NIGHTLY_REPORT.md` に検証コマンドを提示する。
   5. Antigravity プラグインスキルとして `/nightly-bundle` および `/nightly-verify` を提供し、チャットUI上で完結する。
-- [ ] 機能W (マルチチーム自律開発の基盤構造 Multi-Team Foundation - Stage 1):
+- [x] 機能W (マルチチーム自律開発の基盤構造 Multi-Team Foundation - Stage 1):
   1. `TeamManifest`（`src/auto_developer/manifest.py`）: プロジェクト設定、チーム定義（`id`, `owns`, `depends_on`, `max_parallel_tasks`）、契約参照（`contracts`）、統合設定（`integration`）を保持し、JSONおよび構造化定義から検証・ロードできるデータモデル。
   2. `WorktreeManager`（`src/auto_developer/worktree.py`）: 各チーム専用の独立作業ディレクトリ（`.dev/worktrees/<team_id>/`）およびブランチ（`feature/<team_id>`）をアトミックに作成、一覧、衝突検知、安全なクリーンアップを行う。Makerには作業ディレクトリのみを渡し、worktree管理権限は分離する。
   3. `BoundaryGuard`（`src/auto_developer/boundary.py`）: チームの `owns`（変更許可パターン）を逸脱したファイル作成・変更・削除を機械的に検知し、領域外編集を検知した場合は外部不変条件違反として即座にQuarantine（隔離ロールバック）を発動する。
   4. 決定論的受入テスト（`tests/test_multi_team_foundation.py`）: 独立した2つのWorktreeが競合なく共存できること、およびBoundaryGuardによる領空侵犯の即時遮断を証明する。
+- [ ] 機能X (Stage 1 堅牢化とパイプライン統合 Stage 1 Hardening & Pipeline Integration):
+  1. `WorktreeManager` のパス・削除安全性（P0-1, P0-2）:
+     - `team_id` を正規表現 `^[a-z][a-z0-9_-]{0,63}$` に制限し、不適合なIDを拒否する。
+     - 作成・削除時に、解決されたターゲットパスが `self.worktree_base` の直下であることを検証し、パストラバーサルを遮断する。
+     - `shutil.rmtree` による直接削除を廃止し、Gitが削除を拒否した場合は例外を送出して安全停止する。未コミット成果の無断破棄を遮断する。
+  2. `TeamManifest` のスキーマ厳格化（P1-2）:
+     - `team_id` の正規表現検証、空の `owns` リスト拒否。
+     - `max_parallel_tasks` の正の整数制約（`> 0`）。
+     - 真偽値フィールドにおける型安全性（`isinstance(val, bool)` を検証し、文字列 `"false"` による誤判定を遮断）。
+  3. `BoundaryGuard` の Fail-Closed 化・glob 厳格化・rename 検査（P0-3, P1-1）:
+     - `git diff` または `git status` が失敗した場合、結果を握りつぶさず例外を送出し検査失敗（Fail-Closed）とする。
+     - glob照合をリポジトリルートからの相対パス先頭一致に統一し、意図しない曖昧一致を排除する。
+     - Git rename (`R  old -> new`) において `old` と `new` の両方を検査対象とし、許可領域外へのファイル移動・持ち出しを遮断する。
+  4. 境界違反時の自動 Quarantine とパイプライン統合（P0-3, P1-3）:
+     - チーム実行時、Maker 実行直後およびコミット確定直前に `BoundaryGuard` を機械的に実行する。
+     - 領空侵犯検知時にチーム固有の隔離ブランチ（`quarantine/<team_id>-...`）へ自動退避させ、成果をアーカイブ保全した上で本線をクリーン復元する。
+  5. 決定論的受入テスト（`tests/test_multi_team_foundation.py`）:
+     - パストラバーサル遮断、削除時の成果保全、Fail-Closed動作、領空侵犯時の自動Quarantineと完全復元を実証する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
