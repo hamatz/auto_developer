@@ -128,12 +128,14 @@ class GitGuard:
         re.compile(r"(api[_-]?key|secret[_-]?key|private[_-]?key|auth[_-]?token)\s*[:=]\s*['\"][a-zA-Z0-9_\-]{16,}['\"]", re.IGNORECASE),  # gitleaks:allow
     )
 
-    def is_secret_file(self, filename: str) -> bool:
+    @classmethod
+    def is_secret_file(cls, filename: str) -> bool:
         """シークレット・認証情報ファイル名パターンに合致するか判定する。"""
         base_name = Path(filename).name
-        return any(pattern.search(base_name) for pattern in self.SECRET_EXCLUDE_PATTERNS)
+        return any(pattern.search(base_name) for pattern in cls.SECRET_EXCLUDE_PATTERNS)
 
-    def has_secret_content(self, content: bytes | str) -> bool:
+    @classmethod
+    def has_secret_content(cls, content: bytes | str) -> bool:
         """テキストまたはバイナリ内に認証情報・秘密鍵パターンが含まれているか検査する。"""
         if isinstance(content, bytes):
             try:
@@ -142,7 +144,7 @@ class GitGuard:
                 return False
         else:
             text = content
-        return any(pattern.search(text) for pattern in self.SECRET_CONTENT_PATTERNS)
+        return any(pattern.search(text) for pattern in cls.SECRET_CONTENT_PATTERNS)
 
     def sanitize_staged_changes(self) -> list[str]:
         """ステージされたファイルの内容を検査し、シークレットを含むファイルをステージから除外する。"""

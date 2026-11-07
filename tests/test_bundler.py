@@ -402,6 +402,89 @@ class TestEvidenceBundler(unittest.TestCase):
         self.assertEqual(res.status, "INVALID", "Fake HEAD commit in manifest must be INVALID")
         self.assertFalse(res.is_valid)
 
+    def test_verify_bundle_rejects_empty_head_commit_in_manifest(self):
+        """P1: Manifest の head_commit / head_tree_sha が空文字または欠落の場合、必ず INVALID で遮断すること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        base_zip = bundler.create_bundle(dest_path=self.repo / "base_empty_head.zip")
+
+        with zipfile.ZipFile(base_zip, "r") as zf:
+            manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+        manifest["head_commit"] = ""
+        manifest["head_tree_sha"] = ""
+
+        empty_head_zip = self.repo / "empty_head.zip"
+        with zipfile.ZipFile(base_zip, "r") as zf, zipfile.ZipFile(empty_head_zip, "w") as out_zf:
+            for name in zf.namelist():
+                if name == "bundle_manifest.json":
+                    out_zf.writestr(name, json.dumps(manifest).encode("utf-8"))
+                else:
+                    out_zf.writestr(name, zf.read(name))
+
+        res = bundler.verify_bundle(empty_head_zip)
+        self.assertEqual(res.status, "INVALID", "Empty HEAD commit in manifest must be INVALID")
+        self.assertFalse(res.is_valid)
+
+    def test_verify_bundle_rejects_extra_unhashed_files_in_zip(self):
+        """P1: ZIP 内に Manifest で宣言されていない未知ファイル (mystery.txt) がある場合、必ず INVALID で遮断すること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        base_zip = bundler.create_bundle(dest_path=self.repo / "base_extra.zip")
+
+        extra_zip = self.repo / "extra_file.zip"
+        with zipfile.ZipFile(base_zip, "r") as zf, zipfile.ZipFile(extra_zip, "w") as out_zf:
+            for name in zf.namelist():
+                out_zf.writestr(name, zf.read(name))
+            out_zf.writestr("mystery.txt", b"unauthorized surprise content\n")
+
+        res = bundler.verify_bundle(extra_zip)
+        self.assertEqual(res.status, "INVALID", "Extra unhashed file in ZIP must be INVALID")
+        self.assertFalse(res.is_valid)
+
+    def test_verify_bundle_rejects_manifest_task_field_tampering(self):
+        """P1: Manifest 側のタスク情報 (tree_sha等) が Evidence Record と不一致の場合、必ず INVALID で遮断すること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        base_zip = bundler.create_bundle(dest_path=self.repo / "base_tamper.zip")
+
+        with zipfile.ZipFile(base_zip, "r") as zf:
+            manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+        self.assertTrue(len(manifest.get("tasks", [])) > 0)
+        # Manifest の Task 1 の tree_sha をゼロ改ざん (Sol氏再現ケース)
+        manifest["tasks"][0]["tree_sha"] = "0000000000000000000000000000000000000000"
+
+        tampered_zip = self.repo / "tampered_task.zip"
+        with zipfile.ZipFile(base_zip, "r") as zf, zipfile.ZipFile(tampered_zip, "w") as out_zf:
+            for name in zf.namelist():
+                if name == "bundle_manifest.json":
+                    out_zf.writestr(name, json.dumps(manifest).encode("utf-8"))
+                else:
+                    out_zf.writestr(name, zf.read(name))
+
+        res = bundler.verify_bundle(tampered_zip)
+        self.assertEqual(res.status, "INVALID", "Tampered task tree_sha in manifest must be INVALID")
+        self.assertFalse(res.is_valid)
+
+    def test_verify_bundle_rejects_duplicate_tasks_in_manifest(self):
+        """P1: Manifest 内に重複したタスクIDが存在する場合、必ず INVALID で遮断すること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        base_zip = bundler.create_bundle(dest_path=self.repo / "base_dup.zip")
+
+        with zipfile.ZipFile(base_zip, "r") as zf:
+            manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+        self.assertTrue(len(manifest.get("tasks", [])) > 0)
+        # 同じタスクを重複追加 (Sol氏再現ケース)
+        manifest["tasks"].append(manifest["tasks"][0].copy())
+
+        dup_zip = self.repo / "dup_task.zip"
+        with zipfile.ZipFile(base_zip, "r") as zf, zipfile.ZipFile(dup_zip, "w") as out_zf:
+            for name in zf.namelist():
+                if name == "bundle_manifest.json":
+                    out_zf.writestr(name, json.dumps(manifest).encode("utf-8"))
+                else:
+                    out_zf.writestr(name, zf.read(name))
+
+        res = bundler.verify_bundle(dup_zip)
+        self.assertEqual(res.status, "INVALID", "Duplicate tasks in manifest must be INVALID")
+        self.assertFalse(res.is_valid)
+
     def test_cli_bundle_and_verify_bundle(self):
         from auto_developer.cli import main
 

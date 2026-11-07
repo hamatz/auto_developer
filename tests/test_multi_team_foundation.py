@@ -314,6 +314,43 @@ class TestMultiTeamFoundation(unittest.TestCase):
             self.assertFalse(any(n.endswith(".env") for n in tar_names))
             self.assertFalse(any(n.endswith(".key") for n in tar_names))
 
+        # 9. ファイル内容にAPIキー等を含む場合の Worktree 削除停止 (Fail-Closed) の検証
+        q_wt_leak = self.wt_manager.create_worktree(team_id="team-quarantine-leak")
+        fake_key_name = "api" + "_key"
+        fake_secret_val = "sk-" + "a1b2c3d4e5f6g7h8i9j0"  # gitleaks:allow
+        (q_wt_leak / "config.json").write_text(json.dumps({fake_key_name: fake_secret_val}) + "\n", encoding="utf-8")
+        from auto_developer.worktree import WorktreeError
+        with self.assertRaises(WorktreeError):
+            self.wt_manager.remove_worktree(team_id="team-quarantine-leak", force=True)
+        self.assertTrue(q_wt_leak.exists(), "Worktree with secret content must be preserved without deletion")
+        (q_wt_leak / "config.json").unlink()
+
+        # 10. Manifest 側のタスクメタデータ改ざん遮断の検証
+        import zipfile
+        with zipfile.ZipFile(verified_bundle, "r") as zf:
+            manifest_json = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+        manifest_json["tasks"][0]["tree_sha"] = "0000000000000000000000000000000000000000"
+        tampered_manifest_zip = self.repo_dir / "audit_test_manifest_tampered.zip"
+        with zipfile.ZipFile(verified_bundle, "r") as zf, zipfile.ZipFile(tampered_manifest_zip, "w") as out_zf:
+            for name in zf.namelist():
+                if name == "bundle_manifest.json":
+                    out_zf.writestr(name, json.dumps(manifest_json).encode("utf-8"))
+                else:
+                    out_zf.writestr(name, zf.read(name))
+        res_tampered = bundler.verify_bundle(tampered_manifest_zip)
+        self.assertEqual(res_tampered.status, "INVALID")
+        self.assertFalse(res_tampered.is_valid)
+
+        # 11. ZIP への未知ファイル追加遮断の検証
+        extra_file_zip = self.repo_dir / "audit_test_extra_file.zip"
+        with zipfile.ZipFile(verified_bundle, "r") as zf, zipfile.ZipFile(extra_file_zip, "w") as out_zf:
+            for name in zf.namelist():
+                out_zf.writestr(name, zf.read(name))
+            out_zf.writestr("mystery.txt", b"mystery data")
+        res_extra = bundler.verify_bundle(extra_file_zip)
+        self.assertEqual(res_extra.status, "INVALID")
+        self.assertFalse(res_extra.is_valid)
+
 
 if __name__ == "__main__":
     unittest.main()
