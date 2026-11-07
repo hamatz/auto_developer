@@ -223,22 +223,24 @@ class WorktreeManager:
 
                 # 1. 退避対象ファイルの事前スキャンと機密内容検査
                 files_to_archive: list[tuple[Path, str, str]] = []  # (file_path, arcname, sha256)
+                excluded_sensitive_files: list[str] = []
                 for item in sorted(target_dir.rglob("*")):
                     if not item.is_file():
                         continue
                     rel_to_wt = item.relative_to(target_dir)
                     rel_posix = rel_to_wt.as_posix()
 
-                    # Git管理ディレクトリやノイズファイルは除外
+                    # Git管理ディレクトリやノイズファイルは除外 (再生成可能なため削除を阻害しない)
                     if rel_posix.startswith(".git") or "/.git" in rel_posix:
                         continue
                     if any(pat.search(rel_posix) for pat in NOISE_PATTERNS):
                         continue
 
-                    # 既知のシークレットファイル名パターンは退避アーカイブから除外
+                    # 既知のシークレットファイル名パターンは検知して記録 (アーカイブには含めない)
                     if GitGuard.is_secret_file(item.name) or any(
                         pat.search(item.name) for pat in SECRET_PATTERNS
                     ):
+                        excluded_sensitive_files.append(rel_posix)
                         continue
 
                     # 通常ファイルの内容ディープスキャン
@@ -256,6 +258,14 @@ class WorktreeManager:
                     file_sha = hashlib.sha256(content).hexdigest()
                     arcname = f"{team_id}/{rel_posix}"
                     files_to_archive.append((item, arcname, file_sha))
+
+                # P0: 機密ファイルが未保存で消失するのを防ぐため、削除を拒否 (Fail-Closed 保全)
+                if excluded_sensitive_files:
+                    sample_files = ", ".join(sorted(excluded_sensitive_files)[:3])
+                    raise WorktreeError(
+                        f"Worktree '{team_id}' contains sensitive files excluded from quarantine ({sample_files}); "
+                        "removal refused to prevent data loss. Please commit, move, or clean up sensitive files before removal."
+                    )
 
                 # 2. アーカイブと Manifest の物理生成
                 with tarfile.open(snapshot_path, "w:gz") as tar:

@@ -154,30 +154,29 @@ class TestWorktreeManager(unittest.TestCase):
             names = tar.getnames()
             self.assertTrue(any("dirty.txt" in n for n in names))
 
-    def test_remove_worktree_quarantine_sanitizes_secrets(self) -> None:
-        """Quarantine 退避時に .env や秘密鍵等の機密ファイルが除外（サニタイズ）されること。"""
-        import tarfile
-
+    def test_remove_worktree_quarantine_refuses_deletion_if_sensitive_files_exist(self) -> None:
+        """P0: .env や秘密鍵等の機密ファイルが未保存で消失するのを防ぐため、削除を拒否（Fail-Closed保全）すること。"""
         wt_path = self.manager.create_worktree(team_id="team-sec")
         (wt_path / "valid.py").write_text("print('clean')\n", encoding="utf-8")
         (wt_path / ".env").write_text("SECRET_KEY=12345\n", encoding="utf-8")
         (wt_path / "server.key").write_text("RSA PRIVATE KEY\n", encoding="utf-8")
-        (wt_path / ".DS_Store").write_bytes(b"\x00\x00\x00\x01")
+
+        with self.assertRaises(WorktreeError) as ctx:
+            self.manager.remove_worktree(team_id="team-sec", force=True)
+
+        self.assertIn("excluded from quarantine", str(ctx.exception))
+        # Worktree と未コミット機密ファイルが物理的に保全されていること
+        self.assertTrue(wt_path.exists())
+        self.assertTrue((wt_path / ".env").exists())
+        self.assertTrue((wt_path / "server.key").exists())
+
+        # 機密ファイルを解消すれば安全に退避・削除できること
+        (wt_path / ".env").unlink()
+        (wt_path / "server.key").unlink()
+        (wt_path / ".DS_Store").write_bytes(b"\x00\x00\x00\x01")  # ノイズは除外されて削除可能
 
         self.manager.remove_worktree(team_id="team-sec", force=True)
         self.assertFalse(wt_path.exists())
-
-        quarantines_dir = self.repo_dir / ".dev" / "quarantines"
-        snapshots = sorted(quarantines_dir.glob("snapshot_worktree_team-sec_*.tar.gz"))
-        self.assertTrue(len(snapshots) > 0)
-
-        with tarfile.open(snapshots[-1], "r:gz") as tar:
-            names = tar.getnames()
-            self.assertTrue(any("valid.py" in n for n in names))
-            for n in names:
-                self.assertFalse(n.endswith(".env"), f"Secret file {n} must be excluded from quarantine!")
-                self.assertFalse(n.endswith(".key"), f"Secret file {n} must be excluded from quarantine!")
-                self.assertFalse(n.endswith(".DS_Store"), f"Noise file {n} must be excluded from quarantine!")
 
     def test_remove_worktree_aborts_on_secret_content_in_files(self) -> None:
         """ファイル名が通常でもファイル内容にAPIキー等を含む場合、削除を停止（Fail-Closed）すること。"""
