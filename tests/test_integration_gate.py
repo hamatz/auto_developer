@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 import sys
 import tempfile
@@ -280,6 +282,174 @@ class TestIntegrationGateExecution(unittest.TestCase):
         # 元のブランチ (main) に戻っていること
         current_branch = self._run_git(["branch", "--show-current"]).stdout.strip()
         self.assertEqual(current_branch, "main")
+
+
+class TestIntegrationGateAcceptance(unittest.TestCase):
+    """2チーム統合（Core & UI）の決定論的受入テスト (AA.5)。"""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo_dir = Path(self.temp_dir.name).resolve()
+        self._run_git(["init", "-b", "main"])
+        self._run_git(["config", "user.name", "IntegrationTester"])
+        self._run_git(["config", "user.email", "integration@example.com"])
+
+        # 初期リポジトリ構造の構築
+        (self.repo_dir / "SPEC.md").write_text("# SPEC\nCore Requirements", encoding="utf-8")
+        (self.repo_dir / "PLAN.md").write_text("# PLAN\n- [x] Initial setup", encoding="utf-8")
+        (self.repo_dir / ".gitignore").write_text(".dev/\n*.zip\n", encoding="utf-8")
+        scripts_dir = self.repo_dir / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        verify_sh = scripts_dir / "verify_local.sh"
+        verify_sh.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        verify_sh.chmod(0o755)
+
+        self._run_git(["add", "."])
+        self._run_git(["commit", "-m", "init: repository structure"])
+        self.base_commit = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _run_git(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=self.repo_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    def _create_team_work_and_bundle(
+        self, team_id: str, branch: str, file_path: str, content: str
+    ) -> tuple[Path, str]:
+        # ブランチ作成
+        self._run_git(["checkout", "-b", branch, "main"])
+        target = self.repo_dir / file_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        self._run_git(["add", file_path])
+        self._run_git(["commit", "-m", f"feat({team_id}): implement {file_path}"])
+
+        head_commit = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
+        head_tree = self._run_git(["rev-parse", "HEAD^{tree}"]).stdout.strip()
+        spec_sha = hashlib.sha256((self.repo_dir / "SPEC.md").read_bytes()).hexdigest()
+
+        # Evidence Record 作成
+        records_dir = self.repo_dir / ".git" / "nightly_evidence" / "records"
+        records_dir.mkdir(parents=True, exist_ok=True)
+        for old_file in records_dir.glob("*.json"):
+            old_file.unlink()
+        (records_dir / f"task_{team_id}.json").write_text(
+            json.dumps({
+                "task_id": team_id,
+                "checkpoint": self.base_commit,
+                "commit": head_commit,
+                "tree_sha": head_tree,
+                "spec_sha": spec_sha,
+                "checker": {"decision": "APPROVE", "reason": f"Team {team_id} tests pass"},
+                "status": "COMPLETED",
+            }),
+            encoding="utf-8",
+        )
+
+        bundler = EvidenceBundler(repo_dir=self.repo_dir)
+        bundle_path = self.repo_dir / f"bundle_{team_id}.zip"
+        bundler.create_bundle(dest_path=bundle_path)
+
+        # main に戻る
+        self._run_git(["checkout", "main"])
+        return bundle_path, head_commit
+
+    def test_two_team_integration_success_scenario(self) -> None:
+        # Core チームの成果物とバンドル作成
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/core/app.py",
+            content="# Core logic\ndef get_core(): return 42\n",
+        )
+
+        # UI チームの成果物とバンドル作成
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/ui/view.py",
+            content="# UI logic\ndef render(): return 'view'\n",
+        )
+
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
+        ]
+
+        result = gate.execute_integration(
+            job_id="job-integration-e2e",
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.status, "SUCCESS")
+        self.assertEqual(result.integration_branch, "integration/job-integration-e2e")
+        self.assertIsNotNone(result.release_candidate_commit)
+
+        # 統合ブランチ上に両チームのファイルが存在すること
+        self._run_git(["checkout", result.integration_branch])
+        self.assertTrue((self.repo_dir / "src" / "core" / "app.py").exists())
+        self.assertTrue((self.repo_dir / "src" / "ui" / "view.py").exists())
+
+        # Release Candidate タグが一致すること
+        rc_tag_commit = self._run_git(["rev-parse", "rc/job-integration-e2e"]).stdout.strip()
+        self.assertEqual(rc_tag_commit, result.release_candidate_commit)
+
+        # main ブランチが不変・無汚染であること
+        self._run_git(["checkout", "main"])
+        main_commit = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
+        self.assertEqual(main_commit, self.base_commit)
+
+    def test_two_team_integration_conflict_quarantine_scenario(self) -> None:
+        # Core チームが shared.py を作成
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/shared.py",
+            content="SHARED_VERSION = 'core_v1'\n",
+        )
+
+        # UI チームが shared.py を競合内容で作成
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/shared.py",
+            content="SHARED_VERSION = 'ui_v2'\n",
+        )
+
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
+        ]
+
+        result = gate.execute_integration(
+            job_id="job-integration-conflict",
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "CONFLICT")
+        self.assertIn("ui", result.details.get("conflict_team", ""))
+
+        # main ブランチが不変・無汚染であること
+        current_branch = self._run_git(["branch", "--show-current"]).stdout.strip()
+        self.assertEqual(current_branch, "main")
+        main_commit = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
+        self.assertEqual(main_commit, self.base_commit)
+        self.assertFalse((self.repo_dir / "src" / "shared.py").exists())
 
 
 if __name__ == "__main__":
