@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.3.0] - 2026-11-07
+
+### Major Milestone: Stage 1 Multi-Team Foundation & Zero-Loss Evidence Verification (Phases 11 - 18)
+
+Auto Developer v0.3.0 marks the completion of **Stage 1 (Multi-Team Autonomous Development Foundation)**. This release establishes physical Git Worktree isolation for parallel development teams, strict file boundary enforcement, fail-closed unsaved work preservation (Zero-Loss Guarantee), and a tamper-proof third-party verifiable Evidence Bundle architecture.
+
+### Added
+- **Multi-Team Worktree Isolation & Lifecycle Management (`WorktreeManager`)**:
+  - Isolated Git Worktree provisioning and dedicated feature branches (`feature/{team_id}`) per team.
+  - Team ownership boundaries enforcement via `BoundaryGuard`, mechanically preventing out-of-boundary code changes before commit.
+  - Non-destructive unmerged branch protection on worktree removal (`purge_unmerged=False`).
+- **Zero-Loss Guarantee & Comprehensive Quarantine (`remove_worktree`)**:
+  - **Git-Status-Independent Real-File Scanning**: Pre-scans physical worktree files prior to Git status execution to detect uncommitted and ignored assets.
+  - **Fail-Closed Secret Preservation (P0)**: Refuses removal of worktrees containing sensitive files (`.env`, private keys) or secret contents, preventing accidental loss or leakage.
+  - **Ignored Work File Quarantine (P0)**: Automatically archives non-sensitive Git-ignored files (`local-notes.txt`, etc.) into compressed quarantine snapshots (`tar.gz` + `manifest.json`) with readback SHA-256 verification before removal.
+  - **Tracked Clean File Exemption**: Differentiates tracked clean files (e.g. `.env.example`) from uncommitted secrets, preventing false-positive secret blocking on clean worktree removal.
+- **Tamper-Proof Evidence Bundle & Third-Party Verifier (`auto-dev bundle` / `auto-dev verify-bundle`)**:
+  - Standalone audit package bundling sanitized Git Bundle, Evidence Records, JobState, and execution briefs into an immutable ZIP archive.
+  - Isolated clone restoration and deterministic physical verification against real Git commits and Tree objects.
+  - Strict Fail-Closed manifest checks rejecting synthetic/zero Tree SHAs, unmanifested ZIP contents, missing task fields (`commit`, `tree_sha`, `spec_sha`, `status`, `checker_decision`), and mismatched evidence tokens.
+  - Morning Brief (`NIGHTLY_REPORT.md`) freshness inspection ensuring report HEAD aligns with bundle manifest commit.
+- **Deterministic Acceptance & Security Test Suites**:
+  - Expanded test coverage from 67 tests to **125 tests (+58 tests)** covering multi-team orchestration, worktree isolation, boundary violations, tamper detection, and fail-closed data preservation.
+  - Hardened test payloads against Gitleaks scanning using dynamically combined credential tokens.
+
+### Changed
+- Standardized Evidence Record generation to strictly bind physical commit SHA, Tree SHA, and SPEC SHA in a 1-to-1 relationship.
+- Refactored `remove_worktree` to eliminate redundant directory traversals, combining pre-scanning, secret detection, and quarantine bundling into a unified safe pipeline.
+
+---
+
 ## [0.2.0] - 2026-11-06
 
 ### Major Milestone: Trustworthy Autonomous Development & Crash-Resilient Transactional Pipeline (Pilots 01 - 04)
@@ -40,6 +71,37 @@ Auto Developer v0.2.0 establishes an industrial-grade foundation for autonomous 
 ### Changed
 - Refactored `JobState` to persist `base_branch` and fine-grained phases (`INIT`, `MAKER`, `VERIFIER`, `CHECKER`, `COMMIT`, `QUARANTINE`).
 - Stabilized local verification suite `scripts/verify_local.sh` with 67 comprehensive unit, regression, and acceptance tests.
+
+---
+
+## [0.3.0] - 2026-11-07
+
+### Major Milestone: Stage 1 Multi-Team Foundation & Zero-Loss Evidence Verification (Phases 11 - 18)
+
+Auto Developer v0.3.0 marks the completion of **Stage 1 (Multi-Team Autonomous Development Foundation)**. This release establishes physical Git Worktree isolation for parallel development teams, strict file boundary enforcement, fail-closed unsaved work preservation (Zero-Loss Guarantee), and a tamper-proof third-party verifiable Evidence Bundle architecture.
+
+### Added
+- **Multi-Team Worktree Isolation & Lifecycle Management (`WorktreeManager`)**:
+  - Isolated Git Worktree provisioning and dedicated feature branches (`feature/{team_id}`) per team.
+  - Team ownership boundaries enforcement via `BoundaryGuard`, mechanically preventing out-of-boundary code changes before commit.
+  - Non-destructive unmerged branch protection on worktree removal (`purge_unmerged=False`).
+- **Zero-Loss Guarantee & Comprehensive Quarantine (`remove_worktree`)**:
+  - **Git-Status-Independent Real-File Scanning**: Pre-scans physical worktree files prior to Git status execution to detect uncommitted and ignored assets.
+  - **Fail-Closed Secret Preservation (P0)**: Refuses removal of worktrees containing sensitive files (`.env`, private keys) or secret contents, preventing accidental loss or leakage.
+  - **Ignored Work File Quarantine (P0)**: Automatically archives non-sensitive Git-ignored files (`local-notes.txt`, etc.) into compressed quarantine snapshots (`tar.gz` + `manifest.json`) with readback SHA-256 verification before removal.
+  - **Tracked Clean File Exemption**: Differentiates tracked clean files (e.g. `.env.example`) from uncommitted secrets, preventing false-positive secret blocking on clean worktree removal.
+- **Tamper-Proof Evidence Bundle & Third-Party Verifier (`auto-dev bundle` / `auto-dev verify-bundle`)**:
+  - Standalone audit package bundling sanitized Git Bundle, Evidence Records, JobState, and execution briefs into an immutable ZIP archive.
+  - Isolated clone restoration and deterministic physical verification against real Git commits and Tree objects.
+  - Strict Fail-Closed manifest checks rejecting synthetic/zero Tree SHAs, unmanifested ZIP contents, missing task fields (`commit`, `tree_sha`, `spec_sha`, `status`, `checker_decision`), and mismatched evidence tokens.
+  - Morning Brief (`NIGHTLY_REPORT.md`) freshness inspection ensuring report HEAD aligns with bundle manifest commit.
+- **Deterministic Acceptance & Security Test Suites**:
+  - Expanded test coverage from 67 tests to **125 tests (+58 tests)** covering multi-team orchestration, worktree isolation, boundary violations, tamper detection, and fail-closed data preservation.
+  - Hardened test payloads against Gitleaks scanning using dynamically combined credential tokens.
+
+### Changed
+- Standardized Evidence Record generation to strictly bind physical commit SHA, Tree SHA, and SPEC SHA in a 1-to-1 relationship.
+- Refactored `remove_worktree` to eliminate redundant directory traversals, combining pre-scanning, secret detection, and quarantine bundling into a unified safe pipeline.
 
 ---
 
