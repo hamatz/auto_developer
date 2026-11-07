@@ -98,16 +98,37 @@ class IntegrationGate:
                 errors.append(err)
                 continue
 
-            if (
-                team_input.head_commit
-                and verification.head_commit
-                and team_input.head_commit != verification.head_commit
-            ):
-                    err = (
-                        f"Team '{team_input.team_id}' head commit mismatch: "
-                        f"expected {team_input.head_commit}, bundle has {verification.head_commit}"
-                    )
-                    errors.append(err)
+            bundle_head = (verification.head_commit or "").strip()
+            if not bundle_head or len(bundle_head) != 40:
+                errors.append(
+                    f"Team '{team_input.team_id}' bundle missing valid 40-character head commit: '{bundle_head}'"
+                )
+                continue
+
+            # P0-1: Git リポジトリ上のブランチ先端コミットを解決し、Bundle 監査済みコミットと完全一致するか照合
+            rev_proc = self._run_git(["rev-parse", "--verify", team_input.branch], check=False)
+            if rev_proc.returncode != 0:
+                errors.append(
+                    f"Team '{team_input.team_id}' branch '{team_input.branch}' cannot be resolved in git: {rev_proc.stderr.strip()}"
+                )
+                continue
+
+            branch_head = rev_proc.stdout.strip()
+            if branch_head != bundle_head:
+                errors.append(
+                    f"Team '{team_input.team_id}' branch '{team_input.branch}' HEAD ({branch_head}) "
+                    f"does not match audited bundle HEAD ({bundle_head}): unapproved commit detected"
+                )
+                continue
+
+            if team_input.head_commit and team_input.head_commit != bundle_head:
+                errors.append(
+                    f"Team '{team_input.team_id}' head commit mismatch: "
+                    f"expected {team_input.head_commit}, bundle has {bundle_head}"
+                )
+                continue
+
+            audits[team_input.team_id]["verified_commit"] = bundle_head
 
         is_valid = len(errors) == 0
         return is_valid, audits, errors
@@ -122,38 +143,67 @@ class IntegrationGate:
         )
 
     def create_integration_branch(self, job_id: str, base_commit: str = "HEAD") -> str:
-        """ベースコミットから新規統合ブランチ integration/{job_id} を作成・チェックアウトする。"""
+        """ベースコミットから新規統合ブランチ integration/{job_id} を作成・チェックアウトする。
+
+        P0-2: 既存の統合ブランチが存在する場合は上書きリセット (-B) せず例外を送出する。
+        """
         branch_name = f"integration/{job_id}"
-        self._run_git(["checkout", "-B", branch_name, base_commit])
+        check_proc = self._run_git(["rev-parse", "--verify", f"refs/heads/{branch_name}"], check=False)
+        if check_proc.returncode == 0:
+            raise ValueError(
+                f"Integration branch '{branch_name}' already exists. Refusing to overwrite previous integration run."
+            )
+
+        self._run_git(["checkout", "-b", branch_name, base_commit], check=True)
         return branch_name
 
     def merge_team_branches(
         self,
         integration_branch: str,
         inputs: list[TeamIntegrationInput],
+        verified_commits: dict[str, str] | None = None,
         original_branch: str | None = None,
     ) -> tuple[bool, str | None, list[str]]:
-        """統合ブランチ上で各チームのブランチを順次マージする。
+        """統合ブランチ上で各チームのコミットを順次マージする。
 
+        P0-1: ブランチ名ではなく監査済み固定 Commit SHA を直接指定してマージし、
+        マージコミットの第2親 (HEAD^2) が監査済みコミットと完全一致することを検証する。
         コンフリクト発生時は即座に推測なき Fail-Closed を発動し、マージを abort して
         original_branch に安全に戻る。
         """
         errors: list[str] = []
         for team_input in inputs:
-            branch = team_input.branch
             team_id = team_input.team_id
-            msg = f"chore(integration): merge team '{team_id}' ({branch}) into {integration_branch}"
-            proc = self._run_git(["merge", "--no-ff", branch, "-m", msg], check=False)
+            commit_target = (verified_commits or {}).get(team_id) or team_input.head_commit or team_input.branch
+            msg = f"chore(integration): merge team '{team_id}' ({commit_target[:7]}) into {integration_branch}"
+            proc = self._run_git(["merge", "--no-ff", commit_target, "-m", msg], check=False)
             if proc.returncode != 0:
                 self._run_git(["merge", "--abort"], check=False)
                 if original_branch:
                     self._run_git(["checkout", original_branch], check=False)
                 err = (
-                    f"Merge conflict detected while merging team '{team_id}' ({branch}): "
+                    f"Merge conflict detected while merging team '{team_id}' ({commit_target}): "
                     f"speculation-free Fail-Closed triggered. Output:\n{proc.stderr or proc.stdout}"
                 )
                 errors.append(err)
                 return False, team_id, errors
+
+            # P0-1: マージ親 (HEAD^2) の検証
+            p2_proc = self._run_git(["rev-parse", "HEAD^2"], check=False)
+            if p2_proc.returncode == 0:
+                actual_p2 = p2_proc.stdout.strip()
+                target_hash_proc = self._run_git(["rev-parse", commit_target], check=False)
+                expected_p2 = target_hash_proc.stdout.strip() if target_hash_proc.returncode == 0 else commit_target
+                if actual_p2 != expected_p2:
+                    self._run_git(["reset", "--hard", "HEAD~1"], check=False)
+                    if original_branch:
+                        self._run_git(["checkout", original_branch], check=False)
+                    err = (
+                        f"Merge parent invariant breached for team '{team_id}': "
+                        f"expected parent {expected_p2}, but HEAD^2 is {actual_p2}"
+                    )
+                    errors.append(err)
+                    return False, team_id, errors
 
         return True, None, []
 
@@ -198,6 +248,15 @@ class IntegrationGate:
         5. 合格時: Release Candidate (rc/{job_id}) 発行
            不合格時: main ブランチへ退避し統合ブランチを隔離
         """
+        # P0-2: 実行開始前の作業ツリーがクリーンであることを検査
+        clean_proc = self._run_git(["status", "--porcelain"], check=False)
+        if clean_proc.returncode != 0 or clean_proc.stdout.strip():
+            return IntegrationResult(
+                success=False,
+                status="UNCLEAN_TREE",
+                errors=["Working tree contains uncommitted changes. Clean working tree is required before integration."],
+            )
+
         current_branch_proc = self._run_git(["branch", "--show-current"], check=False)
         original_branch = current_branch_proc.stdout.strip() or base_commit
 
@@ -210,10 +269,24 @@ class IntegrationGate:
                 audited_bundles=audits,
             )
 
-        integration_branch = self.create_integration_branch(job_id, base_commit=base_commit)
+        verified_commits = {
+            tid: info["verified_commit"]
+            for tid, info in audits.items()
+            if isinstance(info, dict) and "verified_commit" in info
+        }
+
+        try:
+            integration_branch = self.create_integration_branch(job_id, base_commit=base_commit)
+        except ValueError as e:
+            return IntegrationResult(
+                success=False,
+                status="BRANCH_ALREADY_EXISTS",
+                errors=[str(e)],
+                audited_bundles=audits,
+            )
 
         merge_ok, conflict_team, merge_errors = self.merge_team_branches(
-            integration_branch, inputs, original_branch=original_branch
+            integration_branch, inputs, verified_commits=verified_commits, original_branch=original_branch
         )
         if not merge_ok:
             return IntegrationResult(

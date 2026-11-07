@@ -27,6 +27,12 @@ class TestIntegrationGateAudit(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.work_dir = Path(self.temp_dir.name).resolve()
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.work_dir, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name", "Tester"], cwd=self.work_dir, capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=self.work_dir, capture_output=True, check=True)
+        (self.work_dir / "init.txt").write_text("init\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.work_dir, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.work_dir, capture_output=True, check=True)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -45,12 +51,20 @@ class TestIntegrationGateAudit(unittest.TestCase):
         self.assertEqual(res.errors, [])
 
     def test_audit_team_inputs_success(self) -> None:
+        # feature/core ブランチ作成
+        subprocess.run(["git", "checkout", "-b", "feature/core"], cwd=self.work_dir, capture_output=True, check=True)
+        (self.work_dir / "core.txt").write_text("core\n", encoding="utf-8")
+        subprocess.run(["git", "add", "core.txt"], cwd=self.work_dir, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "core"], cwd=self.work_dir, capture_output=True, check=True)
+        core_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.work_dir, capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run(["git", "checkout", "main"], cwd=self.work_dir, capture_output=True, check=True)
+
         mock_bundler = MagicMock(spec=EvidenceBundler)
         valid_res = BundleVerificationResult(
             is_valid=True,
             status="VERIFIED",
             job_id="job-1",
-            head_commit="commit-123",
+            head_commit=core_head,
             tasks=[{"id": "1", "title": "task 1", "evidence": {"token": "tok1"}}],
         )
         mock_bundler.verify_bundle.return_value = valid_res
@@ -59,13 +73,51 @@ class TestIntegrationGateAudit(unittest.TestCase):
         bundle_path = self.work_dir / "bundle.zip"
         bundle_path.touch()
         inputs = [
-            TeamIntegrationInput(team_id="core", bundle_path=bundle_path, branch="feature/core", head_commit="commit-123")
+            TeamIntegrationInput(team_id="core", bundle_path=bundle_path, branch="feature/core", head_commit=core_head)
         ]
         is_valid, audits, errors = gate.audit_team_inputs(inputs)
         self.assertTrue(is_valid)
         self.assertEqual(errors, [])
         self.assertIn("core", audits)
         self.assertEqual(audits["core"]["status"], "VERIFIED")
+        self.assertEqual(audits["core"]["verified_commit"], core_head)
+
+    def test_audit_team_inputs_rejects_branch_head_mismatch_with_bundle(self) -> None:
+        """P0-1: ブランチ先端が Bundle 監査済みコミットから進んでいたり異なる場合、即座に拒絶する。"""
+        # feature/core ブランチでコミットA作成
+        subprocess.run(["git", "checkout", "-b", "feature/core"], cwd=self.work_dir, capture_output=True, check=True)
+        (self.work_dir / "core.txt").write_text("core commit A\n", encoding="utf-8")
+        subprocess.run(["git", "add", "core.txt"], cwd=self.work_dir, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "core A"], cwd=self.work_dir, capture_output=True, check=True)
+        commit_a = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.work_dir, capture_output=True, text=True, check=True).stdout.strip()
+
+        # その後ブランチが勝手に進んでコミットBになる
+        (self.work_dir / "core.txt").write_text("core unapproved commit B\n", encoding="utf-8")
+        subprocess.run(["git", "add", "core.txt"], cwd=self.work_dir, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "core B"], cwd=self.work_dir, capture_output=True, check=True)
+        _commit_b = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.work_dir, capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run(["git", "checkout", "main"], cwd=self.work_dir, capture_output=True, check=True)
+
+        mock_bundler = MagicMock(spec=EvidenceBundler)
+        # Bundle は commit A を検証している
+        bundle_res = BundleVerificationResult(
+            is_valid=True,
+            status="VERIFIED",
+            job_id="job-1",
+            head_commit=commit_a,
+            tasks=[{"id": "1", "title": "task 1", "evidence": {"token": "tok1"}}],
+        )
+        mock_bundler.verify_bundle.return_value = bundle_res
+
+        gate = IntegrationGate(repo_dir=self.work_dir, bundler=mock_bundler)
+        bundle_path = self.work_dir / "bundle.zip"
+        bundle_path.touch()
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=bundle_path, branch="feature/core", head_commit=commit_a)
+        ]
+        is_valid, _audits, errors = gate.audit_team_inputs(inputs)
+        self.assertFalse(is_valid, "Branch HEAD (commit B) differing from Bundle (commit A) must fail audit")
+        self.assertTrue(any("does not match audited bundle HEAD" in err for err in errors))
 
     def test_audit_team_inputs_rejects_unverified_bundle(self) -> None:
         mock_bundler = MagicMock(spec=EvidenceBundler)
@@ -124,6 +176,18 @@ class TestIntegrationGateMerge(unittest.TestCase):
             text=True,
             check=True,
         )
+
+    def test_create_integration_branch_refuses_to_overwrite_existing(self) -> None:
+        """P0-2: 既存の統合ブランチが存在する場合、-B でリセット・上書きせず拒絶する。"""
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        # 初回作成
+        gate.create_integration_branch("job-existing-1", base_commit="main")
+        self._run_git(["checkout", "main"])
+
+        # 同一 Job ID で再作成を試みた場合、上書きせず例外を送出すること
+        with self.assertRaises(ValueError) as ctx:
+            gate.create_integration_branch("job-existing-1", base_commit="main")
+        self.assertIn("already exists", str(ctx.exception))
 
     def test_create_integration_branch_and_merge_success(self) -> None:
         # feature/core ブランチ作成
@@ -200,8 +264,9 @@ class TestIntegrationGateExecution(unittest.TestCase):
         self._run_git(["init", "-b", "main"])
         self._run_git(["config", "user.name", "Tester"])
         self._run_git(["config", "user.email", "tester@example.com"])
+        (self.repo_dir / ".gitignore").write_text("*.zip\n.dev/\n", encoding="utf-8")
         (self.repo_dir / "main.txt").write_text("main\n", encoding="utf-8")
-        self._run_git(["add", "main.txt"])
+        self._run_git(["add", "."])
         self._run_git(["commit", "-m", "init main"])
 
         # feature/core
@@ -231,9 +296,15 @@ class TestIntegrationGateExecution(unittest.TestCase):
         )
 
     def test_execute_integration_success_issues_rc(self) -> None:
+        core_commit = self._run_git(["rev-parse", "feature/core"]).stdout.strip()
+        ui_commit = self._run_git(["rev-parse", "feature/ui"]).stdout.strip()
+
         mock_bundler = MagicMock(spec=EvidenceBundler)
-        valid_res = BundleVerificationResult(is_valid=True, status="VERIFIED", job_id="job-1")
-        mock_bundler.verify_bundle.return_value = valid_res
+        def mock_verify(b_path: Path) -> BundleVerificationResult:
+            if "core" in str(b_path):
+                return BundleVerificationResult(is_valid=True, status="VERIFIED", job_id="job-core", head_commit=core_commit)
+            return BundleVerificationResult(is_valid=True, status="VERIFIED", job_id="job-ui", head_commit=ui_commit)
+        mock_bundler.verify_bundle.side_effect = mock_verify
 
         mock_verifier = MagicMock()
         mock_verifier.run_verification.return_value = (0, "All checks passed!")
@@ -245,8 +316,8 @@ class TestIntegrationGateExecution(unittest.TestCase):
         bundle_ui.touch()
 
         inputs = [
-            TeamIntegrationInput(team_id="core", bundle_path=bundle_core, branch="feature/core"),
-            TeamIntegrationInput(team_id="ui", bundle_path=bundle_ui, branch="feature/ui"),
+            TeamIntegrationInput(team_id="core", bundle_path=bundle_core, branch="feature/core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=bundle_ui, branch="feature/ui", head_commit=ui_commit),
         ]
 
         res = gate.execute_integration("job-succ-1", inputs, base_commit="main")
@@ -257,10 +328,25 @@ class TestIntegrationGateExecution(unittest.TestCase):
         tag_commit = self._run_git(["rev-parse", "rc/job-succ-1"]).stdout.strip()
         self.assertEqual(tag_commit, res.release_candidate_commit)
 
+    def test_execute_integration_rejects_unclean_working_tree(self) -> None:
+        """P0-2: 未コミット変更が存在する場合、統合実行を即座に拒絶する。"""
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        (self.repo_dir / "dirty_untracked.txt").write_text("dirty\n", encoding="utf-8")
+        res = gate.execute_integration("job-dirty", inputs=[])
+        self.assertFalse(res.success)
+        self.assertEqual(res.status, "UNCLEAN_TREE")
+        (self.repo_dir / "dirty_untracked.txt").unlink()
+
     def test_execute_integration_post_verification_failure_rolls_back(self) -> None:
+        core_commit = self._run_git(["rev-parse", "feature/core"]).stdout.strip()
+        ui_commit = self._run_git(["rev-parse", "feature/ui"]).stdout.strip()
+
         mock_bundler = MagicMock(spec=EvidenceBundler)
-        valid_res = BundleVerificationResult(is_valid=True, status="VERIFIED", job_id="job-1")
-        mock_bundler.verify_bundle.return_value = valid_res
+        def mock_verify(b_path: Path) -> BundleVerificationResult:
+            if "core" in str(b_path):
+                return BundleVerificationResult(is_valid=True, status="VERIFIED", job_id="job-core", head_commit=core_commit)
+            return BundleVerificationResult(is_valid=True, status="VERIFIED", job_id="job-ui", head_commit=ui_commit)
+        mock_bundler.verify_bundle.side_effect = mock_verify
 
         mock_verifier = MagicMock()
         mock_verifier.run_verification.return_value = (1, "Integration tests failed!")
@@ -272,8 +358,8 @@ class TestIntegrationGateExecution(unittest.TestCase):
         bundle_ui.touch()
 
         inputs = [
-            TeamIntegrationInput(team_id="core", bundle_path=bundle_core, branch="feature/core"),
-            TeamIntegrationInput(team_id="ui", bundle_path=bundle_ui, branch="feature/ui"),
+            TeamIntegrationInput(team_id="core", bundle_path=bundle_core, branch="feature/core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=bundle_ui, branch="feature/ui", head_commit=ui_commit),
         ]
 
         res = gate.execute_integration("job-fail-1", inputs, base_commit="main")
