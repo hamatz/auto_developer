@@ -8,6 +8,18 @@ from pathlib import Path
 
 TEAM_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 
+SECRET_PATTERNS = (
+    re.compile(r"^\.env(\..+)?$", re.IGNORECASE),
+    re.compile(r"\.(key|pem|pkcs12|pfx)$", re.IGNORECASE),
+    re.compile(r"(token|secret|credential|password)", re.IGNORECASE),
+)
+
+NOISE_PATTERNS = (
+    re.compile(r"(^|/)\.DS_Store$"),
+    re.compile(r"(^|/)__MACOSX(/|$)"),
+    re.compile(r"(^|/)Thumbs\.db$", re.IGNORECASE),
+)
+
 
 class WorktreeError(Exception):
     """Git Worktree操作に関する例外。"""
@@ -172,14 +184,19 @@ class WorktreeManager:
                 capture_output=True,
                 text=True,
             )
-            has_uncommitted = bool(status_res.returncode == 0 and status_res.stdout.strip())
+            if status_res.returncode != 0:
+                raise WorktreeError(
+                    f"git status failed in worktree '{team_id}': {status_res.stderr.strip()}. "
+                    "Aborting removal to prevent unverified data loss."
+                )
+            has_uncommitted = bool(status_res.stdout.strip())
             if has_uncommitted:
                 if not force:
                     raise WorktreeError(
                         f"Cannot remove worktree '{team_id}' with uncommitted changes without force. "
                         "Preserving uncommitted work."
                     )
-                # force=True の場合でも直接破壊せず Quarantine スナップショットを作成して退避保全
+                # force=True の場合でも直接破壊せず Quarantine スナップショットを作成して退避保全 (機密サニタイズ)
                 import tarfile
                 import time
 
@@ -187,8 +204,22 @@ class WorktreeManager:
                 quarantines_dir.mkdir(parents=True, exist_ok=True)
                 snapshot_name = f"snapshot_worktree_{team_id}_{int(time.time())}.tar.gz"
                 snapshot_path = quarantines_dir / snapshot_name
+
+                def _quarantine_filter(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo | None:
+                    normalized = tarinfo.name.replace("\\", "/")
+                    filename = Path(normalized).name
+                    for pat in SECRET_PATTERNS:
+                        if pat.search(filename):
+                            return None
+                    for pat in NOISE_PATTERNS:
+                        if pat.search(normalized):
+                            return None
+                    if "/.git" in normalized or normalized.endswith("/.git"):
+                        return None
+                    return tarinfo
+
                 with tarfile.open(snapshot_path, "w:gz") as tar:
-                    tar.add(target_dir, arcname=team_id)
+                    tar.add(target_dir, arcname=team_id, filter=_quarantine_filter)
 
         branch_to_delete = f"feature/{team_id}"
 

@@ -154,6 +154,46 @@ class TestWorktreeManager(unittest.TestCase):
             names = tar.getnames()
             self.assertTrue(any("dirty.txt" in n for n in names))
 
+    def test_remove_worktree_quarantine_sanitizes_secrets(self) -> None:
+        """Quarantine 退避時に .env や秘密鍵等の機密ファイルが除外（サニタイズ）されること。"""
+        import tarfile
+
+        wt_path = self.manager.create_worktree(team_id="team-sec")
+        (wt_path / "valid.py").write_text("print('clean')\n", encoding="utf-8")
+        (wt_path / ".env").write_text("SECRET_KEY=12345\n", encoding="utf-8")
+        (wt_path / "server.key").write_text("RSA PRIVATE KEY\n", encoding="utf-8")
+        (wt_path / ".DS_Store").write_bytes(b"\x00\x00\x00\x01")
+
+        self.manager.remove_worktree(team_id="team-sec", force=True)
+        self.assertFalse(wt_path.exists())
+
+        quarantines_dir = self.repo_dir / ".dev" / "quarantines"
+        snapshots = sorted(quarantines_dir.glob("snapshot_worktree_team-sec_*.tar.gz"))
+        self.assertTrue(len(snapshots) > 0)
+
+        with tarfile.open(snapshots[-1], "r:gz") as tar:
+            names = tar.getnames()
+            self.assertTrue(any("valid.py" in n for n in names))
+            for n in names:
+                self.assertFalse(n.endswith(".env"), f"Secret file {n} must be excluded from quarantine!")
+                self.assertFalse(n.endswith(".key"), f"Secret file {n} must be excluded from quarantine!")
+                self.assertFalse(n.endswith(".DS_Store"), f"Noise file {n} must be excluded from quarantine!")
+
+    def test_remove_worktree_fails_closed_on_status_error(self) -> None:
+        """git status が失敗した場合、安全停止（Fail-Closed）し WorktreeError を送出すること。"""
+        from unittest.mock import patch
+
+        wt_path = self.manager.create_worktree(team_id="team-err")
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=["git", "status"], returncode=128, stdout="", stderr="fatal: corrupted repository"
+            )
+            with self.assertRaises(WorktreeError):
+                self.manager.remove_worktree(team_id="team-err", force=False)
+
+        # 実ディレクトリがまだ残っていること
+        self.assertTrue(wt_path.exists())
+
     def test_remove_worktree_force_requires_purge_unmerged_to_delete_unmerged_branch(self) -> None:
         """force=True, delete_branch=True でも purge_unmerged=False なら未マージブランチを保全すること。"""
         wt_path = self.manager.create_worktree(team_id="team-a")
