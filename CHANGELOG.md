@@ -22,13 +22,14 @@ Auto Developer v0.3.0 marks the completion of **Stage 1 (Multi-Team Autonomous D
   - **Git-Status-Independent Real-File Scanning**: Pre-scans physical worktree files prior to Git status execution to detect uncommitted and ignored assets.
   - **Fail-Closed Secret Preservation (P0)**: Refuses removal of worktrees containing sensitive files (`.env`, private keys) or secret contents, preventing accidental loss or leakage.
   - **Ignored Work File Quarantine (P0)**: Automatically archives non-sensitive Git-ignored files (`local-notes.txt`, etc.) into compressed quarantine snapshots (`tar.gz` + `manifest.json`) with readback SHA-256 verification before removal.
+  - **Tracked Clean File Exemption**: Differentiates tracked clean files (e.g. `.env.example`) from uncommitted secrets, preventing false-positive secret blocking on clean worktree removal.
 - **Tamper-Proof Evidence Bundle & Third-Party Verifier (`auto-dev bundle` / `auto-dev verify-bundle`)**:
   - Standalone audit package bundling sanitized Git Bundle, Evidence Records, JobState, and execution briefs into an immutable ZIP archive.
   - Isolated clone restoration and deterministic physical verification against real Git commits and Tree objects.
   - Strict Fail-Closed manifest checks rejecting synthetic/zero Tree SHAs, unmanifested ZIP contents, missing task fields (`commit`, `tree_sha`, `spec_sha`, `status`, `checker_decision`), and mismatched evidence tokens.
   - Morning Brief (`NIGHTLY_REPORT.md`) freshness inspection ensuring report HEAD aligns with bundle manifest commit.
 - **Deterministic Acceptance & Security Test Suites**:
-  - Expanded test coverage from 67 tests to **124 tests (+57 tests)** covering multi-team orchestration, worktree isolation, boundary violations, tamper detection, and fail-closed data preservation.
+  - Expanded test coverage from 67 tests to **125 tests (+58 tests)** covering multi-team orchestration, worktree isolation, boundary violations, tamper detection, and fail-closed data preservation.
   - Hardened test payloads against Gitleaks scanning using dynamically combined credential tokens.
 
 ### Changed
@@ -88,13 +89,14 @@ Auto Developer v0.3.0 marks the completion of **Stage 1 (Multi-Team Autonomous D
   - **Git-Status-Independent Real-File Scanning**: Pre-scans physical worktree files prior to Git status execution to detect uncommitted and ignored assets.
   - **Fail-Closed Secret Preservation (P0)**: Refuses removal of worktrees containing sensitive files (`.env`, private keys) or secret contents, preventing accidental loss or leakage.
   - **Ignored Work File Quarantine (P0)**: Automatically archives non-sensitive Git-ignored files (`local-notes.txt`, etc.) into compressed quarantine snapshots (`tar.gz` + `manifest.json`) with readback SHA-256 verification before removal.
+  - **Tracked Clean File Exemption**: Differentiates tracked clean files (e.g. `.env.example`) from uncommitted secrets, preventing false-positive secret blocking on clean worktree removal.
 - **Tamper-Proof Evidence Bundle & Third-Party Verifier (`auto-dev bundle` / `auto-dev verify-bundle`)**:
   - Standalone audit package bundling sanitized Git Bundle, Evidence Records, JobState, and execution briefs into an immutable ZIP archive.
   - Isolated clone restoration and deterministic physical verification against real Git commits and Tree objects.
   - Strict Fail-Closed manifest checks rejecting synthetic/zero Tree SHAs, unmanifested ZIP contents, missing task fields (`commit`, `tree_sha`, `spec_sha`, `status`, `checker_decision`), and mismatched evidence tokens.
   - Morning Brief (`NIGHTLY_REPORT.md`) freshness inspection ensuring report HEAD aligns with bundle manifest commit.
 - **Deterministic Acceptance & Security Test Suites**:
-  - Expanded test coverage from 67 tests to **124 tests (+57 tests)** covering multi-team orchestration, worktree isolation, boundary violations, tamper detection, and fail-closed data preservation.
+  - Expanded test coverage from 67 tests to **125 tests (+58 tests)** covering multi-team orchestration, worktree isolation, boundary violations, tamper detection, and fail-closed data preservation.
   - Hardened test payloads against Gitleaks scanning using dynamically combined credential tokens.
 
 ### Changed
