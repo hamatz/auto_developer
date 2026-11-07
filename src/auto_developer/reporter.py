@@ -176,6 +176,21 @@ class MorningReporter:
                 ]
             )
 
+        bundle_path_str = summary_data.get("bundle_path")
+        if bundle_path_str:
+            lines.extend(
+                [
+                    "",
+                    "## 成果提出パッケージ & 独立検証 (Evidence Bundle)",
+                    "本稼働の全成果コード、コミット履歴、暗号学的検証証跡、およびChecker査読ログをサニタイズした監査パッケージが生成されています。",
+                    f"- **パッケージ保存先**: `{bundle_path_str}`",
+                    "- **第三者・独立監査コマンド**:",
+                    "  ```bash",
+                    f"  auto-dev verify-bundle {bundle_path_str}",
+                    "  ```",
+                ]
+            )
+
         report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def format_console_brief(self, summary_data: dict[str, Any]) -> str:

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+from auto_developer.bundler import EvidenceBundler
 from auto_developer.dispatcher import TaskDispatcher
 from auto_developer.evidence import EvidenceStore
 from auto_developer.guard import GitGuard
@@ -278,6 +279,20 @@ def main(argv: list[str] | None = None) -> int:
         help="Output diagnosis or plan in JSON format",
     )
 
+    # Subcommand: bundle
+    bundle_parser = subparsers.add_parser("bundle", help="Package results and audit evidence into a sanitized bundle")
+    bundle_parser.add_argument("--out", type=Path, default=None, help="Output ZIP path")
+    bundle_parser.add_argument("--job-id", type=str, default=None, help="Optional job ID")
+
+    # Subcommand: verify-bundle
+    verify_bundle_parser = subparsers.add_parser("verify-bundle", help="Verify integrity and evidence of an exported bundle")
+    verify_bundle_parser.add_argument("bundle_path", type=Path, help="Path to bundle ZIP file")
+    verify_bundle_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output verification result in JSON format",
+    )
+
     args = parser.parse_args(argv)
 
     work_dir = args.work_dir.resolve()
@@ -522,6 +537,34 @@ def main(argv: list[str] | None = None) -> int:
                     for act_msg in rec_result.applied_actions:
                         print(f"  ✓ {act_msg}")
             return 0 if rec_result.success else 1
+
+    elif args.subcommand == "bundle":
+        bundler = EvidenceBundler(repo_dir=work_dir)
+        out_path = bundler.create_bundle(dest_path=args.out, job_id=args.job_id)
+        print(f"BUNDLE CREATED: {out_path}")
+        return 0
+
+    elif args.subcommand == "verify-bundle":
+        bundler = EvidenceBundler(repo_dir=work_dir)
+        res = bundler.verify_bundle(args.bundle_path)
+        if getattr(args, "json", False):
+            print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))
+        else:
+            print("=== AUTO DEVELOPER / BUNDLE VERIFICATION ===")
+            print(f" Status:         {'PASSED' if res.is_valid else 'FAILED'}")
+            print(f" Job ID:         {res.job_id or 'Unknown'}")
+            print(f" Head Commit:    {res.head_commit or 'Unknown'}")
+            print(f" Verified Files: {len(res.file_hashes)}")
+            print(f" Tasks Audited:  {len(res.tasks)}")
+            if res.errors:
+                print(" Errors:")
+                for err in res.errors:
+                    print(f"  ✗ {err}")
+            if res.warnings:
+                print(" Warnings:")
+                for warn in res.warnings:
+                    print(f"  ⚠ {warn}")
+        return 0 if res.is_valid else 1
 
     # Default Autonomous Loop ("run" or no subcommand):
     is_mock = getattr(args, "mock", False)

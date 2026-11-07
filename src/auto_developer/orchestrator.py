@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from auto_developer.bundler import EvidenceBundler
 from auto_developer.dispatcher import TaskDispatcher
 from auto_developer.evidence import EvidenceStore
 from auto_developer.guard import GitGuard
@@ -472,6 +473,15 @@ class NightlyOrchestrator:
                     run_cmd = f"python3 -m {root_pkgs[0]} --help"
 
             current_head = self.git_guard.get_current_checkpoint()
+
+            bundle_rel_path = None
+            try:
+                bundler = EvidenceBundler(repo_dir=self.repo_dir)
+                b_path = bundler.create_bundle(job_id=job_state.job_id)
+                bundle_rel_path = str(b_path.resolve().relative_to(self.repo_dir.resolve()))
+            except Exception as e:
+                print(f"Warning: Failed to create evidence bundle: {e}", file=sys.stderr)
+
             self.reporter.write_report(
                 self.report_path,
                 {
@@ -487,6 +497,7 @@ class NightlyOrchestrator:
                     "executive_summary": exec_summary,
                     "run_command": run_cmd,
                     "verify_command": verify_cmd,
+                    "bundle_path": bundle_rel_path,
                 },
             )
             print(f"\nExecution complete! Report written to {self.report_path}")
@@ -537,6 +548,14 @@ class NightlyOrchestrator:
         job_state.quarantined_task = quarantined_info
         job_state.save(self.state_path)
 
+        bundle_rel_path = None
+        try:
+            bundler = EvidenceBundler(repo_dir=self.repo_dir)
+            b_path = bundler.create_bundle(job_id=job_state.job_id)
+            bundle_rel_path = str(b_path.resolve().relative_to(self.repo_dir.resolve()))
+        except Exception:
+            pass
+
         self.reporter.write_report(
             self.report_path,
             {
@@ -548,6 +567,7 @@ class NightlyOrchestrator:
                 "checkpoint": checkpoint,
                 "completed_tasks": succeeded_tasks,
                 "quarantined_task": quarantined_info,
+                "bundle_path": bundle_rel_path,
             },
         )
         return 1

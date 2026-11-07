@@ -18,7 +18,16 @@ from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
 ZIP_PATH = Path("/Users/hamatsumakoto/.gemini/antigravity/brain/d5a0cd95-dc79-481e-828c-48e50566f41a/.user_uploaded/media_1793812425094_fb637520.zip")
 
 
-@unittest.skipUnless(ZIP_PATH.exists(), "Pilot 04 result zip file is not available in local test environment")
+def _is_zip_readable(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            f.read(4)
+        return True
+    except (OSError, PermissionError):
+        return False
+
+
+@unittest.skipUnless(_is_zip_readable(ZIP_PATH), "Pilot 04 result zip file is not available or readable in local test environment")
 class TestPilot04RecoveryE2E(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
