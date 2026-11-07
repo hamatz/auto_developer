@@ -94,7 +94,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 領空侵犯検知時にチーム固有の隔離ブランチ（`quarantine/<team_id>-...`）へ自動退避させ、成果をアーカイブ保全した上で本線をクリーン復元する。
   5. 決定論的受入テスト（`tests/test_multi_team_foundation.py`）:
      - パストラバーサル遮断、削除時の成果保全、Fail-Closed動作、領空侵犯時の自動Quarantineと完全復元を実証する。
-- [ ] 機能Y (Stage 1 最終確定と厳格監査 Stage 1 Finalization & Strict Audit):
+- [x] 機能Y (Stage 1 最終確定と厳格監査 Stage 1 Finalization & Strict Audit):
   1. `WorktreeManager` の非破壊的一括クリーンアップとブランチ成果保全:
      - `cleanup_all(force: bool = False, delete_branches: bool = False)` をデフォルト安全化。
      - `delete_branch=True` 指定時でも、ベースブランチに未マージのコミットが存在する場合はブランチ強制削除（`git branch -D`）を拒否し、未マージ成果を安全に保全する。
@@ -107,6 +107,19 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. 決定論的受入テストの追加:
      - 未マージコミットを持つ Worktree のブランチ保全テスト。
      - 証跡欠落時の `INTEGRITY_ONLY` 拒否判定テスト、および証跡完備時の `VERIFIED` 合格テスト。
+- [ ] 機能Z (Stage 1 完全堅牢化と物理 Git Tree 拘束 Stage 1 Complete Hardening & Git Tree Binding):
+  1. Evidence と物理 Git Tree SHA の厳格拘束（P0-Fail-Open遮断）:
+     - `verify_bundle` は Evidence Record の自己申告を信じず、同梱の `git_bundle.bundle` を検証・参照解決してコミットと Tree SHA を物理照合する。
+     - コミットが存在しない、または Tree SHA が一致しない、または架空ダミーハッシュ（例: `0000...`）の場合は即座に `INVALID`（Exit 1）として遮断する。
+     - Evidence の `spec_sha` がバンドル内 `SPEC.md` の SHA-256 と一致しない（または空）の場合も即座に `INVALID` とする。
+     - `status == COMPLETED` かつ `checker.decision == APPROVE` かつ Git Tree SHA と SPEC SHA が物理実証された場合のみ `VERIFIED`（Exit 0）を許可する。
+  2. Worktree 強制削除時の成果保全と完全破棄ガード（P0-成果保護）:
+     - 未コミット変更がある Worktree の削除時、直接の破壊的消去を禁止し、必ず Quarantine スナップショットアーカイブ（`.dev/quarantines/snapshot_worktree_...`）へ自動退避した上で解除する。
+     - 未統合ブランチは `delete_branch=True` でも保全し、明示フラグ `purge_unmerged=True` が指定された場合のみ削除を許可する。
+  3. 決定論的受入テストの追加:
+     - 架空 Evidence 注入ケース（Sol氏再現シナリオ）に対する `INVALID` 遮断テスト。
+     - 未コミット変更 Worktree 削除時の自動 Quarantine 保全テスト。
+     - 未統合ブランチの `purge_unmerged` ガードテスト。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
