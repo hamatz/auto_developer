@@ -297,22 +297,31 @@ class TestMultiTeamFoundation(unittest.TestCase):
         self.assertEqual(res_fake_commit.status, "INVALID")
         self.assertFalse(res_fake_commit.is_valid)
 
-        # 8. Quarantine 退避時の機密ファイル (.env, *.key) 除外の検証
+        # 8. Quarantine 退避時の機密ファイル (.env, *.key) 存在による Worktree 削除拒否 (Fail-Closed 保全) の検証
         import tarfile
 
+        from auto_developer.worktree import WorktreeError
         q_wt_sec = self.wt_manager.create_worktree(team_id="team-quarantine-sec")
         (q_wt_sec / "safe.py").write_text("print('safe')\n", encoding="utf-8")
         (q_wt_sec / ".env").write_text("SECRET=123\n", encoding="utf-8")
         (q_wt_sec / "id_rsa.key").write_text("KEY_DATA\n", encoding="utf-8")
+        with self.assertRaises(WorktreeError):
+            self.wt_manager.remove_worktree(team_id="team-quarantine-sec", force=True)
+        self.assertTrue(q_wt_sec.exists(), "Worktree with .env must be preserved without deletion")
+
+        # 機密ファイルを退避・解消した後は安全に削除され、ノイズ (.DS_Store) のみ除外されること
+        (q_wt_sec / ".env").unlink()
+        (q_wt_sec / "id_rsa.key").unlink()
+        (q_wt_sec / ".DS_Store").write_bytes(b"\x00")
         self.wt_manager.remove_worktree(team_id="team-quarantine-sec", force=True)
+        self.assertFalse(q_wt_sec.exists())
 
         q_sec_snapshots = sorted(quarantines_dir.glob("snapshot_worktree_team-quarantine-sec_*.tar.gz"))
         self.assertTrue(len(q_sec_snapshots) > 0)
         with tarfile.open(q_sec_snapshots[-1], "r:gz") as tar:
             tar_names = tar.getnames()
             self.assertTrue(any("safe.py" in n for n in tar_names))
-            self.assertFalse(any(n.endswith(".env") for n in tar_names))
-            self.assertFalse(any(n.endswith(".key") for n in tar_names))
+            self.assertFalse(any(n.endswith(".DS_Store") for n in tar_names))
 
         # 9. ファイル内容にAPIキー等を含む場合の Worktree 削除停止 (Fail-Closed) の検証
         q_wt_leak = self.wt_manager.create_worktree(team_id="team-quarantine-leak")
@@ -350,6 +359,36 @@ class TestMultiTeamFoundation(unittest.TestCase):
         res_extra = bundler.verify_bundle(extra_file_zip)
         self.assertEqual(res_extra.status, "INVALID")
         self.assertFalse(res_extra.is_valid)
+
+        # 12. Manifest 側のタスク commit 空文字遮断の検証 (P1)
+        with zipfile.ZipFile(verified_bundle, "r") as zf:
+            m_empty_commit = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+        m_empty_commit["tasks"][0]["commit"] = ""
+        empty_commit_zip = self.repo_dir / "audit_test_empty_commit.zip"
+        with zipfile.ZipFile(verified_bundle, "r") as zf, zipfile.ZipFile(empty_commit_zip, "w") as out_zf:
+            for name in zf.namelist():
+                if name == "bundle_manifest.json":
+                    out_zf.writestr(name, json.dumps(m_empty_commit).encode("utf-8"))
+                else:
+                    out_zf.writestr(name, zf.read(name))
+        res_empty_c = bundler.verify_bundle(empty_commit_zip)
+        self.assertEqual(res_empty_c.status, "INVALID")
+        self.assertFalse(res_empty_c.is_valid)
+
+        # 13. Manifest 側のタスク spec_sha 不一致遮断の検証 (P1)
+        with zipfile.ZipFile(verified_bundle, "r") as zf:
+            m_spec_mismatch = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+        m_spec_mismatch["tasks"][0]["spec_sha"] = "0" * 64
+        spec_mismatch_zip = self.repo_dir / "audit_test_spec_mismatch.zip"
+        with zipfile.ZipFile(verified_bundle, "r") as zf, zipfile.ZipFile(spec_mismatch_zip, "w") as out_zf:
+            for name in zf.namelist():
+                if name == "bundle_manifest.json":
+                    out_zf.writestr(name, json.dumps(m_spec_mismatch).encode("utf-8"))
+                else:
+                    out_zf.writestr(name, zf.read(name))
+        res_spec_m = bundler.verify_bundle(spec_mismatch_zip)
+        self.assertEqual(res_spec_m.status, "INVALID")
+        self.assertFalse(res_spec_m.is_valid)
 
 
 if __name__ == "__main__":
