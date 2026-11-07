@@ -8,6 +8,8 @@
   },
   "suggestedPrompts": [
     "/nightly-run",
-    "/nightly-setup"
+    "/nightly-setup",
+    "/nightly-bundle",
+    "/nightly-verify"
   ]
 }
