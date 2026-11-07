@@ -165,7 +165,102 @@ class TestEvidenceBundler(unittest.TestCase):
 
         result = bundler.verify_bundle(tampered_zip)
         self.assertFalse(result.is_valid)
+        self.assertEqual(result.status, "INVALID")
         self.assertTrue(any("Hash mismatch" in err for err in result.errors))
+
+    def test_bundle_collects_evidence_records_from_all_locations(self):
+        # archive ディレクトリと .dev/evidence ディレクトリのレコード収集
+        archive_dir = self.repo / ".git" / "nightly_evidence" / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        (archive_dir / "task_2.json").write_text(
+            json.dumps({
+                "task_id": "2",
+                "checkpoint": "chk2",
+                "tree_sha": "tree2",
+                "spec_sha": "spec2",
+                "checker": {"decision": "APPROVE"},
+                "status": "COMPLETED",
+            }),
+            encoding="utf-8",
+        )
+
+        dev_evidence_dir = self.repo / ".dev" / "evidence"
+        dev_evidence_dir.mkdir(parents=True, exist_ok=True)
+        (dev_evidence_dir / "task_3.json").write_text(
+            json.dumps({
+                "task_id": "3",
+                "checkpoint": "chk3",
+                "tree_sha": "tree3",
+                "spec_sha": "spec3",
+                "checker": {"decision": "APPROVE"},
+                "status": "COMPLETED",
+            }),
+            encoding="utf-8",
+        )
+
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        out_zip = bundler.create_bundle(dest_path=self.repo / "all_locations.zip")
+
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            namelist = zf.namelist()
+            self.assertIn("evidence/task_1.json", namelist)
+            self.assertIn("evidence/task_2.json", namelist)
+            self.assertIn("evidence/task_3.json", namelist)
+
+    def test_verify_bundle_three_way_audit(self):
+        # 1. 証跡ありで完全合格 -> VERIFIED
+        res_tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo, capture_output=True, text=True, check=True)
+        head_tree = res_tree.stdout.strip()
+        import hashlib
+        spec_hash = hashlib.sha256((self.repo / "SPEC.md").read_bytes()).hexdigest()
+
+        records_dir = self.repo / ".git" / "nightly_evidence" / "records"
+        (records_dir / "task_1.json").write_text(
+            json.dumps({
+                "task_id": "1",
+                "checkpoint": "chk1",
+                "tree_sha": head_tree,
+                "spec_sha": spec_hash,
+                "checker": {"decision": "APPROVE", "reason": "All good"},
+                "status": "COMPLETED",
+            }),
+            encoding="utf-8",
+        )
+
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        valid_zip = bundler.create_bundle(dest_path=self.repo / "valid_audit.zip")
+        res_valid = bundler.verify_bundle(valid_zip)
+        self.assertEqual(res_valid.status, "VERIFIED")
+        self.assertTrue(res_valid.is_valid)
+
+        # 2. 証跡レコードが0件のバンドル -> INTEGRITY_ONLY
+        import shutil
+        shutil.rmtree(records_dir)
+        records_dir.mkdir(parents=True, exist_ok=True)
+        no_evidence_zip = bundler.create_bundle(dest_path=self.repo / "no_evidence.zip")
+        res_no_evidence = bundler.verify_bundle(no_evidence_zip)
+        self.assertEqual(res_no_evidence.status, "INTEGRITY_ONLY")
+        self.assertFalse(res_no_evidence.is_valid)
+        self.assertTrue(
+            any("Audit rejected: No verified Evidence Records found" in w for w in res_no_evidence.warnings)
+        )
+
+        # 3. Checker が REJECT のレコードが含まれるバンドル -> INVALID
+        (records_dir / "task_1.json").write_text(
+            json.dumps({
+                "task_id": "1",
+                "checkpoint": "chk1",
+                "tree_sha": head_tree,
+                "spec_sha": spec_hash,
+                "checker": {"decision": "REJECT", "reason": "Bad logic"},
+                "status": "FAILED",
+            }),
+            encoding="utf-8",
+        )
+        rejected_zip = bundler.create_bundle(dest_path=self.repo / "rejected.zip")
+        res_rejected = bundler.verify_bundle(rejected_zip)
+        self.assertEqual(res_rejected.status, "INVALID")
+        self.assertFalse(res_rejected.is_valid)
 
     def test_cli_bundle_and_verify_bundle(self):
         from auto_developer.cli import main
@@ -193,6 +288,21 @@ class TestEvidenceBundler(unittest.TestCase):
         self.assertEqual(exit_code_json, 0)
         parsed = json.loads(captured.getvalue())
         self.assertTrue(parsed["is_valid"])
+        self.assertEqual(parsed["status"], "VERIFIED")
+
+        # 4. 証跡レコードがないバンドルに対する verify-bundle -> exit code 2 (INTEGRITY_ONLY)
+        import shutil
+
+        shutil.rmtree(self.repo / ".git" / "nightly_evidence" / "records")
+        no_ev_zip = self.repo / "no_ev_cli.zip"
+        self.assertEqual(main(["--work-dir", str(self.repo), "bundle", "--out", str(no_ev_zip)]), 0)
+        exit_code_no_ev = main(["--work-dir", str(self.repo), "verify-bundle", str(no_ev_zip)])
+        self.assertEqual(exit_code_no_ev, 2)
+
+        # 5. 改ざんされたバンドルに対する verify-bundle -> exit code 1 (INVALID)
+        no_ev_zip.write_bytes(b"corrupted zip content")
+        exit_code_invalid = main(["--work-dir", str(self.repo), "verify-bundle", str(no_ev_zip)])
+        self.assertEqual(exit_code_invalid, 1)
 
 
 if __name__ == "__main__":

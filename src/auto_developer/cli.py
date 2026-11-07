@@ -551,7 +551,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2))
         else:
             print("=== AUTO DEVELOPER / BUNDLE VERIFICATION ===")
-            print(f" Status:         {'PASSED' if res.is_valid else 'FAILED'}")
+            print(f" Status:         {res.status}")
             print(f" Job ID:         {res.job_id or 'Unknown'}")
             print(f" Head Commit:    {res.head_commit or 'Unknown'}")
             print(f" Verified Files: {len(res.file_hashes)}")
@@ -564,7 +564,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(" Warnings:")
                 for warn in res.warnings:
                     print(f"  ⚠ {warn}")
-        return 0 if res.is_valid else 1
+        if res.status == "VERIFIED":
+            return 0
+        elif res.status == "INTEGRITY_ONLY":
+            return 2
+        else:
+            return 1
 
     # Default Autonomous Loop ("run" or no subcommand):
     is_mock = getattr(args, "mock", False)
