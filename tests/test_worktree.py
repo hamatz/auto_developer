@@ -154,6 +154,38 @@ class TestWorktreeManager(unittest.TestCase):
             names = tar.getnames()
             self.assertTrue(any("dirty.txt" in n for n in names))
 
+    def test_remove_worktree_refuses_deletion_if_ignored_env_only(self) -> None:
+        """.gitignore で無視された .env のみが存在する場合でも、git status に頼らず実ファイルスキャンで削除を拒否し保全すること。"""
+        # リポジトリ全体で .env を無視するよう設定
+        gitignore_path = self.repo_dir / ".gitignore"
+        existing_gitignore = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
+        gitignore_path.write_text(existing_gitignore + "\n.env\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".gitignore"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: ignore .env"], cwd=self.repo_dir, check=True)
+
+        wt_path = self.manager.create_worktree(team_id="team-ignored")
+        # .env のみを作成
+        (wt_path / ".env").write_text("DATABASE_URL=sqlite:///db.sqlite3\n", encoding="utf-8")
+
+        # git status --porcelain が空であることを確認
+        status_res = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=wt_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(status_res.stdout.strip(), "", "Ignored .env must not appear in git status")
+
+        # force=True でも実ファイルスキャンにより削除が拒否されること
+        with self.assertRaises(WorktreeError) as ctx:
+            self.manager.remove_worktree(team_id="team-ignored", force=True)
+
+        self.assertIn("sensitive files", str(ctx.exception))
+        # Worktree と .env が物理保全されていること
+        self.assertTrue(wt_path.exists())
+        self.assertTrue((wt_path / ".env").exists())
+
     def test_remove_worktree_quarantine_refuses_deletion_if_sensitive_files_exist(self) -> None:
         """P0: .env や秘密鍵等の機密ファイルが未保存で消失するのを防ぐため、削除を拒否（Fail-Closed保全）すること。"""
         wt_path = self.manager.create_worktree(team_id="team-sec")
