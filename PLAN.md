@@ -21,7 +21,7 @@
 - [x] 1. `WorktreeManager` のパストラバーサル遮断と安全な削除（`src/auto_developer/worktree.py`）および単体テスト
 - [x] 2. `TeamManifest` のスキーマ厳格化と型安全バリデーション（`src/auto_developer/manifest.py`）および単体テスト
 - [x] 3. `BoundaryGuard` の Fail-Closed 化・glob 厳格化・rename 追跡（`src/auto_developer/boundary.py`）および単体テスト
-- [ ] 4. `BoundaryGuard` のオーケストレーター実行経路接続と自動 Quarantine 連携（`src/auto_developer/orchestrator.py`）
+- [x] 4. `BoundaryGuard` のオーケストレーター実行経路接続と自動 Quarantine 連携（`src/auto_developer/orchestrator.py`）
 - [ ] 5. 領域侵犯時の自動 Quarantine と成果保全の実証受入テスト（`tests/test_multi_team_foundation.py`）
 
 ## 止まっていること・判断待ち
