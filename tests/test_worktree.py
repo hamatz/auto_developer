@@ -186,6 +186,49 @@ class TestWorktreeManager(unittest.TestCase):
         self.assertTrue(wt_path.exists())
         self.assertTrue((wt_path / ".env").exists())
 
+    def test_remove_worktree_quarantines_ignored_non_sensitive_work_files(self) -> None:
+        """P0: .gitignore で無視された非機密の作業ファイル (local-notes.txt等) が force=True で Quarantine 退避され物理保全されること。"""
+        import tarfile
+
+        # リポジトリ全体で local-notes.txt を無視するよう設定
+        gitignore_path = self.repo_dir / ".gitignore"
+        existing_gitignore = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
+        gitignore_path.write_text(existing_gitignore + "\nlocal-notes.txt\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".gitignore"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: ignore local-notes.txt"], cwd=self.repo_dir, check=True)
+
+        wt_path = self.manager.create_worktree(team_id="team-notes")
+        (wt_path / "local-notes.txt").write_text("critical design notes\n", encoding="utf-8")
+
+        # git status --porcelain が空であることを確認
+        status_res = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=wt_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(status_res.stdout.strip(), "", "Ignored file must not appear in git status")
+
+        # 1. force=False では未保存作業があるため削除を拒否すること
+        with self.assertRaises(WorktreeError):
+            self.manager.remove_worktree(team_id="team-notes", force=False)
+        self.assertTrue(wt_path.exists())
+        self.assertTrue((wt_path / "local-notes.txt").exists())
+
+        # 2. force=True で削除時、Quarantine スナップショットに退避されてから削除されること
+        self.manager.remove_worktree(team_id="team-notes", force=True)
+        self.assertFalse(wt_path.exists())
+
+        quarantines_dir = self.repo_dir / ".dev" / "quarantines"
+        snapshots = sorted(quarantines_dir.glob("snapshot_worktree_team-notes_*.tar.gz"))
+        self.assertTrue(len(snapshots) > 0, "Quarantine snapshot must be created for ignored work files!")
+
+        # スナップショット内に local-notes.txt が退避されていること
+        with tarfile.open(snapshots[-1], "r:gz") as tar:
+            names = tar.getnames()
+            self.assertTrue(any("local-notes.txt" in n for n in names))
+
     def test_remove_worktree_quarantine_refuses_deletion_if_sensitive_files_exist(self) -> None:
         """P0: .env や秘密鍵等の機密ファイルが未保存で消失するのを防ぐため、削除を拒否（Fail-Closed保全）すること。"""
         wt_path = self.manager.create_worktree(team_id="team-sec")
