@@ -189,5 +189,98 @@ class TestIntegrationGateMerge(unittest.TestCase):
         self.assertFalse((self.repo_dir / "shared.txt").exists())
 
 
+class TestIntegrationGateExecution(unittest.TestCase):
+    """統合実行パイプライン（事前監査、マージ、全体検証、RC発行・隔離）の単体テスト。"""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo_dir = Path(self.temp_dir.name).resolve()
+        self._run_git(["init", "-b", "main"])
+        self._run_git(["config", "user.name", "Tester"])
+        self._run_git(["config", "user.email", "tester@example.com"])
+        (self.repo_dir / "main.txt").write_text("main\n", encoding="utf-8")
+        self._run_git(["add", "main.txt"])
+        self._run_git(["commit", "-m", "init main"])
+
+        # feature/core
+        self._run_git(["checkout", "-b", "feature/core", "main"])
+        (self.repo_dir / "core.txt").write_text("core\n", encoding="utf-8")
+        self._run_git(["add", "core.txt"])
+        self._run_git(["commit", "-m", "feat: core"])
+
+        # feature/ui
+        self._run_git(["checkout", "-b", "feature/ui", "main"])
+        (self.repo_dir / "ui.txt").write_text("ui\n", encoding="utf-8")
+        self._run_git(["add", "ui.txt"])
+        self._run_git(["commit", "-m", "feat: ui"])
+
+        self._run_git(["checkout", "main"])
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _run_git(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=self.repo_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    def test_execute_integration_success_issues_rc(self) -> None:
+        mock_bundler = MagicMock(spec=EvidenceBundler)
+        valid_res = BundleVerificationResult(is_valid=True, status="VERIFIED", job_id="job-1")
+        mock_bundler.verify_bundle.return_value = valid_res
+
+        mock_verifier = MagicMock()
+        mock_verifier.run_verification.return_value = (0, "All checks passed!")
+
+        gate = IntegrationGate(repo_dir=self.repo_dir, bundler=mock_bundler, verifier=mock_verifier)
+        bundle_core = self.repo_dir / "core.zip"
+        bundle_ui = self.repo_dir / "ui.zip"
+        bundle_core.touch()
+        bundle_ui.touch()
+
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=bundle_core, branch="feature/core"),
+            TeamIntegrationInput(team_id="ui", bundle_path=bundle_ui, branch="feature/ui"),
+        ]
+
+        res = gate.execute_integration("job-succ-1", inputs, base_commit="main")
+        self.assertTrue(res.success)
+        self.assertEqual(res.status, "SUCCESS")
+        self.assertIsNotNone(res.release_candidate_commit)
+        # タグ rc/job-succ-1 が存在すること
+        tag_commit = self._run_git(["rev-parse", "rc/job-succ-1"]).stdout.strip()
+        self.assertEqual(tag_commit, res.release_candidate_commit)
+
+    def test_execute_integration_post_verification_failure_rolls_back(self) -> None:
+        mock_bundler = MagicMock(spec=EvidenceBundler)
+        valid_res = BundleVerificationResult(is_valid=True, status="VERIFIED", job_id="job-1")
+        mock_bundler.verify_bundle.return_value = valid_res
+
+        mock_verifier = MagicMock()
+        mock_verifier.run_verification.return_value = (1, "Integration tests failed!")
+
+        gate = IntegrationGate(repo_dir=self.repo_dir, bundler=mock_bundler, verifier=mock_verifier)
+        bundle_core = self.repo_dir / "core.zip"
+        bundle_ui = self.repo_dir / "ui.zip"
+        bundle_core.touch()
+        bundle_ui.touch()
+
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=bundle_core, branch="feature/core"),
+            TeamIntegrationInput(team_id="ui", bundle_path=bundle_ui, branch="feature/ui"),
+        ]
+
+        res = gate.execute_integration("job-fail-1", inputs, base_commit="main")
+        self.assertFalse(res.success)
+        self.assertEqual(res.status, "VERIFICATION_FAILED")
+        # 元のブランチ (main) に戻っていること
+        current_branch = self._run_git(["branch", "--show-current"]).stdout.strip()
+        self.assertEqual(current_branch, "main")
+
+
 if __name__ == "__main__":
     unittest.main()

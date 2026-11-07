@@ -156,3 +156,102 @@ class IntegrationGate:
                 return False, team_id, errors
 
         return True, None, []
+
+    def run_post_integration_verification(
+        self,
+        base_commit: str = "main",
+        verify_script: Path | None = None,
+        timeout_sec: int = 300,
+    ) -> tuple[bool, int, str]:
+        """マージ後の統合ブランチ上で全体検証スクリプトを実行する。
+
+        保護ファイル（.github/**, SPEC.md, scripts/verify_local.sh, tests/immunity/**）が
+        意図せず変更されていないかも検証する。
+        """
+        diff_proc = self._run_git(
+            ["diff", "--name-only", base_commit, "--", ".github/", "SPEC.md", "scripts/verify_local.sh", "tests/immunity/"],
+            check=False,
+        )
+        if diff_proc.stdout.strip():
+            return False, 10, f"Protected files modified during integration:\n{diff_proc.stdout.strip()}"
+
+        script_path = verify_script or (self.repo_dir / "scripts" / "verify_local.sh")
+        code, out = self.verifier.run_verification(
+            script_path, timeout_sec=timeout_sec, cwd=self.repo_dir
+        )
+        return code == 0, code, out
+
+    def execute_integration(
+        self,
+        job_id: str,
+        inputs: list[TeamIntegrationInput],
+        base_commit: str = "main",
+        verify_script: Path | None = None,
+        timeout_sec: int = 300,
+    ) -> IntegrationResult:
+        """独立自律チーム統合パイプラインのエンドツーエンド実行。
+
+        1. 全チーム Evidence Bundle 事前監査 (Fail-Closed)
+        2. 統合ブランチ (integration/{job_id}) 作成
+        3. 全フィーチャーブランチの順次マージ (衝突時は推測排除で隔離停止)
+        4. 全体検証ゲートの実行
+        5. 合格時: Release Candidate (rc/{job_id}) 発行
+           不合格時: main ブランチへ退避し統合ブランチを隔離
+        """
+        current_branch_proc = self._run_git(["branch", "--show-current"], check=False)
+        original_branch = current_branch_proc.stdout.strip() or base_commit
+
+        audit_ok, audits, audit_errors = self.audit_team_inputs(inputs)
+        if not audit_ok:
+            return IntegrationResult(
+                success=False,
+                status="AUDIT_FAILED",
+                errors=audit_errors,
+                audited_bundles=audits,
+            )
+
+        integration_branch = self.create_integration_branch(job_id, base_commit=base_commit)
+
+        merge_ok, conflict_team, merge_errors = self.merge_team_branches(
+            integration_branch, inputs, original_branch=original_branch
+        )
+        if not merge_ok:
+            return IntegrationResult(
+                success=False,
+                status="CONFLICT",
+                integration_branch=integration_branch,
+                errors=merge_errors,
+                audited_bundles=audits,
+                details={"conflict_team": conflict_team},
+            )
+
+        verify_ok, code, out = self.run_post_integration_verification(
+            base_commit=base_commit,
+            verify_script=verify_script,
+            timeout_sec=timeout_sec,
+        )
+        if not verify_ok:
+            self._run_git(["checkout", original_branch], check=False)
+            quarantine_branch = f"quarantine/{integration_branch.replace('/', '-')}"
+            self._run_git(["branch", "-m", integration_branch, quarantine_branch], check=False)
+            return IntegrationResult(
+                success=False,
+                status="VERIFICATION_FAILED",
+                integration_branch=quarantine_branch,
+                errors=[f"Post-integration verification failed (Exit {code}):\n{out}"],
+                audited_bundles=audits,
+                details={"exit_code": code, "output": out},
+            )
+
+        rc_commit = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
+        rc_tag = f"rc/{job_id}"
+        self._run_git(["tag", "-f", rc_tag, rc_commit])
+
+        return IntegrationResult(
+            success=True,
+            status="SUCCESS",
+            integration_branch=integration_branch,
+            release_candidate_commit=rc_commit,
+            audited_bundles=audits,
+            details={"rc_tag": rc_tag, "verified_at_commit": rc_commit},
+        )
