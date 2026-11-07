@@ -177,6 +177,48 @@ class WorktreeManager:
 
         # 未コミット変更の残存検査と成果保全
         if target_dir.exists():
+            # 1. 実ファイルの事前スキャン（Git status 判定の前に行い、.gitignore された機密ファイルや機密内容の消失・漏洩を防止）
+            from auto_developer.guard import GitGuard
+
+            sensitive_files_found: list[str] = []
+            for item in sorted(target_dir.rglob("*")):
+                if not item.is_file():
+                    continue
+                rel_to_wt = item.relative_to(target_dir)
+                rel_posix = rel_to_wt.as_posix()
+
+                # Git管理ディレクトリやノイズファイルは除外 (再生成可能なため削除を阻害しない)
+                if rel_posix.startswith(".git") or "/.git" in rel_posix:
+                    continue
+                if any(pat.search(rel_posix) for pat in NOISE_PATTERNS):
+                    continue
+
+                # 既知のシークレットファイル名パターン
+                if GitGuard.is_secret_file(item.name) or any(
+                    pat.search(item.name) for pat in SECRET_PATTERNS
+                ):
+                    sensitive_files_found.append(rel_posix)
+                    continue
+
+                # ファイル内容のディープスキャン
+                try:
+                    content = item.read_bytes()
+                except OSError as err:
+                    raise WorktreeError(f"Failed to read file '{rel_posix}' for secret scanning: {err}") from err
+
+                if GitGuard.has_secret_content(content):
+                    raise WorktreeError(
+                        f"Secret content detected in worktree file '{rel_posix}'. "
+                        "Aborting removal to prevent secret leakage or unverified data loss."
+                    )
+
+            if sensitive_files_found:
+                sample_files = ", ".join(sorted(sensitive_files_found)[:3])
+                raise WorktreeError(
+                    f"Worktree '{team_id}' contains sensitive files excluded from quarantine ({sample_files}); "
+                    "removal refused to prevent data loss. Please commit, move, or clean up sensitive files before removal."
+                )
+
             status_res = subprocess.run(
                 ["git", "status", "--porcelain"],
                 cwd=target_dir,

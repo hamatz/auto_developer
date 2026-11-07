@@ -147,7 +147,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 各タスクの `task_id`, `commit`, `tree_sha`, `spec_sha`, `status`, `checker` を同梱された Evidence Record と 1対1 で完全一致照合し、フィールド改変や不整合を即座に `INVALID` として拒否する。
   4. 決定論的受入テストの拡充:
      - Sol 氏再現シナリオ（HEAD空文字、Manifestタスク改変、ZIP内未知ファイル追加、config.json内APIキー混入時のWorktree削除停止）の決定論的テストを追加。
-- [ ] 機能Φ (Stage 1 完璧クローズ・未保存成果消失阻止 & 全必須フィールド厳格拘束 Stage 1 Perfection: Zero Unsaved Loss & Complete Task Binding):
+- [x] 機能Φ (Stage 1 完璧クローズ・未保存成果消失阻止 & 全必須フィールド厳格拘束 Stage 1 Perfection: Zero Unsaved Loss & Complete Task Binding):
   1. Worktree 削除時の未保存秘密情報（.env 等）存在時における削除拒否（P0）:
      - Worktree 内に Quarantine 対象外となる秘密情報ファイル（`.env`, 秘密鍵等）が未コミットのまま存在する場合、Worktree の削除を即座に拒否し、設定・成果の物理的消失を防止（Fail-Closed 保全）する。
   2. Bundle Manifest タスク全必須フィールドの欠落不可・完全一致照合（P1）:
@@ -155,6 +155,12 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   3. 決定論的受入テストの拡充:
      - `.env` 存在時の Worktree 削除拒否・保全テスト。
      - Manifest タスクの `commit` 空文字、`spec_sha` 不一致に対する `INVALID` 遮断テスト。
+- [ ] 機能Χ (Stage 1 完全無欠・Git status 独立の全ファイル秘密情報スキャン Stage 1 Invincibility: Git-Status-Independent Secret Scanning):
+  1. Git status 独立の実ファイル事前スキャン（P0）:
+     - Worktree 削除時、`git status --porcelain` の判定前に Worktree 内の実ファイルを走査する。
+     - `.gitignore` に含まれている等の理由で Git status が空（変更なし）であっても、`.env` や秘密鍵、または秘密情報を含むファイルが存在する場合は即座に `WorktreeError` を送出して削除を拒否し、設定・成果の物理的消失を絶対に防止する。
+  2. 決定論的受入テスト:
+     - `.gitignore` で無視された `.env` のみが存在する Worktree において、`remove_worktree(force=True)` が確実に削除を拒否し、`.env` が物理保全されることの実証テスト。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
