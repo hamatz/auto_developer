@@ -7,20 +7,21 @@
 -->
 
 ## 現在の目標
-- Phase 13: Stage 1 Complete Hardening & Git Tree Binding (物理Git Tree SHA拘束とWorktree成果完全保全)
-  - P0-1: `EvidenceBundler.verify_bundle()` による物理 Git Tree SHA 照合と架空 Evidence 遮断
-  - P0-2: `WorktreeManager.remove_worktree()` による未コミット変更の自動 Quarantine 退避保全と `purge_unmerged` ガード
-  - P0-3: Sol 氏再現シナリオ（架空 Evidence 注入・未コミット削除・未統合ブランチ保護）の決定論的受入テスト
+- Phase 14: Stage 1 Final Completion & Strict Fail-Closed Hardening (Verifier完全Fail-Closed化とQuarantineサニタイズ)
+  - P0-1: `EvidenceBundler.verify_bundle()` の完全 Fail-Closed 化（Git Bundle展開失敗・空履歴での即座 INVALID、Manifest HEAD/Tree照合）
+  - P1-1: Evidence Record の `commit` と `tree_sha` の 1対1 物理照合および Manifest タスク完全性検証
+  - P1-2: `WorktreeManager` の未コミット退避時の機密ファイル除外（サニタイズ）および `git status` エラー時の Fail-Closed
+  - P0/P1-3: Sol 氏再現の 4 つの異常系ストレステスト（Bundle偽造、Commit不正、Evidence欠落、HEAD偽造）および Quarantine 機密除外の決定論的受入テスト
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - なし
 
 ## ステップ
-- [x] 1. `WorktreeManager` の未コミット変更自動 Quarantine 退避および `purge_unmerged` ガード実装（`src/auto_developer/worktree.py`）と単体テスト
-- [x] 2. `EvidenceBundler.verify_bundle()` の物理 `git_bundle.bundle` 照合と Git Tree SHA / SPEC SHA 厳格拘束（`src/auto_developer/bundler.py`）と単体テスト
-- [x] 3. 架空 Evidence 注入遮断および成果保全の決定論的受入テスト（`tests/test_bundler.py`, `tests/test_worktree.py`, `tests/test_multi_team_foundation.py`）
+- [ ] 1. `WorktreeManager` の未コミット退避時機密サニタイズおよび Git status Fail-Closed 実装（`src/auto_developer/worktree.py`）と単体テスト
+- [ ] 2. `EvidenceBundler.verify_bundle()` の完全 Fail-Closed 化（Git Bundleクローン失敗遮断、Manifest HEAD/Tree照合、Commit 1対1 物理照合、Manifestタスク完全性）（`src/auto_developer/bundler.py`）と単体テスト
+- [ ] 3. Sol 氏再現の異常系ストレステストおよび Quarantine サニタイズの決定論的受入テスト（`tests/test_bundler.py`, `tests/test_worktree.py`, `tests/test_multi_team_foundation.py`）
 
 ## 止まっていること・判断待ち
-- なし（Phase 13: Stage 1 Complete Hardening & Git Tree Binding 完了）
+- なし（`/nightly-run` 実行準備完了）
 
 

@@ -107,7 +107,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. 決定論的受入テストの追加:
      - 未マージコミットを持つ Worktree のブランチ保全テスト。
      - 証跡欠落時の `INTEGRITY_ONLY` 拒否判定テスト、および証跡完備時の `VERIFIED` 合格テスト。
-- [ ] 機能Z (Stage 1 完全堅牢化と物理 Git Tree 拘束 Stage 1 Complete Hardening & Git Tree Binding):
+- [x] 機能Z (Stage 1 完全堅牢化と物理 Git Tree 拘束 Stage 1 Complete Hardening & Git Tree Binding):
   1. Evidence と物理 Git Tree SHA の厳格拘束（P0-Fail-Open遮断）:
      - `verify_bundle` は Evidence Record の自己申告を信じず、同梱の `git_bundle.bundle` を検証・参照解決してコミットと Tree SHA を物理照合する。
      - コミットが存在しない、または Tree SHA が一致しない、または架空ダミーハッシュ（例: `0000...`）の場合は即座に `INVALID`（Exit 1）として遮断する。
@@ -120,6 +120,21 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 架空 Evidence 注入ケース（Sol氏再現シナリオ）に対する `INVALID` 遮断テスト。
      - 未コミット変更 Worktree 削除時の自動 Quarantine 保全テスト。
      - 未統合ブランチの `purge_unmerged` ガードテスト。
+- [ ] 機能Ω (Stage 1 最終完成・厳格 Fail-Closed ハードニング Stage 1 Final Completion & Strict Fail-Closed Hardening):
+  1. Git Bundle 検証失敗時の完全 Fail-Closed（P0）:
+     - `git_bundle.bundle` のクローンまたは検証が失敗した場合、またはコミット履歴が空の場合は即座に `INVALID`（Exit 1）として遮断する。
+     - `valid_trees` が空の場合は検証スルーを許さず、必ず拒否する（Fail-Open 脆弱性の完全撤廃）。
+  2. Manifest HEAD / Tree と実 Git オブジェクトの照合（P0）:
+     - Manifest に記載された `head_commit` および `head_tree_sha` が、Git Bundle 内の実際の `HEAD`（`git rev-parse HEAD`, `git rev-parse HEAD^{tree}`）と完全一致することを検証する。
+  3. Task / Commit / Tree の 1対1 物理対応と完全性（P1）:
+     - Evidence Record の `commit` SHA が実在し、`git rev-parse <commit>^{tree}` が Evidence の `tree_sha` と 1対1 で完全一致することを検証する。
+     - Manifest の `tasks` リストと `evidence/` ディレクトリ内の全 `task_*.json` のタスク集合が双方向で完全一致することを検証する。
+  4. Worktree Quarantine の機密除外と Git status の Fail-Closed（P1）:
+     - 未コミット退避アーカイブ生成時、`.env` や秘密鍵等の機密ファイルを除外（サニタイズ）する。
+     - `git status` が失敗した場合は例外を送出して削除を拒否し、安全停止する。
+  5. 決定論的受入テストの追加:
+     - Sol 氏再現の 4 つの異常系ストレステスト（Git Bundle 偽造、Commit 不正、Evidence ファイル欠落、HEAD 偽造）がすべて確実に `INVALID` で弾かれることを検証するテスト。
+     - 機密ファイル除外と `git status` 異常終了時の安全停止テスト。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
