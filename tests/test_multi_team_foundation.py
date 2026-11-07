@@ -279,6 +279,41 @@ class TestMultiTeamFoundation(unittest.TestCase):
         q_snapshots = list(quarantines_dir.glob("snapshot_worktree_team-quarantine_*.tar.gz"))
         self.assertTrue(len(q_snapshots) > 0, "Quarantine snapshot must be created for uncommitted work")
 
+        # 7. Commit SHA 不正による偽造ケースの検証 -> INVALID (物理遮断)
+        (records_dir / "task_1.json").write_text(
+            json.dumps({
+                "task_id": "1",
+                "checkpoint": "chk1",
+                "commit": "0000000000000000000000000000000000000000",
+                "tree_sha": head_tree,
+                "spec_sha": spec_sha,
+                "checker": {"decision": "APPROVE"},
+                "status": "COMPLETED",
+            }),
+            encoding="utf-8",
+        )
+        fake_commit_bundle = bundler.create_bundle(dest_path=self.repo_dir / "audit_test_fake_commit.zip")
+        res_fake_commit = bundler.verify_bundle(fake_commit_bundle)
+        self.assertEqual(res_fake_commit.status, "INVALID")
+        self.assertFalse(res_fake_commit.is_valid)
+
+        # 8. Quarantine 退避時の機密ファイル (.env, *.key) 除外の検証
+        import tarfile
+
+        q_wt_sec = self.wt_manager.create_worktree(team_id="team-quarantine-sec")
+        (q_wt_sec / "safe.py").write_text("print('safe')\n", encoding="utf-8")
+        (q_wt_sec / ".env").write_text("SECRET=123\n", encoding="utf-8")
+        (q_wt_sec / "id_rsa.key").write_text("KEY_DATA\n", encoding="utf-8")
+        self.wt_manager.remove_worktree(team_id="team-quarantine-sec", force=True)
+
+        q_sec_snapshots = sorted(quarantines_dir.glob("snapshot_worktree_team-quarantine-sec_*.tar.gz"))
+        self.assertTrue(len(q_sec_snapshots) > 0)
+        with tarfile.open(q_sec_snapshots[-1], "r:gz") as tar:
+            tar_names = tar.getnames()
+            self.assertTrue(any("safe.py" in n for n in tar_names))
+            self.assertFalse(any(n.endswith(".env") for n in tar_names))
+            self.assertFalse(any(n.endswith(".key") for n in tar_names))
+
 
 if __name__ == "__main__":
     unittest.main()
