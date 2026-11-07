@@ -368,6 +368,56 @@ class TestIntegrationGateExecution(unittest.TestCase):
         # 元のブランチ (main) に戻っていること
         current_branch = self._run_git(["branch", "--show-current"]).stdout.strip()
         self.assertEqual(current_branch, "main")
+        # 隔離ブランチ名にタイムスタンプが含まれること
+        self.assertIsNotNone(res.integration_branch)
+        self.assertTrue(res.integration_branch.startswith("quarantine/integration-job-fail-1-"))
+
+    def test_post_integration_verification_diff_failure_is_fail_closed(self) -> None:
+        """P1-1: 保護ファイル差分検査で git diff がエラー終了した場合、Fail-Closed で遮断する。"""
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        # 存在しないコミットを指定して git diff を失敗させる
+        ok, code, out = gate.run_post_integration_verification(base_commit="0000000000000000000000000000000000000000")
+        self.assertFalse(ok)
+        self.assertEqual(code, 10)
+        self.assertIn("Git diff execution failed", out)
+
+    def test_rc_tag_idempotence_and_immutability(self) -> None:
+        """P1-2: 同一コミットへの RC タグ発行は冪等成功し、異なるコミットへの上書きは拒絶される。"""
+        core_commit = self._run_git(["rev-parse", "feature/core"]).stdout.strip()
+        ui_commit = self._run_git(["rev-parse", "feature/ui"]).stdout.strip()
+
+        mock_bundler = MagicMock(spec=EvidenceBundler)
+        def mock_verify(b_path: Path) -> BundleVerificationResult:
+            if "core" in str(b_path):
+                return BundleVerificationResult(is_valid=True, status="VERIFIED", job_id="job-core", head_commit=core_commit)
+            return BundleVerificationResult(is_valid=True, status="VERIFIED", job_id="job-ui", head_commit=ui_commit)
+        mock_bundler.verify_bundle.side_effect = mock_verify
+
+        mock_verifier = MagicMock()
+        mock_verifier.run_verification.return_value = (0, "All checks passed!")
+
+        gate = IntegrationGate(repo_dir=self.repo_dir, bundler=mock_bundler, verifier=mock_verifier)
+        bundle_core = self.repo_dir / "core.zip"
+        bundle_ui = self.repo_dir / "ui.zip"
+        bundle_core.touch()
+        bundle_ui.touch()
+
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=bundle_core, branch="feature/core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=bundle_ui, branch="feature/ui", head_commit=ui_commit),
+        ]
+
+        # 1回目実行 -> 成功
+        res1 = gate.execute_integration("job-rc-test", inputs, base_commit="main")
+        self.assertTrue(res1.success)
+        self.assertEqual(res1.status, "SUCCESS")
+
+        # 既存 RC タグを強制的に別のコミットに変更して模擬衝突
+        self._run_git(["tag", "-f", "rc/job-rc-conflict", "main"])
+        res2 = gate.execute_integration("job-rc-conflict", inputs, base_commit="main")
+        self.assertFalse(res2.success)
+        self.assertEqual(res2.status, "RC_TAG_IMMUTABLE_BREACH")
+        self.assertIn("Overwriting release candidate tags is forbidden", res2.errors[0])
 
 
 class TestIntegrationGateAcceptance(unittest.TestCase):

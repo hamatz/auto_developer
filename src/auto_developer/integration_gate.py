@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -222,6 +223,8 @@ class IntegrationGate:
             ["diff", "--name-only", base_commit, "--", ".github/", "SPEC.md", "scripts/verify_local.sh", "tests/immunity/"],
             check=False,
         )
+        if diff_proc.returncode != 0:
+            return False, 10, f"Git diff execution failed during protected file invariant check:\n{diff_proc.stderr or diff_proc.stdout}"
         if diff_proc.stdout.strip():
             return False, 10, f"Protected files modified during integration:\n{diff_proc.stdout.strip()}"
 
@@ -305,7 +308,8 @@ class IntegrationGate:
         )
         if not verify_ok:
             self._run_git(["checkout", original_branch], check=False)
-            quarantine_branch = f"quarantine/{integration_branch.replace('/', '-')}"
+            timestamp = int(time.time())
+            quarantine_branch = f"quarantine/{integration_branch.replace('/', '-')}-{timestamp}"
             self._run_git(["branch", "-m", integration_branch, quarantine_branch], check=False)
             return IntegrationResult(
                 success=False,
@@ -318,7 +322,25 @@ class IntegrationGate:
 
         rc_commit = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
         rc_tag = f"rc/{job_id}"
-        self._run_git(["tag", "-f", rc_tag, rc_commit])
+        # P1-2: Release Candidate タグの冪等性と不変性検査
+        tag_check = self._run_git(["rev-parse", "--verify", f"refs/tags/{rc_tag}"], check=False)
+        if tag_check.returncode == 0:
+            existing_commit = tag_check.stdout.strip()
+            if existing_commit != rc_commit:
+                return IntegrationResult(
+                    success=False,
+                    status="RC_TAG_IMMUTABLE_BREACH",
+                    integration_branch=integration_branch,
+                    errors=[
+                        (
+                            f"RC tag '{rc_tag}' already exists pointing to different commit {existing_commit}. "
+                            f"Overwriting release candidate tags is forbidden (Immutable RC Invariant)."
+                        )
+                    ],
+                    audited_bundles=audits,
+                )
+        else:
+            self._run_git(["tag", rc_tag, rc_commit], check=True)
 
         return IntegrationResult(
             success=True,
