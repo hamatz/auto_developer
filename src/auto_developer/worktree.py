@@ -154,15 +154,17 @@ class WorktreeManager:
         team_id: str,
         force: bool = False,
         delete_branch: bool = False,
+        purge_unmerged: bool = False,
     ) -> bool:
         """チーム専用の Git Worktree を安全に削除する。
-        未コミット成果の強制抹消は行わず、未マージブランチは delete_branch=True でも破棄せず保全する。
+        未コミット成果がある場合は自動 Quarantine 保存を行い、未マージブランチは purge_unmerged=True が
+        明示されない限り force=True でも破棄せず保全する。
         戻り値: ブランチが実際に削除された場合は True、保全・スキップされた場合は False。
         """
         target_dir = self._validate_team_id(team_id)
 
-        # force=False の場合、未コミット変更の残存を検査して安全停止
-        if not force and target_dir.exists():
+        # 未コミット変更の残存検査と成果保全
+        if target_dir.exists():
             status_res = subprocess.run(
                 ["git", "status", "--porcelain"],
                 cwd=target_dir,
@@ -170,11 +172,23 @@ class WorktreeManager:
                 capture_output=True,
                 text=True,
             )
-            if status_res.returncode == 0 and status_res.stdout.strip():
-                raise WorktreeError(
-                    f"Cannot remove worktree '{team_id}' with uncommitted changes without force. "
-                    "Preserving uncommitted work."
-                )
+            has_uncommitted = bool(status_res.returncode == 0 and status_res.stdout.strip())
+            if has_uncommitted:
+                if not force:
+                    raise WorktreeError(
+                        f"Cannot remove worktree '{team_id}' with uncommitted changes without force. "
+                        "Preserving uncommitted work."
+                    )
+                # force=True の場合でも直接破壊せず Quarantine スナップショットを作成して退避保全
+                import tarfile
+                import time
+
+                quarantines_dir = self.repo_dir / ".dev" / "quarantines"
+                quarantines_dir.mkdir(parents=True, exist_ok=True)
+                snapshot_name = f"snapshot_worktree_{team_id}_{int(time.time())}.tar.gz"
+                snapshot_path = quarantines_dir / snapshot_name
+                with tarfile.open(snapshot_path, "w:gz") as tar:
+                    tar.add(target_dir, arcname=team_id)
 
         branch_to_delete = f"feature/{team_id}"
 
@@ -189,12 +203,13 @@ class WorktreeManager:
             cmd.append("--force")
         cmd.append(str(target_dir))
 
-        res = subprocess.run(cmd, cwd=self.repo_dir, check=False, capture_output=True, text=True)
-        if res.returncode != 0:
-            # shutil.rmtree などによる直接削除は行わず、安全にエラーを送出
-            raise WorktreeError(
-                f"Failed to remove worktree for team '{team_id}': {res.stderr.strip()}"
-            )
+        if target_dir.exists():
+            res = subprocess.run(cmd, cwd=self.repo_dir, check=False, capture_output=True, text=True)
+            if res.returncode != 0:
+                # shutil.rmtree などによる直接削除は行わず、安全にエラーを送出
+                raise WorktreeError(
+                    f"Failed to remove worktree for team '{team_id}': {res.stderr.strip()}"
+                )
 
         subprocess.run(["git", "worktree", "prune"], cwd=self.repo_dir, check=False, capture_output=True)
 
@@ -209,13 +224,16 @@ class WorktreeManager:
                 text=True,
             )
             merged_branches = {b.strip().lstrip("* ") for b in merged_res.stdout.splitlines()}
-            if branch_to_delete not in merged_branches and not force:
+            is_unmerged = branch_to_delete not in merged_branches
+
+            if is_unmerged and not purge_unmerged:
                 print(
-                    f"Preserving unmerged branch '{branch_to_delete}' (not merged into HEAD).",
+                    f"Preserving unmerged branch '{branch_to_delete}' (not merged into HEAD). "
+                    "Pass purge_unmerged=True if destruction is explicitly intended.",
                     file=sys.stderr,
                 )
             else:
-                del_flag = "-D" if force else "-d"
+                del_flag = "-D" if (force or purge_unmerged) else "-d"
                 del_res = subprocess.run(
                     ["git", "branch", del_flag, branch_to_delete],
                     cwd=self.repo_dir,
@@ -226,11 +244,21 @@ class WorktreeManager:
 
         return branch_deleted
 
-    def cleanup_all(self, force: bool = False, delete_branches: bool = False) -> None:
+    def cleanup_all(
+        self,
+        force: bool = False,
+        delete_branches: bool = False,
+        purge_unmerged: bool = False,
+    ) -> None:
         """管理下の全 Worktree を安全にクリーンアップする。デフォルトではブランチを保全する。"""
         worktrees = self.list_worktrees()
         for wt in worktrees:
-            self.remove_worktree(team_id=wt.team_id, force=force, delete_branch=delete_branches)
+            self.remove_worktree(
+                team_id=wt.team_id,
+                force=force,
+                delete_branch=delete_branches,
+                purge_unmerged=purge_unmerged,
+            )
 
         subprocess.run(["git", "worktree", "prune"], cwd=self.repo_dir, check=False, capture_output=True)
         if self.worktree_base.exists():
