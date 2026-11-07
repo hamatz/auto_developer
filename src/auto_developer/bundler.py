@@ -199,10 +199,18 @@ class EvidenceBundler:
                         continue
                     try:
                         data = json.loads(rec_file.read_text(encoding="utf-8"))
+                        commit_val = data.get("commit", "")
+                        if isinstance(commit_val, dict):
+                            commit_str = str(commit_val.get("hash", commit_val.get("commit_sha", ""))).strip()
+                        else:
+                            commit_str = str(commit_val or "").strip()
+
                         tasks_manifest.append({
                             "task_id": str(data.get("task_id", "")),
+                            "commit": commit_str,
                             "tree_sha": data.get("tree_sha", ""),
                             "spec_sha": data.get("spec_sha", ""),
+                            "checker": data.get("checker", {}),
                             "checker_decision": data.get("checker", {}).get("decision", "UNSPECIFIED")
                             if isinstance(data.get("checker"), dict)
                             else str(data.get("checker", "")),
@@ -320,7 +328,27 @@ class EvidenceBundler:
             file_hashes: dict[str, str] = manifest_data.get("file_hashes", {})
             result.file_hashes = file_hashes
 
-            # 2. 全ファイルのチェックサム完全一致検証
+            # 2. ZIP 内全ファイルと Manifest 記載ファイルの完全一致検証 (P1: 未知ファイル・パストラバーサル遮断)
+            with zipfile.ZipFile(bundle_path, "r") as zf:
+                zip_entries = [name for name in zf.namelist() if not name.endswith("/")]
+                for entry in zip_entries:
+                    if ".." in entry.replace("\\", "/").split("/") or entry.startswith(("/", "\\")):
+                        result.errors.append(f"Insecure or invalid path in bundle ZIP: {entry}")
+                zip_files = set(zip_entries)
+
+            manifest_declared_files = set(file_hashes.keys()) | {"bundle_manifest.json"}
+            extra_files = zip_files - manifest_declared_files
+            if extra_files:
+                result.errors.append(
+                    f"Undeclared extra files found in bundle ZIP: {sorted(extra_files)}"
+                )
+            missing_zip_files = manifest_declared_files - zip_files
+            if missing_zip_files:
+                result.errors.append(
+                    f"Declared files missing from bundle ZIP: {sorted(missing_zip_files)}"
+                )
+
+            # 3. 全ファイルのチェックサム完全一致検証
             for arcname, expected_hash in file_hashes.items():
                 target_file = inspect_dir / arcname
                 if not target_file.exists():
@@ -333,11 +361,11 @@ class EvidenceBundler:
                         f"Hash mismatch for {arcname}: expected {expected_hash}, got {actual_hash}"
                     )
 
-            # 3. SPEC ハッシュ整合性検証
+            # 4. SPEC ハッシュ整合性検証
             spec_file = inspect_dir / "SPEC.md"
             spec_hash = self._calc_sha256(spec_file) if spec_file.exists() else ""
 
-            # 4. Git bundle の展開と HEAD / Commit / Tree SHA 解決
+            # 5. Git bundle の展開と HEAD / Commit / Tree SHA 解決
             git_bundle_file = inspect_dir / "git_bundle.bundle"
             valid_trees: set[str] = set()
             commit_to_tree: dict[str, str] = {}
@@ -397,42 +425,113 @@ class EvidenceBundler:
                     if not commit_to_tree:
                         result.errors.append("git_bundle.bundle contains no valid commits")
 
-            # Manifest HEAD の実 Git オブジェクト照合 (P0)
+            # 6. Manifest 必須項目の厳格検証および実 Git オブジェクト照合 (P1 Fail-Closed)
+            expected_job_id = str(manifest_data.get("job_id", "")).strip()
             expected_head_commit = str(manifest_data.get("head_commit", "")).strip()
             expected_head_tree = str(manifest_data.get("head_tree_sha", "")).strip()
-            if actual_head_commit and expected_head_commit and expected_head_commit != actual_head_commit:
+
+            if not expected_job_id:
+                result.errors.append("Manifest missing required 'job_id'")
+            if not expected_head_commit or len(expected_head_commit) != 40:
+                result.errors.append(
+                    f"Manifest missing or invalid required 'head_commit': '{expected_head_commit}'"
+                )
+            if not expected_head_tree or len(expected_head_tree) != 40:
+                result.errors.append(
+                    f"Manifest missing or invalid required 'head_tree_sha': '{expected_head_tree}'"
+                )
+
+            if expected_head_commit != actual_head_commit:
                 result.errors.append(
                     f"Manifest head_commit mismatch: manifest has '{expected_head_commit}', git bundle HEAD is '{actual_head_commit}'"
                 )
-            if actual_head_tree and expected_head_tree and expected_head_tree != actual_head_tree:
+            if expected_head_tree != actual_head_tree:
                 result.errors.append(
                     f"Manifest head_tree_sha mismatch: manifest has '{expected_head_tree}', git bundle HEAD^{{tree}} is '{actual_head_tree}'"
                 )
 
-            # 5. Manifest タスクと Evidence ファイルの完全性検証 (P1)
+            # 5. Manifest タスクと Evidence ファイルの完全性・フィールド突合検証 (P1 Fail-Closed)
             manifest_tasks = list(manifest_data.get("tasks", []))
-            manifest_task_ids = {str(t.get("task_id", "")).strip() for t in manifest_tasks if t.get("task_id") is not None}
+            seen_task_ids: set[str] = set()
+            manifest_tasks_by_id: dict[str, dict] = {}
+            for t in manifest_tasks:
+                tid = str(t.get("task_id", "")).strip()
+                if not tid:
+                    result.errors.append("Manifest task entry missing 'task_id'")
+                    continue
+                if tid in seen_task_ids:
+                    result.errors.append(f"Duplicate task '{tid}' found in manifest tasks")
+                seen_task_ids.add(tid)
+                manifest_tasks_by_id[tid] = t
 
             evidence_dir = inspect_dir / "evidence"
             evidence_files = list(evidence_dir.glob("task_*.json")) if evidence_dir.exists() else []
-            file_task_ids: set[str] = set()
+            evidence_records_by_id: dict[str, dict] = {}
 
             for rec_file in evidence_files:
                 try:
                     data = json.loads(rec_file.read_text(encoding="utf-8"))
                     tid = str(data.get("task_id", "")).strip()
                     if tid:
-                        file_task_ids.add(tid)
+                        if tid in evidence_records_by_id:
+                            result.errors.append(f"Duplicate task '{tid}' found in evidence files")
+                        evidence_records_by_id[tid] = data
                 except (json.JSONDecodeError, OSError):
-                    pass
+                    result.errors.append(f"Failed to read/parse evidence record: {rec_file.name}")
 
-            missing_in_files = manifest_task_ids - file_task_ids
+            missing_in_files = seen_task_ids - set(evidence_records_by_id.keys())
             if missing_in_files:
                 result.errors.append(f"Evidence files missing for manifest tasks: {sorted(missing_in_files)}")
 
-            extra_files = file_task_ids - manifest_task_ids
+            extra_files = set(evidence_records_by_id.keys()) - seen_task_ids
             if extra_files:
                 result.errors.append(f"Unexpected unmanifested evidence files: {sorted(extra_files)}")
+
+            # 共通タスクの全フィールド一致照合 (Manifest vs Evidence Record)
+            for tid in sorted(seen_task_ids & set(evidence_records_by_id.keys())):
+                m_task = manifest_tasks_by_id[tid]
+                e_task = evidence_records_by_id[tid]
+
+                m_tree = str(m_task.get("tree_sha", "")).strip()
+                e_tree = str(e_task.get("tree_sha", "")).strip()
+                if m_tree != e_tree:
+                    result.errors.append(
+                        f"Task '{tid}' tree_sha mismatch: manifest has '{m_tree}', evidence has '{e_tree}'"
+                    )
+
+                # Commit 比較
+                m_commit_raw = m_task.get("commit")
+                m_commit = str(m_commit_raw.get("hash", "") if isinstance(m_commit_raw, dict) else (m_commit_raw or "")).strip()
+                e_commit_raw = e_task.get("commit")
+                e_commit = str(e_commit_raw.get("hash", "") if isinstance(e_commit_raw, dict) else (e_commit_raw or "")).strip()
+                if m_commit and e_commit and m_commit != e_commit:
+                    result.errors.append(
+                        f"Task '{tid}' commit mismatch: manifest has '{m_commit}', evidence has '{e_commit}'"
+                    )
+
+                # Status 比較
+                m_status = str(m_task.get("status", "")).strip()
+                e_status = str(e_task.get("status", "")).strip()
+                if m_status != e_status:
+                    result.errors.append(
+                        f"Task '{tid}' status mismatch: manifest has '{m_status}', evidence has '{e_status}'"
+                    )
+
+                # Checker 比較
+                m_dec = (
+                    m_task.get("checker_decision")
+                    or (m_task.get("checker", {}).get("decision") if isinstance(m_task.get("checker"), dict) else str(m_task.get("checker", "")))
+                    or ""
+                ).strip()
+                e_dec = (
+                    e_task.get("checker_decision")
+                    or (e_task.get("checker", {}).get("decision") if isinstance(e_task.get("checker"), dict) else str(e_task.get("checker", "")))
+                    or ""
+                ).strip()
+                if m_dec != e_dec:
+                    result.errors.append(
+                        f"Task '{tid}' checker decision mismatch: manifest has '{m_dec}', evidence has '{e_dec}'"
+                    )
 
             # 6. Evidence Record と Checker 判定および物理 Git Tree / Commit / SPEC 拘束の検証
             approved_records_count = 0
