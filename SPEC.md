@@ -65,6 +65,17 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
 - [ ] 機能U (試行単位 Attempts 履歴の完全監査記録):
   1. タスク実行における各 Attempt（試行番号、フェーズ、終了コード、出力要約）の履歴を配列として追跡・保存する。
   2. 成功時は Evidence Record に `attempts` を記録し、失敗時は `logs/nightly/task_<id>_failure.log` に各 Attempt のログを漏れなく出力する。
+- [x] 機能V (成果提出パッケージ Evidence Bundle の生成と独立検証):
+  1. `auto-dev bundle` は、Gitコミット履歴、Evidence Record、Checker査読ログ、JobState、Morning Brief を集約し、機密（`.env*`, `*.pem`, `*.key` 等）および OS固有不要物（`__MACOSX`, `.DS_Store`）を排除した `bundle_<job_id>.zip` を出力する。
+  2. パッケージ内にはファイルハッシュ一覧、Tree SHA、タスク監査情報を含む `bundle_manifest.json` を含める。
+  3. `auto-dev verify-bundle <path>` は、マニフェストと各ファイルの実ハッシュ、Evidence Record の Tree SHA とコミットの Tree SHA の整合性を検証し、改ざんや欠落がないかを Exit 0/1 で判定する。
+  4. オーケストレーターはジョブ完了時に自動で Evidence Bundle を `.dev/bundles/` 配下に生成し、`NIGHTLY_REPORT.md` に検証コマンドを提示する。
+  5. Antigravity プラグインスキルとして `/nightly-bundle` および `/nightly-verify` を提供し、チャットUI上で完結する。
+- [ ] 機能W (マルチチーム自律開発の基盤構造 Multi-Team Foundation - Stage 1):
+  1. `TeamManifest`（`src/auto_developer/manifest.py`）: プロジェクト設定、チーム定義（`id`, `owns`, `depends_on`, `max_parallel_tasks`）、契約参照（`contracts`）、統合設定（`integration`）を保持し、JSONおよび構造化定義から検証・ロードできるデータモデル。
+  2. `WorktreeManager`（`src/auto_developer/worktree.py`）: 各チーム専用の独立作業ディレクトリ（`.dev/worktrees/<team_id>/`）およびブランチ（`feature/<team_id>`）をアトミックに作成、一覧、衝突検知、安全なクリーンアップを行う。Makerには作業ディレクトリのみを渡し、worktree管理権限は分離する。
+  3. `BoundaryGuard`（`src/auto_developer/boundary.py`）: チームの `owns`（変更許可パターン）を逸脱したファイル作成・変更・削除を機械的に検知し、領域外編集を検知した場合は外部不変条件違反として即座にQuarantine（隔離ロールバック）を発動する。
+  4. 決定論的受入テスト（`tests/test_multi_team_foundation.py`）: 独立した2つのWorktreeが競合なく共存できること、およびBoundaryGuardによる領空侵犯の即時遮断を証明する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
