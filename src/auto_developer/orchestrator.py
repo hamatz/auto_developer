@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -479,7 +480,7 @@ class NightlyOrchestrator:
                 bundler = EvidenceBundler(repo_dir=self.repo_dir)
                 b_path = bundler.create_bundle(job_id=job_state.job_id)
                 bundle_rel_path = str(b_path.resolve().relative_to(self.repo_dir.resolve()))
-            except Exception as e:
+            except (OSError, subprocess.SubprocessError) as e:
                 print(f"Warning: Failed to create evidence bundle: {e}", file=sys.stderr)
 
             self.reporter.write_report(
@@ -553,8 +554,8 @@ class NightlyOrchestrator:
             bundler = EvidenceBundler(repo_dir=self.repo_dir)
             b_path = bundler.create_bundle(job_id=job_state.job_id)
             bundle_rel_path = str(b_path.resolve().relative_to(self.repo_dir.resolve()))
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError) as e:
+            print(f"Warning: Failed to create evidence bundle during failure quarantine: {e}", file=sys.stderr)
 
         self.reporter.write_report(
             self.report_path,

@@ -150,7 +150,7 @@ class MorningReporter:
                             checker_review_text = "TAMPERED (Tree Mismatch)"
                         elif dec:
                             checker_review_text = f"{dec} (Record)"
-                    except Exception:
+                    except (json.JSONDecodeError, OSError):
                         checker_review_text = "CORRUPT (Read Error)"
                 else:
                     if explicit_checker == "APPROVE" and not records_dir.exists():
@@ -230,14 +230,15 @@ class MorningReporter:
             try:
                 res = subprocess.run(
                     ["git", "remote", "get-url", "origin"],
+                    check=False,
                     cwd=effective_repo,
                     capture_output=True,
                     text=True,
                 )
                 if res.returncode == 0 and res.stdout.strip():
                     has_origin = True
-            except Exception:
-                pass
+            except (subprocess.SubprocessError, OSError):
+                has_origin = False
 
             if has_origin:
                 lines.append(

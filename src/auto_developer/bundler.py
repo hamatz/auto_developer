@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import subprocess
 import tempfile
@@ -312,6 +311,8 @@ class EvidenceBundler:
                         status = rec_data.get("status", "")
                         spec_sha = rec_data.get("spec_sha", "")
                         tree_sha = rec_data.get("tree_sha", "")
+                        if not tree_sha:
+                            result.warnings.append(f"Task {task_id} Evidence has empty tree_sha")
 
                         # Checker 判定の検証
                         checker = rec_data.get("checker", {})
@@ -341,6 +342,7 @@ class EvidenceBundler:
                 try:
                     verify_res = subprocess.run(
                         ["git", "bundle", "verify", str(git_bundle_file)],
+                        check=False,
                         capture_output=True,
                         text=True,
                     )
