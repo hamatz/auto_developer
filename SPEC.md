@@ -161,7 +161,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `.gitignore` に含まれている等の理由で Git status が空（変更なし）であっても、`.env` や秘密鍵、または秘密情報を含むファイルが存在する場合は即座に `WorktreeError` を送出して削除を拒否し、設定・成果の物理的消失を絶対に防止する。
   2. 決定論的受入テスト:
      - `.gitignore` で無視された `.env` のみが存在する Worktree において、`remove_worktree(force=True)` が確実に削除を拒否し、`.env` が物理保全されることの実証テスト。
-- [ ] 機能Ψ (Stage 1 完全無欠・Git無視通常ファイルの包括的退避保全 & レポート鮮度保証 Stage 1 Absolute Zero-Loss: Ignored File Quarantine & Report Freshness):
+- [x] 機能Ψ (Stage 1 完全無欠・Git無視通常ファイルの包括的退避保全 & レポート鮮度保証 Stage 1 Absolute Zero-Loss: Ignored File Quarantine & Report Freshness):
   1. Git無視通常ファイル（`local-notes.txt` 等）の Quarantine 包括退避保全（P0）:
      - Worktree 削除時、ノイズパターン（`.git/`, `__pycache__`, `.DS_Store` 等）以外の通常ファイル（`.gitignore` で無視されたファイルを含む）が存在する場合を検出する。
      - `git status --porcelain` が空であっても、これらのファイルが存在する場合は未コミット成果（`has_uncommitted = True`）として扱い、`force=False` では削除拒否、`force=True` では Quarantine アーカイブへ確実に退避・保全してから削除する。
@@ -169,6 +169,12 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - Bundle 生成時に、現行ジョブの最新コミットおよびタスク実績が反映されたレポートを確実に同梱・整合させる。
   3. 決定論的受入テスト:
      - `.gitignore` で無視された `local-notes.txt` が `remove_worktree(force=True)` で Quarantine スナップショットに退避され、中身がハッシュ一致で復元・保全可能であることの実証テスト。
+- [ ] 機能Ω (Stage 1 完全無欠・管理済み設定ファイル誤検知防止 & クリーンWorktree正常削除 Stage 1 Perfect Close: Tracked Config Exemption):
+  1. Git管理済み・未変更ファイル（`.env.example` 等）の事前スキャン免除（P1）:
+     - Worktree 削除時、事前スキャンおよび機密性検査の対象を「未コミット・未追跡・無視ファイル等の未保存成果」に限定する。
+     - リポジトリに管理済みで未変更（`tracked` かつ clean）のファイル（`.env.example` 等）は、Worktree 削除によって失われる成果ではないため、機密検査で誤検出せず通常削除を許可する。
+  2. 決定論的受入テスト:
+     - `.env.example` がコミットされている状態で、クリーンな Worktree を作成し、編集なしで `remove_worktree()` が正常に削除を完了することの実証テスト。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
