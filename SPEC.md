@@ -135,7 +135,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   5. 決定論的受入テストの追加:
      - Sol 氏再現の 4 つの異常系ストレステスト（Git Bundle 偽造、Commit 不正、Evidence ファイル欠落、HEAD 偽造）がすべて確実に `INVALID` で弾かれることを検証するテスト。
      - 機密ファイル除外と `git status` 異常終了時の安全停止テスト。
-- [ ] 機能Ψ (Stage 1 完全防衛・機密スキャン & 厳格マニフェスト照合 Stage 1 Ultimate Defense: Deep Secret Scanning & Strict Manifest Verification):
+- [x] 機能Ψ (Stage 1 完全防衛・機密スキャン & 厳格マニフェスト照合 Stage 1 Ultimate Defense: Deep Secret Scanning & Strict Manifest Verification):
   1. Worktree 隔離における秘密情報内容スキャン & SHA-256 Manifest 読み戻し検証（P0）:
      - ファイル名だけでなくファイル内容（APIキー、シークレットトークン等）をディープスキャンし、秘密情報が検出された場合は意図しない機密漏洩・破壊を防ぐため Worktree 削除を安全に停止（Fail-Closed）する。
      - 安全な変更の場合は各ファイルの SHA-256 ハッシュ付き Manifest を生成し、アーカイブ作成後に読み戻し整合性検証を行い、保全が物理的に確認できた場合のみ Worktree 削除を許可する。
@@ -147,6 +147,14 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 各タスクの `task_id`, `commit`, `tree_sha`, `spec_sha`, `status`, `checker` を同梱された Evidence Record と 1対1 で完全一致照合し、フィールド改変や不整合を即座に `INVALID` として拒否する。
   4. 決定論的受入テストの拡充:
      - Sol 氏再現シナリオ（HEAD空文字、Manifestタスク改変、ZIP内未知ファイル追加、config.json内APIキー混入時のWorktree削除停止）の決定論的テストを追加。
+- [ ] 機能Φ (Stage 1 完璧クローズ・未保存成果消失阻止 & 全必須フィールド厳格拘束 Stage 1 Perfection: Zero Unsaved Loss & Complete Task Binding):
+  1. Worktree 削除時の未保存秘密情報（.env 等）存在時における削除拒否（P0）:
+     - Worktree 内に Quarantine 対象外となる秘密情報ファイル（`.env`, 秘密鍵等）が未コミットのまま存在する場合、Worktree の削除を即座に拒否し、設定・成果の物理的消失を防止（Fail-Closed 保全）する。
+  2. Bundle Manifest タスク全必須フィールドの欠落不可・完全一致照合（P1）:
+     - 各タスクについて、`task_id`, `commit`, `tree_sha`, `spec_sha`, `status`, `checker_decision` を全必須（空文字・欠落不可）とし、Manifest と Evidence Record の間で完全一致照合する。
+  3. 決定論的受入テストの拡充:
+     - `.env` 存在時の Worktree 削除拒否・保全テスト。
+     - Manifest タスクの `commit` 空文字、`spec_sha` 不一致に対する `INVALID` 遮断テスト。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
