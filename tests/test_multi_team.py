@@ -1205,6 +1205,148 @@ class TestMultiTeamOrchestration(unittest.TestCase):
             if verify_script.exists():
                 verify_script.unlink()
 
+    def test_run_workers_process_group_termination_and_orphan_prevention(self) -> None:
+        """RR.2: タイムアウト時および強制停止時にプロセスグループ全体が回収され、孤児プロセスが残存しないことの実証。"""
+        import time
+
+        job_id = "job-orphan-prevention-test"
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id=job_id,
+            teams=[
+                TeamWorkerSpec(team_id="team-orphan-test"),
+            ],
+            base_branch="main",
+        )
+
+        orchestrator.prepare_workers(config)
+        wt_path = orchestrator.worktree_manager.worktree_base / "team-orphan-test"
+
+        # 子孫プロセス（sleep 60）を起動して自身の終了を待つスクリプト
+        # PIDをファイルに書き出す
+        worker_script = (
+            "import subprocess, sys, time\n"
+            "p = subprocess.Popen(['sleep', '60'])\n"
+            "with open('child.pid', 'w') as f:\n"
+            "    f.write(str(p.pid))\n"
+            "sys.stdout.write('CHILD_READY\\n')\n"
+            "sys.stdout.flush()\n"
+            "p.wait()\n"
+        )
+
+        def cmd_factory(team_id: str, path: Path) -> list[str]:
+            return ["python3", "-c", worker_script]
+
+        # 0.5 秒でタイムアウトさせる
+        results = orchestrator.run_workers(
+            config=config,
+            worker_cmd_factory=cmd_factory,
+            timeout_sec=0.5,
+        )
+
+        res = results["team-orphan-test"]
+        self.assertFalse(res.success)
+        self.assertEqual(res.status, "TIMEOUT")
+
+        # 子孫プロセスのPIDを確認
+        pid_file = wt_path / "child.pid"
+        self.assertTrue(pid_file.exists(), "child.pid file should have been written by worker")
+        child_pid = int(pid_file.read_text().strip())
+
+        # 少し待って子プロセスがプロセスグループごと完全に終了していることを確認
+        time.sleep(0.3)
+        child_alive = True
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            child_alive = False
+
+        self.assertFalse(child_alive, f"Child process {child_pid} must be terminated and not orphaned")
+
+        # クリーンアップ
+        orchestrator.worktree_manager.remove_worktree("team-orphan-test", force=True, delete_branch=True, purge_unmerged=True)
+
+    def test_terminate_all_workers_terminates_running_subprocesses(self) -> None:
+        """RR.2: terminate_all_workers が並行実行中の全ワーカーのプロセスグループを安全に回収することの実証。"""
+        import concurrent.futures
+        import time
+
+        job_id = "job-terminate-all-test"
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id=job_id,
+            teams=[
+                TeamWorkerSpec(team_id="team-term-1"),
+                TeamWorkerSpec(team_id="team-term-2"),
+            ],
+            base_branch="main",
+        )
+
+        orchestrator.prepare_workers(config)
+        wt1 = orchestrator.worktree_manager.worktree_base / "team-term-1"
+        wt2 = orchestrator.worktree_manager.worktree_base / "team-term-2"
+
+        worker_script = (
+            "import subprocess, sys, time\n"
+            "p = subprocess.Popen(['sleep', '60'])\n"
+            "with open('child.pid', 'w') as f:\n"
+            "    f.write(str(p.pid))\n"
+            "sys.stdout.write('READY\\n')\n"
+            "sys.stdout.flush()\n"
+            "p.wait()\n"
+        )
+
+        def cmd_factory(team_id: str, path: Path) -> list[str]:
+            return ["python3", "-c", worker_script]
+
+        # 別スレッドで run_workers を開始
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                orchestrator.run_workers,
+                config=config,
+                worker_cmd_factory=cmd_factory,
+                timeout_sec=30.0,
+            )
+
+            # 両方の PID ファイルが書き出されるまで待機（最大5秒）
+            start_wait = time.time()
+            pid1_file = wt1 / "child.pid"
+            pid2_file = wt2 / "child.pid"
+            while time.time() - start_wait < 5.0:
+                if pid1_file.exists() and pid2_file.exists():
+                    break
+                time.sleep(0.05)
+
+            self.assertTrue(pid1_file.exists())
+            self.assertTrue(pid2_file.exists())
+            cpid1 = int(pid1_file.read_text().strip())
+            cpid2 = int(pid2_file.read_text().strip())
+
+            # terminate_all_workers を呼び出して全ワーカーを強制回収
+            term_results = orchestrator.terminate_all_workers(timeout=1.0)
+            self.assertTrue(term_results.get("team-term-1", False))
+            self.assertTrue(term_results.get("team-term-2", False))
+
+            # run_workers の future が完了するまで待機
+            worker_results = future.result(timeout=5.0)
+
+        # 両方のチーム結果が非正常終了（FAILEDまたはCRASHED）となっていること
+        for tid in ["team-term-1", "team-term-2"]:
+            self.assertFalse(worker_results[tid].success)
+
+        # 両方の子孫プロセスがプロセスグループごと停止していること
+        time.sleep(0.3)
+        for cpid in [cpid1, cpid2]:
+            alive = True
+            try:
+                os.kill(cpid, 0)
+            except ProcessLookupError:
+                alive = False
+            self.assertFalse(alive, f"Child process {cpid} should be terminated")
+
+        for tid in ["team-term-1", "team-term-2"]:
+            orchestrator.worktree_manager.remove_worktree(tid, force=True, delete_branch=True, purge_unmerged=True)
+
 
 if __name__ == "__main__":
     unittest.main()

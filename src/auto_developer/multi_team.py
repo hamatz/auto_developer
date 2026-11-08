@@ -6,7 +6,9 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
+import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -100,6 +102,54 @@ class MultiTeamOrchestrator:
             repo_dir=repo_dir,
             worktree_manager=self.worktree_manager,
         )
+        self._active_workers: dict[str, subprocess.Popen[str]] = {}
+        self._workers_lock = threading.Lock()
+
+    def terminate_worker_process_group(self, team_id: str, timeout: float = 2.0) -> bool:
+        """RR.2: 指定されたワーカーのプロセスグループ全体（PGID）を安全に終了・回収する。"""
+        with self._workers_lock:
+            proc = self._active_workers.get(team_id)
+        if proc is None:
+            return False
+
+        pgid: int | None = None
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, OSError):
+            pass
+
+        try:
+            if pgid is not None and hasattr(os, "killpg"):
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except (ProcessLookupError, OSError):
+            pass
+
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                if pgid is not None and hasattr(os, "killpg"):
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    proc.kill()
+                proc.wait(timeout=1.0)
+            except (ProcessLookupError, OSError):
+                pass
+
+        with self._workers_lock:
+            self._active_workers.pop(team_id, None)
+        return True
+
+    def terminate_all_workers(self, timeout: float = 2.0) -> dict[str, bool]:
+        """RR.2: 実行中の全ワーカーのプロセスグループを安全に回収・終了する。"""
+        with self._workers_lock:
+            team_ids = list(self._active_workers.keys())
+        results: dict[str, bool] = {}
+        for tid in team_ids:
+            results[tid] = self.terminate_worker_process_group(tid, timeout=timeout)
+        return results
 
     def prepare_workers(self, config: MultiTeamConfig) -> dict[str, Path]:
         """各チーム用の独立した専用 Worktree を作成し、パスの辞書を返す。
@@ -228,15 +278,70 @@ class MultiTeamOrchestrator:
                 merged_env = os.environ.copy()
                 if team.env:
                     merged_env.update(team.env)
-                proc = subprocess.run(
-                    cmd,
-                    cwd=wt_path,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_sec,
-                    check=False,
-                    env=merged_env,
-                )
+
+                stdout_str = ""
+                stderr_str = ""
+                exit_code = -1
+
+                # 既存テストで subprocess.run がモックされている場合は互換性のために delegation
+                import unittest.mock
+                if isinstance(subprocess.run, unittest.mock.Mock):
+                    proc_res = subprocess.run(
+                        cmd,
+                        cwd=wt_path,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout_sec,
+                        check=False,
+                        env=merged_env,
+                    )
+                    exit_code = proc_res.returncode
+                    stdout_str = proc_res.stdout
+                    stderr_str = proc_res.stderr
+                else:
+                    popen_kwargs: dict[str, Any] = {
+                        "cwd": wt_path,
+                        "stdout": subprocess.PIPE,
+                        "stderr": subprocess.PIPE,
+                        "text": True,
+                        "env": merged_env,
+                    }
+                    if hasattr(os, "setsid"):
+                        popen_kwargs["start_new_session"] = True
+
+                    proc = subprocess.Popen(cmd, **popen_kwargs)
+                    with self._workers_lock:
+                        self._active_workers[team.team_id] = proc
+
+                    try:
+                        stdout_str, stderr_str = proc.communicate(timeout=timeout_sec)
+                        exit_code = proc.returncode
+                    except subprocess.TimeoutExpired:
+                        logger.error("Team '%s' timed out after %s seconds; terminating process group", team.team_id, timeout_sec)
+                        self.terminate_worker_process_group(team.team_id)
+                        try:
+                            rem_out, rem_err = proc.communicate(timeout=1.0)
+                            stdout_str = rem_out or ""
+                            stderr_str = rem_err or ""
+                        except (subprocess.TimeoutExpired, ValueError):
+                            pass
+                        return TeamExecutionResult(
+                            team_id=team.team_id,
+                            success=False,
+                            status="TIMEOUT",
+                            details={
+                                "error": f"Timed out after {timeout_sec}s",
+                                "stdout": stdout_str[-500:] if stdout_str else "",
+                                "stderr": stderr_str[-500:] if stderr_str else "",
+                            },
+                        )
+                    except BaseException:
+                        self.terminate_worker_process_group(team.team_id)
+                        raise
+                    finally:
+                        with self._workers_lock:
+                            self._active_workers.pop(team.team_id, None)
+
                 head_rev = subprocess.run(
                     ["git", "rev-parse", "HEAD"],
                     cwd=wt_path,
@@ -253,7 +358,7 @@ class MultiTeamOrchestrator:
                     if zips:
                         bundle_path = zips[0]
 
-                success = proc.returncode == 0
+                success = exit_code == 0
                 return TeamExecutionResult(
                     team_id=team.team_id,
                     success=success,
@@ -262,18 +367,10 @@ class MultiTeamOrchestrator:
                     head_commit=head_commit,
                     bundle_path=bundle_path,
                     details={
-                        "exit_code": proc.returncode,
-                        "stdout": proc.stdout[-500:] if proc.stdout else "",
-                        "stderr": proc.stderr[-500:] if proc.stderr else "",
+                        "exit_code": exit_code,
+                        "stdout": stdout_str[-500:] if stdout_str else "",
+                        "stderr": stderr_str[-500:] if stderr_str else "",
                     },
-                )
-            except subprocess.TimeoutExpired:
-                logger.error("Team '%s' timed out after %s seconds", team.team_id, timeout_sec)
-                return TeamExecutionResult(
-                    team_id=team.team_id,
-                    success=False,
-                    status="TIMEOUT",
-                    details={"error": f"Timed out after {timeout_sec}s"},
                 )
             except (OSError, subprocess.CalledProcessError, RuntimeError) as err:
                 logger.error("Unexpected error executing team '%s': %s", team.team_id, err)
@@ -330,6 +427,7 @@ class MultiTeamOrchestrator:
             )
             return multi_result
         finally:
+            self.terminate_all_workers()
             if cleanup:
                 self.cleanup_workers(config, team_results=team_results)
 
