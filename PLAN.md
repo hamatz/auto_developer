@@ -17,7 +17,7 @@
 
 ## ステップ
 - [x] 1. PID-PGID 所属照合（`os.getpgid(w.pid) == w.pgid` の所属確認 & 照合不能時停止保留）の実装と単体テスト（Red-First）（XX.1）
-- [ ] 2. EvidenceBundler による独立実検証の適用（マニフェストのない不正zip拒絶 & 復旧状態厳格化）の実装と単体テスト（Red-First）（XX.2）
+- [x] 2. EvidenceBundler による独立実検証の適用（マニフェストのない不正zip拒絶 & 復旧状態厳格化）の実装と単体テスト（Red-First）（XX.2）
 - [ ] 3. Stage 3 通しクラッシュ復旧受入実証、全体検証ゲート合格確認（184+ テスト）、および Evidence Bundle 生成・検証（XX.3 / Stage 3 完了判定）
 
 ## 止まっていること・判断待ち
