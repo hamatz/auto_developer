@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -905,6 +906,84 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.status, "RECOVERY_REQUIRED")
         self.assertTrue(result.details.get("quarantine_rename_failed", False))
+
+    def test_execute_integration_persists_job_state(self) -> None:
+        """CC.2 / P1-C: 統合処理実行中に IntegrationJobState がアトミックに永続化される。"""
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/core/app.py",
+            content="# Core logic\ndef get_core():\n    return 42\n",
+        )
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/ui/view.py",
+            content="from core.app import get_core\n\ndef render():\n    return f'Render: {get_core()}'\n",
+        )
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
+        ]
+
+        result = gate.execute_integration(
+            job_id="job-state-persist",
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+        )
+        self.assertTrue(result.success)
+
+        # 状態ファイルが存在し、COMPLETED となっていること
+        state_file = self.repo_dir / ".dev" / "integration_jobs" / "job-state-persist.json"
+        self.assertTrue(state_file.exists(), f"State file {state_file} does not exist!")
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        self.assertEqual(data.get("job_id"), "job-state-persist")
+        self.assertEqual(data.get("state"), "COMPLETED")
+        self.assertIsNotNone(data.get("rc_tag"))
+
+    def test_recover_interrupted_job_quarantines_crashed_state(self) -> None:
+        """CC.3 / P1-C: 途中で強制終了されたジョブの残存 Worktree とブランチを安全に復旧・隔離する。"""
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        job_id = "job-crashed-1"
+        branch_name = f"integration/{job_id}"
+        wt_id = "int-job-crashed-1"
+
+        # 模擬クラッシュ状態の作成: Worktree とブランチを作成し、状態ファイルを MERGING で保存
+        target_dir = gate.worktree_manager.create_worktree(team_id=wt_id, base_branch="main", branch_name=branch_name)
+        state_dir = self.repo_dir / ".dev" / "integration_jobs"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state_file = state_dir / f"{job_id}.json"
+        state_file.write_text(
+            json.dumps({
+                "job_id": job_id,
+                "state": "MERGING",
+                "integration_branch": branch_name,
+                "worktree_path": str(target_dir),
+                "base_commit": self.base_commit,
+                "updated_at": time.time(),
+            }),
+            encoding="utf-8",
+        )
+
+        # 復旧処理を実行
+        recovered, status, details = gate.recover_interrupted_job(job_id)
+        self.assertTrue(recovered)
+        self.assertEqual(status, "RECOVERED")
+
+        # 孤立 Worktree が解除されていること
+        self.assertFalse(target_dir.exists())
+
+        # 元の統合ブランチは残っておらず、quarantine/...-crashed-... へ退避されていること
+        chk = self._run_git(["rev-parse", "--verify", f"refs/heads/{branch_name}"], check=False)
+        self.assertNotEqual(chk.returncode, 0)
+        quarantine_branch = details.get("quarantine_branch", "")
+        self.assertTrue(quarantine_branch.startswith(f"quarantine/integration-{job_id}-crashed-"))
+
+        # 状態ファイルが更新されていること
+        updated_data = json.loads(state_file.read_text(encoding="utf-8"))
+        self.assertEqual(updated_data.get("state"), "RECOVERED")
 
 
 if __name__ == "__main__":

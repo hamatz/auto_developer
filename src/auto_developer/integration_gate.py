@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -53,6 +55,68 @@ class IntegrationResult:
         }
 
 
+@dataclass
+class IntegrationJobState:
+    """統合ジョブの実行進捗と成果の原子的永続化ステート (CC.2)。"""
+
+    job_id: str
+    state: str  # "INITIALIZED" | "AUDITED" | "WORKTREE_CREATED" | "MERGING" | "VERIFYING" | "RC_ISSUED" | "COMPLETED" | "FAILED" | "RECOVERY_REQUIRED" | "RECOVERED"
+    base_commit: str
+    integration_branch: str
+    worktree_path: str | None = None
+    verified_commits: dict[str, str] = field(default_factory=dict)
+    merged_teams: list[str] = field(default_factory=list)
+    rc_commit: str | None = None
+    rc_tag: str | None = None
+    updated_at: float = field(default_factory=time.time)
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def save(self, jobs_dir: Path) -> Path:
+        jobs_dir.mkdir(parents=True, exist_ok=True)
+        target_file = jobs_dir / f"{self.job_id}.json"
+        tmp_file = jobs_dir / f".{self.job_id}.json.tmp.{os.getpid()}"
+        self.updated_at = time.time()
+        data = {
+            "job_id": self.job_id,
+            "state": self.state,
+            "base_commit": self.base_commit,
+            "integration_branch": self.integration_branch,
+            "worktree_path": self.worktree_path,
+            "verified_commits": self.verified_commits,
+            "merged_teams": self.merged_teams,
+            "rc_commit": self.rc_commit,
+            "rc_tag": self.rc_tag,
+            "updated_at": self.updated_at,
+            "details": self.details,
+        }
+        tmp_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp_file, target_file)
+        return target_file
+
+    @classmethod
+    def load(cls, jobs_dir: Path, job_id: str) -> IntegrationJobState | None:
+        target_file = jobs_dir / f"{job_id}.json"
+        if not target_file.is_file():
+            return None
+        try:
+            data = json.loads(target_file.read_text(encoding="utf-8"))
+            return cls(
+                job_id=data["job_id"],
+                state=data.get("state", "INITIALIZED"),
+                base_commit=data.get("base_commit", "main"),
+                integration_branch=data.get("integration_branch", f"integration/{job_id}"),
+                worktree_path=data.get("worktree_path"),
+                verified_commits=data.get("verified_commits", {}),
+                merged_teams=data.get("merged_teams", []),
+                rc_commit=data.get("rc_commit"),
+                rc_tag=data.get("rc_tag"),
+                updated_at=data.get("updated_at", time.time()),
+                details=data.get("details", {}),
+            )
+        except (json.JSONDecodeError, KeyError, OSError):
+            return None
+
+
 class IntegrationGate:
     """独立自律チーム統合ゲート (Stage 2 IntegrationGate)。
 
@@ -73,6 +137,7 @@ class IntegrationGate:
         self.git_guard = git_guard or GitGuard(repo_dir=self.repo_dir)
         self.verifier = verifier or DeterministicVerifier()
         self.worktree_manager = worktree_manager or WorktreeManager(repo_dir=self.repo_dir)
+        self.jobs_dir = (self.repo_dir / ".dev" / "integration_jobs").resolve()
 
     def audit_team_inputs(
         self, inputs: list[TeamIntegrationInput]
@@ -270,8 +335,21 @@ class IntegrationGate:
         current_branch_proc = self._run_git(["branch", "--show-current"], check=False)
         original_branch = current_branch_proc.stdout.strip() or base_commit
 
+        integration_branch = f"integration/{job_id}"
+        # CC.2: 統合ジョブ状態の初期化・原子的永続化
+        job_state = IntegrationJobState(
+            job_id=job_id,
+            state="INITIALIZED",
+            base_commit=base_commit,
+            integration_branch=integration_branch,
+        )
+        job_state.save(self.jobs_dir)
+
         audit_ok, audits, audit_errors = self.audit_team_inputs(inputs)
         if not audit_ok:
+            job_state.state = "FAILED"
+            job_state.details["errors"] = audit_errors
+            job_state.save(self.jobs_dir)
             return IntegrationResult(
                 success=False,
                 status="AUDIT_FAILED",
@@ -284,11 +362,16 @@ class IntegrationGate:
             for tid, info in audits.items()
             if isinstance(info, dict) and "verified_commit" in info
         }
+        job_state.state = "AUDITED"
+        job_state.verified_commits = verified_commits
+        job_state.save(self.jobs_dir)
 
-        integration_branch = f"integration/{job_id}"
         # P0-2: 既存の統合ブランチが存在する場合は上書きリセット (-B) せず拒絶
         check_proc = self._run_git(["rev-parse", "--verify", f"refs/heads/{integration_branch}"], check=False)
         if check_proc.returncode == 0:
+            job_state.state = "FAILED"
+            job_state.details["error"] = f"Integration branch '{integration_branch}' already exists."
+            job_state.save(self.jobs_dir)
             return IntegrationResult(
                 success=False,
                 status="BRANCH_ALREADY_EXISTS",
@@ -334,7 +417,12 @@ class IntegrationGate:
                 branch_name=integration_branch,
             )
             worktree_created = True
+            job_state.state = "WORKTREE_CREATED"
+            job_state.worktree_path = str(target_dir)
+            job_state.save(self.jobs_dir)
 
+            job_state.state = "MERGING"
+            job_state.save(self.jobs_dir)
             merge_ok, conflict_team, merge_errors = self.merge_team_branches(
                 integration_branch,
                 inputs,
@@ -358,6 +446,9 @@ class IntegrationGate:
                         f"Failed to rename conflict integration branch '{integration_branch}' to '{quarantine_branch}'. "
                         f"Output: {rename_proc.stderr or rename_proc.stdout}"
                     )
+                    job_state.state = "RECOVERY_REQUIRED"
+                    job_state.details["error"] = err_msg
+                    job_state.save(self.jobs_dir)
                     res = IntegrationResult(
                         success=False,
                         status="RECOVERY_REQUIRED",
@@ -369,6 +460,9 @@ class IntegrationGate:
                     return _attach_cleanup_info(res)
 
                 if not recovery_ok:
+                    job_state.state = "RECOVERY_REQUIRED"
+                    job_state.details["quarantine_branch"] = quarantine_branch
+                    job_state.save(self.jobs_dir)
                     res = IntegrationResult(
                         success=False,
                         status="RECOVERY_REQUIRED",
@@ -382,6 +476,9 @@ class IntegrationGate:
                     )
                     return _attach_cleanup_info(res)
 
+                job_state.state = "CONFLICT"
+                job_state.details["quarantine_branch"] = quarantine_branch
+                job_state.save(self.jobs_dir)
                 res = IntegrationResult(
                     success=False,
                     status="CONFLICT",
@@ -392,6 +489,8 @@ class IntegrationGate:
                 )
                 return _attach_cleanup_info(res)
 
+            job_state.state = "VERIFYING"
+            job_state.save(self.jobs_dir)
             verify_ok, code, out = self.run_post_integration_verification(
                 base_commit=base_commit,
                 verify_script=verify_script,
@@ -410,6 +509,9 @@ class IntegrationGate:
                         f"Failed to rename failed integration branch '{integration_branch}' to '{quarantine_branch}'. "
                         f"Output: {rename_proc.stderr or rename_proc.stdout}"
                     )
+                    job_state.state = "RECOVERY_REQUIRED"
+                    job_state.details["error"] = err_msg
+                    job_state.save(self.jobs_dir)
                     res = IntegrationResult(
                         success=False,
                         status="RECOVERY_REQUIRED",
@@ -420,6 +522,9 @@ class IntegrationGate:
                     )
                     return _attach_cleanup_info(res)
 
+                job_state.state = "FAILED"
+                job_state.details["quarantine_branch"] = quarantine_branch
+                job_state.save(self.jobs_dir)
                 res = IntegrationResult(
                     success=False,
                     status="VERIFICATION_FAILED",
@@ -438,6 +543,9 @@ class IntegrationGate:
                 existing_commit = tag_check.stdout.strip()
                 if existing_commit != rc_commit:
                     cleanup_status, cleanup_error = _cleanup_worktree()
+                    job_state.state = "FAILED"
+                    job_state.details["error"] = f"RC tag '{rc_tag}' collision."
+                    job_state.save(self.jobs_dir)
                     res = IntegrationResult(
                         success=False,
                         status="RC_TAG_IMMUTABLE_BREACH",
@@ -454,6 +562,11 @@ class IntegrationGate:
             else:
                 self._run_git(["tag", rc_tag, rc_commit], check=True)
 
+            job_state.state = "COMPLETED"
+            job_state.rc_commit = rc_commit
+            job_state.rc_tag = rc_tag
+            job_state.save(self.jobs_dir)
+
             cleanup_status, cleanup_error = _cleanup_worktree()
             res = IntegrationResult(
                 success=True,
@@ -468,6 +581,9 @@ class IntegrationGate:
         except Exception as e:
             logger.exception("Unexpected error during integration execution")
             cleanup_status, cleanup_error = _cleanup_worktree()
+            job_state.state = "FAILED"
+            job_state.details["error"] = str(e)
+            job_state.save(self.jobs_dir)
             res = IntegrationResult(
                 success=False,
                 status="ERROR",
@@ -479,3 +595,43 @@ class IntegrationGate:
         finally:
             if worktree_created:
                 _cleanup_worktree()
+
+    def recover_interrupted_job(self, job_id: str) -> tuple[bool, str, dict[str, Any]]:
+        """途中で強制終了・クラッシュした統合ジョブの残存リソースを安全に復旧・隔離する (CC.3)。
+
+        Git の実態（Worktree、ブランチ、RC タグ）と保存された JobState を照合し、
+        孤立 Worktree の解放および中断ブランチの隔離を実行する。
+        """
+        job_state = IntegrationJobState.load(self.jobs_dir, job_id)
+        if job_state is None:
+            return False, "JOB_NOT_FOUND", {"error": f"No job state found for '{job_id}'"}
+
+        if job_state.state == "COMPLETED":
+            return True, "ALREADY_COMPLETED", {"rc_tag": job_state.rc_tag, "rc_commit": job_state.rc_commit}
+
+        # 1. 孤立 Worktree の解放
+        cleaned_id = re.sub(r"[^a-z0-9_-]", "-", job_id.lower()).strip("-")
+        wt_team_id = f"int-{cleaned_id}"[:64]
+        try:
+            self.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=False)
+        except (OSError, subprocess.CalledProcessError, WorktreeError, RuntimeError) as err:
+            logger.warning("Failed to remove orphaned worktree '%s' during recovery: %s", wt_team_id, err)
+
+        # 2. 中断された統合ブランチの照合と隔離
+        branch_check = self._run_git(["rev-parse", "--verify", f"refs/heads/{job_state.integration_branch}"], check=False)
+        quarantine_branch = None
+        if branch_check.returncode == 0:
+            timestamp = int(time.time())
+            quarantine_branch = f"quarantine/{job_state.integration_branch.replace('/', '-')}-crashed-{timestamp}"
+            rename_proc = self._run_git(["branch", "-m", job_state.integration_branch, quarantine_branch], check=False)
+            if rename_proc.returncode != 0:
+                job_state.state = "RECOVERY_REQUIRED"
+                job_state.details["error"] = f"Failed to rename crashed branch: {rename_proc.stderr or rename_proc.stdout}"
+                job_state.save(self.jobs_dir)
+                return False, "RECOVERY_REQUIRED", {"quarantine_rename_failed": True, "error": rename_proc.stderr}
+
+        job_state.state = "RECOVERED"
+        if quarantine_branch:
+            job_state.details["quarantine_branch"] = quarantine_branch
+        job_state.save(self.jobs_dir)
+        return True, "RECOVERED", {"quarantine_branch": quarantine_branch}
