@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
+import json
 import logging
 import os
 import re
@@ -86,6 +87,114 @@ class MultiTeamResult:
     release_candidate_commit: str | None = None
     release_candidate_tag: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class MultiTeamRecoveryResult:
+    """VV.2: 親オーケストレータークラッシュ後のジョブ自律復旧診断および実行結果。"""
+
+    job_id: str
+    reclaimed_orphans: list[str] = field(default_factory=list)
+    rescued_bundles: list[str] = field(default_factory=list)
+    reused_bundles: list[str] = field(default_factory=list)
+    pipeline_result: MultiTeamResult | None = None
+    success: bool = False
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class WorkerRegistration:
+    """VV.1: ディスクに永続化される単一ワーカーの起動・状態レコード。"""
+
+    team_id: str
+    pid: int
+    pgid: int
+    worktree_path: str
+    base_branch: str
+    branch_name: str
+    status: str
+    start_time: float
+    updated_at: float
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "team_id": self.team_id,
+            "pid": self.pid,
+            "pgid": self.pgid,
+            "worktree_path": self.worktree_path,
+            "base_branch": self.base_branch,
+            "branch_name": self.branch_name,
+            "status": self.status,
+            "start_time": self.start_time,
+            "updated_at": self.updated_at,
+            "details": self.details,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> WorkerRegistration:
+        return cls(
+            team_id=str(data["team_id"]),
+            pid=int(data["pid"]),
+            pgid=int(data["pgid"]),
+            worktree_path=str(data["worktree_path"]),
+            base_branch=str(data.get("base_branch", "")),
+            branch_name=str(data.get("branch_name", "")),
+            status=str(data.get("status", "UNKNOWN")),
+            start_time=float(data.get("start_time", 0.0)),
+            updated_at=float(data.get("updated_at", 0.0)),
+            details=dict(data.get("details", {})),
+        )
+
+
+class WorkerRegistry:
+    """VV.1: ジョブごとのワーカープロセスの起動・ライフサイクル状態を原子的ファイル保存・復元する永続レジストリ。"""
+
+    def __init__(self, repo_dir: Path, job_id: str) -> None:
+        self.repo_dir = repo_dir
+        self.job_id = job_id
+        self.registry_dir = repo_dir / ".dev" / "integration_jobs" / job_id
+        self.registry_file = self.registry_dir / "workers.json"
+        self._lock = threading.RLock()
+
+    def load(self) -> dict[str, WorkerRegistration]:
+        with self._lock:
+            if not self.registry_file.exists():
+                return {}
+            try:
+                data = json.loads(self.registry_file.read_text(encoding="utf-8"))
+                return {tid: WorkerRegistration.from_dict(w) for tid, w in data.get("workers", {}).items()}
+            except (json.JSONDecodeError, OSError):
+                return {}
+
+    def save(self, workers: dict[str, WorkerRegistration]) -> None:
+        with self._lock:
+            self.registry_dir.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "job_id": self.job_id,
+                "updated_at": time.time(),
+                "workers": {tid: w.to_dict() for tid, w in workers.items()},
+            }
+            content = json.dumps(payload, indent=2, ensure_ascii=False)
+            tmp_path = self.registry_dir / f"workers.json.tmp_{os.getpid()}_{time.time_ns()}"
+            tmp_path.write_text(content, encoding="utf-8")
+            os.replace(tmp_path, self.registry_file)
+
+    def register_worker(self, reg: WorkerRegistration) -> None:
+        with self._lock:
+            current = self.load()
+            current[reg.team_id] = reg
+            self.save(current)
+
+    def update_status(self, team_id: str, status: str, details: dict[str, Any] | None = None) -> None:
+        with self._lock:
+            current = self.load()
+            if team_id in current:
+                current[team_id].status = status
+                current[team_id].updated_at = time.time()
+                if details:
+                    current[team_id].details.update(details)
+                self.save(current)
 
 
 @dataclass
@@ -185,6 +294,7 @@ class MultiTeamOrchestrator:
         self._active_workers: dict[str, WorkerProcessHandle] = {}
         self._all_worker_handles: dict[str, WorkerProcessHandle] = {}
         self._worker_history: dict[str, dict[str, Any]] = {}
+        self._current_job_id: str | None = None
         self._workers_lock = threading.Lock()
 
     def terminate_worker_process_group(self, team_id: str, timeout: float = 2.0) -> bool:
@@ -253,6 +363,11 @@ class MultiTeamOrchestrator:
                 "status": status,
                 "terminated_at": time.time(),
             }
+            if self._current_job_id:
+                try:
+                    WorkerRegistry(repo_dir=self.repo_dir, job_id=self._current_job_id).update_status(team_id, status)
+                except OSError:
+                    pass
 
         return not still_alive
 
@@ -264,6 +379,174 @@ class MultiTeamOrchestrator:
         for tid in team_ids:
             results[tid] = self.terminate_worker_process_group(tid, timeout=timeout)
         return results
+
+    def recover_multi_team_job(
+        self,
+        job_id: str,
+        verify_script: Path | None = None,
+        cleanup: bool = True,
+    ) -> MultiTeamRecoveryResult:
+        """VV.2: 親プロセス強制終了（SIGKILL）等からの自律復旧。
+
+        Case 1: 孤児ワーカーの検知と安全回収（PGIDによるグループ終了）
+        Case 2: 終了済みワーカーの未退避 Evidence Bundle 救出
+        Case 3: 確定済み Evidence Bundle の再利用と統合ゲート（RC発行）への前進
+        """
+        registry = WorkerRegistry(repo_dir=self.repo_dir, job_id=job_id)
+        workers = registry.load()
+        result = MultiTeamRecoveryResult(job_id=job_id)
+
+        if not workers:
+            result.details["error"] = f"No worker registry found for job_id '{job_id}'"
+            return result
+
+        evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+
+        team_results: dict[str, TeamExecutionResult] = {}
+
+        for tid, w in workers.items():
+            wt_path = Path(w.worktree_path)
+            dest_bundle = evidence_dir / f"{tid}.zip"
+
+            # Case 1: 孤児ワーカーが生存しているか検査
+            if w.pgid > 0 and has_active_processes_in_group(w.pgid):
+                # 孤児プロセスグループを安全に停止・回収
+                if hasattr(os, "killpg"):
+                    try:
+                        os.killpg(w.pgid, signal.SIGTERM)
+                    except (ProcessLookupError, OSError):
+                        pass
+                    deadline = time.time() + 1.0
+                    while time.time() < deadline:
+                        if not has_active_processes_in_group(w.pgid):
+                            break
+                        time.sleep(0.05)
+                    if has_active_processes_in_group(w.pgid):
+                        try:
+                            os.killpg(w.pgid, signal.SIGKILL)
+                        except (ProcessLookupError, OSError):
+                            pass
+                registry.update_status(tid, "TERMINATED")
+                result.reclaimed_orphans.append(tid)
+
+            # Case 3: 恒久保存先に確定済み Evidence が存在するか確認
+            if dest_bundle.exists():
+                result.reused_bundles.append(tid)
+                team_results[tid] = TeamExecutionResult(
+                    team_id=tid,
+                    success=True,
+                    status="SUCCESS",
+                    bundle_path=dest_bundle,
+                    evidence_preserved=True,
+                )
+            else:
+                # Case 2: Worktree 内に成果物（Bundle）が残存しているか探索
+                wt_bundles_dir = wt_path / ".dev" / "bundles"
+                wt_bundle: Path | None = None
+                if wt_bundles_dir.exists():
+                    candidates = sorted(wt_bundles_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+                    if candidates:
+                        wt_bundle = candidates[0]
+
+                if wt_bundle and wt_bundle.exists():
+                    # 未退避 Bundle を恒久保存先へ救出
+                    tmp_dest = evidence_dir / f"{tid}.zip.tmp_rec_{os.getpid()}_{time.time_ns()}"
+                    try:
+                        shutil.copy2(wt_bundle, tmp_dest)
+                        try:
+                            os.link(tmp_dest, dest_bundle)
+                            result.rescued_bundles.append(tid)
+                            team_results[tid] = TeamExecutionResult(
+                                team_id=tid,
+                                success=True,
+                                status="SUCCESS",
+                                bundle_path=dest_bundle,
+                                evidence_preserved=True,
+                            )
+                            registry.update_status(tid, "EVIDENCE_PRESERVED")
+                        except FileExistsError:
+                            result.reused_bundles.append(tid)
+                            team_results[tid] = TeamExecutionResult(
+                                team_id=tid,
+                                success=True,
+                                status="SUCCESS",
+                                bundle_path=dest_bundle,
+                                evidence_preserved=True,
+                            )
+                        finally:
+                            if tmp_dest.exists():
+                                tmp_dest.unlink()
+                    except OSError as err:
+                        logger.error("Failed to rescue bundle for team '%s': %s", tid, err)
+                        team_results[tid] = TeamExecutionResult(
+                            team_id=tid,
+                            success=False,
+                            status="RESCUE_FAILED",
+                            details={"error": str(err)},
+                        )
+                else:
+                    team_results[tid] = TeamExecutionResult(
+                        team_id=tid,
+                        success=False,
+                        status="EVIDENCE_NOT_FOUND",
+                    )
+
+        # 全チームの成果物が揃っている場合は統合ゲートへ進める
+        all_preserved = all(tr.evidence_preserved for tr in team_results.values()) and len(team_results) == len(workers)
+        result.success = all_preserved
+
+        if all_preserved:
+            inputs: list[TeamIntegrationInput] = []
+            for tid, tr in team_results.items():
+                worker_reg = workers.get(tid)
+                if tr.bundle_path:
+                    inputs.append(
+                        TeamIntegrationInput(
+                            team_id=tid,
+                            bundle_path=tr.bundle_path,
+                            branch=(worker_reg.branch_name if worker_reg and worker_reg.branch_name else f"team/{tid}"),
+                            head_commit=tr.head_commit,
+                        )
+                    )
+
+            int_res = None
+            rc_commit = None
+            rc_tag = None
+            if verify_script is not None and self.integration_gate is not None:
+                base_branch = next(iter(workers.values())).base_branch or "main"
+                int_res = self.integration_gate.execute_integration(
+                    job_id=job_id,
+                    inputs=inputs,
+                    base_commit=base_branch,
+                    verify_script=verify_script,
+                    resume=True,
+                )
+                if int_res.success:
+                    rc_commit = int_res.release_candidate_commit
+                    rc_tag = str(int_res.details.get("rc_tag")) if int_res.details.get("rc_tag") else f"refs/tags/rc/{job_id}"
+
+            result.pipeline_result = MultiTeamResult(
+                job_id=job_id,
+                success=int_res.success if int_res else True,
+                status="SUCCESS" if (int_res.success if int_res else True) else "INTEGRATION_FAILED",
+                team_results=team_results,
+                integration_result=int_res,
+                release_candidate_commit=rc_commit,
+                release_candidate_tag=rc_tag,
+            )
+
+            if cleanup:
+                for tid, w in workers.items():
+                    wt_p = Path(w.worktree_path)
+                    try:
+                        self.worktree_manager.remove_worktree(tid, force=True)
+                    except (subprocess.SubprocessError, OSError) as exc:
+                        logger.debug("Worktree removal non-fatal error for %s: %s", tid, exc)
+                    if wt_p.exists():
+                        shutil.rmtree(wt_p, ignore_errors=True)
+
+        return result
 
     def prepare_workers(self, config: MultiTeamConfig) -> dict[str, Path]:
         """各チーム用の独立した専用 Worktree を作成し、パスの辞書を返す。
@@ -345,7 +628,9 @@ class MultiTeamOrchestrator:
         worker_fn: Callable[[str, Path], TeamExecutionResult] | None = None,
         timeout_sec: float = 120.0,
     ) -> dict[str, TeamExecutionResult]:
-        """II.1, II.2: 各チームワーカーを並行実行し、結果・コミット・成果物バンドルを収集する。"""
+        """II.1, II.2, VV.1: 各チームワーカーを並行実行し、結果・コミット・成果物バンドルを収集する。"""
+        self._current_job_id = config.job_id
+        registry = WorkerRegistry(repo_dir=self.repo_dir, job_id=config.job_id)
         results: dict[str, TeamExecutionResult] = {}
         paths = {
             team.team_id: self.worktree_manager.worktree_base / team.team_id
@@ -435,11 +720,27 @@ class MultiTeamOrchestrator:
                         self._active_workers[team.team_id] = handle
                         self._all_worker_handles[team.team_id] = handle
 
+                    now = time.time()
+                    registry.register_worker(
+                        WorkerRegistration(
+                            team_id=team.team_id,
+                            pid=proc.pid,
+                            pgid=pgid,
+                            worktree_path=str(wt_path),
+                            base_branch=team.base_branch or config.base_branch,
+                            branch_name=f"team/{team.team_id}",
+                            status="RUNNING",
+                            start_time=now,
+                            updated_at=now,
+                        )
+                    )
+
                     try:
                         stdout_str, stderr_str = proc.communicate(timeout=timeout_sec)
                         exit_code = proc.returncode
                     except subprocess.TimeoutExpired:
                         logger.error("Team '%s' timed out after %s seconds; terminating process group", team.team_id, timeout_sec)
+                        registry.update_status(team.team_id, "TIMEOUT", details={"error": f"Timed out after {timeout_sec}s"})
                         self.terminate_worker_process_group(team.team_id)
                         try:
                             rem_out, rem_err = proc.communicate(timeout=1.0)
@@ -461,6 +762,8 @@ class MultiTeamOrchestrator:
                         self.terminate_worker_process_group(team.team_id)
                         raise
                     finally:
+                        final_status = "COMPLETED" if exit_code == 0 else "FAILED"
+                        registry.update_status(team.team_id, final_status, details={"exit_code": exit_code})
                         with self._workers_lock:
                             if not has_active_processes_in_group(handle.pgid):
                                 self._active_workers.pop(team.team_id, None)
@@ -468,7 +771,7 @@ class MultiTeamOrchestrator:
                                 self._worker_history[team.team_id] = {
                                     "pid": handle.pid,
                                     "pgid": handle.pgid,
-                                    "status": "COMPLETED" if exit_code == 0 else "FAILED",
+                                    "status": final_status,
                                     "finished_at": time.time(),
                                 }
 

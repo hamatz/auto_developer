@@ -7,18 +7,18 @@
 -->
 
 ## 現在の目標
-- Phase 35: Stage 3 ワーカー停止失敗時のハンドル保持と再試行回収保証 (Sol氏レビュー追加P1対応)
-  - P1: 停止失敗時のハンドル維持（機能UU.1）
-  - P1: 再試行による回収能力の実証（機能UU.2）
-  - 受入実証: 全体検証ゲート通過、および Evidence Bundle 生成・検証（機能UU.3）
+- Phase 36: Stage 3 親プロセス強制終了耐性 & ワーカークラッシュ自律復旧 (Sol氏提案マイルストーン)
+  - P1: 永続 Worker Registry 機構の実装（機能VV.1）
+  - P1: 3状態自律復旧エンジン `recover_multi_team_job()` の実装（機能VV.2）
+  - 受入実証: 親プロセスSIGKILL疑似クラッシュ障害注入テスト、全体検証ゲート通過、および Evidence Bundle 生成・検証（機能VV.3）
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - なし
 
 ## ステップ
-- [x] 1. 停止失敗時のハンドル保持と履歴記録（UU.1: still_alive時にactive維持 & TERMINATION_FAILED記録）の実装と単体テスト（Red-First）
-- [x] 2. 再試行による回収能力実証（UU.2: 停止失敗 → ハンドル維持 → 再試行停止成功）の単体テスト（Red-First）
-- [x] 3. 全体検証ゲート合格確認（181+ テスト）、および Evidence Bundle 生成・検証（UU.3）
+- [x] 1. 永続 Worker Registry 機構（VV.1: `.dev/integration_jobs/<job_id>/workers.json` への原子的一時保存 & 状態追跡）の実装と単体テスト（Red-First）
+- [x] 2. 3状態自律復旧エンジン `recover_multi_team_job()`（VV.2: Case 1 孤児回収, Case 2 成果救出, Case 3 前進完了）の実装と単体テスト（Red-First）
+- [x] 3. 親プロセスSIGKILL疑似クラッシュからの完全自律復旧テスト実証、全体検証ゲート合格確認（181+ テスト）、および Evidence Bundle 生成・検証（VV.3）
 
 ## 止まっていること・判断待ち
 - なし
