@@ -18,6 +18,7 @@ if src_dir not in sys.path:
 from auto_developer.bundler import BundleVerificationResult, EvidenceBundler
 from auto_developer.integration_gate import (
     IntegrationGate,
+    IntegrationJobState,
     IntegrationResult,
     TeamIntegrationInput,
 )
@@ -1048,6 +1049,90 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         # 最終状態ファイルが COMPLETED に更新されていること
         final_state = json.loads(state_file.read_text(encoding="utf-8"))
         self.assertEqual(final_state.get("state"), "COMPLETED")
+
+    def test_recover_interrupted_job_fails_closed_when_worktree_removal_fails(self) -> None:
+        """DD.1 / P0: Worktree 削除に失敗した際、Fail-Closed で RECOVERY_REQUIRED を返し RECOVERED に偽陽性しないことの実証。"""
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        job_id = "job-wt-fail-closed"
+        state = IntegrationJobState(
+            job_id=job_id,
+            state="MERGING",
+            base_commit=self.base_commit,
+            integration_branch=f"integration/{job_id}",
+        )
+        state.save(gate.jobs_dir)
+
+        # 削除処理で障害が発生（Sol氏の独立検証シナリオ）
+        with unittest.mock.patch.object(
+            gate.worktree_manager,
+            "remove_worktree",
+            side_effect=RuntimeError("injected cleanup failure"),
+        ):
+            success, status, details = gate.recover_interrupted_job(job_id)
+
+        self.assertFalse(success)
+        self.assertEqual(status, "RECOVERY_REQUIRED")
+        self.assertTrue(details.get("worktree_cleanup_failed"))
+
+        persisted = IntegrationJobState.load(gate.jobs_dir, job_id)
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.state, "RECOVERY_REQUIRED")
+
+    def test_recover_interrupted_job_fails_closed_when_worktree_still_exists(self) -> None:
+        """DD.1 / P0: 例外が出なくても Worktree 実態が残存している場合は RECOVERY_REQUIRED となることの実証。"""
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        job_id = "job-wt-still-exists"
+        branch_name = f"integration/{job_id}"
+        wt_team_id = f"int-{job_id}"
+        gate.worktree_manager.create_worktree(team_id=wt_team_id, base_branch="main", branch_name=branch_name)
+
+        state = IntegrationJobState(
+            job_id=job_id,
+            state="MERGING",
+            base_commit=self.base_commit,
+            integration_branch=branch_name,
+        )
+        state.save(gate.jobs_dir)
+
+        # remove_worktree が何もしなかった（削除されずにディレクトリが残存）ケースを模擬
+        with unittest.mock.patch.object(gate.worktree_manager, "remove_worktree", return_value=False):
+            success, status, details = gate.recover_interrupted_job(job_id)
+
+        self.assertFalse(success)
+        self.assertEqual(status, "RECOVERY_REQUIRED")
+        self.assertTrue(details.get("worktree_cleanup_failed"))
+
+        # クリーンアップ
+        gate.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=True, purge_unmerged=True)
+
+    def test_integration_job_id_validation_rejects_invalid_chars(self) -> None:
+        """DD.2 / P1: job_id のパストラバーサルや不正文字を厳格に拒否することの実証。"""
+        # 不正な job_id によるステート作成拒否
+        for invalid_id in ["../job", "job/1", "job;rm", "job test", "job$1"]:
+            with self.assertRaises(ValueError):
+                IntegrationJobState(
+                    job_id=invalid_id,
+                    state="INITIALIZED",
+                    base_commit="main",
+                    integration_branch="integration/test",
+                )
+
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        # 不正な job_id による recover 拒否
+        success, status, details = gate.recover_interrupted_job("../../etc/passwd")
+        self.assertFalse(success)
+        self.assertEqual(status, "INVALID_JOB_ID")
+        self.assertIn("Invalid job_id", details.get("error", ""))
+
+        # 不正な job_id による execute 拒否
+        result = gate.execute_integration(
+            job_id="../../bad_job",
+            inputs=[],
+            base_commit="main",
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "ERROR")
+        self.assertIn("Invalid job_id", result.errors[0])
 
 
 if __name__ == "__main__":
