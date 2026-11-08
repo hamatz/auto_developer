@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -151,6 +152,7 @@ class IntegrationGate:
         git_guard: GitGuard | None = None,
         verifier: DeterministicVerifier | None = None,
         worktree_manager: WorktreeManager | None = None,
+        fault_hook: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.repo_dir = Path(repo_dir or Path.cwd()).resolve()
         self.bundler = bundler or EvidenceBundler(repo_dir=self.repo_dir)
@@ -158,6 +160,11 @@ class IntegrationGate:
         self.verifier = verifier or DeterministicVerifier()
         self.worktree_manager = worktree_manager or WorktreeManager(repo_dir=self.repo_dir)
         self.jobs_dir = (self.repo_dir / ".dev" / "integration_jobs").resolve()
+        self.fault_hook = fault_hook
+
+    def _trigger_fault(self, checkpoint: str, **kwargs: Any) -> None:
+        if self.fault_hook is not None:
+            self.fault_hook(checkpoint, kwargs)
 
     def audit_team_inputs(
         self, inputs: list[TeamIntegrationInput]
@@ -299,6 +306,11 @@ class IntegrationGate:
                     errors.append(err)
                     return False, team_id, errors
 
+            # DD.3: 障害注入チェックポイント
+            self._trigger_fault("after_merge", team_id=team_id)
+            if team_input == inputs[0]:
+                self._trigger_fault("after_first_merge", team_id=team_id)
+
         return True, None, []
 
     def run_post_integration_verification(
@@ -365,17 +377,25 @@ class IntegrationGate:
 
         integration_branch = f"integration/{job_id}"
 
-        # CC.3: クラッシュ復旧・再開処理
+        # CC.3, DD.3: クラッシュ復旧・再開処理
         if resume:
             existing_state = IntegrationJobState.load(self.jobs_dir, job_id)
-            if existing_state and existing_state.state not in ("COMPLETED", "RECOVERED"):
-                rec_ok, rec_status, _rec_details = self.recover_interrupted_job(job_id)
+            if existing_state and existing_state.state != "COMPLETED":
+                rec_ok, rec_status, rec_details = self.recover_interrupted_job(job_id)
                 if not rec_ok:
                     return IntegrationResult(
                         success=False,
                         status=rec_status,
                         integration_branch=integration_branch,
                         errors=[f"Failed to recover interrupted integration job '{job_id}' before resuming."],
+                    )
+                if rec_status == "ALREADY_COMPLETED":
+                    return IntegrationResult(
+                        success=True,
+                        status="SUCCESS",
+                        integration_branch=integration_branch,
+                        release_candidate_commit=rec_details.get("rc_commit"),
+                        details={"resumed_from_completed": True, "rc_tag": rec_details.get("rc_tag")},
                     )
 
         current_branch_proc = self._run_git(["branch", "--show-current"], check=False)
@@ -536,6 +556,7 @@ class IntegrationGate:
 
             job_state.state = "VERIFYING"
             job_state.save(self.jobs_dir)
+            self._trigger_fault("before_verify", target_dir=target_dir)
             verify_ok, code, out = self.run_post_integration_verification(
                 base_commit=base_commit,
                 verify_script=verify_script,
@@ -607,6 +628,8 @@ class IntegrationGate:
             else:
                 self._run_git(["tag", rc_tag, rc_commit], check=True)
 
+            self._trigger_fault("after_rc_tag", rc_tag=rc_tag, rc_commit=rc_commit)
+
             job_state.state = "COMPLETED"
             job_state.rc_commit = rc_commit
             job_state.rc_tag = rc_tag
@@ -658,6 +681,24 @@ class IntegrationGate:
 
         if job_state.state == "COMPLETED":
             return True, "ALREADY_COMPLETED", {"rc_tag": job_state.rc_tag, "rc_commit": job_state.rc_commit}
+
+        # DD.3: RC タグが既に発行されているかの実態検査 (RC発行後・COMPLETED保存前のクラッシュ復旧)
+        rc_tag = f"rc/{job_id}"
+        tag_check = self._run_git(["rev-parse", "--verify", f"refs/tags/{rc_tag}"], check=False)
+        if tag_check.returncode == 0:
+            existing_rc_commit = tag_check.stdout.strip()
+            # 孤立 Worktree が残っていれば解放
+            cleaned_id = re.sub(r"[^a-z0-9_-]", "-", job_id.lower()).strip("-")
+            wt_team_id = f"int-{cleaned_id}"[:64]
+            try:
+                self.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=False)
+            except (OSError, subprocess.CalledProcessError, WorktreeError, RuntimeError) as err:
+                logger.warning("Failed to remove worktree during RC recovery: %s", err)
+            job_state.state = "COMPLETED"
+            job_state.rc_commit = existing_rc_commit
+            job_state.rc_tag = rc_tag
+            job_state.save(self.jobs_dir)
+            return True, "ALREADY_COMPLETED", {"rc_tag": rc_tag, "rc_commit": existing_rc_commit}
 
         # 1. 孤立 Worktree の解放
         cleaned_id = re.sub(r"[^a-z0-9_-]", "-", job_id.lower()).strip("-")
