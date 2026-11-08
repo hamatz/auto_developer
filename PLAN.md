@@ -18,7 +18,7 @@
 ## ステップ
 - [x] 1. 永続 Worker Registry 機構（VV.1: `.dev/integration_jobs/<job_id>/workers.json` への原子的一時保存 & 状態追跡）の実装と単体テスト（Red-First）
 - [x] 2. 3状態自律復旧エンジン `recover_multi_team_job()`（VV.2: Case 1 孤児回収, Case 2 成果救出, Case 3 前進完了）の実装と単体テスト（Red-First）
-- [ ] 3. 親プロセスSIGKILL疑似クラッシュからの完全自律復旧テスト実証、全体検証ゲート合格確認（181+ テスト）、および Evidence Bundle 生成・検証（VV.3）
+- [x] 3. 親プロセスSIGKILL疑似クラッシュからの完全自律復旧テスト実証、全体検証ゲート合格確認（181+ テスト）、および Evidence Bundle 生成・検証（VV.3）
 
 ## 止まっていること・判断待ち
 - なし

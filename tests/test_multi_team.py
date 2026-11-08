@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -1779,6 +1781,115 @@ class TestMultiTeamOrchestration(unittest.TestCase):
                 pass
             if verify_script.exists():
                 verify_script.unlink()
+
+
+    def test_parent_process_sigkill_simulation_and_full_recovery(self) -> None:
+        """VV.3: 親プロセスが SIGKILL で急死したシナリオをシミュレートし、新親オーケストレーターによる自律復旧を実証する。"""
+        job_id = "job-sigkill-simulation"
+        registry = WorkerRegistry(repo_dir=self.repo_dir, job_id=job_id)
+
+        # 統合検証スクリプト
+        with tempfile.NamedTemporaryFile(suffix=".sh", mode="w", delete=False) as tf:
+            tf.write("#!/bin/sh\nexit 0\n")
+            verify_script = Path(tf.name)
+        verify_script.chmod(0o755)
+
+        # 親プロセス役のスクリプトを作成
+        # 親は worker1 (sleep 60) を起動し、worker2 の成果物を用意して registry に保存後、自らを SIGKILL する
+        src_path = str(Path(__file__).resolve().parents[1] / "src")
+        repo_dir_str = str(self.repo_dir)
+        parent_script = self.repo_dir / "simulated_parent.py"
+        parent_script.write_text(f"""
+import sys, os, time, signal, subprocess
+from pathlib import Path
+if {src_path!r} not in sys.path:
+    sys.path.insert(0, {src_path!r})
+from auto_developer.multi_team import WorkerRegistry, WorkerRegistration
+
+repo_dir = Path({repo_dir_str!r})
+job_id = {job_id!r}
+registry = WorkerRegistry(repo_dir=repo_dir, job_id=job_id)
+
+wt1 = repo_dir / ".dev" / "worktrees" / "team-live"
+wt1.mkdir(parents=True, exist_ok=True)
+p1 = subprocess.Popen(["sleep", "60"], start_new_session=True)
+
+wt2 = repo_dir / ".dev" / "worktrees" / "team-done"
+wt2_bundles = wt2 / ".dev" / "bundles"
+wt2_bundles.mkdir(parents=True, exist_ok=True)
+(wt2_bundles / "bundle_team-done.zip").write_bytes(b"PK\\x03\\x04SIMULATED_BUNDLE_DATA")
+
+now = time.time()
+registry.save({{
+    "team-live": WorkerRegistration(
+        team_id="team-live",
+        pid=p1.pid,
+        pgid=p1.pid,
+        worktree_path=str(wt1),
+        base_branch="main",
+        branch_name="team/team-live",
+        status="RUNNING",
+        start_time=now,
+        updated_at=now,
+    ),
+    "team-done": WorkerRegistration(
+        team_id="team-done",
+        pid=99990,
+        pgid=99990,
+        worktree_path=str(wt2),
+        base_branch="main",
+        branch_name="team/team-done",
+        status="RUNNING",
+        start_time=now,
+        updated_at=now,
+    ),
+}})
+
+# 親プロセス自身を SIGKILL して突然死を模倣
+os.kill(os.getpid(), signal.SIGKILL)
+""", encoding="utf-8")
+
+        proc = subprocess.Popen([sys.executable, str(parent_script)])
+        proc.wait()  # SIGKILL により returncode -9 (or 137) で終了する
+        self.assertNotEqual(proc.returncode, 0)
+
+        # 親プロセスが死んだ時点で、WorkerRegistry にワーカー情報が残っていること
+        workers = registry.load()
+        self.assertIn("team-live", workers)
+        self.assertIn("team-done", workers)
+
+        live_pid = workers["team-live"].pid
+        self.assertTrue(_is_process_running(live_pid), "Worker 1 process must be orphaned and running after parent SIGKILL")
+
+        try:
+            # 新しい親オーケストレーターを起動してクラッシュ復旧を実行
+            new_orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+            rec_result: MultiTeamRecoveryResult = new_orchestrator.recover_multi_team_job(
+                job_id=job_id,
+                verify_script=verify_script,
+                cleanup=True,
+            )
+
+            # 孤児プロセスが回収され、生存していないこと
+            self.assertIn("team-live", rec_result.reclaimed_orphans)
+            self.assertFalse(_is_process_running(live_pid))
+
+            # 未退避成果物が救出されていること
+            self.assertIn("team-done", rec_result.rescued_bundles)
+            dest_bundle = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence" / "team-done.zip"
+            self.assertTrue(dest_bundle.exists())
+            self.assertEqual(dest_bundle.read_bytes(), b"PK\x03\x04SIMULATED_BUNDLE_DATA")
+
+        finally:
+            try:
+                if _is_process_running(live_pid):
+                    os.kill(live_pid, signal.SIGKILL)
+            except OSError:
+                pass
+            if verify_script.exists():
+                verify_script.unlink()
+            if parent_script.exists():
+                parent_script.unlink()
 
 
 if __name__ == "__main__":
