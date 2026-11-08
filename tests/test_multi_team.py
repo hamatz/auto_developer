@@ -17,6 +17,8 @@ from auto_developer.multi_team import (
     MultiTeamOrchestrator,
     TeamExecutionResult,
     TeamWorkerSpec,
+    WorkerProcessHandle,
+    has_active_processes_in_group,
 )
 
 
@@ -1448,6 +1450,58 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         self.assertFalse(_is_process_running(grandchild_pid), f"Grandchild process {grandchild_pid} must be terminated even if parent exited first")
 
         orchestrator.worktree_manager.remove_worktree("team-parent-exit", force=True, delete_branch=True, purge_unmerged=True)
+
+    def test_has_active_processes_in_group_excludes_zombies(self) -> None:
+        """TT.1: has_active_processes_in_group がゾンビプロセスを除外し、真の実行中プロセスのみを検知することの実証。"""
+        import time
+
+        # 1. 存在しないPGID -> False
+        self.assertFalse(has_active_processes_in_group(999999))
+
+        # 2. 実行中のプロセスグループ（sleep 60） -> True
+        p_active = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        try:
+            self.assertTrue(has_active_processes_in_group(p_active.pid))
+        finally:
+            p_active.kill()
+            p_active.wait()
+
+        # 3. ゾンビプロセス -> False
+        # 親が wait() を呼ばずに保持することでゾンビ状態を作る
+        p_zombie = subprocess.Popen(["true"], start_new_session=True)
+        try:
+            # 終了を待機（最大1秒）
+            time.sleep(0.05)
+            # has_active_processes_in_group はゾンビのみのグループに対して False を返すこと
+            self.assertFalse(has_active_processes_in_group(p_zombie.pid))
+        finally:
+            p_zombie.wait()
+
+    def test_terminate_worker_process_group_succeeds_even_when_killpg_reports_zombie(self) -> None:
+        """TT.1: Linux等でSIGKILL直後にゾンビが残存してkillpg(pgid, 0)が成功し続けても、実行中プロセス消滅を検知して回収成功と判定することの実証。"""
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        p = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        handle = WorkerProcessHandle(team_id="team-zombie-test", proc=p, pid=p.pid, pgid=p.pid)
+        orchestrator._active_workers["team-zombie-test"] = handle
+
+        try:
+            # os.killpg(pgid, 0) がゾンビ残存によって常に成功（例外なし）し続ける状況をシミュレート
+            # （従来の判定ロジックではタイムアウトして False を返していた）
+            orig_killpg = os.killpg if hasattr(os, "killpg") else None
+
+            def mock_killpg(pg: int, sig: int) -> None:
+                if sig == 0:
+                    # ゾンビが存在するため 0 (存在確認) は常に成功
+                    return
+                if orig_killpg is not None:
+                    orig_killpg(pg, sig)
+
+            with unittest.mock.patch("os.killpg", side_effect=mock_killpg):
+                success = orchestrator.terminate_worker_process_group("team-zombie-test", timeout=1.0)
+                self.assertTrue(success, "terminate_worker_process_group must succeed once active process is terminated, even if zombie causes killpg(pgid, 0) to succeed")
+        finally:
+            p.kill()
+            p.wait()
 
 
 if __name__ == "__main__":
