@@ -443,7 +443,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. 決定論的受入実証と全体検証ゲート合格確認 (AAA.4 / Phase 41 完了判定):
      - 非通常ファイル・シンボリックリンクの遮断、0件実行・環境エラーの排除、および本体汚染テストからの完全隔離を実証する単体・受入テストスイート（Red-First）。
      - 全自動検証ゲート（214+ テスト、Ruff、Mypy）の完全合格確認。
-- [ ] 機能BBB (Stage 4 OS権限ロックダウン & TestResult構造化判定 Stage 4 OS-level Permission Lockdown & Structured TestResult Verification):
+- [x] 機能BBB (Stage 4 OS権限ロックダウン & TestResult構造化判定 Stage 4 OS-level Permission Lockdown & Structured TestResult Verification):
   1. TestResult 構造化判定 (BBB.1 / Sol氏 P1指摘):
      - `RedTestVerifier` において、出力の正規表現/文字列マッチ（`"AssertionError" in output`）による判定を廃止し、Python `unittest.TestResult` の構造化結果（`testsRun >= 1`, `len(failures) >= 1`, `len(errors) == 0`）により厳密判定する。
      - `raise OSError("AssertionError: pretend failure")` などの例外メッセージ偽装は `errors`（非期待の例外・環境障害）として記録されるため、`UNHANDLED_EXCEPTION` として確実に `False` 判定（偽Redの完全排除）。
@@ -454,6 +454,21 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   3. 決定論的受入実証と全体検証ゲート合格確認 (BBB.3 / Phase 42 完了判定):
      - 例外メッセージ偽装（`OSError("AssertionError: ...")`）の排除、および絶対パス指定による本体書き換えが OS レベルで `PermissionError` となり本体が完全に無傷であることを実証する単体・受入テストスイート（Red-First）。
      - 全自動検証ゲート（222+ テスト、Ruff、Mypy）の完全合格確認。
+- [ ] 機能CCC (Stage 4 自己改善パイプライン接続 & 監査自動タスク登録 Stage 4 Self-Improvement Pipeline & Audit Task Dispatching):
+  1. 防壁の穴封鎖 (CCC.1 / Sol氏 P0 & P1指摘):
+     - 既存テスト不干渉検証 (Mutual Non-Interference Guard): 新規免疫テスト追加前後の既存テストスイート実行結果（テスト総数・パス件数）を比較し、既存テストの成否や結果が一切変化しないことを機械的に証明する。
+     - トップレベル AST 検査 (Top-level AST Validator): 候補テストコードのトップレベル構造を検査し、`import`、`class`、`def` 定義以外のトップレベル実行文（モンキーパッチやグローバル変数・関数の動的差し替え）を Fail-Closed で即時拒絶（`False`）する。
+     - root 実行検知と安全遮断 (Root Execution Guard): `os.geteuid() == 0`（root権限）で実行されている環境では、OSのファイルパーミッションロックダウンが無効化されるため、候補テストの実行を即座に拒絶（Fail-Closed, Exit 1）する。
+  2. 独立監査役ランナーと構造化 Finding モデル (CCC.2 / Sol氏 縦断スライス指摘):
+     - `AuditFinding` データモデル（`finding_id`, `severity`, `spec_reference`, `location`, `description`, `reproduction_test_code`, `status`）の実装。
+     - `AuditRunner`: SPEC.md と直近の git diff / 成果物を入力とし、独立した監査プロセスを実行して構造化 Finding を取得する。
+  3. 監査指摘から Red 検証を経て PLAN.md への修正タスク自動登録 (CCC.3 / Sol氏 縦断スライス指摘):
+     - `AuditRunner` が出力した各 Finding に対して `RedTestVerifier` を実行。
+     - 真正な Red（`GENUINE_RED`）かつ既存テストに不干渉であることが確認された場合、`TaskDispatcher` が `PLAN.md` の末尾または未完了タスクの先頭に修正タスク（`- [ ] Fix: [AUD-xxx] description`）を自動登録する。
+     - Red が成立しなかった指摘（未再現・無効）は `PLAN.md` には追加せず、Morning Brief（`NIGHTLY_REPORT.md`）の人間の要確認事項として記録する。
+  4. 決定論的受入実証と全体検証ゲート合格確認 (CCC.4 / Phase 43 完了判定):
+     - モンキーパッチによるガード弛緩の遮断、root 実行拒否、および「シードバグの監査指摘 → 隔離Red検証 → PLAN.md自動登録」が人間の介在ゼロで完結することを実証する単体・受入テストスイート（Red-First）。
+     - 全自動検証ゲート（227+ テスト、Ruff、Mypy）の完全合格確認。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
