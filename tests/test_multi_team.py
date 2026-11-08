@@ -1543,6 +1543,36 @@ class TestMultiTeamOrchestration(unittest.TestCase):
             p_active.kill()
             p_active.wait()
 
+    def test_terminate_worker_process_group_retains_active_handle_on_termination_failure(self) -> None:
+        """UU.1: 停止処理が失敗（プロセス残存）した場合、監督ハンドルが維持されTERMINATION_FAILEDが記録されることの実証。"""
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+
+        p = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        handle = WorkerProcessHandle(team_id="team-stubborn", proc=p, pid=p.pid, pgid=p.pid)
+        orchestrator._active_workers["team-stubborn"] = handle
+        orchestrator._all_worker_handles["team-stubborn"] = handle
+
+        try:
+            # has_active_processes_in_group が True を返し続ける（停止失敗）状況をシミュレート
+            with unittest.mock.patch("auto_developer.multi_team.has_active_processes_in_group", return_value=True):
+                success = orchestrator.terminate_worker_process_group("team-stubborn", timeout=0.1)
+
+            # 停止失敗が返されること
+            self.assertFalse(success)
+
+            # ハンドルが削除されずに維持されていること
+            self.assertIn("team-stubborn", orchestrator._active_workers)
+            self.assertIn("team-stubborn", orchestrator._all_worker_handles)
+
+            # 履歴ステータスが TERMINATION_FAILED となっていること
+            hist = orchestrator._worker_history.get("team-stubborn")
+            self.assertIsNotNone(hist)
+            assert hist is not None
+            self.assertEqual(hist["status"], "TERMINATION_FAILED")
+        finally:
+            p.kill()
+            p.wait()
+
 
 if __name__ == "__main__":
     unittest.main()
