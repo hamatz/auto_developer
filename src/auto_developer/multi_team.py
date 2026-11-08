@@ -395,12 +395,47 @@ class MultiTeamOrchestrator:
                     res.details["bundle_error"] = "SHA-256 mismatch during bundle preservation"
                     continue
 
-                # 原子的置換 (os.replace) により既存ファイルを壊さずに確定
-                os.replace(tmp_path, dest_path)
-
-                # パスを恒久保存先に更新 & 退避成功を記録
-                res.bundle_path = dest_path
-                res.evidence_preserved = True
+                # QQ.1: os.link による排他的・アトミック確定（既存ファイルの上書きを完全に遮断）
+                try:
+                    os.link(tmp_path, dest_path)
+                    if tmp_path.exists():
+                        try:
+                            tmp_path.unlink()
+                        except OSError:
+                            pass
+                    res.bundle_path = dest_path
+                    res.evidence_preserved = True
+                except FileExistsError:
+                    # 先行・並行プロセスによって dest_path が直前に作成された場合 (TOCTOU競合検知)
+                    if tmp_path.exists():
+                        try:
+                            tmp_path.unlink()
+                        except OSError:
+                            pass
+                    existing_bytes = dest_path.read_bytes()
+                    existing_sha = hashlib.sha256(existing_bytes).hexdigest()
+                    if existing_sha == orig_sha:
+                        logger.info(
+                            "Concurrent preservation: identical bundle was already linked for team '%s'",
+                            res.team_id,
+                        )
+                        res.bundle_path = dest_path
+                        res.evidence_preserved = True
+                        continue
+                    else:
+                        logger.error(
+                            "Concurrent preservation collision for team '%s': existing bundle has different SHA-256 (%s vs %s)",
+                            res.team_id,
+                            existing_sha,
+                            orig_sha,
+                        )
+                        res.success = False
+                        res.status = "BUNDLE_PRESERVATION_COLLISION"
+                        res.details["bundle_error"] = (
+                            f"Collision: A concurrent evidence bundle with different content was published at {dest_path}. "
+                            f"Refusing to overwrite existing evidence (existing={existing_sha[:10]}, new={orig_sha[:10]})."
+                        )
+                        continue
             except (OSError, shutil.Error) as err:
                 if tmp_path.exists():
                     try:

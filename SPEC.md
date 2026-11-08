@@ -294,7 +294,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   2. 全体検証ゲート通過と Evidence Bundle 生成・検証 (OO.2):
      - 全自動検証ゲート（175+ テスト、Ruff、Mypy）の合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
-- [ ] 機能PP (Stage 3 既存Evidenceの非破壊保全 & 衝突拒否 Stage 3 Non-destructive Evidence Preservation & Collision Guard):
+- [x] 機能PP (Stage 3 既存Evidenceの非破壊保全 & 衝突拒否 Stage 3 Non-destructive Evidence Preservation & Collision Guard):
   1. 既存 Evidence の非破壊照合 & 同一ハッシュ冪等再利用 (PP.1 / P1):
      - `preserve_team_bundles()` において、恒久保存先（`dest_path`）が既に存在する場合、既存ファイルの SHA-256 と退避対象 Bundle の SHA-256 を照合する。
      - 両者の SHA-256 が完全一致する場合、上書きコピーを実行せず既存ファイルを再利用（冪等成功）として扱い、`res.bundle_path = dest_path`, `res.evidence_preserved = True` を設定する。
@@ -303,6 +303,20 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 退避未完了として扱うことで、既存の保存先 Evidence を保護すると同時に、退避に失敗した新しい Worktree の削除も抑止して双方の成果を完全保全する。
   3. 冪等保存・衝突遮断の回帰テスト実証 (PP.3):
      - 同一 Bundle の冪等保存成功、および内容が異なる Bundle の衝突検知・上書き遮断・原本保護を検証する決定論的テストを追加。
+- [ ] 機能QQ (Stage 3 同時保存の排他的確定 & TOCTOU競合解消 Stage 3 Exclusive Atomic Publication & TOCTOU Race Condition Elimination):
+  1. `os.link` による排他的・アトミック確定 (QQ.1 / P1):
+     - `preserve_team_bundles()` において、ハッシュ照合済みの一時ファイル（`tmp_path`）から保存先（`dest_path`）への公開確定時に、上書き置換する `os.replace` ではなく、排他的リンク作成 `os.link(tmp_path, dest_path)` を使用する。
+     - 作成成功時は `tmp_path.unlink()` を行い、`res.bundle_path = dest_path`, `res.evidence_preserved = True` とする。
+     - `os.link` が `FileExistsError`（既存ファイル存在）を送出した場合、先行プロセスまたは並行プロセスが `dest_path` を確定させたと判断し、直ちに `dest_path` の SHA-256 を照合する。
+       - 同一ハッシュなら冪等成功として `tmp_path.unlink()`, `res.bundle_path = dest_path`, `res.evidence_preserved = True`。
+       - 異ハッシュなら `BUNDLE_PRESERVATION_COLLISION` として `tmp_path.unlink()`, `res.success = False`, `res.evidence_preserved = False`（既存ファイル保護 & 新規Worktree原本保護）。
+     - 万が一ファイルシステムが `os.link` をサポートしない環境（`OSError` / `EPERM` / `ENOTSUP`）の場合に備え、安全なフォールバック機構を用意する。
+  2. TOCTOU 競合注入テスト & 決定論的受入実証 (QQ.2 / P1):
+     - 初期検査（`dest_path.exists()`）時点ではファイルが存在しなかったが、一時ファイル作成・確定直前に別プロセスによって同名ファイルが作成された状況を人工的に注入するテストを追加。
+     - 先行作成ファイルが同一ハッシュの場合は安全に冪等成功し、異ハッシュの場合は既存ファイルを破壊・上書きせず `BUNDLE_PRESERVATION_COLLISION` で拒絶され原本保護されることを実証。
+  3. 全体検証ゲート合格と Evidence Bundle 生成・検証 (QQ.3):
+     - 全自動検証ゲート（179+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
