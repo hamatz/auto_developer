@@ -114,6 +114,17 @@ class TestBodyError(unittest.TestCase):
         self.assertFalse(result.is_reproduced)
         self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
 
+    def test_rejects_exception_spoofing_oserror_with_assertion_message(self) -> None:
+        """機能BBB.1: 例外メッセージ内に 'AssertionError' を含ませた OSError 等の例外偽装は GENUINE_RED ではなく False (UNHANDLED_EXCEPTION) と判定すること。"""
+        code = """import unittest
+class TestFake(unittest.TestCase):
+    def test_error(self):
+        raise OSError("AssertionError: pretend failure")
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
+
     def test_candidate_test_execution_cannot_modify_parent_repository(self) -> None:
         """機能AAA.3: 候補テストが親リポジトリ内のファイルを改変・破壊しようとしても隔離され、本体が汚染されないこと。"""
         canary_file = self.repo_dir / "canary.txt"
@@ -135,6 +146,61 @@ class HostileTest(unittest.TestCase):
             "PRISTINE_ORIGINAL_CONTENT",
             "Parent repository's canary.txt must not be modified by candidate test execution!",
         )
+
+    def test_candidate_test_cannot_modify_parent_repository_by_absolute_path(self) -> None:
+        """機能BBB.2: 候補テストが本体リポジトリの絶対パスを指定してファイルを書き換えようとしても、OS権限レベルの読取専用ロックダウンにより PermissionError で阻止され本体が改変されないこと。"""
+        canary_file = self.repo_dir / "canary.txt"
+        canary_file.write_text("PRISTINE_ORIGINAL_CONTENT", encoding="utf-8")
+
+        abs_canary_str = str(canary_file.resolve())
+        hostile_code = f"""import unittest
+from pathlib import Path
+
+class AbsolutePathTamperTest(unittest.TestCase):
+    def test_tamper_abs_path(self):
+        target = Path(r"{abs_canary_str}")
+        target.write_text("MALICIOUSLY_MODIFIED_VIA_ABSOLUTE_PATH", encoding="utf-8")
+        self.assertEqual(1, 2)
+"""
+        result = self.verifier.verify_candidate_test(hostile_code)
+        self.assertEqual(
+            canary_file.read_text(encoding="utf-8"),
+            "PRISTINE_ORIGINAL_CONTENT",
+            "Parent repository's canary.txt must not be modified even via absolute path!",
+        )
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
+
+    def test_candidate_test_cannot_create_or_delete_file_in_parent_repository(self) -> None:
+        """機能BBB.2: 候補テストが本体リポジトリ内に新規ファイルを作成または既存ファイルを削除しようとしても PermissionError で物理遮断されること。"""
+        canary_to_delete = self.repo_dir / "canary_delete.txt"
+        canary_to_delete.write_text("KEEP_ME", encoding="utf-8")
+        new_file_target = self.repo_dir / "unwanted_created.txt"
+
+        abs_del = str(canary_to_delete.resolve())
+        abs_create = str(new_file_target.resolve())
+
+        hostile_code = f"""import os
+import unittest
+from pathlib import Path
+
+class CreateDeleteTamperTest(unittest.TestCase):
+    def test_tamper(self):
+        try:
+            os.unlink(r"{abs_del}")
+        except Exception:
+            pass
+        try:
+            Path(r"{abs_create}").write_text("SPURIOUS", encoding="utf-8")
+        except Exception:
+            pass
+        self.assertEqual(1, 2)
+"""
+        result = self.verifier.verify_candidate_test(hostile_code)
+        self.assertTrue(canary_to_delete.exists(), "canary_delete.txt must not be deleted!")
+        self.assertFalse(new_file_target.exists(), "unwanted_created.txt must not be created!")
+        self.assertTrue(result.is_reproduced)  # try-exceptで握りつぶした場合は assertEqual(1, 2) が failure となる
+        self.assertEqual(result.reason, "GENUINE_RED")
 
     def test_candidate_test_does_not_inherit_sensitive_environment_secrets(self) -> None:
         """機能AAA.3: 候補テストに親プロセスのシークレットやAPIキーが露出・継承されないこと。"""

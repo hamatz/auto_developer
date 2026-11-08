@@ -21,6 +21,22 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-08] 作業ディレクトリ隔離の不完全性とOS権限レベルの読取専用ロックダウン (OS Permission Lockdown)
+- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`)
+- Trap: 候補テストの作業ディレクトリを一時ディレクトリ（`cwd=sandbox_dir`）に変更しても、Pythonプロセスは本体リポジトリに対するファイルアクセス権限を保持しているため、絶対パスや `PYTHONPATH` 経由で本体のファイル（例: `canary.txt`）を書き換えてからアサーション失敗を起こす攻撃・副作用を遮断できなかった。
+- Rule: 作業ディレクトリの変更に加えて、候補テスト実行中は対象リポジトリ（`repo_dir`）全体のディレクトリ・ファイルから書き込み権限を一時的に剥奪（`a-w`, `0o555`/`0o444`）してOS権限レベルで読取専用化し、絶対パスによる改変試行も `PermissionError` で物理遮断する。実行終了後はコンテキストマネージャ等で確実に元の権限へ復元する。
+- Rung: 作り（OS権限ロックダウン） & 検査（受入テスト）
+- Immunity Test: `tests/test_red_verifier.py`, `tests/test_immunity_and_red_acceptance.py`
+- Proof: 候補テスト内から本体リポジトリの絶対パスへ書き込みを試行させ、`PermissionError` が発生して本体が一切汚染されないことを実証。
+
+### [2026-11-08] 再現テスト候補における例外メッセージ偽装と文字列判定の限界 (Structured TestResult vs String Matching)
+- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`)
+- Trap: プロセスの標準エラー出力から `"AssertionError" in output` を文字列検索して判定していたため、`raise OSError("AssertionError: pretend failure")` のように環境例外や意図しないエラーのメッセージに `"AssertionError"` が含まれているだけで `GENUINE_RED` と誤認してしまう脆弱性があった。
+- Rule: 標準出力/標準エラー出力の文字列検索による判定を廃止し、Python `unittest.TestResult` の構造化結果を直接検証する。真正なRedは `testsRun >= 1` かつ `len(failures) >= 1` かつ `len(errors) == 0`（予期せぬ例外や環境障害が0件）であることを厳格に要求する。
+- Rung: 作り（構造化TestResult解析） & 検査
+- Immunity Test: `tests/test_red_verifier.py` (`test_rejects_exception_spoofing_oserror_with_assertion_message`)
+- Proof: `raise OSError("AssertionError: pretend failure")` を送出する候補テストを与えた際に `UNHANDLED_EXCEPTION` として確実に `False` 判定されることを実証。
+
 ### [2026-11-08] 再現テスト候補実行による本体作業ツリー汚染・副作用の物理隔離 (Candidate Test Isolation)
 - Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`)
 - Trap: 監査役や外部AIから提示された未検証の再現テスト候補を `cwd=self.repo_dir` かつ現プロセスの環境変数で直接実行したため、候補テスト内のコードが本体リポジトリのファイル（例: `canary.txt`）を書き換えてからアサーション失敗を起こした場合に、本体を汚染したまま `GENUINE_RED` と判定して通過してしまう重大な脆弱性があった。

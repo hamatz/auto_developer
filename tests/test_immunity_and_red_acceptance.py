@@ -163,6 +163,44 @@ class MaliciousCandidateTest(unittest.TestCase):
             "Parent repository canary.txt must remain pristine!",
         )
 
+    def test_end_to_end_exception_spoofing_rejected_as_genuine_red(self) -> None:
+        """受入シナリオ5 (BBB.1): 例外メッセージ偽装 (OSError('AssertionError: ...')) が GENUINE_RED として誤判定されず確実に弾かれること。"""
+        spoofed_code = """import unittest
+
+class FakeAssertionTest(unittest.TestCase):
+    def test_fake(self):
+        raise OSError("AssertionError: pretend failure message to spoof verifier")
+"""
+        res = self.verifier.verify_candidate_test(spoofed_code)
+        self.assertFalse(
+            res.is_reproduced,
+            "Spoofed exception message must not fool RedTestVerifier into genuine red!",
+        )
+        self.assertEqual(res.reason, "UNHANDLED_EXCEPTION")
+
+    def test_end_to_end_absolute_path_tamper_blocked_by_os_lockdown(self) -> None:
+        """受入シナリオ6 (BBB.2): 候補テストが絶対パス指定で本体リポジトリを改変しようとしても OS 権限ロックダウンにより PermissionError で阻止され本体が無傷であること。"""
+        canary = self.repo_dir / "canary_abs.txt"
+        canary.write_text("PRISTINE_ABS_CANARY", encoding="utf-8")
+        abs_canary_str = str(canary.resolve())
+
+        hostile_code = f"""import unittest
+from pathlib import Path
+
+class AbsoluteTamperTest(unittest.TestCase):
+    def test_tamper(self):
+        Path(r"{abs_canary_str}").write_text("HACKED_VIA_ABSOLUTE_PATH", encoding="utf-8")
+        self.assertEqual(1, 2)
+"""
+        res = self.verifier.verify_candidate_test(hostile_code)
+        self.assertEqual(
+            canary.read_text(encoding="utf-8"),
+            "PRISTINE_ABS_CANARY",
+            "Parent repository file must remain pristine even against absolute path tampering!",
+        )
+        self.assertFalse(res.is_reproduced)
+        self.assertEqual(res.reason, "UNHANDLED_EXCEPTION")
+
 
 if __name__ == "__main__":
     unittest.main()

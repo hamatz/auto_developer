@@ -7,19 +7,18 @@
 -->
 
 ## 現在の目標
-- Phase 41: Stage 4 — 実行隔離 & 厳格Red検証 & 免疫防壁堅牢化 (Isolated Red-Verification & Hardened Immunity Guard)
-  - 免疫追加の厳格制限: `tests/immunity/` への新規追加を「通常ファイル（非symlink）」かつ「`test_*.py` 命名規則」に限定し、非テストファイルや任意ファイル参照を物理遮断（機能AAA.1）
-  - Red判定の構造化厳格化: 実行テスト件数 >= 1 を強制し、Exit 5（0件実行）や環境例外を排除して真正なアサーション失敗のみを判定（機能AAA.2）
-  - 候補テスト実行の物理隔離: 使い捨て一時Worktree/隔離環境で実行し、環境変数サニタイズおよび本体リポジトリ汚染の物理防止を保証（機能AAA.3）
-  - 決定論的受入実証 & 全自動検証ゲート完全合格（214+ テスト）（機能AAA.4）
+- Phase 42: Stage 4 — OS権限ロックダウン & TestResult構造化判定 (OS-level Permission Lockdown & Structured TestResult Verification)
+  - TestResult 構造化判定: 出力文字列マッチを廃止し、Python `unittest.TestResult` の構造化情報（`testsRun >= 1`, `len(failures) >= 1`, `len(errors) == 0`）により厳密判定。例外偽装（`OSError("AssertionError: ...")`）を確実に排除（機能BBB.1）
+  - OS権限レベルの本体作業ツリー読取専用ロックダウン: 候補テスト実行中、対象リポジトリから書き込み権限を一時剥奪（`a-w`, `0o555`/`0o444`）し、絶対パス等による本体改変を `PermissionError` で物理遮断（機能BBB.2）
+  - 決定論的受入実証 & 全自動検証ゲート完全合格（222+ テスト）（機能BBB.3）
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- `tests/test_immunity_and_red_acceptance.py`: 機能AAA.2におけるアサーション失敗（AssertionError / FAIL:）必須化に伴い、受入実証内の候補コードを未処理例外送出からアサーション失敗形式（try-except後の期待値不一致アサーション）へ更新。
+- なし（既存テストの破壊的変更は行わず、新規テスト追加と既存合格の維持を徹底）
 
 ## ステップ
-- [x] 1. 免疫テスト追加の厳格制限（通常ファイル・非symlink・test_*.py命名規則強制）の実装と単体テスト（Red-First）（AAA.1）
-- [x] 2. Red判定の構造化厳格化（実行件数>=1、Exit 5/0件実行排除、環境例外排除、真正アサーション失敗抽出）の実装と単体テスト（Red-First）（AAA.2）
-- [x] 3. 候補テスト実行の物理隔離（使い捨て隔離環境、環境変数サニタイズ、本体汚染防止）の実装と統合受入実証、全体検証ゲート合格確認（AAA.3, AAA.4）
+- [x] 1. TestResult 構造化判定（`testsRun >= 1`, `len(failures) >= 1`, `len(errors) == 0`、例外偽装排除）の実装と単体テスト（Red-First）（BBB.1）
+- [x] 2. OS権限レベルのリポジトリ読取専用ロックダウン（`0o555`/`0o444`、例外安全な権限復元）の実装と単体テスト（Red-First）（BBB.2）
+- [x] 3. 統合受入実証（例外偽装排除 & 絶対パス書き換え阻止）と全体検証ゲート合格確認、Evidence Bundle 生成（BBB.3）
 
 ## 止まっていること・判断待ち
 - なし
