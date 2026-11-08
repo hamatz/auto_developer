@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 import uuid
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -214,6 +215,21 @@ class WorkerProcessHandle:
     proc: subprocess.Popen[str]
     pid: int
     pgid: int
+
+
+def _is_valid_bundle_archive(bundle_path: Path) -> bool:
+    """WW.3: Evidence Bundle が有効な ZIP アーカイブであり破損していないか検査する。"""
+    if not bundle_path.is_file() or bundle_path.stat().st_size == 0:
+        return False
+    if not zipfile.is_zipfile(bundle_path):
+        return False
+    try:
+        with zipfile.ZipFile(bundle_path, "r") as zf:
+            if zf.testzip() is not None:
+                return False
+        return True
+    except (zipfile.BadZipFile, OSError):
+        return False
 
 
 def get_process_start_identifier(pid: int) -> str | None:
@@ -495,14 +511,24 @@ class MultiTeamOrchestrator:
 
             # Case 3: 恒久保存先に確定済み Evidence が存在するか確認
             if dest_bundle.exists():
-                result.reused_bundles.append(tid)
-                team_results[tid] = TeamExecutionResult(
-                    team_id=tid,
-                    success=True,
-                    status="SUCCESS",
-                    bundle_path=dest_bundle,
-                    evidence_preserved=True,
-                )
+                if _is_valid_bundle_archive(dest_bundle):
+                    result.reused_bundles.append(tid)
+                    team_results[tid] = TeamExecutionResult(
+                        team_id=tid,
+                        success=True,
+                        status="SUCCESS",
+                        bundle_path=dest_bundle,
+                        evidence_preserved=True,
+                    )
+                else:
+                    logger.warning("Existing bundle for team '%s' is corrupted or invalid", tid)
+                    team_results[tid] = TeamExecutionResult(
+                        team_id=tid,
+                        success=False,
+                        status="INVALID_EVIDENCE",
+                        bundle_path=dest_bundle,
+                        evidence_preserved=False,
+                    )
             else:
                 # Case 2: Worktree 内に成果物（Bundle）が残存しているか探索
                 wt_bundles_dir = wt_path / ".dev" / "bundles"
@@ -512,11 +538,16 @@ class MultiTeamOrchestrator:
                     if candidates:
                         wt_bundle = candidates[0]
 
-                if wt_bundle and wt_bundle.exists():
+                if wt_bundle and wt_bundle.exists() and _is_valid_bundle_archive(wt_bundle):
                     # 未退避 Bundle を恒久保存先へ救出
                     tmp_dest = evidence_dir / f"{tid}.zip.tmp_rec_{os.getpid()}_{time.time_ns()}"
                     try:
                         shutil.copy2(wt_bundle, tmp_dest)
+                        src_sha = hashlib.sha256(wt_bundle.read_bytes()).hexdigest()
+                        copied_sha = hashlib.sha256(tmp_dest.read_bytes()).hexdigest()
+                        if src_sha != copied_sha or not _is_valid_bundle_archive(tmp_dest):
+                            raise OSError(f"Corrupted copy during rescue of team '{tid}'")
+
                         try:
                             os.link(tmp_dest, dest_bundle)
                             result.rescued_bundles.append(tid)
@@ -529,14 +560,23 @@ class MultiTeamOrchestrator:
                             )
                             registry.update_status(tid, "EVIDENCE_PRESERVED")
                         except FileExistsError:
-                            result.reused_bundles.append(tid)
-                            team_results[tid] = TeamExecutionResult(
-                                team_id=tid,
-                                success=True,
-                                status="SUCCESS",
-                                bundle_path=dest_bundle,
-                                evidence_preserved=True,
-                            )
+                            existing_sha = hashlib.sha256(dest_bundle.read_bytes()).hexdigest()
+                            if existing_sha == src_sha and _is_valid_bundle_archive(dest_bundle):
+                                result.reused_bundles.append(tid)
+                                team_results[tid] = TeamExecutionResult(
+                                    team_id=tid,
+                                    success=True,
+                                    status="SUCCESS",
+                                    bundle_path=dest_bundle,
+                                    evidence_preserved=True,
+                                )
+                            else:
+                                logger.error("Rescue collision with differing or corrupt bundle for '%s'", tid)
+                                team_results[tid] = TeamExecutionResult(
+                                    team_id=tid,
+                                    success=False,
+                                    status="BUNDLE_PRESERVATION_COLLISION",
+                                )
                         finally:
                             if tmp_dest.exists():
                                 tmp_dest.unlink()
@@ -548,12 +588,28 @@ class MultiTeamOrchestrator:
                             status="RESCUE_FAILED",
                             details={"error": str(err)},
                         )
+                elif wt_bundle and wt_bundle.exists() and not _is_valid_bundle_archive(wt_bundle):
+                    logger.warning("Candidate bundle in worktree for team '%s' is invalid", tid)
+                    team_results[tid] = TeamExecutionResult(
+                        team_id=tid,
+                        success=False,
+                        status="INVALID_EVIDENCE",
+                    )
                 else:
                     team_results[tid] = TeamExecutionResult(
                         team_id=tid,
                         success=False,
                         status="EVIDENCE_NOT_FOUND",
                     )
+
+        result.details["team_results"] = {
+            tid: {
+                "success": tr.success,
+                "status": tr.status,
+                "evidence_preserved": tr.evidence_preserved,
+            }
+            for tid, tr in team_results.items()
+        }
 
         # 全チームの成果物が揃っている場合は統合ゲートへ進める
         all_preserved = all(tr.evidence_preserved for tr in team_results.values()) and len(team_results) == len(workers)
@@ -589,41 +645,54 @@ class MultiTeamOrchestrator:
                     rc_commit = int_res.release_candidate_commit
                     rc_tag = str(int_res.details.get("rc_tag")) if int_res.details.get("rc_tag") else f"refs/tags/rc/{job_id}"
 
+            pipeline_status = (
+                "SUCCESS"
+                if (int_res and int_res.success)
+                else ("RECOVERED_EVIDENCE_FOUND" if verify_script is None else "INTEGRATION_FAILED")
+            )
             result.pipeline_result = MultiTeamResult(
                 job_id=job_id,
                 success=int_res.success if int_res else True,
-                status="SUCCESS" if (int_res.success if int_res else True) else "INTEGRATION_FAILED",
+                status=pipeline_status,
                 team_results=team_results,
                 integration_result=int_res,
                 release_candidate_commit=rc_commit,
                 release_candidate_tag=rc_tag,
             )
+        else:
+            result.success = False
+            result.pipeline_result = MultiTeamResult(
+                job_id=job_id,
+                success=False,
+                status="EVIDENCE_VERIFICATION_FAILED",
+                team_results=team_results,
+            )
 
-            if cleanup:
-                registered_wts = {wt.team_id: wt for wt in self.worktree_manager.list_worktrees()}
-                base_dir = self.worktree_manager.worktree_base.resolve()
-                for tid, w in workers.items():
-                    wt_p = Path(w.worktree_path)
-                    try:
-                        resolved_wt = wt_p.resolve()
-                        is_within_base = resolved_wt.is_relative_to(base_dir)
-                    except (ValueError, OSError):
-                        is_within_base = False
+        if cleanup:
+            registered_wts = {wt.team_id: wt for wt in self.worktree_manager.list_worktrees()}
+            base_dir = self.worktree_manager.worktree_base.resolve()
+            for tid, w in workers.items():
+                wt_p = Path(w.worktree_path)
+                try:
+                    resolved_wt = wt_p.resolve()
+                    is_within_base = resolved_wt.is_relative_to(base_dir)
+                except (ValueError, OSError):
+                    is_within_base = False
 
-                    # WW.2: 安全境界検査: worktree_base 配下かつ Git 登録済みであること
-                    if not is_within_base or tid not in registered_wts:
-                        logger.warning(
-                            "Worktree path for team '%s' (%s) is outside base directory or not registered in git; preserving untouched",
-                            tid,
-                            w.worktree_path,
-                        )
-                        result.unverified_worktrees.append(tid)
-                        continue
+                # WW.2: 安全境界検査: worktree_base 配下かつ Git 登録済みであること
+                if not is_within_base or tid not in registered_wts:
+                    logger.warning(
+                        "Worktree path for team '%s' (%s) is outside base directory or not registered in git; preserving untouched",
+                        tid,
+                        w.worktree_path,
+                    )
+                    result.unverified_worktrees.append(tid)
+                    continue
 
-                    try:
-                        self.worktree_manager.remove_worktree(tid, force=True)
-                    except (subprocess.SubprocessError, OSError, WorktreeError) as exc:
-                        logger.debug("Worktree removal non-fatal error for %s: %s", tid, exc)
+                try:
+                    self.worktree_manager.remove_worktree(tid, force=True)
+                except (subprocess.SubprocessError, OSError, WorktreeError) as exc:
+                    logger.debug("Worktree removal non-fatal error for %s: %s", tid, exc)
 
         return result
 

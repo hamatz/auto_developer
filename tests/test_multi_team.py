@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import shutil
 import signal
@@ -10,6 +11,7 @@ import tempfile
 import time
 import unittest
 import unittest.mock
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,14 @@ from auto_developer.multi_team import (
     get_process_start_identifier,
     has_active_processes_in_group,
 )
+
+
+def _make_dummy_zip_bytes(data: bytes = b"DUMMY_DATA") -> bytes:
+    """有効な ZIP アーカイブのバイト列を生成する。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("evidence.txt", data)
+    return buf.getvalue()
 
 
 def _is_process_running(pid: int) -> bool:
@@ -1718,7 +1728,8 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         wt2_bundles = wt2 / ".dev" / "bundles"
         wt2_bundles.mkdir(parents=True, exist_ok=True)
         bundle2 = wt2_bundles / "bundle_team-case2.zip"
-        bundle2.write_bytes(b"PK\x03\x04CASE2_RESCUE_TEST")
+        case2_bytes = _make_dummy_zip_bytes(b"CASE2_RESCUE_TEST")
+        bundle2.write_bytes(case2_bytes)
         reg2 = WorkerRegistration(
             team_id="team-case2",
             pid=99991,
@@ -1733,7 +1744,8 @@ class TestMultiTeamOrchestration(unittest.TestCase):
 
         # 3. Case 3: 成果物が既に恒久保存先（evidence/）に確定済み
         dest3 = evidence_dir / "team-case3.zip"
-        dest3.write_bytes(b"PK\x03\x04CASE3_CONFIRMED_TEST")
+        case3_bytes = _make_dummy_zip_bytes(b"CASE3_CONFIRMED_TEST")
+        dest3.write_bytes(case3_bytes)
         wt3 = self.repo_dir / ".dev" / "worktrees" / "team-case3"
         wt3.mkdir(parents=True, exist_ok=True)
         reg3 = WorkerRegistration(
@@ -1768,7 +1780,7 @@ class TestMultiTeamOrchestration(unittest.TestCase):
             self.assertIn("team-case2", rec_result.rescued_bundles)
             dest2 = evidence_dir / "team-case2.zip"
             self.assertTrue(dest2.exists())
-            self.assertEqual(dest2.read_bytes(), b"PK\x03\x04CASE2_RESCUE_TEST")
+            self.assertEqual(dest2.read_bytes(), case2_bytes)
 
             # Case 3: 確定済み Bundle が再利用されたこと
             self.assertIn("team-case3", rec_result.reused_bundles)
@@ -1819,7 +1831,11 @@ p1 = subprocess.Popen(["sleep", "60"], start_new_session=True)
 wt2 = repo_dir / ".dev" / "worktrees" / "team-done"
 wt2_bundles = wt2 / ".dev" / "bundles"
 wt2_bundles.mkdir(parents=True, exist_ok=True)
-(wt2_bundles / "bundle_team-done.zip").write_bytes(b"PK\\x03\\x04SIMULATED_BUNDLE_DATA")
+import zipfile, io
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, "w") as zf:
+    zf.writestr("evidence.txt", b"SIMULATED_BUNDLE_DATA")
+(wt2_bundles / "bundle_team-done.zip").write_bytes(buf.getvalue())
 
 now = time.time()
 registry.save({{
@@ -1881,7 +1897,8 @@ os.kill(os.getpid(), signal.SIGKILL)
             self.assertIn("team-done", rec_result.rescued_bundles)
             dest_bundle = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence" / "team-done.zip"
             self.assertTrue(dest_bundle.exists())
-            self.assertEqual(dest_bundle.read_bytes(), b"PK\x03\x04SIMULATED_BUNDLE_DATA")
+            with zipfile.ZipFile(dest_bundle) as zf:
+                self.assertEqual(zf.read("evidence.txt"), b"SIMULATED_BUNDLE_DATA")
 
         finally:
             try:
@@ -1957,7 +1974,7 @@ os.kill(os.getpid(), signal.SIGKILL)
         evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
         evidence_dir.mkdir(parents=True, exist_ok=True)
         dest_bundle = evidence_dir / "team-outside.zip"
-        dest_bundle.write_bytes(b"PK\x03\x04CONFIRMED_DATA")
+        dest_bundle.write_bytes(_make_dummy_zip_bytes(b"CONFIRMED_DATA"))
 
         now = time.time()
         reg = WorkerRegistration(
@@ -1994,6 +2011,43 @@ os.kill(os.getpid(), signal.SIGKILL)
         finally:
             if keep_me_dir.exists():
                 shutil.rmtree(keep_me_dir, ignore_errors=True)
+
+
+    def test_recover_multi_team_job_rejects_corrupted_evidence_bundle(self) -> None:
+        """WW.3: 破損・不正な Evidence Bundle が存在する場合、成功と誤判定せず拒絶することを実証。"""
+        job_id = "job-corrupt-evidence-test"
+        registry = WorkerRegistry(repo_dir=self.repo_dir, job_id=job_id)
+
+        evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        corrupted_bundle = evidence_dir / "team-corrupt.zip"
+        corrupted_bundle.write_bytes(b"NOT_A_VALID_ZIP_FILE_CORRUPTED_BYTES")
+
+        now = time.time()
+        wt = self.repo_dir / ".dev" / "worktrees" / "team-corrupt"
+        wt.mkdir(parents=True, exist_ok=True)
+        reg = WorkerRegistration(
+            team_id="team-corrupt",
+            pid=99996,
+            pgid=99996,
+            worktree_path=str(wt),
+            base_branch="main",
+            branch_name="team/team-corrupt",
+            status="RUNNING",
+            start_time=now,
+            updated_at=now,
+        )
+        registry.save({"team-corrupt": reg})
+
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        rec_result: MultiTeamRecoveryResult = orchestrator.recover_multi_team_job(job_id=job_id)
+
+        # 破損バンドルが拒絶され、復旧が成功扱いになっていないこと
+        self.assertFalse(rec_result.success)
+        team_res = rec_result.details.get("team_results", {}).get("team-corrupt")
+        if team_res:
+            self.assertFalse(team_res.get("success", False))
+            self.assertEqual(team_res.get("status"), "INVALID_EVIDENCE")
 
 
 if __name__ == "__main__":
