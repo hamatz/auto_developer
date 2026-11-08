@@ -93,6 +93,38 @@ class TestAsymmetricImmunityGuard(unittest.TestCase):
         self.spec_file.write_text("# modified spec\n", encoding="utf-8")
         self.assertFalse(self.guard.check_protected_files_untouched(self.checkpoint, allow_immunity_additions=True))
 
+    def test_asymmetric_mode_rejects_non_test_files(self) -> None:
+        """機能AAA.1: allow_immunity_additions=True であっても、非Pythonファイルや命名規則外の追加は拒絶されること。"""
+        # not_a_test.txt (非Python / 非テスト)
+        not_test = self.immunity_dir / "not_a_test.txt"
+        not_test.write_text("random text\n", encoding="utf-8")
+        self.assertFalse(
+            self.guard.check_protected_files_untouched(self.checkpoint, allow_immunity_additions=True),
+            "Non-test file 'not_a_test.txt' must be rejected even when allow_immunity_additions=True",
+        )
+        not_test.unlink()
+
+        # helper.py (test_ で始まらない Python ファイル)
+        helper = self.immunity_dir / "helper.py"
+        helper.write_text("x = 1\n", encoding="utf-8")
+        self.assertFalse(
+            self.guard.check_protected_files_untouched(self.checkpoint, allow_immunity_additions=True),
+            "Non-test python file 'helper.py' must be rejected even when allow_immunity_additions=True",
+        )
+
+    def test_asymmetric_mode_rejects_symlinks(self) -> None:
+        """機能AAA.1: allow_immunity_additions=True であっても、シンボリックリンクの追加は拒絶されること。"""
+        symlink_test = self.immunity_dir / "test_link.py"
+        try:
+            symlink_test.symlink_to("/etc/hosts")
+        except OSError:
+            symlink_test.symlink_to(self.spec_file)
+
+        self.assertFalse(
+            self.guard.check_protected_files_untouched(self.checkpoint, allow_immunity_additions=True),
+            "Symlink inside tests/immunity/ must be strictly rejected!",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
