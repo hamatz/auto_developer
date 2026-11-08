@@ -17,7 +17,7 @@
 - 現時点で既存テストの変更予定なし。
 
 ## ステップ
-- [ ] 1. 異系統LLM独立監査ポリシーとモデル強制（同一モデル自己承認拒絶）の実装と単体テスト（Red-First）（EEE.1）
+- [x] 1. 異系統LLM独立監査ポリシーとモデル強制（同一モデル自己承認拒絶）の実装と単体テスト（Red-First）（EEE.1）
 - [ ] 2. 構造化監査プロンプトと独立監査役アダプタ（IndependentAuditRunner）の実装と単体テスト（Red-First）（EEE.2）
 - [ ] 3. Before Red / After Green 証跡バインディングと免疫テスト自動昇格の実装と単体テスト（Red-First）（EEE.3）
 - [ ] 4. LESSONS.md への自動教訓記録と全体検証ゲート合格確認、Evidence Bundle 生成（EEE.4）

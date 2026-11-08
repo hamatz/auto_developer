@@ -9,6 +9,80 @@ VALID_STATUSES: frozenset[str] = frozenset(
 )
 
 
+def detect_model_family(model_name: str) -> str:
+    """モデル識別子から大分類ファミリ（gemini, claude, openai, mock等）を推定する。"""
+    if not model_name:
+        return "unknown"
+    name = model_name.strip().lower()
+    if "mock" in name:
+        return "mock"
+    if "gemini" in name:
+        return "gemini"
+    if any(k in name for k in ("claude", "opus", "sonnet", "haiku", "anthropic")):
+        return "claude"
+    if any(k in name for k in ("gpt", "o1", "o3", "o4", "openai")):
+        return "openai"
+    return "unknown"
+
+
+def verify_model_independence(
+    maker_model: str,
+    auditor_model: str,
+    allow_same_model_override: bool = False,
+) -> tuple[bool, str]:
+    """MakerモデルとAuditor/Checkerモデルの独立性を検証する (AGENTS.md Rule 6 / EEE.1)。"""
+    if not maker_model or not auditor_model:
+        return True, "Models not fully specified; independent verification skipped"
+
+    m_norm = maker_model.strip()
+    a_norm = auditor_model.strip()
+
+    if allow_same_model_override:
+        return True, f"Override enabled: Maker='{m_norm}', Auditor='{a_norm}'"
+
+    if m_norm.lower() == a_norm.lower():
+        msg = (
+            f"INDEPENDENT_AUDIT_VIOLATION: maker_model '{m_norm}' and auditor_model '{a_norm}' are identical. "
+            "AGENTS.md Rule 6 forbids self-audit by the identical model."
+        )
+        return False, msg
+
+    m_fam = detect_model_family(m_norm)
+    a_fam = detect_model_family(a_norm)
+
+    if m_fam != "mock" and m_fam != "unknown" and m_fam == a_fam:
+        msg = (
+            f"INDEPENDENT_AUDIT_VIOLATION: maker_model '{m_norm}' and auditor_model '{a_norm}' "
+            f"belong to the same family '{m_fam}'. AGENTS.md Rule 6 requires cross-model audit "
+            "from distinct families (e.g., Gemini Maker vs Claude Opus Auditor)."
+        )
+        return False, msg
+
+    return (
+        True,
+        f"Independent audit policy satisfied: Maker family '{m_fam}' ({m_norm}) vs Auditor family '{a_fam}' ({a_norm}).",
+    )
+
+
+@dataclass
+class AuditConfig:
+    """独立監査の設定とモデル独立性検証を保持する設定モデル。"""
+
+    maker_model: str
+    auditor_model: str
+    allow_same_model_override: bool = False
+
+    def validate(self) -> bool:
+        ok, reason = verify_model_independence(
+            self.maker_model,
+            self.auditor_model,
+            self.allow_same_model_override,
+        )
+        if not ok:
+            raise ValueError(reason)
+        return True
+
+
 @dataclass
 class AuditFinding:
     """独立監査役（外部または自動）によって報告された指摘モデル。"""

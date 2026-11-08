@@ -34,6 +34,9 @@ class NightlyOrchestrator:
         resume: bool = False,
         team_id: str | None = None,
         owns_patterns: list[str] | None = None,
+        maker_model: str | None = None,
+        checker_model: str | None = None,
+        allow_same_model_override: bool = False,
     ) -> None:
         self.repo_dir = repo_dir or Path.cwd()
         self.plan_path = plan_path or (self.repo_dir / "PLAN.md")
@@ -47,6 +50,9 @@ class NightlyOrchestrator:
         self.resume = resume
         self.team_id = team_id
         self.owns_patterns = owns_patterns
+        self.maker_model = maker_model
+        self.checker_model = checker_model
+        self.allow_same_model_override = allow_same_model_override
 
         self.git_guard = GitGuard(repo_dir=self.repo_dir)
         self.dispatcher = TaskDispatcher()
@@ -55,6 +61,18 @@ class NightlyOrchestrator:
         self.evidence_store = EvidenceStore(repo_dir=self.repo_dir)
 
     def run(self) -> int:
+        if self.maker_model and self.checker_model:
+            from auto_developer.audit import verify_model_independence
+
+            ok, reason = verify_model_independence(
+                self.maker_model,
+                self.checker_model,
+                self.allow_same_model_override,
+            )
+            if not ok:
+                print(f"PRE-FLIGHT MODEL POLICY ERROR: {reason}", file=sys.stderr)
+                return 2
+
         if not self.plan_path.exists():
             print(f"PRE-FLIGHT ERROR: Plan file not found: {self.plan_path}", file=sys.stderr)
             return 2
