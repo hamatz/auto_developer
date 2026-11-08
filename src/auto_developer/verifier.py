@@ -208,11 +208,66 @@ class RedTestVerifier:
 
     RUNNER_CODE = """
 import json
+import os
 import sys
 import unittest
+from pathlib import Path
 
 search_dir = sys.argv[1]
 pattern = sys.argv[2]
+protected_repo = sys.argv[3] if len(sys.argv) > 3 else ""
+
+if protected_repo:
+    try:
+        resolved_protected = str(Path(protected_repo).resolve())
+    except Exception:
+        resolved_protected = protected_repo
+
+    def _security_audit_hook(event, args):
+        # 1. chmod / chown
+        if event in ("os.chmod", "os.chown"):
+            if args and args[0]:
+                try:
+                    p = str(Path(args[0]).resolve())
+                except Exception:
+                    p = str(args[0])
+                if p == resolved_protected or p.startswith(resolved_protected + os.sep):
+                    raise PermissionError(f"Security audit hook: '{event}' on protected repo '{p}' is forbidden.")
+        # 2. write open
+        elif event == "open":
+            if args and len(args) >= 2:
+                path_arg, mode_arg = args[0], args[1]
+                flags_arg = args[2] if len(args) > 2 else None
+                is_write = (mode_arg and any(m in mode_arg for m in ("w", "a", "x", "+"))) or (
+                    flags_arg is not None and bool(flags_arg & (os.O_WRONLY | os.O_RDWR))
+                )
+                if is_write and path_arg:
+                    try:
+                        p = str(Path(path_arg).resolve())
+                    except Exception:
+                        p = str(path_arg)
+                    if p == resolved_protected or p.startswith(resolved_protected + os.sep):
+                        raise PermissionError(f"Security audit hook: write to protected repo '{p}' is forbidden.")
+        # 3. delete / rename / mkdir
+        elif event in ("os.remove", "os.unlink", "os.rmdir", "os.mkdir"):
+            if args and args[0]:
+                try:
+                    p = str(Path(args[0]).resolve())
+                except Exception:
+                    p = str(args[0])
+                if p == resolved_protected or p.startswith(resolved_protected + os.sep):
+                    raise PermissionError(f"Security audit hook: '{event}' on protected repo '{p}' is forbidden.")
+        elif event == "os.rename":
+            for arg in args[:2]:
+                if arg:
+                    try:
+                        p = str(Path(arg).resolve())
+                    except Exception:
+                        p = str(arg)
+                    if p == resolved_protected or p.startswith(resolved_protected + os.sep):
+                        raise PermissionError(f"Security audit hook: 'os.rename' involving protected repo '{p}' is forbidden.")
+
+    sys.addaudithook(_security_audit_hook)
 
 loader = unittest.defaultTestLoader
 try:
@@ -377,6 +432,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             self.RUNNER_CODE,
             search_dir,
             test_file.name,
+            str(self.repo_dir.resolve()),
         ]
 
         try:
