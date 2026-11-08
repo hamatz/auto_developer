@@ -870,6 +870,120 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         # 手動クリーンアップ
         orchestrator.worktree_manager.remove_worktree("team-preserve-ng", force=True, delete_branch=True, purge_unmerged=True)
 
+    def test_preserve_team_bundles_idempotent_when_existing_bundle_identical(self) -> None:
+        """PP.1: 保存先に同一ハッシュのEvidence Bundleが既に存在する場合、上書きせず冪等に再利用することの実証。"""
+        job_id = "job-idempotent-preserve-test"
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id=job_id,
+            teams=[
+                TeamWorkerSpec(team_id="team-idempotent"),
+            ],
+            base_branch="main",
+        )
+
+        evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = evidence_dir / "team-idempotent.zip"
+        bundle_content = b"PK\x03\x04identical_evidence_content_bytes"
+        dest_path.write_bytes(bundle_content)
+
+        # ワーカー側の成果物 Bundle も同一内容
+        worker_bundle = self.repo_dir / "worker_bundle.zip"
+        worker_bundle.write_bytes(bundle_content)
+
+        team_res = {
+            "team-idempotent": TeamExecutionResult(
+                team_id="team-idempotent",
+                success=True,
+                status="SUCCESS",
+                bundle_path=worker_bundle,
+            )
+        }
+
+        with unittest.mock.patch("shutil.copy2") as mock_copy, unittest.mock.patch("os.replace") as mock_replace:
+            orchestrator.preserve_team_bundles(config, team_res)
+            # 同一ハッシュのため上書きコピーおよび置換が実行されないこと
+            mock_copy.assert_not_called()
+            mock_replace.assert_not_called()
+
+        res = team_res["team-idempotent"]
+        self.assertTrue(res.evidence_preserved)
+        self.assertEqual(res.status, "SUCCESS")
+        self.assertEqual(res.bundle_path.resolve(), dest_path.resolve())
+        self.assertEqual(dest_path.read_bytes(), bundle_content)
+
+    def test_preserve_team_bundles_refuses_overwrite_on_different_hash_collision(self) -> None:
+        """PP.2: 保存先に異なるハッシュのEvidence Bundleが存在する場合、上書きを拒否し原本Worktreeを保持することの実証。"""
+        job_id = "job-collision-test"
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id=job_id,
+            teams=[
+                TeamWorkerSpec(team_id="team-collision-target"),
+            ],
+            base_branch="main",
+        )
+
+        # 1. 恒久保存先に既存の別 Evidence Bundle をあらかじめ配置
+        evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = evidence_dir / "team-collision-target.zip"
+        old_content = b"PK\x03\x04ORIGINAL_PAST_EVIDENCE_BYTES"
+        dest_path.write_bytes(old_content)
+
+        # 2. ワーカーが新しい別内容の Bundle を生成
+        new_content = b"PK\x03\x04UNRELATED_NEW_EVIDENCE_BYTES"
+
+        def mock_worker(team_id: str, wt_path: Path) -> TeamExecutionResult:
+            target = wt_path / "new_work.txt"
+            target.write_text("new work\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=wt_path, check=True)
+            subprocess.run(["git", "commit", "-m", "feat: new work"], cwd=wt_path, check=True)
+            rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt_path, capture_output=True, text=True, check=True).stdout.strip()
+
+            bundles_dir = wt_path / ".dev" / "bundles"
+            bundles_dir.mkdir(parents=True, exist_ok=True)
+            bundle_p = bundles_dir / f"bundle_{team_id}.zip"
+            bundle_p.write_bytes(new_content)
+
+            return TeamExecutionResult(
+                team_id=team_id,
+                success=True,
+                status="SUCCESS",
+                branch=f"team/{team_id}",
+                head_commit=rev,
+                bundle_path=bundle_p,
+            )
+
+        wt_path = orchestrator.worktree_manager.worktree_base / "team-collision-target"
+
+        multi_res = orchestrator.execute_multi_team_pipeline(
+            config=config,
+            worker_fn=mock_worker,
+            cleanup=True,
+        )
+
+        # 衝突検知によりパイプラインは WORKER_FAILED となること
+        self.assertFalse(multi_res.success)
+        self.assertEqual(multi_res.status, "WORKER_FAILED")
+
+        team_res = multi_res.team_results["team-collision-target"]
+        self.assertFalse(team_res.evidence_preserved)
+        self.assertEqual(team_res.status, "BUNDLE_PRESERVATION_COLLISION")
+
+        # 既存の Evidence Bundle が上書きされず、旧内容が100%保持されていること
+        self.assertEqual(dest_path.read_bytes(), old_content)
+
+        # 新規 Worktree が原本保護され、ディスク上に残っていること
+        self.assertTrue(wt_path.exists(), "Original worktree must be preserved on collision")
+        new_bundle = wt_path / ".dev" / "bundles" / "bundle_team-collision-target.zip"
+        self.assertTrue(new_bundle.exists())
+        self.assertEqual(new_bundle.read_bytes(), new_content)
+
+        # 手動クリーンアップ
+        orchestrator.worktree_manager.remove_worktree("team-collision-target", force=True, delete_branch=True, purge_unmerged=True)
+
 
 if __name__ == "__main__":
     unittest.main()
