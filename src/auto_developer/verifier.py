@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -158,6 +161,79 @@ print(json.dumps(data))
 sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.errors) == 0) else 1)
 """
 
+    @contextlib.contextmanager
+    def _lockdown_repo(self, repo_dir: Path) -> Iterator[None]:
+        """候補テスト実行中、対象リポジトリ配下の全ファイルおよびディレクトリから
+        書き込み権限を一時的に剥奪（a-w）して OS 権限レベルで読取専用化し、
+        テスト終了後に元のパーミッションを確実に復元する。
+        """
+        original_modes: list[tuple[Path, int]] = []
+        resolved_repo = repo_dir.resolve()
+        write_mask = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+
+        items: list[tuple[Path, int, bool]] = []
+        try:
+            if resolved_repo.exists():
+                for root, dirs, files in os.walk(resolved_repo):
+                    root_path = Path(root)
+                    for f in files:
+                        p = root_path / f
+                        try:
+                            st = p.lstat()
+                            if not stat.S_ISLNK(st.st_mode):
+                                items.append((p, st.st_mode, False))
+                        except OSError:
+                            pass
+                    for d in dirs:
+                        p = root_path / d
+                        try:
+                            st = p.lstat()
+                            if not stat.S_ISLNK(st.st_mode):
+                                items.append((p, st.st_mode, True))
+                        except OSError:
+                            pass
+                try:
+                    st_repo = resolved_repo.lstat()
+                    items.append((resolved_repo, st_repo.st_mode, True))
+                except OSError:
+                    pass
+
+                # ファイルの書き込み権限を先に剥奪
+                for p, mode, is_dir in items:
+                    if not is_dir:
+                        try:
+                            p.chmod(mode & ~write_mask)
+                            original_modes.append((p, mode))
+                        except OSError:
+                            pass
+
+                # ディレクトリの書き込み権限を剥奪 (読取・実行権は維持)
+                for p, mode, is_dir in items:
+                    if is_dir:
+                        try:
+                            p.chmod(mode & ~write_mask)
+                            original_modes.append((p, mode))
+                        except OSError:
+                            pass
+
+            yield
+
+        finally:
+            # 復元: ディレクトリ (親) から先に元の書き込み権限を復元
+            for p, mode in reversed(original_modes):
+                try:
+                    if p.exists() and p.is_dir():
+                        p.chmod(mode)
+                except OSError:
+                    pass
+            # 次にファイルのパーミッションを復元
+            for p, mode in original_modes:
+                try:
+                    if p.exists() and not p.is_dir():
+                        p.chmod(mode)
+                except OSError:
+                    pass
+
     def _execute_test(
         self,
         test_file: Path,
@@ -167,7 +243,8 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
     ) -> RedVerificationResult:
         """構造化 TestResult を用いて候補テストを実行し、Red/Green/無効を判定する。
         本体リポジトリ汚染を防ぐため、実行作業ディレクトリは使い捨ての sandbox_dir に隔離し、
-        シークレット等の機密環境変数を除外サニタイズして実行する。
+        シークレット等の機密環境変数を除外サニタイズした上で、本体作業ツリーを OS 権限レベルで
+        読取専用にロックダウンして実行する。
         """
         # 1. 環境変数のサニタイズ（シークレット・APIキーの除外）
         sanitized_env: dict[str, str] = {}
@@ -193,15 +270,16 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         ]
 
         try:
-            proc = subprocess.run(
-                cmd,
-                cwd=exec_cwd,
-                env=sanitized_env,
-                capture_output=True,
-                text=True,
-                timeout=timeout_sec,
-                check=False,
-            )
+            with self._lockdown_repo(self.repo_dir):
+                proc = subprocess.run(
+                    cmd,
+                    cwd=exec_cwd,
+                    env=sanitized_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_sec,
+                    check=False,
+                )
         except subprocess.TimeoutExpired as e:
             return RedVerificationResult(
                 is_reproduced=False,
