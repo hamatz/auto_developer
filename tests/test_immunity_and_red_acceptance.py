@@ -11,7 +11,8 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 from auto_developer.audit import AuditRunner
-from auto_developer.dispatcher import AuditDispatcher
+from auto_developer.audit_store import AuditStore
+from auto_developer.dispatcher import AuditDispatcher, TaskDispatcher
 from auto_developer.guard import GitGuard
 from auto_developer.verifier import RedTestVerifier
 
@@ -260,6 +261,21 @@ class ZeroDivisionReproTest(unittest.TestCase):
         self.assertIn("- [ ] AUD-BUG-DIV-ZERO. Fix: [BUG-DIV-ZERO] Zero division does not return -1.0 as specified", plan_content)
         self.assertIn("Severity: P1", plan_content)
 
+        # 2.5. TaskDispatcher によるタスク取得（Makerへの引き渡し実証）
+        task_dispatcher = TaskDispatcher()
+        pending_tasks = task_dispatcher.parse_plan(plan_file)
+        target_task = task_dispatcher.get_next_pending_task(pending_tasks)
+        self.assertIsNotNone(target_task, "Dispatched task must be acquired by TaskDispatcher for Maker!")
+        assert target_task is not None
+        self.assertEqual(target_task.task_id, "AUD-BUG-DIV-ZERO")
+
+        # 2.6. AuditStore による永続化確認 (DDD.3)
+        store = AuditStore(audit_dir=self.repo_dir / ".dev" / "audit")
+        persisted_finding = store.load_finding("BUG-DIV-ZERO")
+        self.assertIsNotNone(persisted_finding, "Finding must be persisted in .dev/audit/!")
+        assert persisted_finding is not None
+        self.assertEqual(persisted_finding.finding_id, "BUG-DIV-ZERO")
+
         # 3. Maker がタスクに着手し、コードを修正 (バグ解消)
         # calculator.py を修正: ZeroDivisionError の場合に -1.0 を返すようにする
         self.calc_file.write_text(
@@ -276,6 +292,11 @@ class ZeroDivisionReproTest(unittest.TestCase):
         self.assertFalse(post_fix_res.is_reproduced)
         self.assertEqual(post_fix_res.exit_code, 0)
 
+        # タスク完了マークの検証
+        task_dispatcher.mark_task_status(plan_file, target_task, "completed")
+        updated_plan = plan_file.read_text(encoding="utf-8")
+        self.assertIn("- [x] AUD-BUG-DIV-ZERO.", updated_plan)
+
         # 5. 再現テストを永続的な免疫テスト (tests/immunity/) へ昇格・追加
         promoted_immunity_file = self.immunity_dir / "test_divide_zero_immunity.py"
         promoted_immunity_file.write_text(dispatched[0].reproduction_test_code, encoding="utf-8")
@@ -285,6 +306,41 @@ class ZeroDivisionReproTest(unittest.TestCase):
         self.assertTrue(
             self.guard.check_protected_files_untouched(self.checkpoint, allow_immunity_additions=True),
             "Promoted immunity test must be accepted in audit phase!",
+        )
+
+    def test_candidate_test_chmod_hostile_tamper_blocked_by_clone_isolation(self) -> None:
+        """受入シナリオ8 (DDD.1 & DDD.4): 候補テストが os.chmod で権限を復元して
+        本体リポジトリを直接改変しようとしても、物理クローン隔離と多層防御により
+        本体ファイルが 100% 物理的に無傷のまま保護されること。
+        """
+        canary = self.repo_dir / "canary_p0.txt"
+        canary.write_text("PRISTINE_PARENT_CANARY", encoding="utf-8")
+        canary_abs = str(canary.resolve())
+
+        hostile_code = f"""import os
+import unittest
+from pathlib import Path
+
+class HostileChmodTamperTest(unittest.TestCase):
+    def test_attack(self):
+        target = Path(r"{canary_abs}")
+        if target.exists():
+            try:
+                os.chmod(target, 0o644)
+                target.write_text("MALICIOUS_OVERWRITE")
+            except Exception:
+                pass
+        self.assertEqual(1, 2)
+"""
+        res = self.verifier.verify_candidate_test(hostile_code)
+        self.assertTrue(res.is_reproduced)
+        self.assertEqual(res.reason, "GENUINE_RED")
+
+        # 親リポジトリの canary_p0.txt が 1 バイトも汚染されていないこと
+        self.assertEqual(
+            canary.read_text(encoding="utf-8"),
+            "PRISTINE_PARENT_CANARY",
+            "Parent canary file must remain pristine even against os.chmod tampering!",
         )
 
 

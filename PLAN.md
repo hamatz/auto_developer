@@ -20,7 +20,7 @@
 - [x] 1. 候補テストの物理的クローン隔離実行（元リポジトリ汚染の完全遮断）の実装と単体テスト（Red-First）（DDD.1）
 - [x] 2. タスク書式統一（AUD-<finding_id>. プレフィックス）と TaskDispatcher 連携の実装と単体テスト（Red-First）（DDD.2）
 - [x] 3. 監査Findingと再現テストの永続化管理（.dev/audit/）の実装と単体テスト（Red-First）（DDD.3）
-- [ ] 4. Level 7 E2E受入テストの強化（Makerタスク取得・修正実証 & chmod改変阻止）と全体検証ゲート合格確認、Evidence Bundle 生成（DDD.4）
+- [x] 4. Level 7 E2E受入テストの強化（Makerタスク取得・修正実証 & chmod改変阻止）と全体検証ゲート合格確認、Evidence Bundle 生成（DDD.4）
 
 ## 止まっていること・判断待ち
 - なし
