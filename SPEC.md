@@ -330,7 +330,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - ワーカータイムアウトおよび異常停止時にプロセスグループ全体が確実に回収され、孤児プロセスが残存しないことを実証する決定論的テストを追加。
      - 全自動検証ゲート（180+ テスト、Ruff、Mypy）の合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
-- [ ] 機能SS (Stage 3 ワーカープロセス監督堅牢化 & 決定論的孤児防止実証 Stage 3 Robust Worker Process Lifecycle & Deterministic Orphan Prevention):
+- [x] 機能SS (Stage 3 ワーカープロセス監督堅牢化 & 決定論的孤児防止実証 Stage 3 Robust Worker Process Lifecycle & Deterministic Orphan Prevention):
   1. 起動時 PGID 保持と厳格な終了ステータス判定 (SS.1 / P1):
      - `MultiTeamOrchestrator` において、ワーカー起動直後（`subprocess.Popen` 呼び出し直後）に `proc.pid` から PGID を確定取得・保持するデータ構造（`WorkerProcessHandle`）を導入。
      - `terminate_worker_process_group()` において、親ワーカープロセスが先行終了・クラッシュした場合でも、保持された PGID に対して `os.killpg(SIGTERM/SIGKILL)` を確実に発行し、残存した孫プロセス・子孫プロセスを完全回収する。
@@ -341,6 +341,18 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 親ワーカー先行終了時でも孫プロセスがプロセスグループごと安全に回収される決定論的テストを追加。
   3. ドキュメント実装状況マトリクスの追加、全体検証ゲート通過、および Evidence Bundle 生成・検証 (SS.3):
      - `README.md` および `docs/designs/autonomous_pipeline_orchestrator.md` に「実装状況マトリクス（実装・検証完了 / 開発中 / 将来マイルストーン）」を追加し、北極星アーキテクチャ図と現在地を明確化。
+     - 全自動検証ゲート（181+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [ ] 機能TT (Stage 3 プロセスグループ実行中判定の厳格化とアクティブハンドル寿命管理 Stage 3 Process Group Active State Verification & Handle Lifecycle):
+  1. プロセスグループ実行中判定の厳格化 (TT.1 / P1):
+     - `terminate_worker_process_group()` において、単なる `killpg(pgid, 0)` の消滅待ちではなく、プロセスグループ内に「実行中プロセス（非ゾンビ）」が残存していないことを直接検査する判定ロジックを実装。
+     - Linux 環境では `/proc` を走査して対象 PGID のプロセス状態（`State: Z/X` 除外）を確認し、macOS/BSD/その他環境では `ps -eo pid=,pgid=,stat=` を用いて検査。
+     - グループ内に実行可能プロセスが存在しない場合（全プロセス消滅またはゾンビのみ）に回収成功（`True`）と判定し、停止指示失敗や状態確認不可時は `False` を返却する。
+  2. 終了済みハンドルのアクティブ監督対象除外とPID/PGID再利用対策 (TT.2 / P1):
+     - `terminate_all_workers()` において、過去に終了・回収済みのハンドルへシグナルを誤送信しないよう、現在アクティブに実行中のワーカー（`_active_workers`）のみを対象とする。
+     - 終了確認済みのワーカーはアクティブ対象から除外し、OSによるPID/PGID再利用時の無関係なプロセスグループ誤爆を物理的に防止する。
+  3. 2ワーカー並行停止テストの決定論的実証、全体検証ゲート通過、および Evidence Bundle 生成・検証 (TT.3):
+     - 独立実行環境において `test_terminate_all_workers_terminates_running_subprocesses` を含む全 23 件の multi-team テストが 100% 決定論的に合格することを実証。
      - 全自動検証ゲート（181+ テスト、Ruff、Mypy）の合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
 

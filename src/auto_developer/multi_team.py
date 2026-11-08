@@ -98,6 +98,75 @@ class WorkerProcessHandle:
     pgid: int
 
 
+def has_active_processes_in_group(pgid: int) -> bool:
+    """プロセスグループ内に実行中（非ゾンビ）のプロセスが存在するか検査する。
+
+    TT.1: Linux の /proc または POSIX ps を走査し、State: Z (zombie) または X (dead) を除外して判定する。
+    """
+    if pgid <= 0:
+        return False
+
+    # 1. まず killpg(pgid, 0) でグループの存在を確認
+    if hasattr(os, "killpg"):
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            # グループ自体が消滅している -> 実行中プロセスなし
+            return False
+        except OSError:
+            # 権限エラーやプラットフォーム制限の場合は詳細検査へ進む
+            pass
+
+    # 2. Linux: /proc がマウントされている場合は /proc/<pid>/stat を直接高速走査
+    proc_dir = Path("/proc")
+    if proc_dir.is_dir():
+        try:
+            for entry in proc_dir.iterdir():
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    stat_content = (entry / "stat").read_text()
+                    rparen = stat_content.rfind(")")
+                    if rparen == -1:
+                        continue
+                    rest = stat_content[rparen + 2 :].split()
+                    if len(rest) >= 3:
+                        state = rest[0].upper()
+                        pgrp = int(rest[2])
+                        if pgrp == pgid and state not in ("Z", "X"):
+                            return True
+                except (OSError, IndexError, ValueError):
+                    continue
+            return False
+        except OSError:
+            pass
+
+    # 3. macOS / BSD / Linux fallback: ps -eo pid=,pgid=,stat= を用いて検査
+    try:
+        res = subprocess.run(
+            ["ps", "-eo", "pid=,pgid=,stat="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 3:
+                    try:
+                        pgrp = int(parts[1])
+                        stat = parts[2]
+                        if pgrp == pgid and not stat.startswith("Z"):
+                            return True
+                    except ValueError:
+                        continue
+            return False
+        return True
+    except (subprocess.SubprocessError, OSError):
+        # 検査不能時は安全のため生存（未回収）と判定
+        return True
+
+
 class MultiTeamOrchestrator:
     """Stage 3: 複数チームワーカーの独立 Worktree 分割・並行実行・成果統合を統括する。"""
 
@@ -115,6 +184,7 @@ class MultiTeamOrchestrator:
         )
         self._active_workers: dict[str, WorkerProcessHandle] = {}
         self._all_worker_handles: dict[str, WorkerProcessHandle] = {}
+        self._worker_history: dict[str, dict[str, Any]] = {}
         self._workers_lock = threading.Lock()
 
     def terminate_worker_process_group(self, team_id: str, timeout: float = 2.0) -> bool:
@@ -157,31 +227,34 @@ class MultiTeamOrchestrator:
             except (ProcessLookupError, OSError):
                 pass
 
-        # 4. プロセスグループ内に実行中プロセスが残っていないか検証 (終了反映を最大1秒待機)
+        # 4. プロセスグループ内に実行中（非ゾンビ）プロセスが残っていないか検証 (最大2秒待機)
+        deadline = time.time() + min(timeout, 2.0)
         still_alive = True
         if hasattr(os, "killpg"):
-            for _ in range(20):
-                try:
-                    os.killpg(pgid, 0)
-                    time.sleep(0.05)
-                except ProcessLookupError:
+            while time.time() < deadline:
+                if not has_active_processes_in_group(pgid):
                     still_alive = False
                     break
-                except OSError:
-                    still_alive = False
-                    break
+                time.sleep(0.05)
         else:
             still_alive = proc.poll() is None
 
         with self._workers_lock:
             self._active_workers.pop(team_id, None)
+            self._all_worker_handles.pop(team_id, None)
+            self._worker_history[team_id] = {
+                "pid": handle.pid,
+                "pgid": handle.pgid,
+                "status": "TERMINATED" if not still_alive else "TERMINATION_FAILED",
+                "terminated_at": time.time(),
+            }
 
         return not still_alive
 
     def terminate_all_workers(self, timeout: float = 2.0) -> dict[str, bool]:
-        """RR.2, SS.1: 実行中および全ワーカーのプロセスグループを安全に回収・終了する。"""
+        """RR.2, SS.1, TT.2: 現在アクティブな全ワーカーのプロセスグループを安全に回収・終了する。"""
         with self._workers_lock:
-            team_ids = list(set(list(self._active_workers.keys()) + list(self._all_worker_handles.keys())))
+            team_ids = list(self._active_workers.keys())
         results: dict[str, bool] = {}
         for tid in team_ids:
             results[tid] = self.terminate_worker_process_group(tid, timeout=timeout)
@@ -384,7 +457,15 @@ class MultiTeamOrchestrator:
                         raise
                     finally:
                         with self._workers_lock:
-                            self._active_workers.pop(team.team_id, None)
+                            if not has_active_processes_in_group(handle.pgid):
+                                self._active_workers.pop(team.team_id, None)
+                                self._all_worker_handles.pop(team.team_id, None)
+                                self._worker_history[team.team_id] = {
+                                    "pid": handle.pid,
+                                    "pgid": handle.pgid,
+                                    "status": "COMPLETED" if exit_code == 0 else "FAILED",
+                                    "finished_at": time.time(),
+                                }
 
                 head_rev = subprocess.run(
                     ["git", "rev-parse", "HEAD"],
