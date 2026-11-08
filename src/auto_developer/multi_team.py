@@ -644,8 +644,12 @@ class MultiTeamOrchestrator:
             for tid, tr in team_results.items()
         }
 
-        # 全チームの成果物が揃っている場合は統合ゲートへ進める
-        all_preserved = all(tr.evidence_preserved for tr in team_results.values()) and len(team_results) == len(workers)
+        # YY.1: 未確認ワーカー（unverified_processes）が存在しないこと、かつ全チームの有効な成果物が揃っている場合は統合ゲートへ進める
+        all_preserved = (
+            not result.unverified_processes
+            and all(tr.evidence_preserved for tr in team_results.values())
+            and len(team_results) == len(workers)
+        )
 
         if all_preserved:
             inputs: list[TeamIntegrationInput] = []
@@ -695,10 +699,11 @@ class MultiTeamOrchestrator:
             )
         else:
             result.success = False
+            fail_status = "RECOVERY_REQUIRED" if result.unverified_processes else "EVIDENCE_VERIFICATION_FAILED"
             result.pipeline_result = MultiTeamResult(
                 job_id=job_id,
                 success=False,
-                status="EVIDENCE_VERIFICATION_FAILED",
+                status=fail_status,
                 team_results=team_results,
             )
 
