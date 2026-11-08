@@ -95,6 +95,7 @@ class MultiTeamRecoveryResult:
 
     job_id: str
     reclaimed_orphans: list[str] = field(default_factory=list)
+    unverified_processes: list[str] = field(default_factory=list)
     rescued_bundles: list[str] = field(default_factory=list)
     reused_bundles: list[str] = field(default_factory=list)
     pipeline_result: MultiTeamResult | None = None
@@ -115,6 +116,7 @@ class WorkerRegistration:
     status: str
     start_time: float
     updated_at: float
+    process_start_time: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -128,6 +130,7 @@ class WorkerRegistration:
             "status": self.status,
             "start_time": self.start_time,
             "updated_at": self.updated_at,
+            "process_start_time": self.process_start_time,
             "details": self.details,
         }
 
@@ -143,6 +146,11 @@ class WorkerRegistration:
             status=str(data.get("status", "UNKNOWN")),
             start_time=float(data.get("start_time", 0.0)),
             updated_at=float(data.get("updated_at", 0.0)),
+            process_start_time=(
+                str(data["process_start_time"])
+                if data.get("process_start_time") is not None
+                else None
+            ),
             details=dict(data.get("details", {})),
         )
 
@@ -205,6 +213,43 @@ class WorkerProcessHandle:
     proc: subprocess.Popen[str]
     pid: int
     pgid: int
+
+
+def get_process_start_identifier(pid: int) -> str | None:
+    """WW.1: OS上のプロセス開始識別子（Linux: /proc/<pid>/stat starttime、macOS/POSIX: ps lstart）を取得する。"""
+    if pid <= 0:
+        return None
+
+    # 1. Linux: /proc/<pid>/stat から starttime（フィールド22）を取得
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.is_file():
+        try:
+            content = proc_stat.read_text(encoding="utf-8").strip()
+            rparen = content.rfind(")")
+            if rparen != -1:
+                fields = content[rparen + 2 :].split()
+                # fields[0] は state (フィールド3)。starttime はフィールド22なので fields[19]
+                if len(fields) >= 20:
+                    return f"starttime:{fields[19]}"
+        except (OSError, ValueError):
+            pass
+
+    # 2. POSIX / macOS: ps -p <pid> -o lstart=
+    try:
+        res = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode == 0:
+            val = res.stdout.strip()
+            if val:
+                return f"lstart:{val}"
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+    return None
 
 
 def has_active_processes_in_group(pgid: int) -> bool:
@@ -411,24 +456,41 @@ class MultiTeamOrchestrator:
 
             # Case 1: 孤児ワーカーが生存しているか検査
             if w.pgid > 0 and has_active_processes_in_group(w.pgid):
-                # 孤児プロセスグループを安全に停止・回収
-                if hasattr(os, "killpg"):
-                    try:
-                        os.killpg(w.pgid, signal.SIGTERM)
-                    except (ProcessLookupError, OSError):
-                        pass
-                    deadline = time.time() + 1.0
-                    while time.time() < deadline:
-                        if not has_active_processes_in_group(w.pgid):
-                            break
-                        time.sleep(0.05)
-                    if has_active_processes_in_group(w.pgid):
+                # WW.1: プロセス同一性照合（PID再利用・無関係プロセス誤停止の防止）
+                curr_ident = get_process_start_identifier(w.pid)
+                identity_verified = False
+                if w.process_start_time and curr_ident:
+                    identity_verified = (curr_ident == w.process_start_time)
+
+                if identity_verified:
+                    # 孤児プロセスグループを安全に停止・回収
+                    if hasattr(os, "killpg"):
                         try:
-                            os.killpg(w.pgid, signal.SIGKILL)
+                            os.killpg(w.pgid, signal.SIGTERM)
                         except (ProcessLookupError, OSError):
                             pass
-                registry.update_status(tid, "TERMINATED")
-                result.reclaimed_orphans.append(tid)
+                        deadline = time.time() + 1.0
+                        while time.time() < deadline:
+                            if not has_active_processes_in_group(w.pgid):
+                                break
+                            time.sleep(0.05)
+                        if has_active_processes_in_group(w.pgid):
+                            try:
+                                os.killpg(w.pgid, signal.SIGKILL)
+                            except (ProcessLookupError, OSError):
+                                pass
+                    registry.update_status(tid, "TERMINATED")
+                    result.reclaimed_orphans.append(tid)
+                else:
+                    logger.warning(
+                        "Process identity mismatch or unverified for worker %s (PID=%s, stored=%s, current=%s); skipping signal",
+                        tid,
+                        w.pid,
+                        w.process_start_time,
+                        curr_ident,
+                    )
+                    registry.update_status(tid, "UNVERIFIED_PROCESS")
+                    result.unverified_processes.append(tid)
 
             # Case 3: 恒久保存先に確定済み Evidence が存在するか確認
             if dest_bundle.exists():
@@ -721,6 +783,7 @@ class MultiTeamOrchestrator:
                         self._all_worker_handles[team.team_id] = handle
 
                     now = time.time()
+                    proc_ident = get_process_start_identifier(proc.pid)
                     registry.register_worker(
                         WorkerRegistration(
                             team_id=team.team_id,
@@ -732,6 +795,7 @@ class MultiTeamOrchestrator:
                             status="RUNNING",
                             start_time=now,
                             updated_at=now,
+                            process_start_time=proc_ident,
                         )
                     )
 

@@ -24,6 +24,7 @@ from auto_developer.multi_team import (
     WorkerProcessHandle,
     WorkerRegistration,
     WorkerRegistry,
+    get_process_start_identifier,
     has_active_processes_in_group,
 )
 
@@ -1709,6 +1710,7 @@ class TestMultiTeamOrchestration(unittest.TestCase):
             status="RUNNING",
             start_time=time.time(),
             updated_at=time.time(),
+            process_start_time=get_process_start_identifier(p_case1.pid),
         )
 
         # 2. Case 2: ワーカーは停止したが、Worktree 内に成果物（Bundle）が残存
@@ -1804,7 +1806,7 @@ import sys, os, time, signal, subprocess
 from pathlib import Path
 if {src_path!r} not in sys.path:
     sys.path.insert(0, {src_path!r})
-from auto_developer.multi_team import WorkerRegistry, WorkerRegistration
+from auto_developer.multi_team import WorkerRegistry, WorkerRegistration, get_process_start_identifier
 
 repo_dir = Path({repo_dir_str!r})
 job_id = {job_id!r}
@@ -1831,6 +1833,7 @@ registry.save({{
         status="RUNNING",
         start_time=now,
         updated_at=now,
+        process_start_time=get_process_start_identifier(p1.pid),
     ),
     "team-done": WorkerRegistration(
         team_id="team-done",
@@ -1890,6 +1893,53 @@ os.kill(os.getpid(), signal.SIGKILL)
                 verify_script.unlink()
             if parent_script.exists():
                 parent_script.unlink()
+
+
+    def test_recover_multi_team_job_skips_unrelated_process_on_identity_mismatch(self) -> None:
+        """WW.1: Registryに無関係なプロセスのPID/PGIDが注入された場合、プロセスの同一性照合により誤停止しないことを実証。"""
+        job_id = "job-unrelated-probe-test"
+        registry = WorkerRegistry(repo_dir=self.repo_dir, job_id=job_id)
+
+        # 無関係な検証用プロセス（別の sleep 60）を起動
+        p_unrelated = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        unrelated_pid = p_unrelated.pid
+
+        # 偽の開始時刻識別子、または不一致の識別子を持つワーカー情報を登録
+        now = time.time()
+        wt = self.repo_dir / ".dev" / "worktrees" / "team-probe"
+        wt.mkdir(parents=True, exist_ok=True)
+        reg = WorkerRegistration(
+            team_id="team-probe",
+            pid=unrelated_pid,
+            pgid=unrelated_pid,
+            worktree_path=str(wt),
+            base_branch="main",
+            branch_name="team/team-probe",
+            status="RUNNING",
+            start_time=now,
+            updated_at=now,
+            process_start_time="mismatched-non-existent-start-id",
+        )
+        registry.save({"team-probe": reg})
+
+        try:
+            orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+            rec_result: MultiTeamRecoveryResult = orchestrator.recover_multi_team_job(job_id=job_id)
+
+            # 無関係なプロセスが誤停止されず、現在も実稼働中であること
+            self.assertTrue(
+                _is_process_running(unrelated_pid),
+                "Unrelated process must NOT be terminated when process identity does not match",
+            )
+            self.assertNotIn("team-probe", rec_result.reclaimed_orphans)
+            self.assertIn("team-probe", rec_result.unverified_processes)
+        finally:
+            try:
+                if _is_process_running(unrelated_pid):
+                    p_unrelated.kill()
+                p_unrelated.wait(timeout=1.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
 
 
 if __name__ == "__main__":
