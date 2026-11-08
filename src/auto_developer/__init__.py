@@ -32,7 +32,11 @@ from auto_developer.runner import (
     MockRunnerAdapter,
     RunnerAdapter,
 )
-from auto_developer.verifier import DeterministicVerifier
+from auto_developer.verifier import (
+    DeterministicVerifier,
+    RedTestVerifier,
+    RedVerificationResult,
+)
 
 __version__ = "0.2.0"
 
@@ -57,6 +61,8 @@ __all__ = [
     "RecoveryEngine",
     "RecoveryPlan",
     "RecoveryResult",
+    "RedTestVerifier",
+    "RedVerificationResult",
     "RunnerAdapter",
     "Task",
     "TaskDispatcher",
