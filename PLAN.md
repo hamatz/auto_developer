@@ -7,18 +7,18 @@
 -->
 
 ## 現在の目標
-- Phase 36: Stage 3 親プロセス強制終了耐性 & ワーカークラッシュ自律復旧 (Sol氏提案マイルストーン)
-  - P1: 永続 Worker Registry 機構の実装（機能VV.1）
-  - P1: 3状態自律復旧エンジン `recover_multi_team_job()` の実装（機能VV.2）
-  - 受入実証: 親プロセスSIGKILL疑似クラッシュ障害注入テスト、全体検証ゲート通過、および Evidence Bundle 生成・検証（機能VV.3）
+- Phase 37: Stage 3 復旧時プロセス同一性照合・Worktree安全境界復元・Evidence実証厳格化 (Sol氏レビュー残課題)
+  - P0: プロセス同一性照合（`process_start_time`）による無関係プロセス誤停止の防止（機能WW.1）
+  - P0: Worktree 削除安全境界の復元と直接 `shutil.rmtree` の完全撤廃（機能WW.2）
+  - P1: Evidence 実検証（`verify_bundle`）の義務化、状態厳格化、全体検証ゲート合格、および Evidence Bundle 生成・検証（機能WW.3）
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - なし
 
 ## ステップ
-- [x] 1. 永続 Worker Registry 機構（VV.1: `.dev/integration_jobs/<job_id>/workers.json` への原子的一時保存 & 状態追跡）の実装と単体テスト（Red-First）
-- [x] 2. 3状態自律復旧エンジン `recover_multi_team_job()`（VV.2: Case 1 孤児回収, Case 2 成果救出, Case 3 前進完了）の実装と単体テスト（Red-First）
-- [x] 3. 親プロセスSIGKILL疑似クラッシュからの完全自律復旧テスト実証、全体検証ゲート合格確認（181+ テスト）、および Evidence Bundle 生成・検証（VV.3）
+- [x] 1. プロセス同一性照合（起動時 OS 開始識別子記録 & 復旧時照合不一致での停止保留）の実装と単体テスト（Red-First）（WW.1）
+- [x] 2. Worktree 削除安全境界の復元（直接 `shutil.rmtree` 撤廃 & `WorktreeManager` 経由安全削除への一本化）の実装と単体テスト（Red-First）（WW.2）
+- [x] 3. Evidence 実検証（`verify_bundle`）の義務化・復旧状態厳格化、全体検証ゲート合格確認（182+ テスト）、および Evidence Bundle 生成・検証（WW.3）
 
 ## 止まっていること・判断待ち
 - なし

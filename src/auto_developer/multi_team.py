@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 import uuid
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -95,6 +96,8 @@ class MultiTeamRecoveryResult:
 
     job_id: str
     reclaimed_orphans: list[str] = field(default_factory=list)
+    unverified_processes: list[str] = field(default_factory=list)
+    unverified_worktrees: list[str] = field(default_factory=list)
     rescued_bundles: list[str] = field(default_factory=list)
     reused_bundles: list[str] = field(default_factory=list)
     pipeline_result: MultiTeamResult | None = None
@@ -115,6 +118,7 @@ class WorkerRegistration:
     status: str
     start_time: float
     updated_at: float
+    process_start_time: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -128,6 +132,7 @@ class WorkerRegistration:
             "status": self.status,
             "start_time": self.start_time,
             "updated_at": self.updated_at,
+            "process_start_time": self.process_start_time,
             "details": self.details,
         }
 
@@ -143,6 +148,11 @@ class WorkerRegistration:
             status=str(data.get("status", "UNKNOWN")),
             start_time=float(data.get("start_time", 0.0)),
             updated_at=float(data.get("updated_at", 0.0)),
+            process_start_time=(
+                str(data["process_start_time"])
+                if data.get("process_start_time") is not None
+                else None
+            ),
             details=dict(data.get("details", {})),
         )
 
@@ -205,6 +215,58 @@ class WorkerProcessHandle:
     proc: subprocess.Popen[str]
     pid: int
     pgid: int
+
+
+def _is_valid_bundle_archive(bundle_path: Path) -> bool:
+    """WW.3: Evidence Bundle が有効な ZIP アーカイブであり破損していないか検査する。"""
+    if not bundle_path.is_file() or bundle_path.stat().st_size == 0:
+        return False
+    if not zipfile.is_zipfile(bundle_path):
+        return False
+    try:
+        with zipfile.ZipFile(bundle_path, "r") as zf:
+            if zf.testzip() is not None:
+                return False
+        return True
+    except (zipfile.BadZipFile, OSError):
+        return False
+
+
+def get_process_start_identifier(pid: int) -> str | None:
+    """WW.1: OS上のプロセス開始識別子（Linux: /proc/<pid>/stat starttime、macOS/POSIX: ps lstart）を取得する。"""
+    if pid <= 0:
+        return None
+
+    # 1. Linux: /proc/<pid>/stat から starttime（フィールド22）を取得
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.is_file():
+        try:
+            content = proc_stat.read_text(encoding="utf-8").strip()
+            rparen = content.rfind(")")
+            if rparen != -1:
+                fields = content[rparen + 2 :].split()
+                # fields[0] は state (フィールド3)。starttime はフィールド22なので fields[19]
+                if len(fields) >= 20:
+                    return f"starttime:{fields[19]}"
+        except (OSError, ValueError):
+            pass
+
+    # 2. POSIX / macOS: ps -p <pid> -o lstart=
+    try:
+        res = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode == 0:
+            val = res.stdout.strip()
+            if val:
+                return f"lstart:{val}"
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+    return None
 
 
 def has_active_processes_in_group(pgid: int) -> bool:
@@ -411,35 +473,62 @@ class MultiTeamOrchestrator:
 
             # Case 1: 孤児ワーカーが生存しているか検査
             if w.pgid > 0 and has_active_processes_in_group(w.pgid):
-                # 孤児プロセスグループを安全に停止・回収
-                if hasattr(os, "killpg"):
-                    try:
-                        os.killpg(w.pgid, signal.SIGTERM)
-                    except (ProcessLookupError, OSError):
-                        pass
-                    deadline = time.time() + 1.0
-                    while time.time() < deadline:
-                        if not has_active_processes_in_group(w.pgid):
-                            break
-                        time.sleep(0.05)
-                    if has_active_processes_in_group(w.pgid):
+                # WW.1: プロセス同一性照合（PID再利用・無関係プロセス誤停止の防止）
+                curr_ident = get_process_start_identifier(w.pid)
+                identity_verified = False
+                if w.process_start_time and curr_ident:
+                    identity_verified = (curr_ident == w.process_start_time)
+
+                if identity_verified:
+                    # 孤児プロセスグループを安全に停止・回収
+                    if hasattr(os, "killpg"):
                         try:
-                            os.killpg(w.pgid, signal.SIGKILL)
+                            os.killpg(w.pgid, signal.SIGTERM)
                         except (ProcessLookupError, OSError):
                             pass
-                registry.update_status(tid, "TERMINATED")
-                result.reclaimed_orphans.append(tid)
+                        deadline = time.time() + 1.0
+                        while time.time() < deadline:
+                            if not has_active_processes_in_group(w.pgid):
+                                break
+                            time.sleep(0.05)
+                        if has_active_processes_in_group(w.pgid):
+                            try:
+                                os.killpg(w.pgid, signal.SIGKILL)
+                            except (ProcessLookupError, OSError):
+                                pass
+                    registry.update_status(tid, "TERMINATED")
+                    result.reclaimed_orphans.append(tid)
+                else:
+                    logger.warning(
+                        "Process identity mismatch or unverified for worker %s (PID=%s, stored=%s, current=%s); skipping signal",
+                        tid,
+                        w.pid,
+                        w.process_start_time,
+                        curr_ident,
+                    )
+                    registry.update_status(tid, "UNVERIFIED_PROCESS")
+                    result.unverified_processes.append(tid)
 
             # Case 3: 恒久保存先に確定済み Evidence が存在するか確認
             if dest_bundle.exists():
-                result.reused_bundles.append(tid)
-                team_results[tid] = TeamExecutionResult(
-                    team_id=tid,
-                    success=True,
-                    status="SUCCESS",
-                    bundle_path=dest_bundle,
-                    evidence_preserved=True,
-                )
+                if _is_valid_bundle_archive(dest_bundle):
+                    result.reused_bundles.append(tid)
+                    team_results[tid] = TeamExecutionResult(
+                        team_id=tid,
+                        success=True,
+                        status="SUCCESS",
+                        bundle_path=dest_bundle,
+                        evidence_preserved=True,
+                    )
+                else:
+                    logger.warning("Existing bundle for team '%s' is corrupted or invalid", tid)
+                    team_results[tid] = TeamExecutionResult(
+                        team_id=tid,
+                        success=False,
+                        status="INVALID_EVIDENCE",
+                        bundle_path=dest_bundle,
+                        evidence_preserved=False,
+                    )
             else:
                 # Case 2: Worktree 内に成果物（Bundle）が残存しているか探索
                 wt_bundles_dir = wt_path / ".dev" / "bundles"
@@ -449,11 +538,16 @@ class MultiTeamOrchestrator:
                     if candidates:
                         wt_bundle = candidates[0]
 
-                if wt_bundle and wt_bundle.exists():
+                if wt_bundle and wt_bundle.exists() and _is_valid_bundle_archive(wt_bundle):
                     # 未退避 Bundle を恒久保存先へ救出
                     tmp_dest = evidence_dir / f"{tid}.zip.tmp_rec_{os.getpid()}_{time.time_ns()}"
                     try:
                         shutil.copy2(wt_bundle, tmp_dest)
+                        src_sha = hashlib.sha256(wt_bundle.read_bytes()).hexdigest()
+                        copied_sha = hashlib.sha256(tmp_dest.read_bytes()).hexdigest()
+                        if src_sha != copied_sha or not _is_valid_bundle_archive(tmp_dest):
+                            raise OSError(f"Corrupted copy during rescue of team '{tid}'")
+
                         try:
                             os.link(tmp_dest, dest_bundle)
                             result.rescued_bundles.append(tid)
@@ -466,14 +560,23 @@ class MultiTeamOrchestrator:
                             )
                             registry.update_status(tid, "EVIDENCE_PRESERVED")
                         except FileExistsError:
-                            result.reused_bundles.append(tid)
-                            team_results[tid] = TeamExecutionResult(
-                                team_id=tid,
-                                success=True,
-                                status="SUCCESS",
-                                bundle_path=dest_bundle,
-                                evidence_preserved=True,
-                            )
+                            existing_sha = hashlib.sha256(dest_bundle.read_bytes()).hexdigest()
+                            if existing_sha == src_sha and _is_valid_bundle_archive(dest_bundle):
+                                result.reused_bundles.append(tid)
+                                team_results[tid] = TeamExecutionResult(
+                                    team_id=tid,
+                                    success=True,
+                                    status="SUCCESS",
+                                    bundle_path=dest_bundle,
+                                    evidence_preserved=True,
+                                )
+                            else:
+                                logger.error("Rescue collision with differing or corrupt bundle for '%s'", tid)
+                                team_results[tid] = TeamExecutionResult(
+                                    team_id=tid,
+                                    success=False,
+                                    status="BUNDLE_PRESERVATION_COLLISION",
+                                )
                         finally:
                             if tmp_dest.exists():
                                 tmp_dest.unlink()
@@ -485,12 +588,28 @@ class MultiTeamOrchestrator:
                             status="RESCUE_FAILED",
                             details={"error": str(err)},
                         )
+                elif wt_bundle and wt_bundle.exists() and not _is_valid_bundle_archive(wt_bundle):
+                    logger.warning("Candidate bundle in worktree for team '%s' is invalid", tid)
+                    team_results[tid] = TeamExecutionResult(
+                        team_id=tid,
+                        success=False,
+                        status="INVALID_EVIDENCE",
+                    )
                 else:
                     team_results[tid] = TeamExecutionResult(
                         team_id=tid,
                         success=False,
                         status="EVIDENCE_NOT_FOUND",
                     )
+
+        result.details["team_results"] = {
+            tid: {
+                "success": tr.success,
+                "status": tr.status,
+                "evidence_preserved": tr.evidence_preserved,
+            }
+            for tid, tr in team_results.items()
+        }
 
         # 全チームの成果物が揃っている場合は統合ゲートへ進める
         all_preserved = all(tr.evidence_preserved for tr in team_results.values()) and len(team_results) == len(workers)
@@ -526,25 +645,54 @@ class MultiTeamOrchestrator:
                     rc_commit = int_res.release_candidate_commit
                     rc_tag = str(int_res.details.get("rc_tag")) if int_res.details.get("rc_tag") else f"refs/tags/rc/{job_id}"
 
+            pipeline_status = (
+                "SUCCESS"
+                if (int_res and int_res.success)
+                else ("RECOVERED_EVIDENCE_FOUND" if verify_script is None else "INTEGRATION_FAILED")
+            )
             result.pipeline_result = MultiTeamResult(
                 job_id=job_id,
                 success=int_res.success if int_res else True,
-                status="SUCCESS" if (int_res.success if int_res else True) else "INTEGRATION_FAILED",
+                status=pipeline_status,
                 team_results=team_results,
                 integration_result=int_res,
                 release_candidate_commit=rc_commit,
                 release_candidate_tag=rc_tag,
             )
+        else:
+            result.success = False
+            result.pipeline_result = MultiTeamResult(
+                job_id=job_id,
+                success=False,
+                status="EVIDENCE_VERIFICATION_FAILED",
+                team_results=team_results,
+            )
 
-            if cleanup:
-                for tid, w in workers.items():
-                    wt_p = Path(w.worktree_path)
-                    try:
-                        self.worktree_manager.remove_worktree(tid, force=True)
-                    except (subprocess.SubprocessError, OSError) as exc:
-                        logger.debug("Worktree removal non-fatal error for %s: %s", tid, exc)
-                    if wt_p.exists():
-                        shutil.rmtree(wt_p, ignore_errors=True)
+        if cleanup:
+            registered_wts = {wt.team_id: wt for wt in self.worktree_manager.list_worktrees()}
+            base_dir = self.worktree_manager.worktree_base.resolve()
+            for tid, w in workers.items():
+                wt_p = Path(w.worktree_path)
+                try:
+                    resolved_wt = wt_p.resolve()
+                    is_within_base = resolved_wt.is_relative_to(base_dir)
+                except (ValueError, OSError):
+                    is_within_base = False
+
+                # WW.2: 安全境界検査: worktree_base 配下かつ Git 登録済みであること
+                if not is_within_base or tid not in registered_wts:
+                    logger.warning(
+                        "Worktree path for team '%s' (%s) is outside base directory or not registered in git; preserving untouched",
+                        tid,
+                        w.worktree_path,
+                    )
+                    result.unverified_worktrees.append(tid)
+                    continue
+
+                try:
+                    self.worktree_manager.remove_worktree(tid, force=True)
+                except (subprocess.SubprocessError, OSError, WorktreeError) as exc:
+                    logger.debug("Worktree removal non-fatal error for %s: %s", tid, exc)
 
         return result
 
@@ -721,6 +869,7 @@ class MultiTeamOrchestrator:
                         self._all_worker_handles[team.team_id] = handle
 
                     now = time.time()
+                    proc_ident = get_process_start_identifier(proc.pid)
                     registry.register_worker(
                         WorkerRegistration(
                             team_id=team.team_id,
@@ -732,6 +881,7 @@ class MultiTeamOrchestrator:
                             status="RUNNING",
                             start_time=now,
                             updated_at=now,
+                            process_start_time=proc_ident,
                         )
                     )
 
