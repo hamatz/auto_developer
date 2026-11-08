@@ -12,5 +12,5 @@
 /tests/                   @hamatz
 
 # 仕様と指示（ここが誤ると、すべての検証が誤った物差しになる）
-/SPEC.md                  @yhamatz
+/SPEC.md                  @hamatz
 /AGENTS.md                @hamatz
