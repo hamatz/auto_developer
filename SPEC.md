@@ -317,7 +317,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   3. 全体検証ゲート合格と Evidence Bundle 生成・検証 (QQ.3):
      - 全自動検証ゲート（179+ テスト、Ruff、Mypy）の合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
-- [ ] 機能RR (Stage 3 システムアーキテクチャ刷新 & ワーカープロセス監督・回収 Stage 3 Architecture Refresh & Worker Process Lifecycle Supervision):
+- [x] 機能RR (Stage 3 システムアーキテクチャ刷新 & ワーカープロセス監督・回収 Stage 3 Architecture Refresh & Worker Process Lifecycle Supervision):
   1. 多層防衛アーキテクチャ図 & 設計ドキュメント刷新 (RR.1):
      - `docs/designs/autonomous_pipeline_orchestrator.md` および `README.md` を更新。
      - Stage 1（Worktree物理分離・領空防御）、Stage 2（IntegrationGate・RC確定）、Stage 3（並列ワーカー・排他確定・非破壊保全）を統合した包括的 Mermaid システム構成図を反映。
@@ -329,6 +329,19 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   3. プロセス回収 & 孤児防止テストの実証、全体検証ゲート通過、および Evidence Bundle 生成・検証 (RR.3):
      - ワーカータイムアウトおよび異常停止時にプロセスグループ全体が確実に回収され、孤児プロセスが残存しないことを実証する決定論的テストを追加。
      - 全自動検証ゲート（180+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [ ] 機能SS (Stage 3 ワーカープロセス監督堅牢化 & 決定論的孤児防止実証 Stage 3 Robust Worker Process Lifecycle & Deterministic Orphan Prevention):
+  1. 起動時 PGID 保持と厳格な終了ステータス判定 (SS.1 / P1):
+     - `MultiTeamOrchestrator` において、ワーカー起動直後（`subprocess.Popen` 呼び出し直後）に `proc.pid` から PGID を確定取得・保持するデータ構造（`WorkerProcessHandle`）を導入。
+     - `terminate_worker_process_group()` において、親ワーカープロセスが先行終了・クラッシュした場合でも、保持された PGID に対して `os.killpg(SIGTERM/SIGKILL)` を確実に発行し、残存した孫プロセス・子孫プロセスを完全回収する。
+     - プロセスグループ全体の消滅（`os.killpg(pgid, 0)` が `ProcessLookupError` を送出）を検証し、停止指示・回収結果の成否を決定論的に判定・返却する。
+  2. 起動同期 & ゾンビ除外による決定論的回収テスト (SS.2 / P1):
+     - テスト環境において起動準備の時間差による Flakiness を解消するため、子プロセスの起動完了（PID ファイル書き込み等）を確実に待機・同期してから回収操作を実行する。
+     - Linux 等の環境で終了済みゾンビプロセス（`State: Z`）を生存プロセスと誤認しないよう、ゾンビ状態を除外して真に実行中の孤児プロセスが存在しないことを厳密に検証する。
+     - 親ワーカー先行終了時でも孫プロセスがプロセスグループごと安全に回収される決定論的テストを追加。
+  3. ドキュメント実装状況マトリクスの追加、全体検証ゲート通過、および Evidence Bundle 生成・検証 (SS.3):
+     - `README.md` および `docs/designs/autonomous_pipeline_orchestrator.md` に「実装状況マトリクス（実装・検証完了 / 開発中 / 将来マイルストーン）」を追加し、北極星アーキテクチャ図と現在地を明確化。
+     - 全自動検証ゲート（181+ テスト、Ruff、Mypy）の合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
