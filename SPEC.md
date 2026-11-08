@@ -204,7 +204,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. 受入テストの偽陽性排除と厳格な機能結合検証 (BB.4 / P1-3):
      - 契約受入テスト（`test_contract.py`）内の `except ImportError: return` を排除し、必要なモジュール（`core.app`, `ui.view`）のインポート失敗や期待値不一致は必ずテスト失敗（Exit 1）として検知する。
      - 統合前に契約テストが誤って実行されないようテスト実行条件・スコープを整理し、結合成功時のみ Exit 0、不整合時は即座に Exit 1 となる決定論的検証を保証する。
-- [ ] 機能CC (Stage 2: 統合クラッシュ耐性パック Integration Crash Consistency Pack):
+- [x] 機能CC (Stage 2: 統合クラッシュ耐性パック Integration Crash Consistency Pack):
   1. クリーンアップ状態の明示と隔離リネームの Fail-Closed 検査 (CC.1 / P1-A, P1-B):
      - Worktree の後片付け成否を `IntegrationResult.details` の `cleanup_status` ("SUCCESS" | "FAILED")、`worktree_path`、`cleanup_error` に記録し、クリーンアップ失敗時は警告またはエラー情報として呼び出し元へ明示する。
      - 競合（CONFLICT）や全体検証失敗（VERIFICATION_FAILED）時の隔離ブランチリネーム（`git branch -m`）の実行結果を検証し、リネームに失敗した場合は推測で処理を完了せず即座に `status="RECOVERY_REQUIRED"` を返す。
@@ -217,6 +217,15 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 途中で孤立した Worktree やロックが存在する場合は安全に回収・隔離し、作業をクリーンな状態へ復元または安全に再開する。
   4. クラッシュ復旧の決定論的受入テスト (CC.4 / P1-D):
      - マージ途中や全体検証途中でプロセスが強制終了された状態を再現し、次回実行時に安全に検知・復旧（クリーンアップまたは再開）できることを実証する決定論的受入テストを追加。
+- [ ] 機能DD (Stage 2: クラッシュ復旧堅牢化 & 実プロセスSIGKILL障害注入実証 Stage 2 Crash Consistency Hardening & Real SIGKILL Verification):
+  1. `recover_interrupted_job` の完全 Fail-Closed 化 (DD.1 / P0):
+     - 孤立 Worktree の削除失敗（例外発生）時、または削除試行後にターゲットディレクトリや Git 管理下の Worktree が実在する場合、推測で `RECOVERED` とせず確実に `status="RECOVERY_REQUIRED"` を返す。対象が最初から存在しない場合のみ冪等成功として扱う。
+  2. `IntegrationJobState` の識別子検証 & 原子的永続化の堅牢化 (DD.2 / P1):
+     - `job_id` を正規表現 `^[a-zA-Z0-9_-]+$` で厳格検証しパストラバーサルを遮断。状態保存時に一時ファイルへの `flush()` + `os.fsync()` および親ディレクトリの同期を行い、突然の電源断に対する耐性を担保。
+  3. 実プロセスへの `SIGKILL` 障害注入受入テストの実証 (DD.3 / P1):
+     - `IntegrationGate` に障害注入フック（`fault_hook`）を設け、別プロセスで起動した `execute_integration` をマージ途中（`after_first_merge`）または RC 発行直後で実際に `os.kill(pid, signal.SIGKILL)` により強制終了。その後の `execute_integration(..., resume=True)` による安全な復旧・隔離・統合完遂を実証。
+  4. Morning Brief (NIGHTLY_REPORT.md) と Manifest の Tree SHA 完全整合 (DD.4 / P2):
+     - `MorningReporter` が全 Evidence 領域（`records`, `archive`, `.dev/evidence`）から実態照合を行い、Manifest の Tree SHA と 1対1 で完全一致するよう出力する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
+import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -18,9 +21,32 @@ if src_dir not in sys.path:
 from auto_developer.bundler import BundleVerificationResult, EvidenceBundler
 from auto_developer.integration_gate import (
     IntegrationGate,
+    IntegrationJobState,
     IntegrationResult,
     TeamIntegrationInput,
 )
+
+
+def _child_gate_sigkill_worker(
+    repo_dir: Path,
+    job_id: str,
+    inputs: list[TeamIntegrationInput],
+    base_commit: str,
+    verify_script: Path,
+    fault_checkpoint: str,
+) -> None:
+    def _fault_hook(checkpoint: str, context: dict[str, Any]) -> None:
+        if checkpoint == fault_checkpoint:
+            os.kill(os.getpid(), signal.SIGKILL)
+
+    gate = IntegrationGate(repo_dir=repo_dir, fault_hook=_fault_hook)
+    gate.execute_integration(
+        job_id=job_id,
+        inputs=inputs,
+        base_commit=base_commit,
+        verify_script=verify_script,
+        resume=False,
+    )
 
 
 class TestIntegrationGateAudit(unittest.TestCase):
@@ -1048,6 +1074,204 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         # 最終状態ファイルが COMPLETED に更新されていること
         final_state = json.loads(state_file.read_text(encoding="utf-8"))
         self.assertEqual(final_state.get("state"), "COMPLETED")
+
+    def test_recover_interrupted_job_fails_closed_when_worktree_removal_fails(self) -> None:
+        """DD.1 / P0: Worktree 削除に失敗した際、Fail-Closed で RECOVERY_REQUIRED を返し RECOVERED に偽陽性しないことの実証。"""
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        job_id = "job-wt-fail-closed"
+        state = IntegrationJobState(
+            job_id=job_id,
+            state="MERGING",
+            base_commit=self.base_commit,
+            integration_branch=f"integration/{job_id}",
+        )
+        state.save(gate.jobs_dir)
+
+        # 削除処理で障害が発生（Sol氏の独立検証シナリオ）
+        with unittest.mock.patch.object(
+            gate.worktree_manager,
+            "remove_worktree",
+            side_effect=RuntimeError("injected cleanup failure"),
+        ):
+            success, status, details = gate.recover_interrupted_job(job_id)
+
+        self.assertFalse(success)
+        self.assertEqual(status, "RECOVERY_REQUIRED")
+        self.assertTrue(details.get("worktree_cleanup_failed"))
+
+        persisted = IntegrationJobState.load(gate.jobs_dir, job_id)
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.state, "RECOVERY_REQUIRED")
+
+    def test_recover_interrupted_job_fails_closed_when_worktree_still_exists(self) -> None:
+        """DD.1 / P0: 例外が出なくても Worktree 実態が残存している場合は RECOVERY_REQUIRED となることの実証。"""
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        job_id = "job-wt-still-exists"
+        branch_name = f"integration/{job_id}"
+        wt_team_id = f"int-{job_id}"
+        gate.worktree_manager.create_worktree(team_id=wt_team_id, base_branch="main", branch_name=branch_name)
+
+        state = IntegrationJobState(
+            job_id=job_id,
+            state="MERGING",
+            base_commit=self.base_commit,
+            integration_branch=branch_name,
+        )
+        state.save(gate.jobs_dir)
+
+        # remove_worktree が何もしなかった（削除されずにディレクトリが残存）ケースを模擬
+        with unittest.mock.patch.object(gate.worktree_manager, "remove_worktree", return_value=False):
+            success, status, details = gate.recover_interrupted_job(job_id)
+
+        self.assertFalse(success)
+        self.assertEqual(status, "RECOVERY_REQUIRED")
+        self.assertTrue(details.get("worktree_cleanup_failed"))
+
+        # クリーンアップ
+        gate.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=True, purge_unmerged=True)
+
+    def test_integration_job_id_validation_rejects_invalid_chars(self) -> None:
+        """DD.2 / P1: job_id のパストラバーサルや不正文字を厳格に拒否することの実証。"""
+        # 不正な job_id によるステート作成拒否
+        for invalid_id in ["../job", "job/1", "job;rm", "job test", "job$1"]:
+            with self.assertRaises(ValueError):
+                IntegrationJobState(
+                    job_id=invalid_id,
+                    state="INITIALIZED",
+                    base_commit="main",
+                    integration_branch="integration/test",
+                )
+
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        # 不正な job_id による recover 拒否
+        success, status, details = gate.recover_interrupted_job("../../etc/passwd")
+        self.assertFalse(success)
+        self.assertEqual(status, "INVALID_JOB_ID")
+        self.assertIn("Invalid job_id", details.get("error", ""))
+
+        # 不正な job_id による execute 拒否
+        result = gate.execute_integration(
+            job_id="../../bad_job",
+            inputs=[],
+            base_commit="main",
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "ERROR")
+        self.assertIn("Invalid job_id", result.errors[0])
+
+    def test_real_process_sigkill_during_merge_recovers_and_completes(self) -> None:
+        """DD.3 / P1: マージ途中の実プロセス SIGKILL 障害注入から resume=True で安全に復旧・完遂することの実証。"""
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/core/app.py",
+            content="# Core logic\ndef get_core():\n    return 42\n",
+        )
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/ui/view.py",
+            content="from core.app import get_core\n\ndef render():\n    return f'Render: {get_core()}'\n",
+        )
+        job_id = "job-real-sigkill-merge"
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
+        ]
+        verify_script = self.repo_dir / "scripts" / "verify_local.sh"
+
+        # 別プロセスで IntegrationGate を起動し、第1チームマージ直後に SIGKILL で即死させる
+        ctx = multiprocessing.get_context("spawn")
+        proc = ctx.Process(
+            target=_child_gate_sigkill_worker,
+            args=(self.repo_dir, job_id, inputs, "main", verify_script, "after_first_merge"),
+        )
+        proc.start()
+        proc.join(timeout=15)
+
+        # プロセスが実際に SIGKILL (シグナル 9) で異常終了したことを確認
+        self.assertFalse(proc.is_alive())
+        self.assertEqual(proc.exitcode, -signal.SIGKILL)
+
+        # 親プロセス側から状態ファイルを確認 (MERGING 途中で停止していること)
+        state_file = self.repo_dir / ".dev" / "integration_jobs" / f"{job_id}.json"
+        self.assertTrue(state_file.exists())
+        state_data = json.loads(state_file.read_text(encoding="utf-8"))
+        self.assertEqual(state_data.get("state"), "MERGING")
+
+        # 親プロセス側で resume=True を実行し、安全な復旧と統合完遂を実証
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        result = gate.execute_integration(
+            job_id=job_id,
+            inputs=inputs,
+            base_commit="main",
+            verify_script=verify_script,
+            resume=True,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.status, "SUCCESS")
+        self.assertIsNotNone(result.release_candidate_commit)
+
+        # 過去のクラッシュブランチが隔離されていること
+        branch_list = self._run_git(["branch", "--list", "quarantine/*"]).stdout
+        self.assertIn(f"quarantine/integration-{job_id}-crashed-", branch_list)
+
+        # 最終状態が COMPLETED であること
+        final_state = json.loads(state_file.read_text(encoding="utf-8"))
+        self.assertEqual(final_state.get("state"), "COMPLETED")
+
+    def test_real_process_sigkill_after_rc_tag_recovers_as_completed(self) -> None:
+        """DD.3 / P1: RC タグ発行後・状態更新前の実プロセス SIGKILL 障害注入から安全に COMPLETED 復旧できることの実証。"""
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/core/app.py",
+            content="# Core logic\ndef get_core():\n    return 42\n",
+        )
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/ui/view.py",
+            content="from core.app import get_core\n\ndef render():\n    return f'Render: {get_core()}'\n",
+        )
+        job_id = "job-real-sigkill-rctag"
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
+        ]
+        verify_script = self.repo_dir / "scripts" / "verify_local.sh"
+
+        ctx = multiprocessing.get_context("spawn")
+        proc = ctx.Process(
+            target=_child_gate_sigkill_worker,
+            args=(self.repo_dir, job_id, inputs, "main", verify_script, "after_rc_tag"),
+        )
+        proc.start()
+        proc.join(timeout=15)
+
+        self.assertFalse(proc.is_alive())
+        self.assertEqual(proc.exitcode, -signal.SIGKILL)
+
+        # Git に RC タグが存在することを確認
+        rc_tag = f"rc/{job_id}"
+        tag_chk = self._run_git(["rev-parse", "--verify", f"refs/tags/{rc_tag}"])
+        self.assertEqual(tag_chk.returncode, 0)
+        expected_rc_commit = tag_chk.stdout.strip()
+
+        # 親プロセス側で resume=True を実行
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        result = gate.execute_integration(
+            job_id=job_id,
+            inputs=inputs,
+            base_commit="main",
+            verify_script=verify_script,
+            resume=True,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.status, "SUCCESS")
+        self.assertEqual(result.release_candidate_commit, expected_rc_commit)
 
 
 if __name__ == "__main__":

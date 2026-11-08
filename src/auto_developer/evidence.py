@@ -116,6 +116,8 @@ class EvidenceStore:
             data["status"] = status
             if commit_info is not None:
                 data["commit"] = commit_info
+                if commit_info.get("tree_sha"):
+                    data["tree_sha"] = commit_info["tree_sha"]
             if checker_info is not None:
                 data["checker"] = checker_info
             if verification_info is not None:

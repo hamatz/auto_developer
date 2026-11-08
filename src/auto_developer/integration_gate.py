@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,9 @@ class TeamIntegrationInput:
 
     def __post_init__(self) -> None:
         self.bundle_path = Path(self.bundle_path)
+
+
+VALID_JOB_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 @dataclass
@@ -57,7 +61,7 @@ class IntegrationResult:
 
 @dataclass
 class IntegrationJobState:
-    """統合ジョブの実行進捗と成果の原子的永続化ステート (CC.2)。"""
+    """統合ジョブの実行進捗と成果の原子的永続化ステート (CC.2, DD.2)。"""
 
     job_id: str
     state: str  # "INITIALIZED" | "AUDITED" | "WORKTREE_CREATED" | "MERGING" | "VERIFYING" | "RC_ISSUED" | "COMPLETED" | "FAILED" | "RECOVERY_REQUIRED" | "RECOVERED"
@@ -70,6 +74,10 @@ class IntegrationJobState:
     rc_tag: str | None = None
     updated_at: float = field(default_factory=time.time)
     details: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not VALID_JOB_ID_PATTERN.match(self.job_id):
+            raise ValueError(f"Invalid job_id '{self.job_id}': must match '^[a-zA-Z0-9_-]+$'")
 
     def save(self, jobs_dir: Path) -> Path:
         jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -89,12 +97,25 @@ class IntegrationJobState:
             "updated_at": self.updated_at,
             "details": self.details,
         }
-        tmp_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2))
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_file, target_file)
+        try:
+            dir_fd = os.open(str(jobs_dir), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
         return target_file
 
     @classmethod
     def load(cls, jobs_dir: Path, job_id: str) -> IntegrationJobState | None:
+        if not VALID_JOB_ID_PATTERN.match(job_id):
+            return None
         target_file = jobs_dir / f"{job_id}.json"
         if not target_file.is_file():
             return None
@@ -113,7 +134,7 @@ class IntegrationJobState:
                 updated_at=data.get("updated_at", time.time()),
                 details=data.get("details", {}),
             )
-        except (json.JSONDecodeError, KeyError, OSError):
+        except (json.JSONDecodeError, KeyError, OSError, ValueError):
             return None
 
 
@@ -131,6 +152,7 @@ class IntegrationGate:
         git_guard: GitGuard | None = None,
         verifier: DeterministicVerifier | None = None,
         worktree_manager: WorktreeManager | None = None,
+        fault_hook: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.repo_dir = Path(repo_dir or Path.cwd()).resolve()
         self.bundler = bundler or EvidenceBundler(repo_dir=self.repo_dir)
@@ -138,6 +160,11 @@ class IntegrationGate:
         self.verifier = verifier or DeterministicVerifier()
         self.worktree_manager = worktree_manager or WorktreeManager(repo_dir=self.repo_dir)
         self.jobs_dir = (self.repo_dir / ".dev" / "integration_jobs").resolve()
+        self.fault_hook = fault_hook
+
+    def _trigger_fault(self, checkpoint: str, **kwargs: Any) -> None:
+        if self.fault_hook is not None:
+            self.fault_hook(checkpoint, kwargs)
 
     def audit_team_inputs(
         self, inputs: list[TeamIntegrationInput]
@@ -279,6 +306,11 @@ class IntegrationGate:
                     errors.append(err)
                     return False, team_id, errors
 
+            # DD.3: 障害注入チェックポイント
+            self._trigger_fault("after_merge", team_id=team_id)
+            if team_input == inputs[0]:
+                self._trigger_fault("after_first_merge", team_id=team_id)
+
         return True, None, []
 
     def run_post_integration_verification(
@@ -326,6 +358,14 @@ class IntegrationGate:
         CC.2: 各フェーズの進捗を IntegrationJobState へ原子的永続化する。
         CC.3: resume=True 時は前回の未完了クラッシュ状態を安全に復旧・隔離してから再開する。
         """
+        # DD.2: job_id の厳格検証
+        if not VALID_JOB_ID_PATTERN.match(job_id):
+            return IntegrationResult(
+                success=False,
+                status="ERROR",
+                errors=[f"Invalid job_id '{job_id}': must match '^[a-zA-Z0-9_-]+$'"],
+            )
+
         # P0-2: 実行開始前の作業ツリーがクリーンであることを検査
         clean_proc = self._run_git(["status", "--porcelain"], check=False)
         if clean_proc.returncode != 0 or clean_proc.stdout.strip():
@@ -337,17 +377,25 @@ class IntegrationGate:
 
         integration_branch = f"integration/{job_id}"
 
-        # CC.3: クラッシュ復旧・再開処理
+        # CC.3, DD.3: クラッシュ復旧・再開処理
         if resume:
             existing_state = IntegrationJobState.load(self.jobs_dir, job_id)
-            if existing_state and existing_state.state not in ("COMPLETED", "RECOVERED"):
-                rec_ok, rec_status, _rec_details = self.recover_interrupted_job(job_id)
+            if existing_state and existing_state.state != "COMPLETED":
+                rec_ok, rec_status, rec_details = self.recover_interrupted_job(job_id)
                 if not rec_ok:
                     return IntegrationResult(
                         success=False,
                         status=rec_status,
                         integration_branch=integration_branch,
                         errors=[f"Failed to recover interrupted integration job '{job_id}' before resuming."],
+                    )
+                if rec_status == "ALREADY_COMPLETED":
+                    return IntegrationResult(
+                        success=True,
+                        status="SUCCESS",
+                        integration_branch=integration_branch,
+                        release_candidate_commit=rec_details.get("rc_commit"),
+                        details={"resumed_from_completed": True, "rc_tag": rec_details.get("rc_tag")},
                     )
 
         current_branch_proc = self._run_git(["branch", "--show-current"], check=False)
@@ -508,6 +556,7 @@ class IntegrationGate:
 
             job_state.state = "VERIFYING"
             job_state.save(self.jobs_dir)
+            self._trigger_fault("before_verify", target_dir=target_dir)
             verify_ok, code, out = self.run_post_integration_verification(
                 base_commit=base_commit,
                 verify_script=verify_script,
@@ -579,6 +628,8 @@ class IntegrationGate:
             else:
                 self._run_git(["tag", rc_tag, rc_commit], check=True)
 
+            self._trigger_fault("after_rc_tag", rc_tag=rc_tag, rc_commit=rc_commit)
+
             job_state.state = "COMPLETED"
             job_state.rc_commit = rc_commit
             job_state.rc_tag = rc_tag
@@ -614,11 +665,16 @@ class IntegrationGate:
                 _cleanup_worktree()
 
     def recover_interrupted_job(self, job_id: str) -> tuple[bool, str, dict[str, Any]]:
-        """途中で強制終了・クラッシュした統合ジョブの残存リソースを安全に復旧・隔離する (CC.3)。
+        """途中で強制終了・クラッシュした統合ジョブの残存リソースを安全に復旧・隔離する (CC.3, DD.1)。
 
         Git の実態（Worktree、ブランチ、RC タグ）と保存された JobState を照合し、
         孤立 Worktree の解放および中断ブランチの隔離を実行する。
+        Fail-Closed: 孤立 Worktree 削除で例外が発生するか、または削除後にターゲットディレクトリや
+        Git 管理下の Worktree が実在する場合、推測で RECOVERED とせず確実に RECOVERY_REQUIRED を返す。
         """
+        if not VALID_JOB_ID_PATTERN.match(job_id):
+            return False, "INVALID_JOB_ID", {"error": f"Invalid job_id '{job_id}': must match '^[a-zA-Z0-9_-]+$'"}
+
         job_state = IntegrationJobState.load(self.jobs_dir, job_id)
         if job_state is None:
             return False, "JOB_NOT_FOUND", {"error": f"No job state found for '{job_id}'"}
@@ -626,13 +682,44 @@ class IntegrationGate:
         if job_state.state == "COMPLETED":
             return True, "ALREADY_COMPLETED", {"rc_tag": job_state.rc_tag, "rc_commit": job_state.rc_commit}
 
+        # DD.3: RC タグが既に発行されているかの実態検査 (RC発行後・COMPLETED保存前のクラッシュ復旧)
+        rc_tag = f"rc/{job_id}"
+        tag_check = self._run_git(["rev-parse", "--verify", f"refs/tags/{rc_tag}"], check=False)
+        if tag_check.returncode == 0:
+            existing_rc_commit = tag_check.stdout.strip()
+            # 孤立 Worktree が残っていれば解放
+            cleaned_id = re.sub(r"[^a-z0-9_-]", "-", job_id.lower()).strip("-")
+            wt_team_id = f"int-{cleaned_id}"[:64]
+            try:
+                self.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=False)
+            except (OSError, subprocess.CalledProcessError, WorktreeError, RuntimeError) as err:
+                logger.warning("Failed to remove worktree during RC recovery: %s", err)
+            job_state.state = "COMPLETED"
+            job_state.rc_commit = existing_rc_commit
+            job_state.rc_tag = rc_tag
+            job_state.save(self.jobs_dir)
+            return True, "ALREADY_COMPLETED", {"rc_tag": rc_tag, "rc_commit": existing_rc_commit}
+
         # 1. 孤立 Worktree の解放
         cleaned_id = re.sub(r"[^a-z0-9_-]", "-", job_id.lower()).strip("-")
         wt_team_id = f"int-{cleaned_id}"[:64]
+        wt_path = self.worktree_manager.worktree_base / wt_team_id
+
+        removal_error: str | None = None
         try:
             self.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=False)
         except (OSError, subprocess.CalledProcessError, WorktreeError, RuntimeError) as err:
+            removal_error = str(err)
             logger.warning("Failed to remove orphaned worktree '%s' during recovery: %s", wt_team_id, err)
+
+        # 削除後の実態照合 (DD.1 / P0 Fail-Closed ガード)
+        still_exists = wt_path.exists() or any(wt.team_id == wt_team_id for wt in self.worktree_manager.list_worktrees())
+        if removal_error is not None or still_exists:
+            job_state.state = "RECOVERY_REQUIRED"
+            err_msg = removal_error or f"Worktree '{wt_team_id}' still exists after removal attempt"
+            job_state.details["error"] = err_msg
+            job_state.save(self.jobs_dir)
+            return False, "RECOVERY_REQUIRED", {"worktree_cleanup_failed": True, "error": err_msg}
 
         # 2. 中断された統合ブランチの照合と隔離
         branch_check = self._run_git(["rev-parse", "--verify", f"refs/heads/{job_state.integration_branch}"], check=False)
