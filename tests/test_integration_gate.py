@@ -1288,6 +1288,7 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
             integration_branch=f"integration/{job_id}",
             rc_commit=self.base_commit,
             rc_tag=rc_tag,
+            verified_commits={"team-test": self.base_commit},
         )
         state.save(gate.jobs_dir)
 
@@ -1359,6 +1360,61 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
             rc_commit=self.base_commit,
             rc_tag=rc_tag,
             verified_commits={"team-orphan": orphan_commit},
+        )
+        state.save(gate.jobs_dir)
+
+        success, status, details = gate.recover_interrupted_job(job_id)
+        self.assertFalse(success)
+        self.assertEqual(status, "RECOVERY_REQUIRED")
+        self.assertTrue(details.get("rc_validation_failed"))
+
+        persisted = IntegrationJobState.load(gate.jobs_dir, job_id)
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.state, "RECOVERY_REQUIRED")
+
+    def test_recover_interrupted_job_fails_closed_when_rc_exists_without_verified_team_evidence(self) -> None:
+        """FF.1, FF.3 / P1: Sol氏再現シナリオ: RCタグが存在しても verified_commits が空（証拠未記録）の場合は Fail-Closed で RECOVERY_REQUIRED となることの実証。"""
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        job_id = "job-rc-no-verified-evidence"
+        rc_tag = f"rc/{job_id}"
+        self._run_git(["tag", rc_tag, self.base_commit], check=True)
+
+        # Sol氏の指摘シナリオ: INITIALIZED, rc_commit未設定, verified_commits空, 統合ブランチ実在なし
+        state = IntegrationJobState(
+            job_id=job_id,
+            state="INITIALIZED",
+            base_commit=self.base_commit,
+            integration_branch=f"integration/{job_id}",
+            rc_commit=None,
+            rc_tag=None,
+            verified_commits={},
+        )
+        state.save(gate.jobs_dir)
+
+        success, status, details = gate.recover_interrupted_job(job_id)
+        self.assertFalse(success)
+        self.assertEqual(status, "RECOVERY_REQUIRED")
+        self.assertTrue(details.get("rc_validation_failed"))
+
+        persisted = IntegrationJobState.load(gate.jobs_dir, job_id)
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.state, "RECOVERY_REQUIRED")
+
+    def test_recover_interrupted_job_fails_closed_when_rc_commit_unset_and_branch_missing(self) -> None:
+        """FF.2, FF.3 / P1: rc_commit が未記録かつ統合ブランチも実在しない場合、RCタグの正当性を証明できず Fail-Closed で RECOVERY_REQUIRED となることの実証。"""
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        job_id = "job-rc-unset-branch-missing"
+        rc_tag = f"rc/{job_id}"
+        self._run_git(["tag", rc_tag, self.base_commit], check=True)
+
+        state = IntegrationJobState(
+            job_id=job_id,
+            state="MERGING",
+            base_commit=self.base_commit,
+            integration_branch=f"integration/{job_id}",
+            rc_commit=None,
+            rc_tag=None,
+            verified_commits={"team-a": self.base_commit},
         )
         state.save(gate.jobs_dir)
 
