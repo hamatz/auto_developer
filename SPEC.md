@@ -175,7 +175,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - リポジトリに管理済みで未変更（`tracked` かつ clean）のファイル（`.env.example` 等）は、Worktree 削除によって失われる成果ではないため、機密検査で誤検出せず通常削除を許可する。
   2. 決定論的受入テスト:
      - `.env.example` がコミットされている状態で、クリーンな Worktree を作成し、編集なしで `remove_worktree()` が正常に削除を完了することの実証テスト。
-- [ ] 機能AA (Stage 2: 独立自律チーム統合ゲート堅牢化 IntegrationGate Hardening & Strict Binding):
+- [x] 機能AA (Stage 2: 独立自律チーム統合ゲート堅牢化 IntegrationGate Hardening & Strict Binding):
   1. Bundle とマージ対象 Commit SHA の厳格束縛 (P0-1):
      - `audit_team_inputs`: 各チームブランチ先端（`git rev-parse <branch>`）と Bundle の `verification.head_commit` が完全一致することを必須検証。不一致時は即座に監査拒絶（Fail-Closed）。
      - `merge_team_branches`: ブランチ名ではなく、監査済み Commit SHA を直接指定してマージ。マージ後にマージコミットの第2親（`git rev-parse HEAD^2`）が監査済み Commit SHA と一致することを機械的検証。
@@ -190,6 +190,20 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   5. 実機能結合の決定論的受入テスト (P1-3):
      - Core チームの計算関数を UI チームがインポートして呼び出す実機能結合テストを追加し、マージ後の全体検証通過を実証。
      - API 不整合（引数不一致など意味的競合）による統合後全体検証失敗・安全隔離シナリオを実証。
+- [ ] 機能BB (Stage 2: 専用 Integration Worktree 分離とクラッシュ復旧の完全性 Integration Worktree & Crash Recovery):
+  1. 専用 Integration Worktree による親作業領域の完全非汚染化 (BB.1 / P1-1):
+     - `execute_integration`: 呼び出し元作業ディレクトリ（親）上で直接 `git checkout` やマージを行わず、`WorktreeManager` を利用して専用の一時 Worktree（`.dev/worktrees/integration-<job_id>`）を新規ブランチ（`integration/<job_id>`）で作成し、その中で順次マージおよび全体検証を実行する。
+     - 呼び出し元（親）の作業ディレクトリおよびカレントブランチ・作業ツリーは、統合処理の開始から終了（成功・失敗問わず）まで一切変更・切り替えされない。
+     - 統合成功時は RC タグを発行後、Worktree を安全に削除・クリーンアップする。
+  2. ライフサイクル管理と例外時の安全隔離・復旧 (BB.2 / P1-2):
+     - Worktree の操作は `try ... finally` 等で保護され、Git 操作例外や RC タグ不変性違反（`RC_TAG_IMMUTABLE_BREACH`）等のあらゆる例外発生時にも親の作業ツリーは完全に保護され、Worktree の残留やリークを防止する。
+     - 予期せぬ例外時も外へ生例外を伝播させず、`IntegrationResult(success=False, status="ERROR", errors=[...])` を安全に返却する。
+  3. マージ競合時のタイムスタンプ付き隔離ブランチ明示と復旧不能状態管理 (BB.3 / P1-4):
+     - Git マージ競合が発生した場合、`merge --abort` を実行した上で、途中マージブランチを `quarantine/integration-<job_id>-conflict-<timestamp>` へリネームし、通常の統合ブランチと誤認されないよう隔離状態を明示する。
+     - `merge --abort` や作業ツリーの初期化等で復旧不能なエラーが発生した場合は、推測で処理を継続せず明示的に `status="RECOVERY_REQUIRED"` を返す。
+  4. 受入テストの偽陽性排除と厳格な機能結合検証 (BB.4 / P1-3):
+     - 契約受入テスト（`test_contract.py`）内の `except ImportError: return` を排除し、必要なモジュール（`core.app`, `ui.view`）のインポート失敗や期待値不一致は必ずテスト失敗（Exit 1）として検知する。
+     - 統合前に契約テストが誤って実行されないようテスト実行条件・スコープを整理し、結合成功時のみ Exit 0、不整合時は即座に Exit 1 となる決定論的検証を保証する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

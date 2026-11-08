@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 src_dir = str(Path(__file__).resolve().parent.parent / "src")
@@ -168,13 +169,13 @@ class TestIntegrationGateMerge(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def _run_git(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+    def _run_git(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", *args],
             cwd=self.repo_dir,
             capture_output=True,
             text=True,
-            check=True,
+            check=check,
         )
 
     def test_create_integration_branch_refuses_to_overwrite_existing(self) -> None:
@@ -286,13 +287,13 @@ class TestIntegrationGateExecution(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def _run_git(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+    def _run_git(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", *args],
             cwd=self.repo_dir,
             capture_output=True,
             text=True,
-            check=True,
+            check=check,
         )
 
     def test_execute_integration_success_issues_rc(self) -> None:
@@ -443,7 +444,7 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         )
         verify_sh.chmod(0o755)
 
-        # 結合契約テスト (P1-3)
+        # 結合契約テスト (P1-3): 偽陽性を排除し、インポートや契約の不整合は必ずテスト失敗とする
         tests_dir = self.repo_dir / "tests"
         tests_dir.mkdir(parents=True, exist_ok=True)
         (tests_dir / "test_contract.py").write_text(
@@ -455,13 +456,9 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
             "    sys.path.insert(0, src_path)\n\n"
             "class ContractTest(unittest.TestCase):\n"
             "    def test_core_ui_contract(self):\n"
-            "        try:\n"
-            "            from core.app import get_core\n"
-            "            from ui.view import render\n"
-            "        except ImportError:\n"
-            "            return\n"
-            "        res = render()\n"
-            "        self.assertEqual(res, 'Render: 42')\n",
+            "        from core.app import get_core\n"
+            "        from ui.view import render\n"
+            "        self.assertEqual(render(), 'Render: 42')\n",
             encoding="utf-8",
         )
 
@@ -472,13 +469,13 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def _run_git(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+    def _run_git(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", *args],
             cwd=self.repo_dir,
             capture_output=True,
             text=True,
-            check=True,
+            check=check,
         )
 
     def _create_team_work_and_bundle(
@@ -572,6 +569,79 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         main_commit = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
         self.assertEqual(main_commit, self.base_commit)
 
+    def test_integration_preserves_parent_workspace_and_branch(self) -> None:
+        """P1-1: execute_integration 実行中・実行後も呼び出し元のブランチおよび作業ツリーが一切切り替わらない。"""
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/core/app.py",
+            content="# Core logic\ndef get_core():\n    return 42\n",
+        )
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/ui/view.py",
+            content="from core.app import get_core\n\ndef render():\n    return f'Render: {get_core()}'\n",
+        )
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
+        ]
+
+        # 呼び出し前: main ブランチにいること
+        self.assertEqual(self._run_git(["branch", "--show-current"]).stdout.strip(), "main")
+
+        result = gate.execute_integration(
+            job_id="job-preserves-parent",
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+        )
+        self.assertTrue(result.success)
+
+        # 呼び出し後: 親リポジトリのカレントブランチは依然として main であり、HEAD も不変であること
+        current_branch = self._run_git(["branch", "--show-current"]).stdout.strip()
+        self.assertEqual(current_branch, "main", f"Parent branch was modified to '{current_branch}'!")
+        current_head = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
+        self.assertEqual(current_head, self.base_commit)
+
+    def test_integration_rc_breach_preserves_parent_workspace_and_cleans_worktree(self) -> None:
+        """P1-2: RCタグ衝突時にも親の作業ツリーは保護され、Worktree が適切に破棄される。"""
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/core/app.py",
+            content="# Core logic\ndef get_core():\n    return 42\n",
+        )
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/ui/view.py",
+            content="from core.app import get_core\n\ndef render():\n    return f'Render: {get_core()}'\n",
+        )
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
+        ]
+
+        # 異なるコミットを指す既存の RC タグを作成しておく
+        self._run_git(["tag", "rc/job-rc-conflict", self.base_commit])
+
+        result = gate.execute_integration(
+            job_id="job-rc-conflict",
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "RC_TAG_IMMUTABLE_BREACH")
+
+        # 親リポジトリのカレントブランチは依然として main であること
+        current_branch = self._run_git(["branch", "--show-current"]).stdout.strip()
+        self.assertEqual(current_branch, "main", f"Parent branch was modified to '{current_branch}'!")
+
     def test_two_team_integration_semantic_mismatch_quarantine_scenario(self) -> None:
         """P1-3: Gitコンフリクトはないが API 不整合（意味的競合）で結合テストが失敗するケースの安全隔離。"""
         # Core チームは数値を返すべき関数で文字列を返す (API 契約違反)
@@ -616,6 +686,44 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         self.assertEqual(main_commit, self.base_commit)
         self.assertFalse((self.repo_dir / "src" / "core" / "app.py").exists())
 
+    def test_two_team_integration_import_error_quarantine_scenario(self) -> None:
+        """P1-3: ImportError などの結合欠陥がスキップされず確実に検証失敗・安全隔離される。"""
+        # Core チームのモジュール名または関数名が合っていない (get_core ではなく missing_func)
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/core/app.py",
+            content="# Missing expected function\ndef other_func():\n    return 42\n",
+        )
+
+        # UI チームは get_core をインポートしようとする
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/ui/view.py",
+            content="from core.app import get_core\n\ndef render():\n    return f'Render: {get_core()}'\n",
+        )
+
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
+        ]
+
+        result = gate.execute_integration(
+            job_id="job-integration-import-fail",
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+        )
+
+        # ImportError (ImportError: cannot import name 'get_core') が握りつぶされず失敗すること
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "VERIFICATION_FAILED")
+        self.assertIsNotNone(result.integration_branch)
+        self.assertTrue(result.integration_branch.startswith("quarantine/integration-job-integration-import-fail-"))
+        self.assertTrue(any("ImportError" in err or "Exit 1" in err for err in result.errors))
+
     def test_two_team_integration_conflict_quarantine_scenario(self) -> None:
         # Core チームが shared.py を作成
         core_bundle, core_commit = self._create_team_work_and_bundle(
@@ -649,6 +757,15 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.status, "CONFLICT")
         self.assertIn("ui", result.details.get("conflict_team", ""))
+        self.assertIsNotNone(result.integration_branch)
+        self.assertTrue(
+            result.integration_branch.startswith("quarantine/integration-job-integration-conflict-conflict-"),
+            f"Expected quarantine branch with conflict prefix, got: {result.integration_branch}",
+        )
+
+        # 通常の統合ブランチ名は残っていないこと
+        chk = self._run_git(["rev-parse", "--verify", "refs/heads/integration/job-integration-conflict"], check=False)
+        self.assertNotEqual(chk.returncode, 0)
 
         # main ブランチが不変・無汚染であること
         current_branch = self._run_git(["branch", "--show-current"]).stdout.strip()
@@ -656,6 +773,46 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         main_commit = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
         self.assertEqual(main_commit, self.base_commit)
         self.assertFalse((self.repo_dir / "src" / "shared.py").exists())
+
+    def test_merge_conflict_recovery_failure_triggers_recovery_required(self) -> None:
+        """P1-4: merge conflict 後の abort/復旧に失敗した場合、推測で進めず RECOVERY_REQUIRED を返す。"""
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/shared.py",
+            content="SHARED_VERSION = 'core_v1'\n",
+        )
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/shared.py",
+            content="SHARED_VERSION = 'ui_v2'\n",
+        )
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
+        ]
+
+        # merge --abort が失敗した状態（未解決コンフリクト等で作業ツリーがクリーンに戻らない状態）を模倣
+        def faulty_merge(*args: Any, **kwargs: Any) -> tuple[bool, str | None, list[str]]:
+            # target_dir 内に未解決ファイルを残して False を返す
+            target_dir = kwargs.get("target_dir")
+            if target_dir:
+                (target_dir / "unresolved_conflict.txt").write_text("conflict left uncleaned\n", encoding="utf-8")
+            return False, "ui", ["Simulated abort failure leaving dirty tree"]
+
+        gate.merge_team_branches = faulty_merge  # type: ignore[assignment]
+
+        result = gate.execute_integration(
+            job_id="job-recovery-fail",
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "RECOVERY_REQUIRED")
+        self.assertTrue(result.details.get("recovery_failed", False))
 
 
 if __name__ == "__main__":

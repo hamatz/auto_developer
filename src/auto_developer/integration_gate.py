@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -10,6 +11,7 @@ from typing import Any
 from auto_developer.bundler import EvidenceBundler
 from auto_developer.guard import GitGuard
 from auto_developer.verifier import DeterministicVerifier
+from auto_developer.worktree import WorktreeError, WorktreeManager
 
 logger = logging.getLogger(__name__)
 
@@ -64,11 +66,13 @@ class IntegrationGate:
         bundler: EvidenceBundler | None = None,
         git_guard: GitGuard | None = None,
         verifier: DeterministicVerifier | None = None,
+        worktree_manager: WorktreeManager | None = None,
     ) -> None:
         self.repo_dir = Path(repo_dir or Path.cwd()).resolve()
         self.bundler = bundler or EvidenceBundler(repo_dir=self.repo_dir)
         self.git_guard = git_guard or GitGuard(repo_dir=self.repo_dir)
         self.verifier = verifier or DeterministicVerifier()
+        self.worktree_manager = worktree_manager or WorktreeManager(repo_dir=self.repo_dir)
 
     def audit_team_inputs(
         self, inputs: list[TeamIntegrationInput]
@@ -134,10 +138,12 @@ class IntegrationGate:
         is_valid = len(errors) == 0
         return is_valid, audits, errors
 
-    def _run_git(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+    def _run_git(
+        self, args: list[str], check: bool = True, cwd: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", *args],
-            cwd=self.repo_dir,
+            cwd=cwd or self.repo_dir,
             capture_output=True,
             text=True,
             check=check,
@@ -164,6 +170,7 @@ class IntegrationGate:
         inputs: list[TeamIntegrationInput],
         verified_commits: dict[str, str] | None = None,
         original_branch: str | None = None,
+        target_dir: Path | None = None,
     ) -> tuple[bool, str | None, list[str]]:
         """統合ブランチ上で各チームのコミットを順次マージする。
 
@@ -172,16 +179,17 @@ class IntegrationGate:
         コンフリクト発生時は即座に推測なき Fail-Closed を発動し、マージを abort して
         original_branch に安全に戻る。
         """
+        run_dir = target_dir or self.repo_dir
         errors: list[str] = []
         for team_input in inputs:
             team_id = team_input.team_id
             commit_target = (verified_commits or {}).get(team_id) or team_input.head_commit or team_input.branch
             msg = f"chore(integration): merge team '{team_id}' ({commit_target[:7]}) into {integration_branch}"
-            proc = self._run_git(["merge", "--no-ff", commit_target, "-m", msg], check=False)
+            proc = self._run_git(["merge", "--no-ff", commit_target, "-m", msg], check=False, cwd=run_dir)
             if proc.returncode != 0:
-                self._run_git(["merge", "--abort"], check=False)
-                if original_branch:
-                    self._run_git(["checkout", original_branch], check=False)
+                self._run_git(["merge", "--abort"], check=False, cwd=run_dir)
+                if original_branch and not target_dir:
+                    self._run_git(["checkout", original_branch], check=False, cwd=run_dir)
                 err = (
                     f"Merge conflict detected while merging team '{team_id}' ({commit_target}): "
                     f"speculation-free Fail-Closed triggered. Output:\n{proc.stderr or proc.stdout}"
@@ -190,15 +198,15 @@ class IntegrationGate:
                 return False, team_id, errors
 
             # P0-1: マージ親 (HEAD^2) の検証
-            p2_proc = self._run_git(["rev-parse", "HEAD^2"], check=False)
+            p2_proc = self._run_git(["rev-parse", "HEAD^2"], check=False, cwd=run_dir)
             if p2_proc.returncode == 0:
                 actual_p2 = p2_proc.stdout.strip()
-                target_hash_proc = self._run_git(["rev-parse", commit_target], check=False)
+                target_hash_proc = self._run_git(["rev-parse", commit_target], check=False, cwd=run_dir)
                 expected_p2 = target_hash_proc.stdout.strip() if target_hash_proc.returncode == 0 else commit_target
                 if actual_p2 != expected_p2:
-                    self._run_git(["reset", "--hard", "HEAD~1"], check=False)
-                    if original_branch:
-                        self._run_git(["checkout", original_branch], check=False)
+                    self._run_git(["reset", "--hard", "HEAD~1"], check=False, cwd=run_dir)
+                    if original_branch and not target_dir:
+                        self._run_git(["checkout", original_branch], check=False, cwd=run_dir)
                     err = (
                         f"Merge parent invariant breached for team '{team_id}': "
                         f"expected parent {expected_p2}, but HEAD^2 is {actual_p2}"
@@ -213,24 +221,27 @@ class IntegrationGate:
         base_commit: str = "main",
         verify_script: Path | None = None,
         timeout_sec: int = 300,
+        target_dir: Path | None = None,
     ) -> tuple[bool, int, str]:
         """マージ後の統合ブランチ上で全体検証スクリプトを実行する。
 
         保護ファイル（.github/**, SPEC.md, scripts/verify_local.sh, tests/immunity/**）が
         意図せず変更されていないかも検証する。
         """
+        run_dir = target_dir or self.repo_dir
         diff_proc = self._run_git(
             ["diff", "--name-only", base_commit, "--", ".github/", "SPEC.md", "scripts/verify_local.sh", "tests/immunity/"],
             check=False,
+            cwd=run_dir,
         )
         if diff_proc.returncode != 0:
             return False, 10, f"Git diff execution failed during protected file invariant check:\n{diff_proc.stderr or diff_proc.stdout}"
         if diff_proc.stdout.strip():
             return False, 10, f"Protected files modified during integration:\n{diff_proc.stdout.strip()}"
 
-        script_path = verify_script or (self.repo_dir / "scripts" / "verify_local.sh")
+        script_path = verify_script or (run_dir / "scripts" / "verify_local.sh")
         code, out = self.verifier.run_verification(
-            script_path, timeout_sec=timeout_sec, cwd=self.repo_dir
+            script_path, timeout_sec=timeout_sec, cwd=run_dir
         )
         return code == 0, code, out
 
@@ -244,12 +255,8 @@ class IntegrationGate:
     ) -> IntegrationResult:
         """独立自律チーム統合パイプラインのエンドツーエンド実行。
 
-        1. 全チーム Evidence Bundle 事前監査 (Fail-Closed)
-        2. 統合ブランチ (integration/{job_id}) 作成
-        3. 全フィーチャーブランチの順次マージ (衝突時は推測排除で隔離停止)
-        4. 全体検証ゲートの実行
-        5. 合格時: Release Candidate (rc/{job_id}) 発行
-           不合格時: main ブランチへ退避し統合ブランチを隔離
+        BB.1: 専用 Integration Worktree を用いて親の作業ツリーを完全非汚染に保持する。
+        BB.2: try / finally により例外発生時も Worktree を確実に破棄し安全に結果を返却する。
         """
         # P0-2: 実行開始前の作業ツリーがクリーンであることを検査
         clean_proc = self._run_git(["status", "--porcelain"], check=False)
@@ -278,75 +285,137 @@ class IntegrationGate:
             if isinstance(info, dict) and "verified_commit" in info
         }
 
-        try:
-            integration_branch = self.create_integration_branch(job_id, base_commit=base_commit)
-        except ValueError as e:
+        integration_branch = f"integration/{job_id}"
+        # P0-2: 既存の統合ブランチが存在する場合は上書きリセット (-B) せず拒絶
+        check_proc = self._run_git(["rev-parse", "--verify", f"refs/heads/{integration_branch}"], check=False)
+        if check_proc.returncode == 0:
             return IntegrationResult(
                 success=False,
                 status="BRANCH_ALREADY_EXISTS",
-                errors=[str(e)],
+                errors=[f"Integration branch '{integration_branch}' already exists. Refusing to overwrite previous integration run."],
                 audited_bundles=audits,
             )
 
-        merge_ok, conflict_team, merge_errors = self.merge_team_branches(
-            integration_branch, inputs, verified_commits=verified_commits, original_branch=original_branch
-        )
-        if not merge_ok:
-            return IntegrationResult(
-                success=False,
-                status="CONFLICT",
-                integration_branch=integration_branch,
-                errors=merge_errors,
-                audited_bundles=audits,
-                details={"conflict_team": conflict_team},
-            )
+        # BB.1: 専用 Worktree 用の team_id を生成
+        cleaned_id = re.sub(r"[^a-z0-9_-]", "-", job_id.lower()).strip("-")
+        wt_team_id = f"int-{cleaned_id}"[:64]
 
-        verify_ok, code, out = self.run_post_integration_verification(
-            base_commit=base_commit,
-            verify_script=verify_script,
-            timeout_sec=timeout_sec,
-        )
-        if not verify_ok:
-            self._run_git(["checkout", original_branch], check=False)
-            timestamp = int(time.time())
-            quarantine_branch = f"quarantine/{integration_branch.replace('/', '-')}-{timestamp}"
-            self._run_git(["branch", "-m", integration_branch, quarantine_branch], check=False)
-            return IntegrationResult(
-                success=False,
-                status="VERIFICATION_FAILED",
-                integration_branch=quarantine_branch,
-                errors=[f"Post-integration verification failed (Exit {code}):\n{out}"],
-                audited_bundles=audits,
-                details={"exit_code": code, "output": out},
+        worktree_created = False
+        target_dir: Path | None = None
+        try:
+            target_dir = self.worktree_manager.create_worktree(
+                team_id=wt_team_id,
+                base_branch=base_commit,
+                branch_name=integration_branch,
             )
+            worktree_created = True
 
-        rc_commit = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
-        rc_tag = f"rc/{job_id}"
-        # P1-2: Release Candidate タグの冪等性と不変性検査
-        tag_check = self._run_git(["rev-parse", "--verify", f"refs/tags/{rc_tag}"], check=False)
-        if tag_check.returncode == 0:
-            existing_commit = tag_check.stdout.strip()
-            if existing_commit != rc_commit:
+            merge_ok, conflict_team, merge_errors = self.merge_team_branches(
+                integration_branch,
+                inputs,
+                verified_commits=verified_commits,
+                original_branch=original_branch,
+                target_dir=target_dir,
+            )
+            if not merge_ok:
+                tree_chk = self._run_git(["status", "--porcelain"], check=False, cwd=target_dir)
+                recovery_ok = (tree_chk.returncode == 0 and not tree_chk.stdout.strip())
+
+                # Worktree を先に削除してから隔離ブランチへリネーム
+                self.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=False)
+                worktree_created = False
+
+                timestamp = int(time.time())
+                quarantine_branch = f"quarantine/{integration_branch.replace('/', '-')}-conflict-{timestamp}"
+                self._run_git(["branch", "-m", integration_branch, quarantine_branch], check=False)
+
+                if not recovery_ok:
+                    return IntegrationResult(
+                        success=False,
+                        status="RECOVERY_REQUIRED",
+                        integration_branch=quarantine_branch,
+                        errors=[
+                            f"Merge abort/recovery failed for team '{conflict_team}'. Unclean state detected:\n{tree_chk.stdout or tree_chk.stderr}",
+                            *merge_errors,
+                        ],
+                        audited_bundles=audits,
+                        details={"conflict_team": conflict_team, "recovery_failed": True},
+                    )
+
                 return IntegrationResult(
                     success=False,
-                    status="RC_TAG_IMMUTABLE_BREACH",
-                    integration_branch=integration_branch,
-                    errors=[
-                        (
-                            f"RC tag '{rc_tag}' already exists pointing to different commit {existing_commit}. "
-                            f"Overwriting release candidate tags is forbidden (Immutable RC Invariant)."
-                        )
-                    ],
+                    status="CONFLICT",
+                    integration_branch=quarantine_branch,
+                    errors=merge_errors,
                     audited_bundles=audits,
+                    details={"conflict_team": conflict_team},
                 )
-        else:
-            self._run_git(["tag", rc_tag, rc_commit], check=True)
 
-        return IntegrationResult(
-            success=True,
-            status="SUCCESS",
-            integration_branch=integration_branch,
-            release_candidate_commit=rc_commit,
-            audited_bundles=audits,
-            details={"rc_tag": rc_tag, "verified_at_commit": rc_commit},
-        )
+            verify_ok, code, out = self.run_post_integration_verification(
+                base_commit=base_commit,
+                verify_script=verify_script,
+                timeout_sec=timeout_sec,
+                target_dir=target_dir,
+            )
+            if not verify_ok:
+                # Worktree を先に削除してから隔離ブランチへリネーム
+                self.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=False)
+                worktree_created = False
+                timestamp = int(time.time())
+                quarantine_branch = f"quarantine/{integration_branch.replace('/', '-')}-{timestamp}"
+                self._run_git(["branch", "-m", integration_branch, quarantine_branch], check=False)
+                return IntegrationResult(
+                    success=False,
+                    status="VERIFICATION_FAILED",
+                    integration_branch=quarantine_branch,
+                    errors=[f"Post-integration verification failed (Exit {code}):\n{out}"],
+                    audited_bundles=audits,
+                    details={"exit_code": code, "output": out},
+                )
+
+            rc_commit = self._run_git(["rev-parse", "HEAD"], check=True, cwd=target_dir).stdout.strip()
+            rc_tag = f"rc/{job_id}"
+            # P1-2: Release Candidate タグの冪等性と不変性検査
+            tag_check = self._run_git(["rev-parse", "--verify", f"refs/tags/{rc_tag}"], check=False)
+            if tag_check.returncode == 0:
+                existing_commit = tag_check.stdout.strip()
+                if existing_commit != rc_commit:
+                    return IntegrationResult(
+                        success=False,
+                        status="RC_TAG_IMMUTABLE_BREACH",
+                        integration_branch=integration_branch,
+                        errors=[
+                            (
+                                f"RC tag '{rc_tag}' already exists pointing to different commit {existing_commit}. "
+                                f"Overwriting release candidate tags is forbidden (Immutable RC Invariant)."
+                            )
+                        ],
+                        audited_bundles=audits,
+                    )
+            else:
+                self._run_git(["tag", rc_tag, rc_commit], check=True)
+
+            return IntegrationResult(
+                success=True,
+                status="SUCCESS",
+                integration_branch=integration_branch,
+                release_candidate_commit=rc_commit,
+                audited_bundles=audits,
+                details={"rc_tag": rc_tag, "verified_at_commit": rc_commit},
+            )
+
+        except Exception as e:
+            logger.exception("Unexpected error during integration execution")
+            return IntegrationResult(
+                success=False,
+                status="ERROR",
+                integration_branch=integration_branch,
+                errors=[f"Unexpected error during integration execution: {e}"],
+                audited_bundles=audits,
+            )
+        finally:
+            if worktree_created:
+                try:
+                    self.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=False)
+                except (OSError, subprocess.CalledProcessError, WorktreeError) as err:
+                    logger.warning("Failed to clean up integration worktree '%s': %s", wt_team_id, err)
