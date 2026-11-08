@@ -682,11 +682,56 @@ class IntegrationGate:
         if job_state.state == "COMPLETED":
             return True, "ALREADY_COMPLETED", {"rc_tag": job_state.rc_tag, "rc_commit": job_state.rc_commit}
 
-        # DD.3, EE.1: RC タグが既に発行されているかの実態検査 (RC発行後・COMPLETED保存前のクラッシュ復旧)
+        # DD.3, EE.1, EE.2: RC タグが既に発行されているかの実態検査 (RC発行後・COMPLETED保存前のクラッシュ復旧)
         rc_tag = f"rc/{job_id}"
         tag_check = self._run_git(["rev-parse", "--verify", f"refs/tags/{rc_tag}"], check=False)
         if tag_check.returncode == 0:
             existing_rc_commit = tag_check.stdout.strip()
+
+            # EE.2 / P0: RC タグコミットと統合成果の厳密照合
+            # 1) JobState に記録された rc_commit との一致
+            if job_state.rc_commit and job_state.rc_commit != existing_rc_commit:
+                job_state.state = "RECOVERY_REQUIRED"
+                err_msg = (
+                    f"RC tag '{rc_tag}' commit ({existing_rc_commit}) does not match "
+                    f"recorded job_state.rc_commit ({job_state.rc_commit})"
+                )
+                job_state.details["error"] = err_msg
+                job_state.save(self.jobs_dir)
+                return False, "RECOVERY_REQUIRED", {"rc_validation_failed": True, "error": err_msg}
+
+            # 2) 統合ブランチが存在する場合、その先端コミットと existing_rc_commit の一致
+            if job_state.integration_branch:
+                branch_chk = self._run_git(
+                    ["rev-parse", "--verify", f"refs/heads/{job_state.integration_branch}"],
+                    check=False,
+                )
+                if branch_chk.returncode == 0 and branch_chk.stdout.strip() != existing_rc_commit:
+                    job_state.state = "RECOVERY_REQUIRED"
+                    err_msg = (
+                        f"RC tag '{rc_tag}' commit ({existing_rc_commit}) does not match "
+                        f"integration branch '{job_state.integration_branch}' HEAD ({branch_chk.stdout.strip()})"
+                    )
+                    job_state.details["error"] = err_msg
+                    job_state.save(self.jobs_dir)
+                    return False, "RECOVERY_REQUIRED", {"rc_validation_failed": True, "error": err_msg}
+
+            # 3) job_state.verified_commits の全チームコミットが existing_rc_commit の祖先であることの検証
+            for team_id, team_commit in job_state.verified_commits.items():
+                ancestor_chk = self._run_git(
+                    ["merge-base", "--is-ancestor", team_commit, existing_rc_commit],
+                    check=False,
+                )
+                if ancestor_chk.returncode != 0:
+                    job_state.state = "RECOVERY_REQUIRED"
+                    err_msg = (
+                        f"Team '{team_id}' commit ({team_commit}) is not an ancestor of "
+                        f"RC tag '{rc_tag}' commit ({existing_rc_commit})"
+                    )
+                    job_state.details["error"] = err_msg
+                    job_state.save(self.jobs_dir)
+                    return False, "RECOVERY_REQUIRED", {"rc_validation_failed": True, "error": err_msg}
+
             # 孤立 Worktree が残っていれば解放
             cleaned_id = re.sub(r"[^a-z0-9_-]", "-", job_id.lower()).strip("-")
             wt_team_id = f"int-{cleaned_id}"[:64]

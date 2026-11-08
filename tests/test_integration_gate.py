@@ -1307,6 +1307,70 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         self.assertIsNotNone(persisted)
         self.assertEqual(persisted.state, "RECOVERY_REQUIRED")
 
+    def test_recover_interrupted_job_fails_closed_when_rc_commit_mismatches_persisted_state(self) -> None:
+        """EE.2 / P0: RC タグが指すコミットが JobState の rc_commit と不一致の場合、Fail-Closed で RECOVERY_REQUIRED となることの実証。"""
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        job_id = "job-rc-mismatch-persisted"
+        rc_tag = f"rc/{job_id}"
+        self._run_git(["tag", rc_tag, self.base_commit], check=True)
+
+        dummy_sha = "1" * 40
+        state = IntegrationJobState(
+            job_id=job_id,
+            state="MERGING",
+            base_commit=self.base_commit,
+            integration_branch=f"integration/{job_id}",
+            rc_commit=dummy_sha,
+            rc_tag=rc_tag,
+        )
+        state.save(gate.jobs_dir)
+
+        success, status, details = gate.recover_interrupted_job(job_id)
+        self.assertFalse(success)
+        self.assertEqual(status, "RECOVERY_REQUIRED")
+        self.assertTrue(details.get("rc_validation_failed"))
+
+        persisted = IntegrationJobState.load(gate.jobs_dir, job_id)
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.state, "RECOVERY_REQUIRED")
+
+    def test_recover_interrupted_job_fails_closed_when_rc_commit_missing_team_ancestor(self) -> None:
+        """EE.2 / P0: RC タグが指すコミットが verified_commits の祖先でない場合、Fail-Closed で RECOVERY_REQUIRED となることの実証。"""
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        job_id = "job-rc-missing-ancestor"
+        rc_tag = f"rc/{job_id}"
+
+        self._run_git(["checkout", "-b", "feature-orphan", self.base_commit], check=True)
+        orphan_file = self.repo_dir / "orphan.txt"
+        orphan_file.write_text("orphan content\n", encoding="utf-8")
+        self._run_git(["add", "orphan.txt"], check=True)
+        self._run_git(["commit", "-m", "orphan team commit"], check=True)
+        rev = self._run_git(["rev-parse", "HEAD"], check=True)
+        orphan_commit = rev.stdout.strip()
+        self._run_git(["checkout", "main"], check=True)
+
+        self._run_git(["tag", rc_tag, self.base_commit], check=True)
+
+        state = IntegrationJobState(
+            job_id=job_id,
+            state="MERGING",
+            base_commit=self.base_commit,
+            integration_branch=f"integration/{job_id}",
+            rc_commit=self.base_commit,
+            rc_tag=rc_tag,
+            verified_commits={"team-orphan": orphan_commit},
+        )
+        state.save(gate.jobs_dir)
+
+        success, status, details = gate.recover_interrupted_job(job_id)
+        self.assertFalse(success)
+        self.assertEqual(status, "RECOVERY_REQUIRED")
+        self.assertTrue(details.get("rc_validation_failed"))
+
+        persisted = IntegrationJobState.load(gate.jobs_dir, job_id)
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.state, "RECOVERY_REQUIRED")
+
 
 if __name__ == "__main__":
     unittest.main()
