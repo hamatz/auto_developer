@@ -376,6 +376,21 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 親プロセスを疑似クラッシュ（強制終了）させた後、独立した新オーケストレーターインスタンスが上記 3 ケースを決定論的に自律復旧できることを実証する受入テストを追加。
      - 全自動検証ゲート（181+ テスト、Ruff、Mypy）の合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [ ] 機能WW (Stage 3 復旧時プロセス同一性照合・Worktree安全境界復元・Evidence実証厳格化 Stage 3 Identity Verification, Worktree Boundary Restoration & Strict Evidence Validation):
+  1. プロセス同一性照合による無関係プロセス誤停止の防止 (WW.1 / P0):
+     - `WorkerRegistration` にプロセスの OS 開始識別子（`process_start_time`）を記録するフィールドを追加。
+     - ワーカー起動時、OS からプロセスの開始時刻（Linux: `/proc/[pid]/stat` の `starttime`、macOS/POSIX: `ps -o lstart=`）を取得して Registry に原子的に記録。
+     - `recover_multi_team_job()` でのプロセスグループ停止時、対象 PID の現在の OS 開始時刻を取得・照合。不一致（PID再利用）または確認不能な場合はシグナル送信を絶対に実行せず、`UNVERIFIED_PROCESS` または `RECOVERY_REQUIRED` として安全に停止を保留する。
+  2. Worktree 削除安全境界の復元と直接 rmtree 撤廃 (WW.2 / P0):
+     - `recover_multi_team_job()` クリーンアップ処理から直接の `shutil.rmtree(wt_p)` を完全撤廃。
+     - 削除操作は `WorktreeManager.remove_worktree`（Git 登録確認・`.dev/worktrees` 境界確認）に一本化。
+     - Git の worktree 一覧に未登録、またはベースディレクトリ外のパスは一切削除を試みず、保全したまま `UNVERIFIED_WORKTREE` / 復旧保留とする。
+  3. Evidence 実検証の義務化、状態厳格化、全体検証ゲート通過、および Evidence Bundle 生成・検証 (WW.3 / P1):
+     - 復旧処理において、単なるファイル存在（`dest_bundle.exists()`）で成功扱いとせず、`EvidenceBundler.verify_bundle()` またはハッシュ照合による実検証を義務化。不正なデータや破損 zip は `INVALID_EVIDENCE` として拒絶。
+     - Worktree からの救出時も SHA-256 ハッシュを計算・照合。
+     - `verify_script=None` や IntegrationGate 未実行時は `RECOVERED_EVIDENCE_FOUND`（復旧保留）中間状態とし、IntegrationGate 成功時のみ `SUCCESS` とする。
+     - 全自動検証ゲート（182+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
