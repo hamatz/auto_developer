@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import logging
 import os
 import re
+import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -302,6 +304,47 @@ class MultiTeamOrchestrator:
             if cleanup:
                 self.cleanup_workers(config)
 
+    def preserve_team_bundles(
+        self,
+        config: MultiTeamConfig,
+        team_results: dict[str, TeamExecutionResult],
+    ) -> None:
+        """LL.1, LL.2: Worktree 削除前に各チームの Evidence Bundle を恒久退避先に保全し、SHA-256 照合とパス更新を行う。"""
+        dest_base = self.repo_dir / ".dev" / "integration_jobs" / config.job_id / "evidence"
+        dest_base.mkdir(parents=True, exist_ok=True)
+
+        for team in config.teams:
+            res = team_results.get(team.team_id)
+            if res is None or res.bundle_path is None or not res.bundle_path.exists():
+                continue
+
+            dest_path = dest_base / f"{res.team_id}.zip"
+            try:
+                orig_bytes = res.bundle_path.read_bytes()
+                orig_sha = hashlib.sha256(orig_bytes).hexdigest()
+                shutil.copy2(res.bundle_path, dest_path)
+                dest_bytes = dest_path.read_bytes()
+                dest_sha = hashlib.sha256(dest_bytes).hexdigest()
+                if orig_sha != dest_sha:
+                    logger.error(
+                        "Preserved bundle SHA-256 mismatch for team '%s': original=%s, preserved=%s",
+                        res.team_id,
+                        orig_sha,
+                        dest_sha,
+                    )
+                    res.success = False
+                    res.status = "BUNDLE_CORRUPTED"
+                    res.details["bundle_error"] = "SHA-256 mismatch during bundle preservation"
+                    continue
+
+                # パスを恒久保存先に更新
+                res.bundle_path = dest_path
+            except (OSError, shutil.Error) as err:
+                logger.error("Failed to preserve bundle for team '%s': %s", res.team_id, err)
+                res.success = False
+                res.status = "BUNDLE_PRESERVATION_FAILED"
+                res.details["bundle_error"] = str(err)
+
     def integrate_team_results(
         self,
         config: MultiTeamConfig,
@@ -310,6 +353,9 @@ class MultiTeamOrchestrator:
         resume: bool = False,
     ) -> MultiTeamResult:
         """全ワーカーの実行結果を収集・照合し、IntegrationGate へ安全に引き渡す。"""
+        # LL.1, LL.2: 統合および Worktree 削除前に各チームの Evidence Bundle を退避保全
+        self.preserve_team_bundles(config, team_results)
+
         failed_teams: list[str] = []
         inputs: list[TeamIntegrationInput] = []
 

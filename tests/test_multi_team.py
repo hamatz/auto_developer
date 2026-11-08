@@ -390,6 +390,17 @@ class TestMultiTeamOrchestration(unittest.TestCase):
             for tid in ["team-core", "team-ui"]:
                 wt_dir = orchestrator.worktree_manager.worktree_base / tid
                 self.assertFalse(wt_dir.exists())
+
+            # Evidence Bundle が Worktree 削除後もディスク上に保全されていることの検証 (LL.1, LL.2)
+            for tid in ["team-core", "team-ui"]:
+                b_path = multi_res.team_results[tid].bundle_path
+                self.assertIsNotNone(b_path)
+                assert b_path is not None
+                self.assertTrue(b_path.exists())
+                self.assertEqual(
+                    b_path.resolve(),
+                    (self.repo_dir / ".dev" / "integration_jobs" / "job-e2e-stage3" / "evidence" / f"{tid}.zip").resolve(),
+                )
         finally:
             if verify_script.exists():
                 verify_script.unlink()
@@ -434,6 +445,97 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         # RC タグが作成されていないことの検証
         tag_chk = self._run_git(["rev-parse", "--verify", "refs/tags/rc/job-e2e-fail"], check=False)
         self.assertNotEqual(tag_chk.returncode, 0)
+
+    def test_execute_multi_team_pipeline_preserves_evidence_bundles_after_cleanup(self) -> None:
+        """LL.1, LL.2: Worktree 削除前の Evidence Bundle 外出し保全 & ハッシュ照合・返却パス更新の検証。"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as script_file:
+            script_file.write("#!/bin/sh\nexit 0\n")
+            verify_script = Path(script_file.name)
+        verify_script.chmod(0o755)
+
+        try:
+            job_id = "job-preserve-bundle-test"
+            orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+            config = MultiTeamConfig(
+                job_id=job_id,
+                teams=[
+                    TeamWorkerSpec(team_id="team-alpha"),
+                    TeamWorkerSpec(team_id="team-beta"),
+                ],
+                base_branch="main",
+                integration_verify_script=verify_script,
+            )
+
+            def mock_worker(team_id: str, wt_path: Path) -> TeamExecutionResult:
+                # Worktree 内で作業・コミット・証跡作成
+                target = wt_path / f"{team_id}.txt"
+                target.write_text(f"content of {team_id}\n", encoding="utf-8")
+                subprocess.run(["git", "add", "."], cwd=wt_path, check=True)
+                subprocess.run(["git", "commit", "-m", f"feat: {team_id}"], cwd=wt_path, check=True)
+                rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt_path, capture_output=True, text=True, check=True).stdout.strip()
+                tree_sha = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=wt_path, capture_output=True, text=True, check=True).stdout.strip()
+                import hashlib
+                spec_sha = hashlib.sha256((wt_path / "SPEC.md").read_bytes()).hexdigest()
+
+                ev_store = EvidenceStore(repo_dir=wt_path)
+                ev_store.issue_evidence(
+                    task_id=f"task-{team_id}",
+                    checkpoint=self.base_commit,
+                    tree_sha=tree_sha,
+                    spec_sha=spec_sha,
+                )
+                ev_store.archive_record(
+                    task_id=f"task-{team_id}",
+                    status="COMPLETED",
+                    commit_info={"sha": rev, "tree_sha": tree_sha},
+                    checker_info={"decision": "APPROVE", "reason": f"Approval {team_id}"},
+                    verification_info={"exit_code": 0},
+                )
+                bundles_dir = wt_path / ".dev" / "bundles"
+                bundles_dir.mkdir(parents=True, exist_ok=True)
+                raw_bundle = bundles_dir / f"bundle_{team_id}.zip"
+                bundler = EvidenceBundler(repo_dir=wt_path)
+                bundler.create_bundle(dest_path=raw_bundle)
+
+                return TeamExecutionResult(
+                    team_id=team_id,
+                    success=True,
+                    status="SUCCESS",
+                    branch=f"team/{team_id}",
+                    head_commit=rev,
+                    bundle_path=raw_bundle,
+                )
+
+            multi_res = orchestrator.execute_multi_team_pipeline(
+                config=config,
+                worker_fn=mock_worker,
+                verify_script=verify_script,
+                cleanup=True,
+            )
+
+            self.assertTrue(multi_res.success)
+            expected_evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+
+            for tid in ["team-alpha", "team-beta"]:
+                team_res = multi_res.team_results[tid]
+                self.assertIsNotNone(team_res.bundle_path)
+                assert team_res.bundle_path is not None
+
+                # 1. Worktree 削除後も bundle_path がディスク上に実在すること
+                self.assertTrue(team_res.bundle_path.exists(), f"Preserved bundle {team_res.bundle_path} must exist on disk")
+
+                # 2. 保存先が Worktree 外の恒久パス (.dev/integration_jobs/<job_id>/evidence/<tid>.zip) であること
+                expected_path = expected_evidence_dir / f"{tid}.zip"
+                self.assertEqual(team_res.bundle_path.resolve(), expected_path.resolve())
+
+                # 3. 保存されたバンドルの整合性が検証できること
+                bundler = EvidenceBundler(repo_dir=self.repo_dir)
+                v_res = bundler.verify_bundle(team_res.bundle_path)
+                self.assertEqual(v_res.status, "VERIFIED")
+                self.assertEqual(len(v_res.errors), 0)
+        finally:
+            if verify_script.exists():
+                verify_script.unlink()
 
 
 if __name__ == "__main__":
