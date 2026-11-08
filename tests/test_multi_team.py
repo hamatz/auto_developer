@@ -16,6 +16,7 @@ from auto_developer.evidence import EvidenceStore
 from auto_developer.multi_team import (
     MultiTeamConfig,
     MultiTeamOrchestrator,
+    MultiTeamRecoveryResult,
     TeamExecutionResult,
     TeamWorkerSpec,
     WorkerProcessHandle,
@@ -1677,6 +1678,107 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         self.assertTrue(final_workers["team-runner-reg"].pgid > 0)
 
         orchestrator.worktree_manager.remove_worktree("team-runner-reg", force=True, delete_branch=True, purge_unmerged=True)
+
+    def test_recover_multi_team_job_handles_all_three_crash_states(self) -> None:
+        """VV.2: 親クラッシュ後の3状態（Case 1: 孤児回収, Case 2: 成果救出, Case 3: 確定成果再利用）を自律復旧することの実証。"""
+        job_id = "job-crash-recovery-test"
+        evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+
+        registry = WorkerRegistry(repo_dir=self.repo_dir, job_id=job_id)
+
+        # 統合検証スクリプト
+        with tempfile.NamedTemporaryFile(suffix=".sh", mode="w", delete=False) as tf:
+            tf.write("#!/bin/sh\nexit 0\n")
+            verify_script = Path(tf.name)
+        verify_script.chmod(0o755)
+
+        # 1. Case 1: 孤児ワーカーが生存中 (sleep 60)
+        p_case1 = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        wt1 = self.repo_dir / ".dev" / "worktrees" / "team-case1"
+        wt1.mkdir(parents=True, exist_ok=True)
+        reg1 = WorkerRegistration(
+            team_id="team-case1",
+            pid=p_case1.pid,
+            pgid=p_case1.pid,
+            worktree_path=str(wt1),
+            base_branch="main",
+            branch_name="team/team-case1",
+            status="RUNNING",
+            start_time=time.time(),
+            updated_at=time.time(),
+        )
+
+        # 2. Case 2: ワーカーは停止したが、Worktree 内に成果物（Bundle）が残存
+        wt2 = self.repo_dir / ".dev" / "worktrees" / "team-case2"
+        wt2_bundles = wt2 / ".dev" / "bundles"
+        wt2_bundles.mkdir(parents=True, exist_ok=True)
+        bundle2 = wt2_bundles / "bundle_team-case2.zip"
+        bundle2.write_bytes(b"PK\x03\x04CASE2_RESCUE_TEST")
+        reg2 = WorkerRegistration(
+            team_id="team-case2",
+            pid=99991,
+            pgid=99991,
+            worktree_path=str(wt2),
+            base_branch="main",
+            branch_name="team/team-case2",
+            status="RUNNING",
+            start_time=time.time(),
+            updated_at=time.time(),
+        )
+
+        # 3. Case 3: 成果物が既に恒久保存先（evidence/）に確定済み
+        dest3 = evidence_dir / "team-case3.zip"
+        dest3.write_bytes(b"PK\x03\x04CASE3_CONFIRMED_TEST")
+        wt3 = self.repo_dir / ".dev" / "worktrees" / "team-case3"
+        wt3.mkdir(parents=True, exist_ok=True)
+        reg3 = WorkerRegistration(
+            team_id="team-case3",
+            pid=99992,
+            pgid=99992,
+            worktree_path=str(wt3),
+            base_branch="main",
+            branch_name="team/team-case3",
+            status="RUNNING",
+            start_time=time.time(),
+            updated_at=time.time(),
+        )
+
+        registry.save({
+            "team-case1": reg1,
+            "team-case2": reg2,
+            "team-case3": reg3,
+        })
+
+        try:
+            # 完全に独立した新オーケストレーターインスタンスを作成して復旧実行
+            orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+            rec_result: MultiTeamRecoveryResult = orchestrator.recover_multi_team_job(job_id=job_id, verify_script=verify_script)
+            self.assertIsInstance(rec_result, MultiTeamRecoveryResult)
+
+            # Case 1: 孤児ワーカーが回収されたこと
+            self.assertIn("team-case1", rec_result.reclaimed_orphans)
+            self.assertFalse(_is_process_running(p_case1.pid))
+
+            # Case 2: Worktree 内の未退避 Bundle が救出されたこと
+            self.assertIn("team-case2", rec_result.rescued_bundles)
+            dest2 = evidence_dir / "team-case2.zip"
+            self.assertTrue(dest2.exists())
+            self.assertEqual(dest2.read_bytes(), b"PK\x03\x04CASE2_RESCUE_TEST")
+
+            # Case 3: 確定済み Bundle が再利用されたこと
+            self.assertIn("team-case3", rec_result.reused_bundles)
+            self.assertTrue(dest3.exists())
+
+        finally:
+            try:
+                if _is_process_running(p_case1.pid):
+                    p_case1.kill()
+                p_case1.wait(timeout=1.0)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            if verify_script.exists():
+                verify_script.unlink()
 
 
 if __name__ == "__main__":

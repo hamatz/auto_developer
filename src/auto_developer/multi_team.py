@@ -90,6 +90,19 @@ class MultiTeamResult:
 
 
 @dataclass
+class MultiTeamRecoveryResult:
+    """VV.2: 親オーケストレータークラッシュ後のジョブ自律復旧診断および実行結果。"""
+
+    job_id: str
+    reclaimed_orphans: list[str] = field(default_factory=list)
+    rescued_bundles: list[str] = field(default_factory=list)
+    reused_bundles: list[str] = field(default_factory=list)
+    pipeline_result: MultiTeamResult | None = None
+    success: bool = False
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class WorkerRegistration:
     """VV.1: ディスクに永続化される単一ワーカーの起動・状態レコード。"""
 
@@ -366,6 +379,174 @@ class MultiTeamOrchestrator:
         for tid in team_ids:
             results[tid] = self.terminate_worker_process_group(tid, timeout=timeout)
         return results
+
+    def recover_multi_team_job(
+        self,
+        job_id: str,
+        verify_script: Path | None = None,
+        cleanup: bool = True,
+    ) -> MultiTeamRecoveryResult:
+        """VV.2: 親プロセス強制終了（SIGKILL）等からの自律復旧。
+
+        Case 1: 孤児ワーカーの検知と安全回収（PGIDによるグループ終了）
+        Case 2: 終了済みワーカーの未退避 Evidence Bundle 救出
+        Case 3: 確定済み Evidence Bundle の再利用と統合ゲート（RC発行）への前進
+        """
+        registry = WorkerRegistry(repo_dir=self.repo_dir, job_id=job_id)
+        workers = registry.load()
+        result = MultiTeamRecoveryResult(job_id=job_id)
+
+        if not workers:
+            result.details["error"] = f"No worker registry found for job_id '{job_id}'"
+            return result
+
+        evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+
+        team_results: dict[str, TeamExecutionResult] = {}
+
+        for tid, w in workers.items():
+            wt_path = Path(w.worktree_path)
+            dest_bundle = evidence_dir / f"{tid}.zip"
+
+            # Case 1: 孤児ワーカーが生存しているか検査
+            if w.pgid > 0 and has_active_processes_in_group(w.pgid):
+                # 孤児プロセスグループを安全に停止・回収
+                if hasattr(os, "killpg"):
+                    try:
+                        os.killpg(w.pgid, signal.SIGTERM)
+                    except (ProcessLookupError, OSError):
+                        pass
+                    deadline = time.time() + 1.0
+                    while time.time() < deadline:
+                        if not has_active_processes_in_group(w.pgid):
+                            break
+                        time.sleep(0.05)
+                    if has_active_processes_in_group(w.pgid):
+                        try:
+                            os.killpg(w.pgid, signal.SIGKILL)
+                        except (ProcessLookupError, OSError):
+                            pass
+                registry.update_status(tid, "TERMINATED")
+                result.reclaimed_orphans.append(tid)
+
+            # Case 3: 恒久保存先に確定済み Evidence が存在するか確認
+            if dest_bundle.exists():
+                result.reused_bundles.append(tid)
+                team_results[tid] = TeamExecutionResult(
+                    team_id=tid,
+                    success=True,
+                    status="SUCCESS",
+                    bundle_path=dest_bundle,
+                    evidence_preserved=True,
+                )
+            else:
+                # Case 2: Worktree 内に成果物（Bundle）が残存しているか探索
+                wt_bundles_dir = wt_path / ".dev" / "bundles"
+                wt_bundle: Path | None = None
+                if wt_bundles_dir.exists():
+                    candidates = sorted(wt_bundles_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+                    if candidates:
+                        wt_bundle = candidates[0]
+
+                if wt_bundle and wt_bundle.exists():
+                    # 未退避 Bundle を恒久保存先へ救出
+                    tmp_dest = evidence_dir / f"{tid}.zip.tmp_rec_{os.getpid()}_{time.time_ns()}"
+                    try:
+                        shutil.copy2(wt_bundle, tmp_dest)
+                        try:
+                            os.link(tmp_dest, dest_bundle)
+                            result.rescued_bundles.append(tid)
+                            team_results[tid] = TeamExecutionResult(
+                                team_id=tid,
+                                success=True,
+                                status="SUCCESS",
+                                bundle_path=dest_bundle,
+                                evidence_preserved=True,
+                            )
+                            registry.update_status(tid, "EVIDENCE_PRESERVED")
+                        except FileExistsError:
+                            result.reused_bundles.append(tid)
+                            team_results[tid] = TeamExecutionResult(
+                                team_id=tid,
+                                success=True,
+                                status="SUCCESS",
+                                bundle_path=dest_bundle,
+                                evidence_preserved=True,
+                            )
+                        finally:
+                            if tmp_dest.exists():
+                                tmp_dest.unlink()
+                    except OSError as err:
+                        logger.error("Failed to rescue bundle for team '%s': %s", tid, err)
+                        team_results[tid] = TeamExecutionResult(
+                            team_id=tid,
+                            success=False,
+                            status="RESCUE_FAILED",
+                            details={"error": str(err)},
+                        )
+                else:
+                    team_results[tid] = TeamExecutionResult(
+                        team_id=tid,
+                        success=False,
+                        status="EVIDENCE_NOT_FOUND",
+                    )
+
+        # 全チームの成果物が揃っている場合は統合ゲートへ進める
+        all_preserved = all(tr.evidence_preserved for tr in team_results.values()) and len(team_results) == len(workers)
+        result.success = all_preserved
+
+        if all_preserved:
+            inputs: list[TeamIntegrationInput] = []
+            for tid, tr in team_results.items():
+                worker_reg = workers.get(tid)
+                if tr.bundle_path:
+                    inputs.append(
+                        TeamIntegrationInput(
+                            team_id=tid,
+                            bundle_path=tr.bundle_path,
+                            branch=(worker_reg.branch_name if worker_reg and worker_reg.branch_name else f"team/{tid}"),
+                            head_commit=tr.head_commit,
+                        )
+                    )
+
+            int_res = None
+            rc_commit = None
+            rc_tag = None
+            if verify_script is not None and self.integration_gate is not None:
+                base_branch = next(iter(workers.values())).base_branch or "main"
+                int_res = self.integration_gate.execute_integration(
+                    job_id=job_id,
+                    inputs=inputs,
+                    base_commit=base_branch,
+                    verify_script=verify_script,
+                    resume=True,
+                )
+                if int_res.success:
+                    rc_commit = int_res.release_candidate_commit
+                    rc_tag = str(int_res.details.get("rc_tag")) if int_res.details.get("rc_tag") else f"refs/tags/rc/{job_id}"
+
+            result.pipeline_result = MultiTeamResult(
+                job_id=job_id,
+                success=int_res.success if int_res else True,
+                status="SUCCESS" if (int_res.success if int_res else True) else "INTEGRATION_FAILED",
+                team_results=team_results,
+                integration_result=int_res,
+                release_candidate_commit=rc_commit,
+                release_candidate_tag=rc_tag,
+            )
+
+            if cleanup:
+                for tid, w in workers.items():
+                    wt_p = Path(w.worktree_path)
+                    try:
+                        self.worktree_manager.remove_worktree(tid, force=True)
+                    except (subprocess.SubprocessError, OSError) as exc:
+                        logger.debug("Worktree removal non-fatal error for %s: %s", tid, exc)
+                    if wt_p.exists():
+                        shutil.rmtree(wt_p, ignore_errors=True)
+
+        return result
 
     def prepare_workers(self, config: MultiTeamConfig) -> dict[str, Path]:
         """各チーム用の独立した専用 Worktree を作成し、パスの辞書を返す。
