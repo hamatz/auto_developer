@@ -682,11 +682,42 @@ class IntegrationGate:
         if job_state.state == "COMPLETED":
             return True, "ALREADY_COMPLETED", {"rc_tag": job_state.rc_tag, "rc_commit": job_state.rc_commit}
 
-        # DD.3, EE.1, EE.2: RC タグが既に発行されているかの実態検査 (RC発行後・COMPLETED保存前のクラッシュ復旧)
+        # DD.3, EE.1, EE.2, FF.1, FF.2: RC タグが既に発行されているかの実態検査 (RC発行後・COMPLETED保存前のクラッシュ復旧)
         rc_tag = f"rc/{job_id}"
         tag_check = self._run_git(["rev-parse", "--verify", f"refs/tags/{rc_tag}"], check=False)
         if tag_check.returncode == 0:
             existing_rc_commit = tag_check.stdout.strip()
+
+            # FF.1 / P1: 監査済みチーム成果（verified_commits）が1件も記録されていない場合、
+            # RCタグが存在してもジョブの成果である証拠がないため Fail-Closed で RECOVERY_REQUIRED
+            if not job_state.verified_commits:
+                job_state.state = "RECOVERY_REQUIRED"
+                err_msg = (
+                    f"RC tag '{rc_tag}' exists but no verified team commits are recorded in job state"
+                )
+                job_state.details["error"] = err_msg
+                job_state.save(self.jobs_dir)
+                return False, "RECOVERY_REQUIRED", {"rc_validation_failed": True, "error": err_msg}
+
+            # 統合ブランチの実在検査
+            branch_chk = None
+            if job_state.integration_branch:
+                branch_chk = self._run_git(
+                    ["rev-parse", "--verify", f"refs/heads/{job_state.integration_branch}"],
+                    check=False,
+                )
+
+            # FF.2 / P1: 証拠必須化
+            # rc_commit も未保存、かつ統合ブランチも実在しない場合、RCタグの正当性を証明できないため RECOVERY_REQUIRED
+            if not job_state.rc_commit and (branch_chk is None or branch_chk.returncode != 0):
+                job_state.state = "RECOVERY_REQUIRED"
+                err_msg = (
+                    f"RC tag '{rc_tag}' exists but neither recorded rc_commit nor active "
+                    f"integration branch '{job_state.integration_branch}' exists to corroborate it"
+                )
+                job_state.details["error"] = err_msg
+                job_state.save(self.jobs_dir)
+                return False, "RECOVERY_REQUIRED", {"rc_validation_failed": True, "error": err_msg}
 
             # EE.2 / P0: RC タグコミットと統合成果の厳密照合
             # 1) JobState に記録された rc_commit との一致
@@ -701,20 +732,15 @@ class IntegrationGate:
                 return False, "RECOVERY_REQUIRED", {"rc_validation_failed": True, "error": err_msg}
 
             # 2) 統合ブランチが存在する場合、その先端コミットと existing_rc_commit の一致
-            if job_state.integration_branch:
-                branch_chk = self._run_git(
-                    ["rev-parse", "--verify", f"refs/heads/{job_state.integration_branch}"],
-                    check=False,
+            if branch_chk is not None and branch_chk.returncode == 0 and branch_chk.stdout.strip() != existing_rc_commit:
+                job_state.state = "RECOVERY_REQUIRED"
+                err_msg = (
+                    f"RC tag '{rc_tag}' commit ({existing_rc_commit}) does not match "
+                    f"integration branch '{job_state.integration_branch}' HEAD ({branch_chk.stdout.strip()})"
                 )
-                if branch_chk.returncode == 0 and branch_chk.stdout.strip() != existing_rc_commit:
-                    job_state.state = "RECOVERY_REQUIRED"
-                    err_msg = (
-                        f"RC tag '{rc_tag}' commit ({existing_rc_commit}) does not match "
-                        f"integration branch '{job_state.integration_branch}' HEAD ({branch_chk.stdout.strip()})"
-                    )
-                    job_state.details["error"] = err_msg
-                    job_state.save(self.jobs_dir)
-                    return False, "RECOVERY_REQUIRED", {"rc_validation_failed": True, "error": err_msg}
+                job_state.details["error"] = err_msg
+                job_state.save(self.jobs_dir)
+                return False, "RECOVERY_REQUIRED", {"rc_validation_failed": True, "error": err_msg}
 
             # 3) job_state.verified_commits の全チームコミットが existing_rc_commit の祖先であることの検証
             for team_id, team_commit in job_state.verified_commits.items():

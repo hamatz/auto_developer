@@ -226,7 +226,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `IntegrationGate` に障害注入フック（`fault_hook`）を設け、別プロセスで起動した `execute_integration` をマージ途中（`after_first_merge`）または RC 発行直後で実際に `os.kill(pid, signal.SIGKILL)` により強制終了。その後の `execute_integration(..., resume=True)` による安全な復旧・隔離・統合完遂を実証。
   4. Morning Brief (NIGHTLY_REPORT.md) と Manifest の Tree SHA 完全整合 (DD.4 / P2):
      - `MorningReporter` が全 Evidence 領域（`records`, `archive`, `.dev/evidence`）から実態照合を行い、Manifest の Tree SHA と 1対1 で完全一致するよう出力する。
-- [ ] 機能EE (Stage 2 最終確定: RC タグ復旧の完全 Fail-Closed 化 & 成果コミット束縛 Stage 2 Finalization: Strict RC Recovery & Commit Binding):
+- [x] 機能EE (Stage 2 最終確定: RC タグ復旧の完全 Fail-Closed 化 & 成果コミット束縛 Stage 2 Finalization: Strict RC Recovery & Commit Binding):
   1. RC 発行済み復旧経路における Worktree 削除の Fail-Closed 化 (EE.1 / P0):
      - `recover_interrupted_job` において、`rc/<job_id>` タグ検出時でも Worktree 削除（`remove_worktree`）で例外が発生した、または Worktree ディレクトリや Git 管理下の Worktree が実在する場合、推測で `ALREADY_COMPLETED` とせず確実に `status="RECOVERY_REQUIRED"` を返す。
   2. RC タグコミットと統合成果の厳密照合 (EE.2 / P0):
@@ -235,6 +235,18 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   3. 決定論的受入・回帰テストの実証 (EE.3 / P0):
      - テスト1: RC タグが存在する状態で Worktree 削除に失敗した際、`RECOVERY_REQUIRED` で遮断されることの実証。
      - テスト2: RC タグが存在するが、保存された統合成果と SHA 不一致または未統合コミットである際、`RECOVERY_REQUIRED` で遮断されることの実証。
+- [ ] 機能FF (Stage 2 完全完了: RC 復旧時の証拠欠落ガード Stage 2 Final Closure: Missing Evidence Guard in RC Recovery):
+  1. 監査済みチーム成果未記録時の Fail-Closed 遮断 (FF.1 / P1):
+     - `recover_interrupted_job` において、`rc/<job_id>` タグ検出時、`job_state.verified_commits` が空（未記録）の場合は即座に `status="RECOVERY_REQUIRED"` で遮断する。
+  2. 照合根拠欠落時の Fail-Closed 遮断 (FF.2 / P1):
+     - `job_state.rc_commit` が未記録、かつ統合ブランチ（`refs/heads/<integration_branch>`）が存在しない場合、RC タグの正当性を証明する根拠が欠落していると判断し、推測で `ALREADY_COMPLETED` とせず確実に `status="RECOVERY_REQUIRED"` で遮断する。
+  3. 決定論的受入・回帰テストの実証 (FF.3 / P1):
+     - JobState が INITIALIZED かつ verified_commits が空、統合ブランチなしの状態で同名 RC タグが存在する際、`RECOVERY_REQUIRED` で遮断されることを実証する回帰テストを追加。
+- [ ] 機能GG (Stage 3 MultiTeamOrchestrator 始動: 複数ワーカー並行実行・統合基盤 MultiTeam Orchestration Foundation):
+  1. 複数チーム並行実行データ構造と契約 (GG.1):
+     - `TeamWorkerSpec`, `MultiTeamConfig`, `MultiTeamResult` などのデータ構造を定義し、複数ワーカーの Worktree 分割と成果統合の不変条件を確立する。
+  2. 独立ワーカーオーケストレーション基盤 (GG.2):
+     - 各チームの独立 Worktree 上での実行・成果収集（Evidence Bundle 収集）と `IntegrationGate` への安全な引き渡しパイプラインの基本実装。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

@@ -10,6 +10,13 @@ from auto_developer.integration_gate import (
     TeamIntegrationInput,
 )
 from auto_developer.models import ExecutionResult, JobState, Task
+from auto_developer.multi_team import (
+    MultiTeamConfig,
+    MultiTeamOrchestrator,
+    MultiTeamResult,
+    TeamExecutionResult,
+    TeamWorkerSpec,
+)
 from auto_developer.orchestrator import NightlyOrchestrator
 from auto_developer.recovery import (
     InspectionReport,
@@ -41,6 +48,9 @@ __all__ = [
     "JobState",
     "MockRunnerAdapter",
     "MorningReporter",
+    "MultiTeamConfig",
+    "MultiTeamOrchestrator",
+    "MultiTeamResult",
     "NightlyOrchestrator",
     "RecoveryAction",
     "RecoveryDiagnosis",
@@ -50,6 +60,8 @@ __all__ = [
     "RunnerAdapter",
     "Task",
     "TaskDispatcher",
+    "TeamExecutionResult",
     "TeamIntegrationInput",
+    "TeamWorkerSpec",
     "main",
 ]
