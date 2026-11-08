@@ -444,7 +444,7 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         )
         verify_sh.chmod(0o755)
 
-        # 結合契約テスト (P1-3)
+        # 結合契約テスト (P1-3): 偽陽性を排除し、インポートや契約の不整合は必ずテスト失敗とする
         tests_dir = self.repo_dir / "tests"
         tests_dir.mkdir(parents=True, exist_ok=True)
         (tests_dir / "test_contract.py").write_text(
@@ -456,13 +456,9 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
             "    sys.path.insert(0, src_path)\n\n"
             "class ContractTest(unittest.TestCase):\n"
             "    def test_core_ui_contract(self):\n"
-            "        try:\n"
-            "            from core.app import get_core\n"
-            "            from ui.view import render\n"
-            "        except ImportError:\n"
-            "            return\n"
-            "        res = render()\n"
-            "        self.assertEqual(res, 'Render: 42')\n",
+            "        from core.app import get_core\n"
+            "        from ui.view import render\n"
+            "        self.assertEqual(render(), 'Render: 42')\n",
             encoding="utf-8",
         )
 
@@ -581,9 +577,16 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
             file_path="src/core/app.py",
             content="# Core logic\ndef get_core():\n    return 42\n",
         )
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/ui/view.py",
+            content="from core.app import get_core\n\ndef render():\n    return f'Render: {get_core()}'\n",
+        )
         gate = IntegrationGate(repo_dir=self.repo_dir)
         inputs = [
             TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
         ]
 
         # 呼び出し前: main ブランチにいること
@@ -611,9 +614,16 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
             file_path="src/core/app.py",
             content="# Core logic\ndef get_core():\n    return 42\n",
         )
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/ui/view.py",
+            content="from core.app import get_core\n\ndef render():\n    return f'Render: {get_core()}'\n",
+        )
         gate = IntegrationGate(repo_dir=self.repo_dir)
         inputs = [
             TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
         ]
 
         # 異なるコミットを指す既存の RC タグを作成しておく
@@ -675,6 +685,44 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         main_commit = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
         self.assertEqual(main_commit, self.base_commit)
         self.assertFalse((self.repo_dir / "src" / "core" / "app.py").exists())
+
+    def test_two_team_integration_import_error_quarantine_scenario(self) -> None:
+        """P1-3: ImportError などの結合欠陥がスキップされず確実に検証失敗・安全隔離される。"""
+        # Core チームのモジュール名または関数名が合っていない (get_core ではなく missing_func)
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/core/app.py",
+            content="# Missing expected function\ndef other_func():\n    return 42\n",
+        )
+
+        # UI チームは get_core をインポートしようとする
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/ui/view.py",
+            content="from core.app import get_core\n\ndef render():\n    return f'Render: {get_core()}'\n",
+        )
+
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
+        ]
+
+        result = gate.execute_integration(
+            job_id="job-integration-import-fail",
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+        )
+
+        # ImportError (ImportError: cannot import name 'get_core') が握りつぶされず失敗すること
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "VERIFICATION_FAILED")
+        self.assertIsNotNone(result.integration_branch)
+        self.assertTrue(result.integration_branch.startswith("quarantine/integration-job-integration-import-fail-"))
+        self.assertTrue(any("ImportError" in err or "Exit 1" in err for err in result.errors))
 
     def test_two_team_integration_conflict_quarantine_scenario(self) -> None:
         # Core チームが shared.py を作成
