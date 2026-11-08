@@ -16,6 +16,12 @@ class GitGuard:
         re.compile(r"^scripts/verify_local\.sh$"),
         re.compile(r"^tests/immunity/"),
     )
+    BASE_PROTECTED_PATTERNS = (
+        re.compile(r"^\.github/"),
+        re.compile(r"^SPEC\.md$"),
+        re.compile(r"^scripts/verify_local\.sh$"),
+    )
+    IMMUNITY_PATTERN = re.compile(r"^tests/immunity/")
 
     def __init__(self, repo_dir: Path | None = None) -> None:
         self.repo_dir = repo_dir or Path.cwd()
@@ -69,33 +75,104 @@ class GitGuard:
         proc_status = self._run_git(["status", "--porcelain"])
         return bool(proc_status.stdout.strip())
 
-    def check_protected_files_untouched(self, checkpoint: str) -> bool:
-        """チェックポイント以降に変更されたファイル（未追跡・ステージ済を含む）に保護対象が含まれていないか検査する。"""
-        files_to_check: set[str] = set()
+    def check_protected_files_untouched(
+        self, checkpoint: str, allow_immunity_additions: bool = False
+    ) -> bool:
+        """チェックポイント以降に変更されたファイル（未追跡・ステージ済を含む）に保護対象が含まれていないか検査する。
+        allow_immunity_additions=True の場合、tests/immunity/ 配下への新規テスト追加のみ許可し、
+        既存の免疫テストの変更・削除・改変は依然として厳格に遮断する。
+        """
+        if not allow_immunity_additions:
+            files_to_check: set[str] = set()
+            proc_diff = self._run_git(["diff", "--name-only", checkpoint])
+            for line in proc_diff.stdout.splitlines():
+                if line.strip():
+                    files_to_check.add(line.strip())
 
-        # 1. Diff against checkpoint (tracked modifications)
+            proc_status = self._run_git(["status", "--porcelain"])
+            for line in proc_status.stdout.splitlines():
+                if not line.strip():
+                    continue
+                raw_path = line[3:].strip()
+                if " -> " in raw_path:
+                    for p in raw_path.split(" -> "):
+                        files_to_check.add(p.strip().strip('"'))
+                else:
+                    files_to_check.add(raw_path.strip('"'))
+
+            for file_path in files_to_check:
+                for pattern in self.PROTECTED_PATTERNS:
+                    if pattern.search(file_path):
+                        return False
+            return True
+
+        # allow_immunity_additions=True の場合:
+        # A. 基本保護対象 (.github/, SPEC.md, scripts/verify_local.sh) の検査
+        files_to_check_base: set[str] = set()
         proc_diff = self._run_git(["diff", "--name-only", checkpoint])
         for line in proc_diff.stdout.splitlines():
             if line.strip():
-                files_to_check.add(line.strip())
+                files_to_check_base.add(line.strip())
 
-        # 2. Porcelain status (untracked files ??, staged files, uncommitted changes)
         proc_status = self._run_git(["status", "--porcelain"])
         for line in proc_status.stdout.splitlines():
             if not line.strip():
                 continue
-            # Format: XY filename or XY orig -> renamed
             raw_path = line[3:].strip()
             if " -> " in raw_path:
                 for p in raw_path.split(" -> "):
-                    files_to_check.add(p.strip().strip('"'))
+                    files_to_check_base.add(p.strip().strip('"'))
             else:
-                files_to_check.add(raw_path.strip('"'))
+                files_to_check_base.add(raw_path.strip('"'))
 
-        for file_path in files_to_check:
-            for pattern in self.PROTECTED_PATTERNS:
+        for file_path in files_to_check_base:
+            for pattern in self.BASE_PROTECTED_PATTERNS:
                 if pattern.search(file_path):
                     return False
+
+        # B. tests/immunity/ の非対称検査
+        try:
+            proc_ls = self._run_git(["ls-tree", "-r", "--name-only", checkpoint, "--", "tests/immunity"])
+            existing_immunity_files = {line.strip() for line in proc_ls.stdout.splitlines() if line.strip()}
+        except subprocess.CalledProcessError:
+            existing_immunity_files = set()
+
+        # B-1: diff による検査 (--name-status)
+        proc_diff_status = self._run_git(["diff", "--name-status", checkpoint])
+        for line in proc_diff_status.stdout.splitlines():
+            if not line.strip():
+                continue
+            parts = line.strip().split("\t")
+            status_code = parts[0]
+            paths = parts[1:]
+            for p in paths:
+                p_clean = p.strip().strip('"')
+                if self.IMMUNITY_PATTERN.search(p_clean):
+                    if p_clean in existing_immunity_files:
+                        return False
+                    if not status_code.startswith("A"):
+                        return False
+
+        # B-2: status による検査 (未追跡・ステージ状態)
+        for line in proc_status.stdout.splitlines():
+            if not line.strip():
+                continue
+            xy = line[:2]
+            raw_path = line[3:].strip()
+            paths = (
+                [p.strip().strip('"') for p in raw_path.split(" -> ")]
+                if " -> " in raw_path
+                else [raw_path.strip('"')]
+            )
+            for p in paths:
+                if self.IMMUNITY_PATTERN.search(p):
+                    if p in existing_immunity_files:
+                        return False
+                    if xy == "??":
+                        continue
+                    if "M" in xy or "D" in xy or "R" in xy:
+                        return False
+
         return True
 
     def commit_task(self, task: Task) -> str:

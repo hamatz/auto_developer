@@ -21,6 +21,24 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-08] 外部プロセス自律回収時の同一性・所属関係照合と統合遮断 (PID & PGID Fail-Closed)
+- Context: `src/auto_developer/multi_team.py` (`recover_multi_team_job`, `WorkerRegistry`)
+- Trap: PID の OS 開始識別子照合だけを行い、Registry の PGID の正当性を検証せずに `os.killpg(w.pgid)` を送ったため、改ざんや誤設定で別プロセスの PGID が指定された場合に無関係なプロセスグループを誤停止する脆弱性があった。また、照合に失敗して停止を保留した未確認ワーカー（`unverified_processes`）が残っているのに、Evidence が揃っているだけで統合ゲートや Worktree 削除に進めてしまう漏れがあった。
+- Rule:
+  1. プロセスグループ停止前に `os.getpgid(w.pid) == w.pgid` で指定 PID が指定 PGID に実在・所属していることを必須照合し、不一致または照合不能な場合はシグナル送信を絶対に保留する。
+  2. 未確認ワーカーが 1 つでも残っている場合は、統合処理（`IntegrationGate`）への進行を物理遮断して `RECOVERY_REQUIRED` に遷移させ、当該ワーカーの Worktree も削除せず保全する。
+- Rung: 作り（ガード実装） & 検査（受入テスト）
+- Immunity Test: `tests/test_multi_team.py` (`test_recover_multi_team_job_skips_when_pid_does_not_belong_to_pgid`, `test_recover_multi_team_job_aborts_integration_when_unverified_processes_exist`, `test_recover_multi_team_job_preserves_worktree_for_unverified_processes`)
+- Proof: 意図的に PID と PGID の所属関係を狂わせた実プロセスを用いたテストで、シグナル送信・統合呼び出し・Worktree 削除がすべて遮断され、期待通り防御されることを実証済み。
+
+### [2026-11-08] 復旧成果物の真正性・改ざん検証 (ZIP 構造検査 vs Evidence 独立監査)
+- Context: `src/auto_developer/multi_team.py`, `bundler.py`
+- Trap: `zipfile.is_zipfile()` や `testzip()` のチェックサム確認だけでは、ZIP 書式が正常であることしか分からず、`bundle_manifest.json` の欠如、Tree SHA 不一致、Checker 承認レコードの有無といった真正性・改ざんの検証が素通りしてしまう。
+- Rule: Evidence 成果物の受け入れ・復旧には必ず `EvidenceBundler.verify_bundle()` を適用し、`bundle_manifest.json`、全ファイル SHA-256、Git Tree、SPEC ハッシュ、Checker 承認レコードのすべてが `VERIFIED` であることを独立監査する。
+- Rung: 作り & 検査
+- Immunity Test: `tests/test_multi_team.py` (`test_recover_multi_team_job_rejects_zip_without_bundle_manifest`)
+- Proof: マニフェストを持たないダミー ZIP が `INVALID_EVIDENCE` として厳格に拒絶されることを実証済み。
+
 ### [記入例] 非同期処理とトランザクションのスコープ
 - Context: IndexedDB 操作全般
 - Trap: transaction のスコープ内で外部の fetch を await したため、トランザクションが自動コミットされ例外が発生した
