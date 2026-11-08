@@ -80,6 +80,40 @@ x = 10
         self.assertFalse(result.is_reproduced)
         self.assertEqual(result.reason, "NO_TESTS_FOUND")
 
+    def test_rejects_class_without_test_methods_ran_zero(self) -> None:
+        """機能AAA.2: TestCase を継承していてもテストメソッドが無く実行数0件の場合は False (NO_TESTS_RAN) と判定すること。"""
+        code = """import unittest
+class TestX(unittest.TestCase):
+    pass
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "NO_TESTS_RAN")
+
+    def test_rejects_setup_environment_oserror(self) -> None:
+        """機能AAA.2: setUp() での OSError 等の環境例外による失敗は False (SETUP_ERROR) と判定すること。"""
+        code = """import unittest
+class TestEnvError(unittest.TestCase):
+    def setUp(self):
+        raise OSError("Harness environment failure: device or file not available")
+    def test_repro(self):
+        self.assertEqual(1, 2)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "SETUP_ERROR")
+
+    def test_rejects_test_body_unhandled_oserror_without_assertion(self) -> None:
+        """機能AAA.2: テストメソッド内でアサーション失敗ではなく OSError 等の例外が発生した場合は False (UNHANDLED_EXCEPTION) と判定すること。"""
+        code = """import unittest
+class TestBodyError(unittest.TestCase):
+    def test_unhandled(self):
+        raise OSError("Unexpected disk failure during test execution")
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
+
     def test_verify_candidate_from_file_path(self) -> None:
         """ファイルパス指定からの検証も正しく動作すること。"""
         test_file = self.repo_dir / "test_file_repro.py"

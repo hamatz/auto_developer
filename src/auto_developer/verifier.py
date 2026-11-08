@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -164,7 +165,19 @@ class RedTestVerifier:
 
         output = (proc.stdout + "\n" + proc.stderr).strip()
 
-        # 判定 A: すでに Green
+        # 判定 A: 実行件数チェック (0件実行 / Exit 5 NO TESTS RAN)
+        m_ran = re.search(r"Ran (\d+) tests?", output)
+        ran_count = int(m_ran.group(1)) if m_ran else 0
+        if ran_count == 0 or "NO TESTS RAN" in output or proc.returncode == 5:
+            return RedVerificationResult(
+                is_reproduced=False,
+                exit_code=proc.returncode,
+                reason="NO_TESTS_RAN",
+                output=output,
+                reason_detail="No test methods were executed during unittest run (ran_count=0).",
+            )
+
+        # 判定 B: すでに Green
         if proc.returncode == 0:
             return RedVerificationResult(
                 is_reproduced=False,
@@ -174,7 +187,7 @@ class RedTestVerifier:
                 reason_detail="Candidate test passed against current codebase without failures.",
             )
 
-        # 判定 B: インポート不能 / モジュール未発見
+        # 判定 C: インポート不能 / モジュール未発見
         if (
             "ImportError: Failed to import test module" in output
             or "ModuleNotFoundError:" in output
@@ -188,11 +201,31 @@ class RedTestVerifier:
                 reason_detail="Test failed due to ImportError / ModuleNotFoundError.",
             )
 
-        # 判定 C: 真正な Red (アサーション失敗やテスト実行中の例外)
+        # 判定 D: setUp() / tearDown() での環境・ハーネス例外 (誤検知防止)
+        if "in setUp" in output or "in tearDown" in output:
+            return RedVerificationResult(
+                is_reproduced=False,
+                exit_code=proc.returncode,
+                reason="SETUP_ERROR",
+                output=output,
+                reason_detail="Test failure occurred during setUp/tearDown rather than test body assertion.",
+            )
+
+        # 判定 E: アサーション失敗 (AssertionError / FAIL:) による真正な Red
+        if "AssertionError" in output or "FAIL:" in output:
+            return RedVerificationResult(
+                is_reproduced=True,
+                exit_code=proc.returncode,
+                reason="GENUINE_RED",
+                output=output,
+                reason_detail="Candidate test failed as expected with assertion failure (Genuine Red).",
+            )
+
+        # 判定 F: アサーション失敗を伴わない例外 (ERROR: / 環境エラー / 予期せぬ実行時エラー)
         return RedVerificationResult(
-            is_reproduced=True,
+            is_reproduced=False,
             exit_code=proc.returncode,
-            reason="GENUINE_RED",
+            reason="UNHANDLED_EXCEPTION",
             output=output,
-            reason_detail="Candidate test failed as expected (Genuine Red).",
+            reason_detail="Test exited with error/exception without an assertion failure (FAIL: / AssertionError).",
         )

@@ -64,8 +64,12 @@ from calculator import divide
 
 class DivideBugReproTest(unittest.TestCase):
     def test_divide_zero_expected_behavior(self):
-        # 期待仕様: ゼロ除算時は -1.0 を返す（または特定の振る舞い）
-        self.assertEqual(divide(10, 0), -1.0, "Bug reproduced: currently raises ZeroDivisionError instead of -1.0")
+        # 期待仕様: ゼロ除算時は -1.0 を返す
+        try:
+            res = divide(10, 0)
+        except ZeroDivisionError:
+            res = None
+        self.assertEqual(res, -1.0, "Bug reproduced: currently raises ZeroDivisionError instead of -1.0")
 """
         # 1. RedTestVerifier による客観的再現判定
         red_result = self.verifier.verify_candidate_test(candidate_bug_test)
