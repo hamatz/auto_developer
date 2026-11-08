@@ -123,6 +123,61 @@ class TestMorningReporterEvidenceVerification(unittest.TestCase):
         self.assertNotIn("git push origin", content)
         self.assertIn("git log", content)
 
+    def test_write_report_locates_evidence_in_archive_and_aligns_tree_sha(self):
+        """DD.4 / P2: archive 配下の証跡レコードを検出し、Git 実態の Tree SHA と厳密整合することの実証。"""
+        # テスト用コミット作成
+        test_file = self.repo / "test_dd4.txt"
+        test_file.write_text("dd4 verification", encoding="utf-8")
+        subprocess.run(["git", "add", "test_dd4.txt"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: test dd4"], cwd=self.repo, check=True)
+        commit_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout.strip()
+        tree_sha = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo, capture_output=True, text=True, check=True).stdout.strip()
+
+        # archive 配下にレコードを配置
+        archive_dir = self.repo / ".git" / "nightly_evidence" / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        rec_file = archive_dir / "task_1.json"
+        rec_file.write_text(
+            json.dumps({
+                "task_id": "1",
+                "status": "COMPLETED",
+                "tree_sha": tree_sha,
+                "commit": {
+                    "sha": commit_sha,
+                    "tree_sha": tree_sha,
+                },
+                "checker": {
+                    "decision": "APPROVE",
+                    "reason": "Verified archive record",
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        reporter = MorningReporter(repo_dir=self.repo)
+        report_path = self.repo / "NIGHTLY_REPORT.md"
+        reporter.write_report(
+            report_path,
+            {
+                "status": "COMPLETED",
+                "total_tasks": 1,
+                "succeeded_count": 1,
+                "quarantined_count": 0,
+                "checkpoint": commit_sha,
+                "completed_tasks": [
+                    {
+                        "task_id": "1",
+                        "title": "DD4 Task",
+                        "commit": commit_sha,
+                    }
+                ],
+            },
+        )
+
+        content = report_path.read_text(encoding="utf-8")
+        self.assertIn(f"`{tree_sha[:7]}`", content)
+        self.assertIn("APPROVE (Verified)", content)
+
 
 if __name__ == "__main__":
     unittest.main()

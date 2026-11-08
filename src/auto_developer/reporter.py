@@ -20,6 +20,31 @@ class MorningReporter:
     ) -> None:
         """NIGHTLY_REPORT.md を意思決定支援型 Morning Brief として作成・更新する。"""
         effective_repo = repo_dir or self.repo_dir or report_path.parent
+        candidate_dirs = [
+            effective_repo / ".git" / "nightly_evidence" / "records",
+            effective_repo / ".git" / "nightly_evidence" / "archive",
+            effective_repo / ".git" / "nightly_evidence",
+            effective_repo / ".dev" / "evidence",
+        ]
+        try:
+            c_res = subprocess.run(
+                ["git", "rev-parse", "--git-common-dir"],
+                cwd=effective_repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if c_res.returncode == 0 and c_res.stdout.strip():
+                common_p = Path(c_res.stdout.strip())
+                if not common_p.is_absolute():
+                    common_p = (effective_repo / common_p).resolve()
+                candidate_dirs.extend([
+                    common_p / "nightly_evidence" / "records",
+                    common_p / "nightly_evidence" / "archive",
+                    common_p / "nightly_evidence",
+                ])
+        except OSError:
+            pass
         records_dir = effective_repo / ".git" / "nightly_evidence" / "records"
 
         status = summary_data.get("status", "UNKNOWN")
@@ -123,18 +148,37 @@ class MorningReporter:
                 committed_tree_sha = item.get("committed_tree_sha", "")
                 explicit_checker = item.get("checker_decision")
 
-                record_file = records_dir / f"task_{tid}.json"
+                record_file: Path | None = None
+                for cdir in candidate_dirs:
+                    cand_p = cdir / f"task_{tid}.json"
+                    if cand_p.is_file():
+                        record_file = cand_p
+                        break
+
                 checker_review_text = "UNVERIFIED (No Record)"
                 verified_tree_text = item.get("evidence_tree_sha", "")[:7] or "N/A"
 
-                if record_file.exists():
+                if record_file is not None and record_file.exists():
                     try:
                         rec_data = json.loads(record_file.read_text(encoding="utf-8"))
                         rec_status = rec_data.get("status", "")
-                        rec_tree = rec_data.get("tree_sha", "")
                         rec_commit_tree = rec_data.get("commit", {}).get("tree_sha", "")
+                        rec_tree = rec_commit_tree or rec_data.get("tree_sha", "")
                         rec_checker = rec_data.get("checker", {})
                         dec = rec_checker.get("decision", "") if isinstance(rec_checker, dict) else str(rec_checker)
+
+                        # Git 実態コミットの Tree SHA との照合
+                        commit_full = str(item.get("commit") or rec_data.get("commit", {}).get("sha") or "").strip()
+                        if commit_full:
+                            tree_proc = subprocess.run(
+                                ["git", "rev-parse", f"{commit_full}^{{tree}}"],
+                                cwd=effective_repo,
+                                capture_output=True,
+                                text=True,
+                                check=False,
+                            )
+                            if tree_proc.returncode == 0 and tree_proc.stdout.strip():
+                                rec_tree = tree_proc.stdout.strip()
 
                         tree_ok = True
                         if committed_tree_sha and rec_tree and committed_tree_sha != rec_tree:

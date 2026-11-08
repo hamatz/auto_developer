@@ -19,7 +19,7 @@
 ## ステップ
 - [x] 1. `recover_interrupted_job` の Fail-Closed 化（Worktree 実態照合・削除失敗時の `RECOVERY_REQUIRED` 遮断）および `job_id` 検証・`os.fsync` 原子的永続化の実装（DD.1, DD.2）と単体テスト（Red-First）
 - [x] 2. 障害注入フック（`fault_hook`）の導入、および実プロセスへの `SIGKILL` 障害注入（マージ途中・RC発行直後）からの `resume=True` 自律復旧・完遂受入テストの実証（DD.3）
-- [ ] 3. `MorningReporter` の Tree SHA 厳密整合（DD.4）、全体検証ゲート合格確認、および Evidence Bundle 生成・検証
+- [x] 3. `MorningReporter` の Tree SHA 厳密整合（DD.4）、全体検証ゲート合格確認、および Evidence Bundle 生成・検証
 
 ## 止まっていること・判断待ち
 - なし
