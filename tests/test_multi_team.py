@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
+from typing import Any
 
 from auto_developer.bundler import EvidenceBundler
 from auto_developer.evidence import EvidenceStore
@@ -55,8 +56,15 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         with self.assertRaises(ValueError):
             TeamWorkerSpec(team_id="../evil_team")
 
-        spec_a = TeamWorkerSpec(team_id="team-alpha", assigned_tasks=["task-1"])
+        spec_a = TeamWorkerSpec(
+            team_id="team-alpha",
+            assigned_tasks=["task-1"],
+            extra_args=["--mock"],
+            env={"WORKER_TEST": "1"},
+        )
         self.assertEqual(spec_a.team_id, "team-alpha")
+        self.assertEqual(spec_a.extra_args, ["--mock"])
+        self.assertEqual(spec_a.env, {"WORKER_TEST": "1"})
 
         config = MultiTeamConfig(
             job_id="job-multi-1",
@@ -65,6 +73,63 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         )
         self.assertEqual(config.job_id, "job-multi-1")
         self.assertEqual(len(config.teams), 1)
+
+    def test_run_workers_builds_correct_cli_command_order_and_arguments(self) -> None:
+        """KK.1, KK.2: 標準CLIワーカー起動コマンドの引数順序 (--work-dir <wt> run) とパラメータ拡張の検証。"""
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id="job-cli-cmd-order",
+            teams=[
+                TeamWorkerSpec(
+                    team_id="team-cli-test",
+                    extra_args=["--mock", "--iterations", "1"],
+                    env={"CUSTOM_KEY": "CUSTOM_VAL"},
+                ),
+            ],
+            base_branch="main",
+        )
+        orchestrator.prepare_workers(config)
+        wt_path = orchestrator.worktree_manager.worktree_base / "team-cli-test"
+
+        captured_calls: list[dict[str, Any]] = []
+
+        def mock_subprocess_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            captured_calls.append({"cmd": cmd, "kwargs": kwargs})
+            if cmd == ["git", "rev-parse", "HEAD"]:
+                return subprocess.CompletedProcess(cmd, returncode=0, stdout="mock_head_sha\n", stderr="")
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout="success\n", stderr="")
+
+        with unittest.mock.patch("subprocess.run", side_effect=mock_subprocess_run):
+            results = orchestrator.run_workers(config)
+
+        self.assertIn("team-cli-test", results)
+        self.assertTrue(results["team-cli-test"].success)
+
+        # 呼び出された CLI コマンドの検査
+        cli_run_calls = [c for c in captured_calls if "auto_developer.cli" in " ".join(c["cmd"])]
+        self.assertEqual(len(cli_run_calls), 1)
+        executed_cmd = cli_run_calls[0]["cmd"]
+        executed_kwargs = cli_run_calls[0]["kwargs"]
+
+        # 引数の順序が python3 -m auto_developer.cli --work-dir <wt> run であること (run --work-dir は Exit 2 となる)
+        expected_cmd_prefix = [
+            "python3",
+            "-m",
+            "auto_developer.cli",
+            "--work-dir",
+            str(wt_path),
+            "run",
+            "--mock",
+            "--iterations",
+            "1",
+        ]
+        self.assertEqual(executed_cmd, expected_cmd_prefix)
+
+        # 環境変数に team.env が反映されていること
+        env_passed = executed_kwargs.get("env", {})
+        self.assertEqual(env_passed.get("CUSTOM_KEY"), "CUSTOM_VAL")
+
+        orchestrator.cleanup_workers(config)
 
     def test_prepare_workers_allocates_isolated_worktrees(self) -> None:
         """GG.2: 複数ワーカー用の専用 Worktree を分離作成し管理できることの実証。"""
@@ -325,6 +390,17 @@ class TestMultiTeamOrchestration(unittest.TestCase):
             for tid in ["team-core", "team-ui"]:
                 wt_dir = orchestrator.worktree_manager.worktree_base / tid
                 self.assertFalse(wt_dir.exists())
+
+            # Evidence Bundle が Worktree 削除後もディスク上に保全されていることの検証 (LL.1, LL.2)
+            for tid in ["team-core", "team-ui"]:
+                b_path = multi_res.team_results[tid].bundle_path
+                self.assertIsNotNone(b_path)
+                assert b_path is not None
+                self.assertTrue(b_path.exists())
+                self.assertEqual(
+                    b_path.resolve(),
+                    (self.repo_dir / ".dev" / "integration_jobs" / "job-e2e-stage3" / "evidence" / f"{tid}.zip").resolve(),
+                )
         finally:
             if verify_script.exists():
                 verify_script.unlink()
@@ -369,6 +445,211 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         # RC タグが作成されていないことの検証
         tag_chk = self._run_git(["rev-parse", "--verify", "refs/tags/rc/job-e2e-fail"], check=False)
         self.assertNotEqual(tag_chk.returncode, 0)
+
+    def test_execute_multi_team_pipeline_preserves_evidence_bundles_after_cleanup(self) -> None:
+        """LL.1, LL.2: Worktree 削除前の Evidence Bundle 外出し保全 & ハッシュ照合・返却パス更新の検証。"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as script_file:
+            script_file.write("#!/bin/sh\nexit 0\n")
+            verify_script = Path(script_file.name)
+        verify_script.chmod(0o755)
+
+        try:
+            job_id = "job-preserve-bundle-test"
+            orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+            config = MultiTeamConfig(
+                job_id=job_id,
+                teams=[
+                    TeamWorkerSpec(team_id="team-alpha"),
+                    TeamWorkerSpec(team_id="team-beta"),
+                ],
+                base_branch="main",
+                integration_verify_script=verify_script,
+            )
+
+            def mock_worker(team_id: str, wt_path: Path) -> TeamExecutionResult:
+                # Worktree 内で作業・コミット・証跡作成
+                target = wt_path / f"{team_id}.txt"
+                target.write_text(f"content of {team_id}\n", encoding="utf-8")
+                subprocess.run(["git", "add", "."], cwd=wt_path, check=True)
+                subprocess.run(["git", "commit", "-m", f"feat: {team_id}"], cwd=wt_path, check=True)
+                rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt_path, capture_output=True, text=True, check=True).stdout.strip()
+                tree_sha = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=wt_path, capture_output=True, text=True, check=True).stdout.strip()
+                import hashlib
+                spec_sha = hashlib.sha256((wt_path / "SPEC.md").read_bytes()).hexdigest()
+
+                ev_store = EvidenceStore(repo_dir=wt_path)
+                ev_store.issue_evidence(
+                    task_id=f"task-{team_id}",
+                    checkpoint=self.base_commit,
+                    tree_sha=tree_sha,
+                    spec_sha=spec_sha,
+                )
+                ev_store.archive_record(
+                    task_id=f"task-{team_id}",
+                    status="COMPLETED",
+                    commit_info={"sha": rev, "tree_sha": tree_sha},
+                    checker_info={"decision": "APPROVE", "reason": f"Approval {team_id}"},
+                    verification_info={"exit_code": 0},
+                )
+                bundles_dir = wt_path / ".dev" / "bundles"
+                bundles_dir.mkdir(parents=True, exist_ok=True)
+                raw_bundle = bundles_dir / f"bundle_{team_id}.zip"
+                bundler = EvidenceBundler(repo_dir=wt_path)
+                bundler.create_bundle(dest_path=raw_bundle)
+
+                return TeamExecutionResult(
+                    team_id=team_id,
+                    success=True,
+                    status="SUCCESS",
+                    branch=f"team/{team_id}",
+                    head_commit=rev,
+                    bundle_path=raw_bundle,
+                )
+
+            multi_res = orchestrator.execute_multi_team_pipeline(
+                config=config,
+                worker_fn=mock_worker,
+                verify_script=verify_script,
+                cleanup=True,
+            )
+
+            self.assertTrue(multi_res.success)
+            expected_evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+
+            for tid in ["team-alpha", "team-beta"]:
+                team_res = multi_res.team_results[tid]
+                self.assertIsNotNone(team_res.bundle_path)
+                assert team_res.bundle_path is not None
+
+                # 1. Worktree 削除後も bundle_path がディスク上に実在すること
+                self.assertTrue(team_res.bundle_path.exists(), f"Preserved bundle {team_res.bundle_path} must exist on disk")
+
+                # 2. 保存先が Worktree 外の恒久パス (.dev/integration_jobs/<job_id>/evidence/<tid>.zip) であること
+                expected_path = expected_evidence_dir / f"{tid}.zip"
+                self.assertEqual(team_res.bundle_path.resolve(), expected_path.resolve())
+
+                # 3. 保存されたバンドルの整合性が検証できること
+                bundler = EvidenceBundler(repo_dir=self.repo_dir)
+                v_res = bundler.verify_bundle(team_res.bundle_path)
+                self.assertEqual(v_res.status, "VERIFIED")
+                self.assertEqual(len(v_res.errors), 0)
+        finally:
+            if verify_script.exists():
+                verify_script.unlink()
+
+    def test_multi_team_end_to_end_real_subprocess_workers_and_semantic_integration(self) -> None:
+        """MM.1, MM.2: 実サブプロセスによる2チーム並行稼働 & Core/UI 意味的機能結合の完全実証。"""
+        # 1. リポジトリの準備 (PLAN.md と local verify_local.sh)
+        plan_file = self.repo_dir / "PLAN.md"
+        plan_file.write_text("# PLAN.md\n\n## ステップ\n- [ ] 1. チーム機能の実装\n", encoding="utf-8")
+        scripts_dir = self.repo_dir / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        local_verify = scripts_dir / "verify_local.sh"
+        local_verify.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        local_verify.chmod(0o755)
+        self._run_git(["add", "PLAN.md", "scripts/verify_local.sh"])
+        self._run_git(["commit", "-m", "chore: setup plan and local verify"])
+
+        # 2. 統合検証スクリプト (Core と UI の意味的結合を実インポートして検証)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as script_file:
+            script_file.write(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "PYTHONPATH=. python3 -c \"import sys; sys.path.insert(0, '.'); from src.ui.view import render_view; msg = render_view(); assert msg == 'UI View: Hello from Core', f'Mismatch: {msg}'\"\n"
+            )
+            verify_script = Path(script_file.name)
+        verify_script.chmod(0o755)
+
+        try:
+            job_id = "job-subprocess-e2e"
+            orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+
+            core_maker_cmd = (
+                "python3 -c \""
+                "import pathlib; "
+                "p = pathlib.Path('src/core'); p.mkdir(parents=True, exist_ok=True); "
+                "(pathlib.Path('src') / '__init__.py').touch(); "
+                "(p / '__init__.py').touch(); "
+                "(p / 'app.py').write_text('def get_core_message() -> str:\\n    return \\\"Hello from Core\\\"\\n', encoding='utf-8')\""
+            )
+            core_checker_cmd = "python3 -c \"import json; print(json.dumps({'decision': 'APPROVE', 'reason': 'Core approved'}))\""
+
+            ui_maker_cmd = (
+                "python3 -c \""
+                "import pathlib; "
+                "p = pathlib.Path('src/ui'); p.mkdir(parents=True, exist_ok=True); "
+                "(pathlib.Path('src') / '__init__.py').touch(); "
+                "(p / '__init__.py').touch(); "
+                "(p / 'view.py').write_text('from src.core.app import get_core_message\\ndef render_view() -> str:\\n    return f\\\"UI View: {get_core_message()}\\\"\\n', encoding='utf-8')\""
+            )
+            ui_checker_cmd = "python3 -c \"import json; print(json.dumps({'decision': 'APPROVE', 'reason': 'UI approved'}))\""
+
+            python_path = str(Path.cwd() / "src")
+            cwd_str = str(Path.cwd())
+            worker_env = {"PYTHONPATH": f"{python_path}:{cwd_str}"}
+
+            config = MultiTeamConfig(
+                job_id=job_id,
+                teams=[
+                    TeamWorkerSpec(
+                        team_id="team-core",
+                        extra_args=["--maker-cmd", core_maker_cmd, "--checker-cmd", core_checker_cmd],
+                        env=worker_env,
+                    ),
+                    TeamWorkerSpec(
+                        team_id="team-ui",
+                        extra_args=["--maker-cmd", ui_maker_cmd, "--checker-cmd", ui_checker_cmd],
+                        env=worker_env,
+                    ),
+                ],
+                base_branch="main",
+                integration_verify_script=verify_script,
+            )
+
+            # worker_fn や worker_cmd_factory を渡さず、標準の CLI サブプロセス並行実行を実行
+            multi_res = orchestrator.execute_multi_team_pipeline(
+                config=config,
+                verify_script=verify_script,
+                cleanup=True,
+            )
+
+            self.assertTrue(multi_res.success, f"Pipeline failed: {multi_res.details}")
+            self.assertEqual(multi_res.status, "SUCCESS")
+            self.assertEqual(multi_res.release_candidate_tag, f"rc/{job_id}")
+            self.assertIsNotNone(multi_res.release_candidate_commit)
+
+            # Git タグの存在とコミットの一致
+            tag_chk = self._run_git(["rev-parse", "--verify", f"refs/tags/rc/{job_id}"])
+            self.assertEqual(tag_chk.returncode, 0)
+            self.assertEqual(tag_chk.stdout.strip(), multi_res.release_candidate_commit)
+
+            # 各チームコミットが RC の祖先であること
+            for tid in ["team-core", "team-ui"]:
+                c = multi_res.team_results[tid].head_commit
+                assert c is not None
+                anc_chk = self._run_git(["merge-base", "--is-ancestor", c, multi_res.release_candidate_commit])
+                self.assertEqual(anc_chk.returncode, 0)
+
+            # Worktree がクリーンアップされ、Evidence Bundle は外出し保全されていること
+            expected_evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+            for tid in ["team-core", "team-ui"]:
+                wt_dir = orchestrator.worktree_manager.worktree_base / tid
+                self.assertFalse(wt_dir.exists())
+
+                bundle_p = multi_res.team_results[tid].bundle_path
+                self.assertIsNotNone(bundle_p)
+                assert bundle_p is not None
+                self.assertTrue(bundle_p.exists())
+                self.assertEqual(bundle_p.resolve(), (expected_evidence_dir / f"{tid}.zip").resolve())
+
+                # バンドルが VERIFIED であること
+                bundler = EvidenceBundler(repo_dir=self.repo_dir)
+                v_res = bundler.verify_bundle(bundle_p)
+                self.assertEqual(v_res.status, "VERIFIED")
+                self.assertEqual(len(v_res.errors), 0)
+        finally:
+            if verify_script.exists():
+                verify_script.unlink()
 
 
 if __name__ == "__main__":
