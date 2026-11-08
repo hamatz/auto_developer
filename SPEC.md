@@ -486,7 +486,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 単にテストコード内で修正するだけでなく、`AuditDispatcher` で登録されたタスクを `TaskDispatcher.get_next_pending_task()` で取得し、Maker インターフェースへ渡して修正・Green化・免疫テスト昇格まで完結する実運用E2E受入テストを追加。
      - `os.chmod` で書き込み権限を復活させて元リポジトリを改変しようとする敵対的テストが実行されても、元リポジトリのファイルが物理的に無傷であることを実証する隔離テスト。
      - 全自動検証ゲート（246+ テスト、Ruff、Mypy）の完全合格確認と Evidence Bundle 生成。
-- [ ] 機能EEE (Stage 4 異系統LLM独立監査ランナー & Before/After確定 Stage 4 Cross-Model Independent Audit Runner & Evidence Confirmation):
+- [x] 機能EEE (Stage 4 異系統LLM独立監査ランナー & Before/After確定 Stage 4 Cross-Model Independent Audit Runner & Evidence Confirmation):
   1. 異系統LLM独立監査ポリシーとモデル強制 (EEE.1 / Sol氏 監査設計合意):
      - `AuditConfig` / `OrchestratorConfig` において `maker_model` と `checker_model` / `auditor_model` のモデルファミリを検証。
      - 同一モデルまたは同系統モデルの指定を検知した場合は Fail-Closed（Exit 2）で起動を拒否し、異系統LLM（例: Maker=Gemini 3.8 Flash, Checker/Auditor=Claude Opus 5.5）による独立監査を強制する。

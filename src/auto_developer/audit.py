@@ -364,8 +364,50 @@ class AuditResolutionManager:
             "resolved_at": time.time(),
         }
 
+        # 5. LESSONS.md への自動教訓記録 (EEE.4)
+        self.record_lesson(finding, proof)
+
         return {
             "success": True,
             "proof": proof,
             "reason": "After Green verified and immunity test promoted successfully",
         }
+
+    def record_lesson(
+        self,
+        finding: AuditFinding,
+        proof: dict[str, Any],
+        lessons_path: Path | None = None,
+    ) -> bool:
+        """解決されたAUD指摘から LESSONS.md に構造化された教訓を自動追記する (EEE.4)。"""
+        from datetime import datetime
+
+        target_path = lessons_path or (self.repo_dir / "LESSONS.md")
+        if not target_path.exists():
+            return False
+
+        content = target_path.read_text(encoding="utf-8")
+        token = f"[{finding.finding_id}]"
+        if token in content:
+            return True  # 既に記録済み (二重追記防止)
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        new_lesson = (
+            f"### [{today_str}] [{finding.finding_id}] {finding.description}\n"
+            f"- Context: {finding.location} (Severity: {finding.severity}, Spec: {finding.spec_reference})\n"
+            f"- Trap: {finding.description}\n"
+            f"- Rule: Ensure compliance with {finding.spec_reference} to prevent regression of {finding.finding_id}.\n"
+            f"- Rung: 検査 & 作り（自動昇格免疫テスト）\n"
+            f"- Immunity Test: {proof.get('immunity_test_path', 'unknown')}\n"
+            f"- Proof: Verified Before Red ({proof.get('before_status', 'VERIFIED_RED')}) and After Green ({proof.get('after_status', 'GREEN')})\n\n"
+        )
+
+        header = "## 恒久教訓インデックス\n"
+        if header in content:
+            parts = content.split(header, 1)
+            updated_content = parts[0] + header + "\n" + new_lesson + parts[1].lstrip("\n")
+        else:
+            updated_content = content.rstrip() + "\n\n" + header + "\n" + new_lesson
+
+        target_path.write_text(updated_content, encoding="utf-8")
+        return True
