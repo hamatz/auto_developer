@@ -147,9 +147,9 @@ class MultiTeamOrchestrator:
                 res = team_results.get(team.team_id)
                 if res is not None:
                     # 原本保護: ワーカー成果バンドルが存在していたにもかかわらず、
-                    # 恒久保存先への Evidence 退避が未完了（または失敗）の場合は削除を抑止
+                    # 恒久保存先への Evidence 退避が未完了（または失敗・衝突）の場合は削除を抑止
                     has_bundle_in_worktree = (
-                        res.status in ("BUNDLE_PRESERVATION_FAILED", "BUNDLE_CORRUPTED")
+                        res.status in ("BUNDLE_PRESERVATION_FAILED", "BUNDLE_CORRUPTED", "BUNDLE_PRESERVATION_COLLISION")
                         or (res.bundle_path is not None and not res.evidence_preserved)
                     )
                     if has_bundle_in_worktree and not res.evidence_preserved:
@@ -353,7 +353,7 @@ class MultiTeamOrchestrator:
                 orig_bytes = res.bundle_path.read_bytes()
                 orig_sha = hashlib.sha256(orig_bytes).hexdigest()
 
-                # PP.1: 既存の保存先 Evidence Bundle の非破壊検査 (同一ハッシュなら冪等に再利用)
+                # PP.1, PP.2: 既存の保存先 Evidence Bundle の非破壊検査
                 if dest_path.exists():
                     existing_bytes = dest_path.read_bytes()
                     existing_sha = hashlib.sha256(existing_bytes).hexdigest()
@@ -361,6 +361,20 @@ class MultiTeamOrchestrator:
                         logger.info("Identical evidence bundle already preserved for team '%s'", res.team_id)
                         res.bundle_path = dest_path
                         res.evidence_preserved = True
+                        continue
+                    else:
+                        logger.error(
+                            "Evidence bundle collision for team '%s': existing bundle has different SHA-256 (%s vs %s)",
+                            res.team_id,
+                            existing_sha,
+                            orig_sha,
+                        )
+                        res.success = False
+                        res.status = "BUNDLE_PRESERVATION_COLLISION"
+                        res.details["bundle_error"] = (
+                            f"Collision: An evidence bundle with different content already exists at {dest_path}. "
+                            f"Refusing to overwrite past evidence (existing={existing_sha[:10]}, new={orig_sha[:10]})."
+                        )
                         continue
 
                 # NN.2: 保存先ファイルを直接上書きせず、同一ディレクトリの一時ファイルへコピー
