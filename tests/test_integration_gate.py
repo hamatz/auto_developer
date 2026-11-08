@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 src_dir = str(Path(__file__).resolve().parent.parent / "src")
@@ -168,13 +169,13 @@ class TestIntegrationGateMerge(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def _run_git(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+    def _run_git(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", *args],
             cwd=self.repo_dir,
             capture_output=True,
             text=True,
-            check=True,
+            check=check,
         )
 
     def test_create_integration_branch_refuses_to_overwrite_existing(self) -> None:
@@ -286,13 +287,13 @@ class TestIntegrationGateExecution(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def _run_git(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+    def _run_git(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", *args],
             cwd=self.repo_dir,
             capture_output=True,
             text=True,
-            check=True,
+            check=check,
         )
 
     def test_execute_integration_success_issues_rc(self) -> None:
@@ -472,13 +473,13 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def _run_git(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+    def _run_git(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", *args],
             cwd=self.repo_dir,
             capture_output=True,
             text=True,
-            check=True,
+            check=check,
         )
 
     def _create_team_work_and_bundle(
@@ -708,6 +709,15 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.status, "CONFLICT")
         self.assertIn("ui", result.details.get("conflict_team", ""))
+        self.assertIsNotNone(result.integration_branch)
+        self.assertTrue(
+            result.integration_branch.startswith("quarantine/integration-job-integration-conflict-conflict-"),
+            f"Expected quarantine branch with conflict prefix, got: {result.integration_branch}",
+        )
+
+        # 通常の統合ブランチ名は残っていないこと
+        chk = self._run_git(["rev-parse", "--verify", "refs/heads/integration/job-integration-conflict"], check=False)
+        self.assertNotEqual(chk.returncode, 0)
 
         # main ブランチが不変・無汚染であること
         current_branch = self._run_git(["branch", "--show-current"]).stdout.strip()
@@ -715,6 +725,46 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         main_commit = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
         self.assertEqual(main_commit, self.base_commit)
         self.assertFalse((self.repo_dir / "src" / "shared.py").exists())
+
+    def test_merge_conflict_recovery_failure_triggers_recovery_required(self) -> None:
+        """P1-4: merge conflict 後の abort/復旧に失敗した場合、推測で進めず RECOVERY_REQUIRED を返す。"""
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/shared.py",
+            content="SHARED_VERSION = 'core_v1'\n",
+        )
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/shared.py",
+            content="SHARED_VERSION = 'ui_v2'\n",
+        )
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
+        ]
+
+        # merge --abort が失敗した状態（未解決コンフリクト等で作業ツリーがクリーンに戻らない状態）を模倣
+        def faulty_merge(*args: Any, **kwargs: Any) -> tuple[bool, str | None, list[str]]:
+            # target_dir 内に未解決ファイルを残して False を返す
+            target_dir = kwargs.get("target_dir")
+            if target_dir:
+                (target_dir / "unresolved_conflict.txt").write_text("conflict left uncleaned\n", encoding="utf-8")
+            return False, "ui", ["Simulated abort failure leaving dirty tree"]
+
+        gate.merge_team_branches = faulty_merge  # type: ignore[assignment]
+
+        result = gate.execute_integration(
+            job_id="job-recovery-fail",
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "RECOVERY_REQUIRED")
+        self.assertTrue(result.details.get("recovery_failed", False))
 
 
 if __name__ == "__main__":

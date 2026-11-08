@@ -318,10 +318,34 @@ class IntegrationGate:
                 target_dir=target_dir,
             )
             if not merge_ok:
+                tree_chk = self._run_git(["status", "--porcelain"], check=False, cwd=target_dir)
+                recovery_ok = (tree_chk.returncode == 0 and not tree_chk.stdout.strip())
+
+                # Worktree を先に削除してから隔離ブランチへリネーム
+                self.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=False)
+                worktree_created = False
+
+                timestamp = int(time.time())
+                quarantine_branch = f"quarantine/{integration_branch.replace('/', '-')}-conflict-{timestamp}"
+                self._run_git(["branch", "-m", integration_branch, quarantine_branch], check=False)
+
+                if not recovery_ok:
+                    return IntegrationResult(
+                        success=False,
+                        status="RECOVERY_REQUIRED",
+                        integration_branch=quarantine_branch,
+                        errors=[
+                            f"Merge abort/recovery failed for team '{conflict_team}'. Unclean state detected:\n{tree_chk.stdout or tree_chk.stderr}",
+                            *merge_errors,
+                        ],
+                        audited_bundles=audits,
+                        details={"conflict_team": conflict_team, "recovery_failed": True},
+                    )
+
                 return IntegrationResult(
                     success=False,
                     status="CONFLICT",
-                    integration_branch=integration_branch,
+                    integration_branch=quarantine_branch,
                     errors=merge_errors,
                     audited_bundles=audits,
                     details={"conflict_team": conflict_team},
