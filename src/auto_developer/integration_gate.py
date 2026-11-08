@@ -302,6 +302,31 @@ class IntegrationGate:
 
         worktree_created = False
         target_dir: Path | None = None
+        cleanup_status = "NOT_APPLICABLE"
+        cleanup_error: str | None = None
+
+        def _cleanup_worktree() -> tuple[str, str | None]:
+            nonlocal worktree_created
+            if not worktree_created:
+                return "NOT_APPLICABLE", None
+            try:
+                self.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=False)
+                worktree_created = False
+                return "SUCCESS", None
+            except (OSError, subprocess.CalledProcessError, WorktreeError, RuntimeError) as err:
+                logger.warning("Failed to clean up integration worktree '%s': %s", wt_team_id, err)
+                return "FAILED", str(err)
+
+        def _attach_cleanup_info(res: IntegrationResult) -> IntegrationResult:
+            res.details["cleanup_status"] = cleanup_status
+            if target_dir:
+                res.details["worktree_path"] = str(target_dir)
+            if cleanup_status == "FAILED":
+                res.details["cleanup_failed"] = True
+                if cleanup_error:
+                    res.details["cleanup_error"] = cleanup_error
+            return res
+
         try:
             target_dir = self.worktree_manager.create_worktree(
                 team_id=wt_team_id,
@@ -322,15 +347,29 @@ class IntegrationGate:
                 recovery_ok = (tree_chk.returncode == 0 and not tree_chk.stdout.strip())
 
                 # Worktree を先に削除してから隔離ブランチへリネーム
-                self.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=False)
-                worktree_created = False
+                cleanup_status, cleanup_error = _cleanup_worktree()
 
                 timestamp = int(time.time())
                 quarantine_branch = f"quarantine/{integration_branch.replace('/', '-')}-conflict-{timestamp}"
-                self._run_git(["branch", "-m", integration_branch, quarantine_branch], check=False)
+                rename_proc = self._run_git(["branch", "-m", integration_branch, quarantine_branch], check=False)
+
+                if rename_proc.returncode != 0:
+                    err_msg = (
+                        f"Failed to rename conflict integration branch '{integration_branch}' to '{quarantine_branch}'. "
+                        f"Output: {rename_proc.stderr or rename_proc.stdout}"
+                    )
+                    res = IntegrationResult(
+                        success=False,
+                        status="RECOVERY_REQUIRED",
+                        integration_branch=integration_branch,
+                        errors=[err_msg, *merge_errors],
+                        audited_bundles=audits,
+                        details={"conflict_team": conflict_team, "quarantine_rename_failed": True, "rename_error": err_msg},
+                    )
+                    return _attach_cleanup_info(res)
 
                 if not recovery_ok:
-                    return IntegrationResult(
+                    res = IntegrationResult(
                         success=False,
                         status="RECOVERY_REQUIRED",
                         integration_branch=quarantine_branch,
@@ -341,8 +380,9 @@ class IntegrationGate:
                         audited_bundles=audits,
                         details={"conflict_team": conflict_team, "recovery_failed": True},
                     )
+                    return _attach_cleanup_info(res)
 
-                return IntegrationResult(
+                res = IntegrationResult(
                     success=False,
                     status="CONFLICT",
                     integration_branch=quarantine_branch,
@@ -350,6 +390,7 @@ class IntegrationGate:
                     audited_bundles=audits,
                     details={"conflict_team": conflict_team},
                 )
+                return _attach_cleanup_info(res)
 
             verify_ok, code, out = self.run_post_integration_verification(
                 base_commit=base_commit,
@@ -359,12 +400,27 @@ class IntegrationGate:
             )
             if not verify_ok:
                 # Worktree を先に削除してから隔離ブランチへリネーム
-                self.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=False)
-                worktree_created = False
+                cleanup_status, cleanup_error = _cleanup_worktree()
                 timestamp = int(time.time())
                 quarantine_branch = f"quarantine/{integration_branch.replace('/', '-')}-{timestamp}"
-                self._run_git(["branch", "-m", integration_branch, quarantine_branch], check=False)
-                return IntegrationResult(
+                rename_proc = self._run_git(["branch", "-m", integration_branch, quarantine_branch], check=False)
+
+                if rename_proc.returncode != 0:
+                    err_msg = (
+                        f"Failed to rename failed integration branch '{integration_branch}' to '{quarantine_branch}'. "
+                        f"Output: {rename_proc.stderr or rename_proc.stdout}"
+                    )
+                    res = IntegrationResult(
+                        success=False,
+                        status="RECOVERY_REQUIRED",
+                        integration_branch=integration_branch,
+                        errors=[err_msg, f"Post-integration verification failed (Exit {code}):\n{out}"],
+                        audited_bundles=audits,
+                        details={"exit_code": code, "output": out, "quarantine_rename_failed": True, "rename_error": err_msg},
+                    )
+                    return _attach_cleanup_info(res)
+
+                res = IntegrationResult(
                     success=False,
                     status="VERIFICATION_FAILED",
                     integration_branch=quarantine_branch,
@@ -372,6 +428,7 @@ class IntegrationGate:
                     audited_bundles=audits,
                     details={"exit_code": code, "output": out},
                 )
+                return _attach_cleanup_info(res)
 
             rc_commit = self._run_git(["rev-parse", "HEAD"], check=True, cwd=target_dir).stdout.strip()
             rc_tag = f"rc/{job_id}"
@@ -380,7 +437,8 @@ class IntegrationGate:
             if tag_check.returncode == 0:
                 existing_commit = tag_check.stdout.strip()
                 if existing_commit != rc_commit:
-                    return IntegrationResult(
+                    cleanup_status, cleanup_error = _cleanup_worktree()
+                    res = IntegrationResult(
                         success=False,
                         status="RC_TAG_IMMUTABLE_BREACH",
                         integration_branch=integration_branch,
@@ -392,10 +450,12 @@ class IntegrationGate:
                         ],
                         audited_bundles=audits,
                     )
+                    return _attach_cleanup_info(res)
             else:
                 self._run_git(["tag", rc_tag, rc_commit], check=True)
 
-            return IntegrationResult(
+            cleanup_status, cleanup_error = _cleanup_worktree()
+            res = IntegrationResult(
                 success=True,
                 status="SUCCESS",
                 integration_branch=integration_branch,
@@ -403,19 +463,19 @@ class IntegrationGate:
                 audited_bundles=audits,
                 details={"rc_tag": rc_tag, "verified_at_commit": rc_commit},
             )
+            return _attach_cleanup_info(res)
 
         except Exception as e:
             logger.exception("Unexpected error during integration execution")
-            return IntegrationResult(
+            cleanup_status, cleanup_error = _cleanup_worktree()
+            res = IntegrationResult(
                 success=False,
                 status="ERROR",
                 integration_branch=integration_branch,
                 errors=[f"Unexpected error during integration execution: {e}"],
                 audited_bundles=audits,
             )
+            return _attach_cleanup_info(res)
         finally:
             if worktree_created:
-                try:
-                    self.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=False)
-                except (OSError, subprocess.CalledProcessError, WorktreeError) as err:
-                    logger.warning("Failed to clean up integration worktree '%s': %s", wt_team_id, err)
+                _cleanup_worktree()

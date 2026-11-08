@@ -814,6 +814,98 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         self.assertEqual(result.status, "RECOVERY_REQUIRED")
         self.assertTrue(result.details.get("recovery_failed", False))
 
+    def test_execute_integration_cleanup_status_recorded_in_details(self) -> None:
+        """CC.1 / P1-A: Worktree クリーンアップ成否が IntegrationResult.details に記録・明示される。"""
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/core/app.py",
+            content="# Core logic\ndef get_core():\n    return 42\n",
+        )
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/ui/view.py",
+            content="from core.app import get_core\n\ndef render():\n    return f'Render: {get_core()}'\n",
+        )
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
+        ]
+
+        # 正常時
+        result = gate.execute_integration(
+            job_id="job-cleanup-success",
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(result.details.get("cleanup_status"), "SUCCESS")
+        self.assertFalse(result.details.get("cleanup_failed", False))
+        self.assertIsNotNone(result.details.get("worktree_path"))
+
+        # クリーンアップ失敗時（モック例外）
+        def faulty_remove(*args: Any, **kwargs: Any) -> bool:
+            raise RuntimeError("Disk locked, failed to remove worktree")
+
+        gate.worktree_manager.remove_worktree = faulty_remove  # type: ignore[assignment]
+        result_fail = gate.execute_integration(
+            job_id="job-cleanup-fail",
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+        )
+        self.assertEqual(result_fail.details.get("cleanup_status"), "FAILED")
+        self.assertTrue(result_fail.details.get("cleanup_failed", False))
+        self.assertIn("Disk locked", result_fail.details.get("cleanup_error", ""))
+
+    def test_quarantine_rename_failure_triggers_recovery_required(self) -> None:
+        """CC.1 / P1-B: 隔離ブランチへのリネームに失敗した場合、安全に RECOVERY_REQUIRED を返す。"""
+        # Core チームの契約違反（検証失敗シナリオ）
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/core/app.py",
+            content="# Invalid return\ndef get_core():\n    return 'INVALID'\n",
+        )
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/ui/view.py",
+            content="from core.app import get_core\n\ndef render():\n    return f'Render: {get_core()}'\n",
+        )
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
+        ]
+
+        orig_run_git = gate._run_git
+
+        def mock_run_git(args: list[str], *a: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+            if len(args) >= 3 and args[0] == "branch" and args[1] == "-m":
+                return subprocess.CompletedProcess(
+                    args=["git", *args],
+                    returncode=1,
+                    stdout="",
+                    stderr="fatal: A branch named 'quarantine/...' already exists or cannot be created.",
+                )
+            return orig_run_git(args, *a, **kw)
+
+        gate._run_git = mock_run_git  # type: ignore[assignment]
+
+        result = gate.execute_integration(
+            job_id="job-rename-fail",
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "RECOVERY_REQUIRED")
+        self.assertTrue(result.details.get("quarantine_rename_failed", False))
+
 
 if __name__ == "__main__":
     unittest.main()
