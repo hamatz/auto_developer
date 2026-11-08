@@ -355,13 +355,25 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 独立実行環境において `test_terminate_all_workers_terminates_running_subprocesses` を含む全 23 件の multi-team テストが 100% 決定論的に合格することを実証。
      - 全自動検証ゲート（181+ テスト、Ruff、Mypy）の合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
-- [ ] 機能UU (Stage 3 ワーカー停止失敗時のハンドル保持と再試行回収保証 Stage 3 Termination Failure Handle Retention & Recovery Retry):
+- [x] 機能UU (Stage 3 ワーカー停止失敗時のハンドル保持と再試行回収保証 Stage 3 Termination Failure Handle Retention & Recovery Retry):
   1. 停止失敗時のハンドル維持 (UU.1 / P1):
      - `terminate_worker_process_group()` において、プロセスグループ内に実行中プロセスが残存している場合（`still_alive == True`）は、`self._active_workers` および `self._all_worker_handles` からハンドルを破棄せず監督対象として保持する。
      - `_worker_history[team_id]` には `status: "TERMINATION_FAILED"` および失敗時刻を記録する。
   2. 再試行による回収能力の実証 (UU.2 / P1):
      - 一度停止に失敗したワーカーであっても、ハンドルが保持されているため、後続の `terminate_worker_process_group()` または `terminate_all_workers()` による再試行で回収可能であることを Red-First テストで実証する（「停止失敗 → ハンドル保持 → 再回収成功」）。
   3. 全体検証ゲート通過、および Evidence Bundle 生成・検証 (UU.3):
+     - 全自動検証ゲート（181+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [ ] 機能VV (Stage 3 親プロセス強制終了耐性 & ワーカークラッシュ自律復旧 Stage 3 Parent SIGKILL Resilience & Worker Crash Autonomic Recovery):
+  1. 永続 Worker Registry の導入 (VV.1 / P1):
+     - `MultiTeamOrchestrator` において、ワーカー起動時にチーム情報、Worktree パス、PID、PGID、起動タイムスタンプ、実行状態を `.dev/integration_jobs/<job_id>/workers.json` へ原子的に永続化する `WorkerRegistry` 機構を導入。
+     - 親オーケストレーターが SIGKILL で強制終了されメモリが揮発しても、新プロセスがジョブ情報とワーカー状態をディスクから完全に復元可能とする。
+  2. 3状態自律復旧エンジン `recover_multi_team_job()` の実装 (VV.2 / P1):
+     - Case 1 (孤児ワーカー生存): Registry に記録された PGID とプロセスの実態（`has_active_processes_in_group`）を照合し、稼働中の孤児プロセスグループを安全に再回収・停止する。
+     - Case 2 (ワーカー停止 & 未回収成果残存): Worktree 内の Evidence Bundle を検査・発見し、`preserve_team_bundles` により恒久保存先へ安全に救出して Worktree を解放する。
+     - Case 3 (確定済み成果からの前進): 全チームの Evidence が検証済みの場合は再実行をスキップし、原子的 RC 発行および統合完了へ前進（Roll-forward）する。
+  3. 親プロセス強制終了（SIGKILL）障害注入テストの実証、全体検証ゲート通過、および Evidence Bundle 生成・検証 (VV.3):
+     - 親プロセスを疑似クラッシュ（強制終了）させた後、独立した新オーケストレーターインスタンスが上記 3 ケースを決定論的に自律復旧できることを実証する受入テストを追加。
      - 全自動検証ゲート（181+ テスト、Ruff、Mypy）の合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
 
