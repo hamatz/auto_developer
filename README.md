@@ -25,34 +25,65 @@ Auto Developer は、**「Job Orchestrator（親プロセスによる状態永�
 
 ## 🏗️ システムアーキテクチャ
 
-Auto Developer は、会話セッションから独立した Python オーケストレーターが親となり、AIセッション（Maker / Checker）を子プロセスとして制御します。
+Auto Developer は、会話セッションから独立した Python オーケストレーター（`MultiTeamOrchestrator` / `NightlyOrchestrator`）が親となり、AIセッション（Maker / Checker）および複数チームの並行ワーカーを安全に監督・統合します。
 
 ```mermaid
 flowchart TD
-    subgraph "Job Orchestrator (親プロセス / 状態永続化)"
-        State[("JobState (.dev/job_state.json)<br/>status / phase / checkpoint")]
-        Loop["NightlyOrchestrator 自律ループ"]
-        State <--> Loop
+    subgraph Host ["Orchestration Boundary (親プロセス / 監督層)"]
+        State[("JobState (.dev/job_state.json)<br/>永続化 & クラッシュ復旧")]
+        MultiOrch["MultiTeamOrchestrator<br/>(並列ワーカー監督 & PGID ライフサイクル管理)"]
+        State <--> MultiOrch
     end
 
-    subgraph "Runner Adapter (AIエージェント起動・監視)"
-        Loop -->|"Phase A: run_maker()"| Maker["Maker 実装<br/>(Antigravity / CLI / Codex)"]
-        Loop -->|"Phase D: run_checker()"| Checker["Checker 独立査読<br/>(Tracked & Untracked 差分)"]
+    subgraph Workers ["Worker Execution Layer (物理 Worktree 分離)"]
+        direction LR
+        subgraph TeamA ["Team Core (Worktree: team-core)"]
+            GuardA["BoundaryGuard (領空検査)"]
+            RunnerA["CLI Worker A<br/>(NightlyOrchestrator)"]
+            BundleA["Evidence Bundle A"]
+            GuardA --- RunnerA --> BundleA
+        end
+        subgraph TeamB ["Team UI (Worktree: team-ui)"]
+            GuardB["BoundaryGuard (領空検査)"]
+            RunnerB["CLI Worker B<br/>(NightlyOrchestrator)"]
+            BundleB["Evidence Bundle B"]
+            GuardB --- RunnerB --> BundleB
+        end
     end
 
-    subgraph "Deterministic Gate & Evidence (物理防壁)"
-        Loop -->|"Phase B"| Guard["GitGuard: 未追跡含む保護ファイル検査"]
-        Loop -->|"Phase C"| Verifier["DeterministicVerifier<br/>(1回目失敗時は Maker へ再試行)"]
-        Loop -->|"Phase E"| Evidence["EvidenceStore<br/>(証跡発行 & 確定コミット)"]
+    subgraph Preservation ["Non-destructive Evidence Preservation (排他保全)"]
+        LinkAtomic["os.link 排他的確定<br/>(TOCTOU 上書き完全遮断)"]
+        Idempotent["同一ハッシュ: 冪等再利用<br/>異ハッシュ: 衝突拒否 & 原本保護"]
+        PermBase[(".dev/integration_jobs/<job_id>/evidence/<team_id>.zip")]
+        LinkAtomic --> Idempotent --> PermBase
     end
 
-    subgraph "Recovery & Handoff (人間への引き継ぎ)"
-        Failure["2回連続失敗 / 不変条件違反"] --> Quarantine["Quarantine Branch へ退避コミット<br/>本線は直前 checkpoint へクリーン復元"]
-        Quarantine --> Brief["Morning Brief<br/>(意思決定支援レポート & CLI)"]
-        Crash["プロセス中断"] -.->|"--resume"| Resume["安全な再開 (残骸クリーン復元)"]
-        Resume --> Loop
+    subgraph Gate ["Integration Gate (独立結合 & RC確定)"]
+        IntWT["Integration Worktree (int-<job_id>)"]
+        GateVerify["結合検証スクリプト実行<br/>(Core + UI の意味論的結合)"]
+        RC["Release Candidate タグ発行<br/>refs/tags/rc/<job_id>"]
+        IntWT --> GateVerify --> RC
     end
+
+    subgraph Delivery ["Audit & Handoff (人間への引き継ぎ)"]
+        BundlePkg["Evidence Bundle ZIP<br/>(Tree SHA / Manifest 拘束)"]
+        Brief["Morning Brief (NIGHTLY_REPORT.md)<br/>意思決定支援レポート"]
+        VerifierTool["独立監査 (auto-dev verify-bundle)"]
+        RC --> BundlePkg --> VerifierTool
+        RC --> Brief
+    end
+
+    MultiOrch -->|"1. 並行 Worktree 準備 & 起動"| Workers
+    Workers -->|"2. 成果 Bundle 収集"| Preservation
+    Preservation -->|"3. 監査済み成果引き渡し"| Gate
+    MultiOrch -->|"4. 安全なクリーンアップ<br/>(失敗時は原本 Worktree を保護)"| Workers
 ```
+
+### 多層防衛アーキテクチャの柱
+1. **物理的分離（Worktree Isolation & BoundaryGuard）**: 各ワーカーは専用の Git Worktree で隔離実行され、担当外ファイル（領空）への改変は即座に遮断されます。
+2. **非破壊的成果保全（Atomic Exclusive Preservation）**: `os.link` による排他的公開を採用し、TOCTOU 競合による上書きを完全遮断。同一成果は冪等に再利用し、異成果衝突時は上書きを拒否して Worktree 原本を安全に保護します。
+3. **独立統合ゲート（IntegrationGate & Release Candidate）**: チーム横断の成果物は独立した統合 Worktree で結合・検証され、全テスト合格時のみ原子的 RC タグ（`rc/<job_id>`）が発行されます。
+4. **暗号学的証跡と第三者監査（Evidence Bundle & Verifier）**: Git Tree SHA、コミット、Checker ログがハッシュ拘束された ZIP パッケージを生成し、改ざんや未検証成果の混入を物理的に検証可能です。
 
 ---
 

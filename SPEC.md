@@ -303,7 +303,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 退避未完了として扱うことで、既存の保存先 Evidence を保護すると同時に、退避に失敗した新しい Worktree の削除も抑止して双方の成果を完全保全する。
   3. 冪等保存・衝突遮断の回帰テスト実証 (PP.3):
      - 同一 Bundle の冪等保存成功、および内容が異なる Bundle の衝突検知・上書き遮断・原本保護を検証する決定論的テストを追加。
-- [ ] 機能QQ (Stage 3 同時保存の排他的確定 & TOCTOU競合解消 Stage 3 Exclusive Atomic Publication & TOCTOU Race Condition Elimination):
+- [x] 機能QQ (Stage 3 同時保存の排他的確定 & TOCTOU競合解消 Stage 3 Exclusive Atomic Publication & TOCTOU Race Condition Elimination):
   1. `os.link` による排他的・アトミック確定 (QQ.1 / P1):
      - `preserve_team_bundles()` において、ハッシュ照合済みの一時ファイル（`tmp_path`）から保存先（`dest_path`）への公開確定時に、上書き置換する `os.replace` ではなく、排他的リンク作成 `os.link(tmp_path, dest_path)` を使用する。
      - 作成成功時は `tmp_path.unlink()` を行い、`res.bundle_path = dest_path`, `res.evidence_preserved = True` とする。
@@ -316,6 +316,19 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 先行作成ファイルが同一ハッシュの場合は安全に冪等成功し、異ハッシュの場合は既存ファイルを破壊・上書きせず `BUNDLE_PRESERVATION_COLLISION` で拒絶され原本保護されることを実証。
   3. 全体検証ゲート合格と Evidence Bundle 生成・検証 (QQ.3):
      - 全自動検証ゲート（179+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [ ] 機能RR (Stage 3 システムアーキテクチャ刷新 & ワーカープロセス監督・回収 Stage 3 Architecture Refresh & Worker Process Lifecycle Supervision):
+  1. 多層防衛アーキテクチャ図 & 設計ドキュメント刷新 (RR.1):
+     - `docs/designs/autonomous_pipeline_orchestrator.md` および `README.md` を更新。
+     - Stage 1（Worktree物理分離・領空防御）、Stage 2（IntegrationGate・RC確定）、Stage 3（並列ワーカー・排他確定・非破壊保全）を統合した包括的 Mermaid システム構成図を反映。
+     - プロセスグループ（PGID）管理およびクラッシュ整合性（Crash Consistency）の設計仕様を明文化。
+  2. ワーカープロセスのグループ監督 & 異常停止時回収機構 (RR.2):
+     - `MultiTeamOrchestrator.run_workers()` において、ワーカー起動時に独立したプロセスグループ（`start_new_session=True`）を設定し、各チームの PID/PGID を追跡・管理。
+     - 親プロセスの終了、シグナル受信（SIGTERM/SIGINT等）、タイムアウト、または例外発生時に、プロセスグループ全体（`os.killpg`）へシグナルを送信して子プロセス・孤児プロセスを安全かつ確実に回収・終了する。
+     - 異常停止時でも退避未完了 Worktree の原本保護原則を遵守しつつ、回収完了ステータスを記録。
+  3. プロセス回収 & 孤児防止テストの実証、全体検証ゲート通過、および Evidence Bundle 生成・検証 (RR.3):
+     - ワーカータイムアウトおよび異常停止時にプロセスグループ全体が確実に回収され、孤児プロセスが残存しないことを実証する決定論的テストを追加。
+     - 全自動検証ゲート（180+ テスト、Ruff、Mypy）の合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
