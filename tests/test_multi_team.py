@@ -728,7 +728,7 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         orchestrator.worktree_manager.remove_worktree("team-preserve-target", force=True, delete_branch=True, purge_unmerged=True)
 
     def test_preserve_team_bundles_uses_atomic_replace_and_cleans_temp_file(self) -> None:
-        """NN.2: preserve_team_bundles がテンポラリファイルと os.replace を用いて原子的に保全することの実証。"""
+        """NN.2, QQ.1: preserve_team_bundles がテンポラリファイルと os.link を用いて排他的・原子的に保全することの実証。"""
         job_id = "job-atomic-preserve-test"
         orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
         config = MultiTeamConfig(
@@ -751,14 +751,14 @@ class TestMultiTeamOrchestration(unittest.TestCase):
             )
         }
 
-        replace_calls: list[tuple[Any, Any]] = []
-        orig_replace = os.replace
+        link_calls: list[tuple[Any, Any]] = []
+        orig_link = os.link
 
-        def tracking_replace(src: Any, dst: Any) -> None:
-            replace_calls.append((Path(src), Path(dst)))
-            orig_replace(src, dst)
+        def tracking_link(src: Any, dst: Any, **kwargs: object) -> None:
+            link_calls.append((Path(src), Path(dst)))
+            orig_link(src, dst, **kwargs)
 
-        with unittest.mock.patch("os.replace", side_effect=tracking_replace):
+        with unittest.mock.patch("os.link", side_effect=tracking_link):
             orchestrator.preserve_team_bundles(config, team_res)
 
         res = team_res["team-atomic"]
@@ -768,9 +768,9 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         self.assertEqual(res.bundle_path.resolve(), dest_expected.resolve())
         self.assertTrue(dest_expected.exists())
 
-        # os.replace がテンポラリファイルから最終目的地へ呼び出されていること
-        self.assertEqual(len(replace_calls), 1)
-        src_path, dst_path = replace_calls[0]
+        # os.link がテンポラリファイルから最終目的地へ呼び出されていること
+        self.assertEqual(len(link_calls), 1)
+        src_path, dst_path = link_calls[0]
         self.assertEqual(dst_path.resolve(), dest_expected.resolve())
         self.assertTrue(src_path.name.startswith("team-atomic.zip.tmp_"))
 
@@ -983,6 +983,108 @@ class TestMultiTeamOrchestration(unittest.TestCase):
 
         # 手動クリーンアップ
         orchestrator.worktree_manager.remove_worktree("team-collision-target", force=True, delete_branch=True, purge_unmerged=True)
+
+    def test_preserve_team_bundles_exclusive_link_handles_concurrent_file_exists(self) -> None:
+        """QQ.1: os.link による排他的アトミック確定と、並行作成時の FileExistsError 照合（同一なら再利用、異なれば拒否）。"""
+        job_id = "job-atomic-link-test"
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id=job_id,
+            teams=[
+                TeamWorkerSpec(team_id="team-link-target"),
+            ],
+            base_branch="main",
+        )
+
+        evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+        dest_path = evidence_dir / "team-link-target.zip"
+        bundle_content = b"PK\x03\x04NEW_TEAM_BUNDLE_BYTES"
+        worker_bundle = self.repo_dir / "worker_link_bundle.zip"
+        worker_bundle.write_bytes(bundle_content)
+
+        # 1. 正常系: 新規確定時に os.link が使用され、tmp_path がアンリンクされ確定すること
+        team_res = {
+            "team-link-target": TeamExecutionResult(
+                team_id="team-link-target",
+                success=True,
+                status="SUCCESS",
+                bundle_path=worker_bundle,
+            )
+        }
+
+        with unittest.mock.patch("os.link", wraps=os.link) as spy_link:
+            orchestrator.preserve_team_bundles(config, team_res)
+            self.assertTrue(spy_link.called, "os.link must be called for exclusive publication")
+
+        res = team_res["team-link-target"]
+        self.assertTrue(res.evidence_preserved)
+        self.assertEqual(res.bundle_path.resolve(), dest_path.resolve())
+        self.assertEqual(dest_path.read_bytes(), bundle_content)
+        # tmp ファイルが残存していないこと
+        tmp_files = list(evidence_dir.glob("*.tmp_*"))
+        self.assertEqual(tmp_files, [])
+
+        # 2. FileExistsError (同一ハッシュ): リンク直前に他プロセスが同一Bundleを作成した場合
+        #    -> 冪等成功として扱い、tmpファイルは削除され、evidence_preserved=True となること
+        dest_path.unlink()
+        worker_bundle2 = self.repo_dir / "worker_link_bundle2.zip"
+        worker_bundle2.write_bytes(bundle_content)
+        team_res2 = {
+            "team-link-target": TeamExecutionResult(
+                team_id="team-link-target",
+                success=True,
+                status="SUCCESS",
+                bundle_path=worker_bundle2,
+            )
+        }
+
+        real_link = os.link
+        def link_with_concurrent_identical(src: str | Path, dst: str | Path, **kwargs: object) -> None:
+            # os.link の直前に別プロセスが同一内容のファイルを配置した状況を再現
+            Path(dst).write_bytes(bundle_content)
+            # 既存ファイルがあるため os.link は FileExistsError を送出する
+            real_link(src, dst, **kwargs)
+
+        with unittest.mock.patch("os.link", side_effect=link_with_concurrent_identical):
+            orchestrator.preserve_team_bundles(config, team_res2)
+
+        res2 = team_res2["team-link-target"]
+        self.assertTrue(res2.evidence_preserved)
+        self.assertEqual(res2.status, "SUCCESS")
+        self.assertEqual(res2.bundle_path.resolve(), dest_path.resolve())
+        self.assertEqual(list(evidence_dir.glob("*.tmp_*")), [])
+
+        # 3. FileExistsError (異ハッシュ衝突): リンク直前に他プロセスが異なるBundleを作成した場合
+        #    -> 上書き拒絶 (BUNDLE_PRESERVATION_COLLISION)、dest_path は破壊されず、evidence_preserved=False
+        dest_path.unlink()
+        different_content = b"PK\x03\x04DIFFERENT_CONCURRENT_CONTENT"
+        worker_bundle3 = self.repo_dir / "worker_link_bundle3.zip"
+        worker_bundle3.write_bytes(bundle_content)
+        team_res3 = {
+            "team-link-target": TeamExecutionResult(
+                team_id="team-link-target",
+                success=True,
+                status="SUCCESS",
+                bundle_path=worker_bundle3,
+            )
+        }
+
+        def link_with_concurrent_different(src: str | Path, dst: str | Path, **kwargs: object) -> None:
+            # os.link の直前に別プロセスが異なる内容のファイルを配置した状況を再現
+            Path(dst).write_bytes(different_content)
+            real_link(src, dst, **kwargs)
+
+        with unittest.mock.patch("os.link", side_effect=link_with_concurrent_different):
+            orchestrator.preserve_team_bundles(config, team_res3)
+
+        res3 = team_res3["team-link-target"]
+        self.assertFalse(res3.evidence_preserved)
+        self.assertEqual(res3.status, "BUNDLE_PRESERVATION_COLLISION")
+        self.assertFalse(res3.success)
+        # 既存ファイルが破壊されず維持されていること
+        self.assertEqual(dest_path.read_bytes(), different_content)
+        # tmp ファイルがクリーンアップされていること
+        self.assertEqual(list(evidence_dir.glob("*.tmp_*")), [])
 
 
 if __name__ == "__main__":
