@@ -184,6 +184,7 @@ class MultiTeamOrchestrator:
         )
         self._active_workers: dict[str, WorkerProcessHandle] = {}
         self._all_worker_handles: dict[str, WorkerProcessHandle] = {}
+        self._worker_history: dict[str, dict[str, Any]] = {}
         self._workers_lock = threading.Lock()
 
     def terminate_worker_process_group(self, team_id: str, timeout: float = 2.0) -> bool:
@@ -240,13 +241,20 @@ class MultiTeamOrchestrator:
 
         with self._workers_lock:
             self._active_workers.pop(team_id, None)
+            self._all_worker_handles.pop(team_id, None)
+            self._worker_history[team_id] = {
+                "pid": handle.pid,
+                "pgid": handle.pgid,
+                "status": "TERMINATED" if not still_alive else "TERMINATION_FAILED",
+                "terminated_at": time.time(),
+            }
 
         return not still_alive
 
     def terminate_all_workers(self, timeout: float = 2.0) -> dict[str, bool]:
-        """RR.2, SS.1: 実行中および全ワーカーのプロセスグループを安全に回収・終了する。"""
+        """RR.2, SS.1, TT.2: 現在アクティブな全ワーカーのプロセスグループを安全に回収・終了する。"""
         with self._workers_lock:
-            team_ids = list(set(list(self._active_workers.keys()) + list(self._all_worker_handles.keys())))
+            team_ids = list(self._active_workers.keys())
         results: dict[str, bool] = {}
         for tid in team_ids:
             results[tid] = self.terminate_worker_process_group(tid, timeout=timeout)
@@ -449,7 +457,15 @@ class MultiTeamOrchestrator:
                         raise
                     finally:
                         with self._workers_lock:
-                            self._active_workers.pop(team.team_id, None)
+                            if not has_active_processes_in_group(handle.pgid):
+                                self._active_workers.pop(team.team_id, None)
+                                self._all_worker_handles.pop(team.team_id, None)
+                                self._worker_history[team.team_id] = {
+                                    "pid": handle.pid,
+                                    "pgid": handle.pgid,
+                                    "status": "COMPLETED" if exit_code == 0 else "FAILED",
+                                    "finished_at": time.time(),
+                                }
 
                 head_rev = subprocess.run(
                     ["git", "rev-parse", "HEAD"],

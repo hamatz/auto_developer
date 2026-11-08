@@ -1503,6 +1503,46 @@ class TestMultiTeamOrchestration(unittest.TestCase):
             p.kill()
             p.wait()
 
+    def test_terminate_all_workers_targets_only_active_workers_and_excludes_finished_handles(self) -> None:
+        """TT.2: 終了済みワーカーがアクティブ監督対象から除外され、terminate_all_workers が過去のPGIDにシグナルを送らないことの実証。"""
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+
+        # 既に終了したプロセスのモックハンドルを作成して登録
+        mock_proc_finished = unittest.mock.MagicMock()
+        mock_proc_finished.poll.return_value = 0
+        finished_handle = WorkerProcessHandle(team_id="team-finished", proc=mock_proc_finished, pid=88881, pgid=88881)
+        orchestrator._all_worker_handles["team-finished"] = finished_handle
+        orchestrator._worker_history["team-finished"] = {"pid": 88881, "pgid": 88881, "status": "FINISHED"}
+
+        # 実行中のプロセス（sleep 60）を作成してアクティブワーカーとして登録
+        p_active = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        active_handle = WorkerProcessHandle(team_id="team-active", proc=p_active, pid=p_active.pid, pgid=p_active.pid)
+        orchestrator._active_workers["team-active"] = active_handle
+
+        signaled_pgids: list[int] = []
+        orig_killpg = os.killpg if hasattr(os, "killpg") else None
+
+        def tracking_killpg(pg: int, sig: int) -> None:
+            signaled_pgids.append(pg)
+            if orig_killpg is not None:
+                orig_killpg(pg, sig)
+
+        try:
+            with unittest.mock.patch("os.killpg", side_effect=tracking_killpg):
+                results = orchestrator.terminate_all_workers(timeout=1.0)
+
+            # team-active のみが停止対象となり、終了済みの 88881 (team-finished) にはシグナルが送られていないこと
+            self.assertIn("team-active", results)
+            self.assertNotIn("team-finished", results)
+            self.assertNotIn(88881, signaled_pgids)
+            self.assertIn(p_active.pid, signaled_pgids)
+
+            # 回収後は _active_workers から除外されていること
+            self.assertNotIn("team-active", orchestrator._active_workers)
+        finally:
+            p_active.kill()
+            p_active.wait()
+
 
 if __name__ == "__main__":
     unittest.main()
