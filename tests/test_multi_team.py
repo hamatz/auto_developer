@@ -2285,6 +2285,76 @@ os.kill(os.getpid(), signal.SIGKILL)
                 except subprocess.TimeoutExpired:
                     p.kill()
 
+    def test_recover_multi_team_job_preserves_worktree_for_unverified_processes(self) -> None:
+        """YY.2: cleanup=True 指定時でも、未確認ワーカー (unverified_processes) の Worktree は絶対に削除されず保全されることを実証。"""
+        job_id = "job-unverified-preserve-wt"
+        registry = WorkerRegistry(repo_dir=self.repo_dir, job_id=job_id)
+
+        # Git 登録済みの正常な Worktree を作成し、重要ファイルを配置
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        wt_path = orchestrator.worktree_manager.create_worktree(
+            team_id="team-unverified-wt",
+            base_branch="main",
+            branch_name="team/team-unverified-wt",
+        )
+        important_file = wt_path / "work_in_progress.txt"
+        important_file.write_text("CRUCIAL_UNVERIFIED_DATA", encoding="utf-8")
+
+        evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        dest_bundle = evidence_dir / "team-unverified-wt.zip"
+        _create_valid_test_bundle(self.repo_dir, dest_bundle, team_id="team-unverified-wt")
+
+        # 独立セッションで実プロセスを2つ起動（PIDとPGIDの不一致を作成）
+        p_a = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"], start_new_session=True)
+        p_b = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"], start_new_session=True)
+        try:
+            start_ident_a = get_process_start_identifier(p_a.pid)
+            b_pgid = os.getpgid(p_b.pid) if hasattr(os, "getpgid") else p_b.pid
+            now = time.time()
+
+            reg = WorkerRegistration(
+                team_id="team-unverified-wt",
+                pid=p_a.pid,
+                pgid=b_pgid,
+                worktree_path=str(wt_path),
+                base_branch="main",
+                branch_name="team/team-unverified-wt",
+                status="RUNNING",
+                start_time=now,
+                updated_at=now,
+                process_start_time=start_ident_a,
+            )
+            registry.save({"team-unverified-wt": reg})
+
+            # cleanup=True を指定して復旧処理を実行
+            rec_result: MultiTeamRecoveryResult = orchestrator.recover_multi_team_job(
+                job_id=job_id,
+                cleanup=True,
+            )
+
+            # 未確認プロセスおよび未確認 Worktree として記録されていること
+            self.assertIn("team-unverified-wt", rec_result.unverified_processes)
+            self.assertIn("team-unverified-wt", rec_result.unverified_worktrees)
+
+            # Worktree およびその内部ファイルが削除されず、物理的に完全に保全されていること
+            self.assertTrue(wt_path.exists(), "Worktree for unverified process must NOT be deleted even with cleanup=True")
+            self.assertTrue(important_file.exists())
+            self.assertEqual(important_file.read_text(encoding="utf-8"), "CRUCIAL_UNVERIFIED_DATA")
+
+        finally:
+            p_a.terminate()
+            p_b.terminate()
+            for p in (p_a, p_b):
+                try:
+                    p.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+            if wt_path.exists():
+                orchestrator.worktree_manager.remove_worktree(
+                    "team-unverified-wt", force=True, delete_branch=True, purge_unmerged=True
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -718,6 +718,16 @@ class MultiTeamOrchestrator:
                 except (ValueError, OSError):
                     is_within_base = False
 
+                # YY.2: 未確認プロセス（同一性・所属関係の照合失敗）の Worktree は安全のため絶対に削除せず保全
+                if tid in result.unverified_processes:
+                    logger.warning(
+                        "Worktree for unverified worker team '%s' (%s) preserved for safety; skipping deletion",
+                        tid,
+                        w.worktree_path,
+                    )
+                    result.unverified_worktrees.append(tid)
+                    continue
+
                 # WW.2: 安全境界検査: worktree_base 配下かつ Git 登録済みであること
                 if not is_within_base or tid not in registered_wts:
                     logger.warning(
