@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -347,28 +348,41 @@ class MultiTeamOrchestrator:
                 continue
 
             dest_path = dest_base / f"{res.team_id}.zip"
+            tmp_path = dest_base / f"{res.team_id}.zip.tmp_{uuid.uuid4().hex[:8]}"
             try:
                 orig_bytes = res.bundle_path.read_bytes()
                 orig_sha = hashlib.sha256(orig_bytes).hexdigest()
-                shutil.copy2(res.bundle_path, dest_path)
-                dest_bytes = dest_path.read_bytes()
-                dest_sha = hashlib.sha256(dest_bytes).hexdigest()
-                if orig_sha != dest_sha:
+
+                # NN.2: 保存先ファイルを直接上書きせず、同一ディレクトリの一時ファイルへコピー
+                shutil.copy2(res.bundle_path, tmp_path)
+                tmp_bytes = tmp_path.read_bytes()
+                tmp_sha = hashlib.sha256(tmp_bytes).hexdigest()
+                if orig_sha != tmp_sha:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
                     logger.error(
                         "Preserved bundle SHA-256 mismatch for team '%s': original=%s, preserved=%s",
                         res.team_id,
                         orig_sha,
-                        dest_sha,
+                        tmp_sha,
                     )
                     res.success = False
                     res.status = "BUNDLE_CORRUPTED"
                     res.details["bundle_error"] = "SHA-256 mismatch during bundle preservation"
                     continue
 
+                # 原子的置換 (os.replace) により既存ファイルを壊さずに確定
+                os.replace(tmp_path, dest_path)
+
                 # パスを恒久保存先に更新 & 退避成功を記録
                 res.bundle_path = dest_path
                 res.evidence_preserved = True
             except (OSError, shutil.Error) as err:
+                if tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
                 logger.error("Failed to preserve bundle for team '%s': %s", res.team_id, err)
                 res.success = False
                 res.status = "BUNDLE_PRESERVATION_FAILED"
