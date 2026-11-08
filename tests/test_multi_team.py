@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from auto_developer.multi_team import (
@@ -102,6 +103,61 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         self.assertFalse(res.success)
         self.assertEqual(res.status, "WORKER_FAILED")
         self.assertIn("team-b", res.details.get("failed_teams", []))
+
+    def test_multi_team_config_rejects_duplicate_team_ids(self) -> None:
+        """HH.2 / P1-2: MultiTeamConfig は重複する team_id を拒絶することの実証。"""
+        with self.assertRaises(ValueError):
+            MultiTeamConfig(
+                job_id="job-dup",
+                teams=[
+                    TeamWorkerSpec(team_id="team-a"),
+                    TeamWorkerSpec(team_id="team-a"),
+                ],
+            )
+
+    def test_cleanup_workers_reports_true_when_worktrees_removed(self) -> None:
+        """HH.1 / P1-1: cleanup_workers は Worktree が正常に解放された場合に True を報告することの実証。"""
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id="job-clean-test",
+            teams=[
+                TeamWorkerSpec(team_id="team-x"),
+                TeamWorkerSpec(team_id="team-y"),
+            ],
+            base_branch="main",
+        )
+        orchestrator.prepare_workers(config)
+        statuses = orchestrator.cleanup_workers(config)
+        self.assertEqual(statuses, {"team-x": True, "team-y": True})
+
+    def test_prepare_workers_atomic_rollback_on_failure(self) -> None:
+        """HH.2 / P1-2: prepare_workers の途中で失敗した場合、作成済みの Worktree が自動ロールバックされることの実証。"""
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id="job-atomic-prep",
+            teams=[
+                TeamWorkerSpec(team_id="team-good"),
+                TeamWorkerSpec(team_id="team-bad"),
+            ],
+            base_branch="main",
+        )
+
+        orig_create = orchestrator.worktree_manager.create_worktree
+
+        def mock_create(team_id: str, *args: object, **kwargs: object) -> Path:
+            if team_id == "team-bad":
+                raise RuntimeError("Injected worktree failure for team-bad")
+            return orig_create(team_id, *args, **kwargs)  # type: ignore[arg-type]
+
+        with (
+            unittest.mock.patch.object(orchestrator.worktree_manager, "create_worktree", side_effect=mock_create),
+            self.assertRaises(RuntimeError),
+        ):
+            orchestrator.prepare_workers(config)
+
+        # 最初の team-good の Worktree もロールバックされて残存しないことの実証
+        good_dir = orchestrator.worktree_manager.worktree_base / "team-good"
+        self.assertFalse(good_dir.exists())
 
 
 if __name__ == "__main__":

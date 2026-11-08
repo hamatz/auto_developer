@@ -42,6 +42,11 @@ class MultiTeamConfig:
     def __post_init__(self) -> None:
         if not VALID_TEAM_ID_PATTERN.match(self.job_id):
             raise ValueError(f"Invalid job_id '{self.job_id}': must match '^[a-zA-Z0-9_-]+$'")
+        seen_team_ids: set[str] = set()
+        for team in self.teams:
+            if team.team_id in seen_team_ids:
+                raise ValueError(f"Duplicate team_id '{team.team_id}' found in MultiTeamConfig")
+            seen_team_ids.add(team.team_id)
 
 
 @dataclass
@@ -88,28 +93,50 @@ class MultiTeamOrchestrator:
         )
 
     def prepare_workers(self, config: MultiTeamConfig) -> dict[str, Path]:
-        """各チーム用の独立した専用 Worktree を作成し、パスの辞書を返す。"""
+        """各チーム用の独立した専用 Worktree を作成し、パスの辞書を返す。
+
+        HH.2 / P1-2: トランザクション的準備。作成途中で失敗した場合は、作成済みの Worktree を自動ロールバックする。
+        """
         paths: dict[str, Path] = {}
-        for team in config.teams:
-            branch_name = f"team/{team.team_id}"
-            wt_path = self.worktree_manager.create_worktree(
-                team_id=team.team_id,
-                base_branch=team.base_branch or config.base_branch,
-                branch_name=branch_name,
-            )
-            paths[team.team_id] = wt_path
-        return paths
+        created_team_ids: list[str] = []
+        try:
+            for team in config.teams:
+                branch_name = f"team/{team.team_id}"
+                wt_path = self.worktree_manager.create_worktree(
+                    team_id=team.team_id,
+                    base_branch=team.base_branch or config.base_branch,
+                    branch_name=branch_name,
+                )
+                created_team_ids.append(team.team_id)
+                paths[team.team_id] = wt_path
+            return paths
+        except Exception as err:
+            logger.warning("Preparation failed during worktree creation; rolling back created worktrees: %s", err)
+            for tid in created_team_ids:
+                try:
+                    self.worktree_manager.remove_worktree(tid, force=True, delete_branch=True, purge_unmerged=True)
+                except (OSError, subprocess.CalledProcessError, WorktreeError, RuntimeError) as rb_err:
+                    logger.error("Failed to rollback worktree for team '%s': %s", tid, rb_err)
+            raise
 
     def cleanup_workers(self, config: MultiTeamConfig, force: bool = True) -> dict[str, bool]:
-        """作成された全チームの Worktree を解放する。"""
+        """作成された全チームの Worktree を解放する。
+
+        HH.1 / P1-1: 削除成否判定を Worktree ディレクトリの消滅および Git 実態に基づいて判定する。
+        """
         cleanup_statuses: dict[str, bool] = {}
         for team in config.teams:
+            wt_path = self.worktree_manager.worktree_base / team.team_id
             try:
-                res = self.worktree_manager.remove_worktree(team.team_id, force=force)
-                cleanup_statuses[team.team_id] = res
+                self.worktree_manager.remove_worktree(team.team_id, force=force)
             except (OSError, subprocess.CalledProcessError, WorktreeError, RuntimeError) as err:
                 logger.warning("Failed to remove worktree for team '%s': %s", team.team_id, err)
-                cleanup_statuses[team.team_id] = False
+
+            # 実態照合による判定 (ディレクトリが存在せず、Git管理下のWorktree一覧からも消滅していること)
+            still_exists = wt_path.exists() or any(
+                wt.team_id == team.team_id for wt in self.worktree_manager.list_worktrees()
+            )
+            cleanup_statuses[team.team_id] = not still_exists
         return cleanup_statuses
 
     def integrate_team_results(
