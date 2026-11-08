@@ -81,74 +81,79 @@
 
 ```mermaid
 flowchart TD
-    subgraph Core ["Orchestrator Engine (Antigravity /nightly-run)"]
-        Dispatcher["TaskDispatcher"]
-        GitGuard["GitGuard & CircuitBreaker"]
-        Reporter["MorningReporter"]
+    subgraph Host ["Orchestration Boundary (親プロセス / 監督層)"]
+        State[("JobState (.dev/job_state.json)<br/>永続化 & クラッシュ復旧")]
+        MultiOrch["MultiTeamOrchestrator<br/>(並列ワーカー監督 & PGID ライフサイクル管理)"]
+        State <--> MultiOrch
     end
 
-    subgraph Inputs ["Project Inputs"]
-        SPEC["SPEC.md"]
-        PLAN["PLAN.md"]
-        LESSONS["LESSONS.md"]
-        PROMPTS["PROMPTS.md"]
+    subgraph Workers ["Worker Execution Layer (物理 Worktree 分離)"]
+        direction LR
+        subgraph TeamA ["Team Core (Worktree: team-core)"]
+            GuardA["BoundaryGuard (領空検査)"]
+            RunnerA["CLI Worker A<br/>(NightlyOrchestrator)"]
+            BundleA["Evidence Bundle A"]
+            GuardA --- RunnerA --> BundleA
+        end
+        subgraph TeamB ["Team UI (Worktree: team-ui)"]
+            GuardB["BoundaryGuard (領空検査)"]
+            RunnerB["CLI Worker B<br/>(NightlyOrchestrator)"]
+            BundleB["Evidence Bundle B"]
+            GuardB --- RunnerB --> BundleB
+        end
     end
 
-    subgraph Execution ["Agent Execution Boundary"]
-        MakerRunner["MakerRunner (Subagent 実装)"]
-        PreCheck["InvariantPreCheck (外部差分検査)"]
-        Verifier["DeterministicVerifier (verify_local.sh)"]
-        CheckerAuditor["CheckerAuditor (Subagent 無記憶査読)"]
+    subgraph Preservation ["Non-destructive Evidence Preservation (排他保全)"]
+        LinkAtomic["os.link 排他的確定<br/>(TOCTOU 上書き完全遮断)"]
+        Idempotent["同一ハッシュ: 冪等再利用<br/>異ハッシュ: 衝突拒否 & 原本保護"]
+        PermBase[(".dev/integration_jobs/<job_id>/evidence/<team_id>.zip")]
+        LinkAtomic --> Idempotent --> PermBase
     end
 
-    PLAN --> Dispatcher
-    SPEC --> Dispatcher
-    LESSONS --> Dispatcher
-    PROMPTS --> Dispatcher
+    subgraph Gate ["Integration Gate (独立結合 & RC確定)"]
+        IntWT["Integration Worktree (int-<job_id>)"]
+        GateVerify["結合検証スクリプト実行<br/>(Core + UI の意味論的結合)"]
+        RC["Release Candidate タグ発行<br/>refs/tags/rc/<job_id>"]
+        IntWT --> GateVerify --> RC
+    end
 
-    Dispatcher -->|"1. Start Task"| GitGuard
-    GitGuard -->|"Record Checkpoint"| MakerRunner
-    MakerRunner -->|"File Edits"| PreCheck
-    
-    PreCheck -->|"Protected Files Touched"| GitGuard
-    PreCheck -->|"Passed"| Verifier
-    
-    Verifier -->|"Exit 0"| CheckerAuditor
-    Verifier -->|"Exit != 0 (1st)"| MakerRunner
-    Verifier -->|"Exit != 0 (2nd)"| GitGuard
-    
-    CheckerAuditor -->|"Approved"| GitGuard
-    CheckerAuditor -->|"Rejected (1st)"| MakerRunner
-    CheckerAuditor -->|"Rejected (2nd)"| GitGuard
+    subgraph Delivery ["Audit & Handoff (人間への引き継ぎ)"]
+        BundlePkg["Evidence Bundle ZIP<br/>(Tree SHA / Manifest 拘束)"]
+        Brief["Morning Brief (NIGHTLY_REPORT.md)<br/>意思決定支援レポート"]
+        VerifierTool["独立監査 (auto-dev verify-bundle)"]
+        RC --> BundlePkg --> VerifierTool
+        RC --> Brief
+    end
 
-    GitGuard -->|"Success: Commit & Update"| PLAN
-    GitGuard -->|"Success: Next"| Dispatcher
-    GitGuard -->|"Failure: reset --hard && clean -fd"| Reporter
-    Dispatcher -->|"All Done"| Reporter
-    Reporter -->|"Generate"| Summary["NIGHTLY_REPORT.md"]
+    MultiOrch -->|"1. 並行 Worktree 準備 & 起動"| Workers
+    Workers -->|"2. 成果 Bundle 収集"| Preservation
+    Preservation -->|"3. 監査済み成果引き渡し"| Gate
+    MultiOrch -->|"4. 安全なクリーンアップ<br/>(失敗時は原本 Worktree を保護)"| Workers
 ```
 
 ### 2. モジュール責務（Canonical Nomenclature）
 
-1. **`TaskDispatcher`**:
-   - `PLAN.md` をパースし、未完了タスク（`- [ ]`）を上から順に1件ずつ取得。
-   - `LESSONS.md` から関連するTrap項目を検索し、`PROMPTS.md` のテンプレートと合成してMakerプロンプトを構築。
-2. **`GitGuard`**:
-   - **起動時事前チェック**: `git status --porcelain` を実行し、未コミットの変更が存在する場合は起動を拒否（Exit Code 2）。
-   - **チェックポイント記録**: タスク開始直前の `HEAD` コミットハッシュを取得。
-   - **外部不変条件検査 (`InvariantPreCheck`)**: `git diff --name-only <checkpoint>` を実行し、保護パス（`.github/**`, `SPEC.md`, `scripts/verify_local.sh`, `tests/immunity/**`）への変更を検知した場合はテスト実行を待たずに即時ロールバック。
-   - **コミット作成**: 検証およびChecker査読が合格した場合、`git commit -m "feat/fix: <task title> [refs: <task_id>]"` を実行し、`PLAN.md` を `- [x]` に更新。
-   - **Circuit Breaker ロールバック**: 同一タスクが2回失敗した場合、`git reset --hard <checkpoint> && git clean -fd` を実行し、未追跡ファイル含めて完全初期化。
-3. **`MakerRunner`**:
-   - Antigravity の `invoke_subagent` を呼び出し、独立コンテキストでMakerを起動。
-   - 1回目の検証失敗時は、同一サブエージェントターンにエラーログをフィードバックして1回のみ自己修復を試行。
-4. **`DeterministicVerifier`**:
-   - `scripts/verify_local.sh` をサブプロセスとして実行し、Exit Code 0 のみを合格と判定。
-5. **`CheckerAuditor`**:
-   - 会話履歴を持たない独立サブエージェントを新規起動。
-   - 入力: `SPEC.md` の該当要件、`git diff <checkpoint>`、検証実行ログ。
-   - 出力: `APPROVE` または `REJECT`（具体的理由付き）。
-6. **`MorningReporter`**:
+1. **`MultiTeamOrchestrator`**:
+   - 複数チームの設定（`MultiTeamConfig`）に基づき、各チームの独立作業環境を準備・監督。
+   - ワーカープロセス起動時に独立したプロセスグループ（PGID）を割り当て、親プロセス停止時やタイムアウト時の孤児プロセス残存を物理遮断。
+   - 各チームの成果物退避（`preserve_team_bundles`）および統合ゲートへの引き渡しを統括。
+2. **`WorktreeManager`**:
+   - 各チーム専用の Git Worktree（`.dev/worktrees/<team_id>/`）およびブランチを安全に作成・管理・解放。
+   - ディレクトリの実態照合による安全な削除と、未マージ成果の無断削除防止を保証。
+3. **`BoundaryGuard`**:
+   - `TeamManifest` の `owns` 設定に基づき、チームが担当外の領域（領空）を変更・作成・削除することを Git レベルで検知・遮断。
+4. **`EvidencePreservation` (`preserve_team_bundles`)**:
+   - `os.link` を用いた排他的確定により、存在確認から確定までの TOCTOU 競合による上書きを完全防止。
+   - 同一成果物は冪等に再利用し、異成果衝突時は `BUNDLE_PRESERVATION_COLLISION` として拒否し、Worktree 原本を安全に保護。
+5. **`IntegrationGate`**:
+   - 複数チームの成果ブランチを独立した統合専用 Worktree にマージし、2-Phase Verification で結合検査。
+   - 全チームの成果が検証された場合のみ原子的 RC タグ（`refs/tags/rc/<job_id>`）を発行。
+6. **`EvidenceBundler` & Verifier**:
+   - コミット履歴、Evidence Record、Checker ログを集約した改ざん防止 ZIP パッケージ（`bundle_<job_id>.zip`）を生成。
+   - `auto-dev verify-bundle` による暗号学的完全性検証（Tree SHA、ハッシュ照合）を提供。
+7. **`TaskDispatcher` & `GitGuard`**:
+   - 各ワーカー内部での直列タスク抽出、クリーンツリー検査、保護ファイル不変条件検査、および証跡拘束確定コミット（`verify-step` / `commit-step`）。
+8. **`MorningReporter`**:
    - 正常終了時またはFail-Fast停止時に `NIGHTLY_REPORT.md` をルート直下に自動生成。
 
 ### 3. データモデルとステータス遷移

@@ -16,7 +16,7 @@
 - なし
 
 ## ステップ
-- [ ] 1. 多層防衛アーキテクチャ図 & 設計ドキュメント刷新（RR.1: `docs/designs/autonomous_pipeline_orchestrator.md` と `README.md` の Stage 1〜3 反映）
+- [x] 1. 多層防衛アーキテクチャ図 & 設計ドキュメント刷新（RR.1: `docs/designs/autonomous_pipeline_orchestrator.md` と `README.md` の Stage 1〜3 反映）
 - [ ] 2. ワーカープロセスのグループ監督（PGID追跡）& 異常停止時回収機構（RR.2: `os.killpg` による孤児防止）の実装と単体テスト（Red-First）
 - [ ] 3. ワーカー回収 & 孤児防止テスト実証、全体検証ゲート合格確認（180+ テスト）、および Evidence Bundle 生成・検証（RR.3）
 
