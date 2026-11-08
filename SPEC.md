@@ -263,23 +263,37 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   1. 2ワーカー並行稼働 & 成果統合受入テストの実証 (JJ.1):
      - 2つのワーカーが独立 Worktree 上で並行実行され、独立した成果物と Evidence Bundle を作成し、親オーケストレーターがこれらを安全に統合して Release Candidate を発行できることを実証。
      - 片方のワーカーが失敗した際に未承認成果の統合が遮断されることの実証。
-- [ ] 機能KK (Stage 3 標準CLIワーカー起動コマンド修正 & パラメータ拡張 Stage 3 Standard CLI Worker Command & Parameter Extension):
+- [x] 機能KK (Stage 3 標準CLIワーカー起動コマンド修正 & パラメータ拡張 Stage 3 Standard CLI Worker Command & Parameter Extension):
   1. CLI コマンド引数順序の修正 (KK.1 / P0):
      - `run_workers()` におけるデフォルト CLI コマンドを `["python3", "-m", "auto_developer.cli", "--work-dir", str(wt_path), "run"]` に修正し、サブコマンドの前に `--work-dir` を配置して引数解析エラー（Exit 2）を解消する。
   2. ワーカー引数・環境変数の明示的設定 (KK.2):
      - `TeamWorkerSpec` に `extra_args` および `env` フィールドを追加し、ワーカー起動時に `--mock` や固有の引数・環境変数を透過的に渡せるよう拡張する。
-- [ ] 機能LL (Stage 3 統合前 Evidence Bundle の Worktree 外保全 & ハッシュ照合 Stage 3 Permanent Evidence Bundle Preservation & Hash Verification):
+- [x] 機能LL (Stage 3 統合前 Evidence Bundle の Worktree 外保全 & ハッシュ照合 Stage 3 Permanent Evidence Bundle Preservation & Hash Verification):
   1. Worktree 削除前の Evidence Bundle 保全 (LL.1 / P1):
      - ワーカー完了後、IntegrationGate による統合または Worktree クリーンアップの前に、各チームの Evidence Bundle を永続保存先（`.dev/integration_jobs/<job_id>/evidence/<team_id>.zip`）へ退避コピーする。
   2. SHA-256 整合性検査と返却パス更新 (LL.2):
      - 退避前後の SHA-256 チェックサムを照合し、不整合時は即座にエラーとして遮断する。
      - `TeamExecutionResult.bundle_path` を保全後の恒久パスへ更新し、Worktree が削除された後でも呼び出し元が返却されたパスから有効な Evidence Bundle を監査・取得できることを保証する。
-- [ ] 機能MM (Stage 3 実サブプロセス 2チーム並行実行 & 意味的機能結合 E2E 受入実証 Stage 3 Real Subprocess Multi-Worker E2E & Semantic Integration Verification):
+- [x] 機能MM (Stage 3 実サブプロセス 2チーム並行実行 & 意味的機能結合 E2E 受入実証 Stage 3 Real Subprocess Multi-Worker E2E & Semantic Integration Verification):
   1. 2つの実サブプロセスによる並行稼働受入実証 (MM.1 / P2):
      - `worker_fn` を使わず、実サブプロセス（`python3 -m auto_developer.cli --work-dir <wt> run --mock` 等）を2本同時に独立 Worktree 上で起動・監督し、並行開発を完遂することの実証。
   2. Core / UI 意味的機能結合検証 (MM.2):
      - Core チームのモジュールと UI チームのモジュールを別々のワーカーが実装・コミットし、統合検証スクリプトが両者の実インポート・結合呼び出しを検証して Exit 0 となり、Release Candidate が発行されることの実証。
      - クリーンアップ後も全 Evidence Bundle が実在し、独立 Verifier で `VERIFIED` となることの確認。
+- [ ] 機能NN (Stage 3 Evidence退避失敗時の原本保護 & 原子的保全 Stage 3 Original Worktree Protection on Preservation Failure & Atomic Storage):
+  1. 退避未完了 Worktree の選択的原本保護 (NN.1 / P0):
+     - `cleanup_workers()` に `team_results` 引数を追加し、各チームの実行結果を参照可能にする。
+     - Evidence Bundle の Worktree 外退避が未完了（`BUNDLE_PRESERVATION_FAILED`, `BUNDLE_CORRUPTED`、または保全パスが存在しない）チームの Worktree は、`finally` 節においても削除せずディスク上に確実に保全（原本保護）する。
+  2. 一時ファイル & `os.replace` による原子的保全 (NN.2):
+     - `preserve_team_bundles()` において、保存先へ直接上書きコピーせず、同一ディレクトリ内のテンポラリファイル（`<dest_path>.tmp_<uuid>`）にコピー。
+     - 一時ファイルの SHA-256 チェックサムを元 Bundle と照合し、完全一致した場合のみ `os.replace()` で原子的に確定置換する。失敗時は一時ファイルを安全に削除し、既存の有効な Evidence を汚染・破壊しない。
+- [ ] 機能OO (Stage 3 成果保全障害注入テスト & 受入実証 Stage 3 Fault Injection Verification & Full Acceptance):
+  1. 退避失敗・原本保護・部分失敗の障害注入実証 (OO.1):
+     - `shutil.copy2` / `os.replace` に `OSError` を注入するテストを追加し、退避失敗時でも Worktree とその中の Evidence Bundle が削除されずディスク上に物理残存することを実証。
+     - Team A 成功 / Team B 失敗の部分退避失敗において、Team A はクリーンアップされ、失敗した Team B の Worktree のみ原本保護されることを実証。
+  2. 全体検証ゲート通過と Evidence Bundle 生成・検証 (OO.2):
+     - 全自動検証ゲート（175+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
