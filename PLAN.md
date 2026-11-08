@@ -7,18 +7,18 @@
 -->
 
 ## 現在の目標
-- Phase 28: Stage 3 完全実証 (CLIワーカー起動修正・Evidence保全・実サブプロセス2チームE2E統合: Sol氏レビュー対応 P0, P1, P2)
-  - P0: 標準CLIワーカー起動コマンドの引数順序修正 (`--work-dir <wt> run`) & 引数・環境変数拡張 (機能KK.1, KK.2)
-  - P1: 統合前 Evidence Bundle の Worktree 外永続保全 (`.dev/integration_jobs/<job_id>/evidence/<team_id>.zip`) & SHA-256 照合・返却パス更新 (機能LL.1, LL.2)
-  - P2 / Stage 3 本番: 実サブプロセス 2チーム並行稼働 & Core/UI 意味的機能結合 E2E 受入実証 (機能MM.1, MM.2)
+- Phase 29: Stage 3 ハードニング (Evidence退避失敗時の原本保護・原子的確定保全・障害注入実証: Sol氏レビュー対応 P0)
+  - P0: 退避未完了 Worktree の選択的原本保護 (`cleanup_workers` による退避失敗チームの削除抑止: 機能NN.1)
+  - P0: 一時ファイル & `os.replace` による原子的保全 (機能NN.2)
+  - P0 / 受入実証: 退避失敗・原本保護・部分失敗の障害注入テスト（Red-First）実証、全体検証ゲート合格確認、および Evidence Bundle 生成・検証 (機能OO.1, OO.2)
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - なし
 
 ## ステップ
-- [x] 1. 標準CLIワーカー起動コマンド修正 & パラメータ拡張（KK.1, KK.2: `--work-dir` 順序修正、`extra_args`/`env` 設定）の実装と単体テスト（Red-First）
-- [x] 2. 統合前 Evidence Bundle の Worktree 外保全 & ハッシュ照合・返却パス更新（LL.1, LL.2）の実装と単体テスト（Red-First）
-- [x] 3. 実サブプロセス 2チーム並行実行 & 意味的機能結合 E2E 受入実証（MM.1, MM.2）、全体検証ゲート合格確認、および Evidence Bundle 生成・検証
+- [x] 1. 退避未完了 Worktree の選択的原本保護（NN.1: `cleanup_workers` の退避失敗チーム削除抑止）の実装と単体テスト（Red-First）
+- [x] 2. 一時ファイル & `os.replace` による原子的保全（NN.2: テンポラリコピー & SHA-256 照合後アトミック置換）の実装と単体テスト（Red-First）
+- [x] 3. 退避失敗・原本保護・部分失敗の障害注入テスト（OO.1）の実証、全体検証ゲート合格確認、および Evidence Bundle 生成・検証（OO.2）
 
 ## 止まっていること・判断待ち
 - なし

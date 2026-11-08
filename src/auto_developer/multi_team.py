@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,6 +68,7 @@ class TeamExecutionResult:
     head_commit: str | None = None
     bundle_path: Path | None = None
     details: dict[str, Any] = field(default_factory=dict)
+    evidence_preserved: bool = False
 
 
 @dataclass
@@ -126,14 +128,40 @@ class MultiTeamOrchestrator:
                     logger.error("Failed to rollback worktree for team '%s': %s", tid, rb_err)
             raise
 
-    def cleanup_workers(self, config: MultiTeamConfig, force: bool = True) -> dict[str, bool]:
+    def cleanup_workers(
+        self,
+        config: MultiTeamConfig,
+        force: bool = True,
+        team_results: dict[str, TeamExecutionResult] | None = None,
+    ) -> dict[str, bool]:
         """作成された全チームの Worktree を解放する。
 
         HH.1 / P1-1: 削除成否判定を Worktree ディレクトリの消滅および Git 実態に基づいて判定する。
+        NN.1 / P0: Evidence 退避失敗または未退避の成果物が残存する Worktree は削除せず原本保護する。
         """
         cleanup_statuses: dict[str, bool] = {}
         for team in config.teams:
             wt_path = self.worktree_manager.worktree_base / team.team_id
+
+            if team_results is not None:
+                res = team_results.get(team.team_id)
+                if res is not None:
+                    # 原本保護: ワーカー成果バンドルが存在していたにもかかわらず、
+                    # 恒久保存先への Evidence 退避が未完了（または失敗）の場合は削除を抑止
+                    has_bundle_in_worktree = (
+                        res.status in ("BUNDLE_PRESERVATION_FAILED", "BUNDLE_CORRUPTED")
+                        or (res.bundle_path is not None and not res.evidence_preserved)
+                    )
+                    if has_bundle_in_worktree and not res.evidence_preserved:
+                        logger.warning(
+                            "Preserving original worktree for team '%s' at '%s': evidence bundle was not successfully preserved (status=%s)",
+                            team.team_id,
+                            wt_path,
+                            res.status,
+                        )
+                        cleanup_statuses[team.team_id] = False
+                        continue
+
             try:
                 self.worktree_manager.remove_worktree(team.team_id, force=force)
             except (OSError, subprocess.CalledProcessError, WorktreeError, RuntimeError) as err:
@@ -286,6 +314,7 @@ class MultiTeamOrchestrator:
         cleanup: bool = True,
     ) -> MultiTeamResult:
         """複数チームの Worktree 準備・並行実行・成果収集・統合を包括実行する。"""
+        team_results: dict[str, TeamExecutionResult] = {}
         try:
             self.prepare_workers(config)
             team_results = self.run_workers(
@@ -302,7 +331,7 @@ class MultiTeamOrchestrator:
             return multi_result
         finally:
             if cleanup:
-                self.cleanup_workers(config)
+                self.cleanup_workers(config, team_results=team_results)
 
     def preserve_team_bundles(
         self,
@@ -319,27 +348,41 @@ class MultiTeamOrchestrator:
                 continue
 
             dest_path = dest_base / f"{res.team_id}.zip"
+            tmp_path = dest_base / f"{res.team_id}.zip.tmp_{uuid.uuid4().hex[:8]}"
             try:
                 orig_bytes = res.bundle_path.read_bytes()
                 orig_sha = hashlib.sha256(orig_bytes).hexdigest()
-                shutil.copy2(res.bundle_path, dest_path)
-                dest_bytes = dest_path.read_bytes()
-                dest_sha = hashlib.sha256(dest_bytes).hexdigest()
-                if orig_sha != dest_sha:
+
+                # NN.2: 保存先ファイルを直接上書きせず、同一ディレクトリの一時ファイルへコピー
+                shutil.copy2(res.bundle_path, tmp_path)
+                tmp_bytes = tmp_path.read_bytes()
+                tmp_sha = hashlib.sha256(tmp_bytes).hexdigest()
+                if orig_sha != tmp_sha:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
                     logger.error(
                         "Preserved bundle SHA-256 mismatch for team '%s': original=%s, preserved=%s",
                         res.team_id,
                         orig_sha,
-                        dest_sha,
+                        tmp_sha,
                     )
                     res.success = False
                     res.status = "BUNDLE_CORRUPTED"
                     res.details["bundle_error"] = "SHA-256 mismatch during bundle preservation"
                     continue
 
-                # パスを恒久保存先に更新
+                # 原子的置換 (os.replace) により既存ファイルを壊さずに確定
+                os.replace(tmp_path, dest_path)
+
+                # パスを恒久保存先に更新 & 退避成功を記録
                 res.bundle_path = dest_path
+                res.evidence_preserved = True
             except (OSError, shutil.Error) as err:
+                if tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
                 logger.error("Failed to preserve bundle for team '%s': %s", res.team_id, err)
                 res.success = False
                 res.status = "BUNDLE_PRESERVATION_FAILED"
