@@ -247,22 +247,39 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `TeamWorkerSpec`, `MultiTeamConfig`, `MultiTeamResult` などのデータ構造を定義し、複数ワーカーの Worktree 分割と成果統合の不変条件を確立する。
   2. 独立ワーカーオーケストレーション基盤 (GG.2):
      - 各チームの独立 Worktree 上での実行・成果収集（Evidence Bundle 収集）と `IntegrationGate` への安全な引き渡しパイプラインの基本実装。
-- [ ] 機能HH (Stage 3 Worktree 管理堅牢化 & トランザクション準備 Stage 3 Worktree Robustness & Atomic Preparation):
+- [x] 機能HH (Stage 3 Worktree 管理堅牢化 & トランザクション準備 Stage 3 Worktree Robustness & Atomic Preparation):
   1. Worktree 削除成否判定の実態整合 (HH.1 / P1-1):
      - `cleanup_workers()` において、`remove_worktree` の戻り値（ブランチ削除フラグ）に依存せず、Worktree ディレクトリの消滅および Git 管理下の解放実態に基づいて削除成功（`True`）を判定する。
   2. 重複チームID拒否 & Worktree 原子的準備 (HH.2 / P1-2):
      - `MultiTeamConfig` において重複した `team_id` が渡された場合、即座に拒絶（`ValueError`）。
      - `prepare_workers()` において一部チームの Worktree 作成が失敗した場合、作成済みの全 Worktree を安全に自動ロールバック解放し、孤立 Worktree を残さないトランザクション的準備を保証する。
-- [ ] 機能II (Stage 3 実ワーカー並行実行 & 成果統合パイプライン MultiTeam Parallel Execution & Integrated Delivery):
+- [x] 機能II (Stage 3 実ワーカー並行実行 & 成果統合パイプライン MultiTeam Parallel Execution & Integrated Delivery):
   1. 複数ワーカーの実並行プロセス実行と監督 (II.1):
      - `MultiTeamOrchestrator.run_workers()` を実装し、各チームの独立 Worktree 上でワーカープロセス（`NightlyOrchestrator` / コマンド）を並行起動・監視する。
      - タイムアウトおよびエラー発生時のプロセス回収・安全停止を担保。
   2. 成果収集・ワーカー失敗遮断・統合ハンドオフ (II.2):
      - 各ワーカーが完了時に生成した Evidence Bundle を収集し、いずれかのワーカーが失敗した場合は未承認成果を統合せず `WORKER_FAILED` で安全停止。双方が成功した場合のみ `IntegrationGate` へ引き渡して統合検証・RC発行。
-- [ ] 機能JJ (Stage 3 決定論的受入・並行実行実証 Stage 3 Deterministic Multi-Worker Acceptance Verification):
+- [x] 機能JJ (Stage 3 決定論的受入・並行実行実証 Stage 3 Deterministic Multi-Worker Acceptance Verification):
   1. 2ワーカー並行稼働 & 成果統合受入テストの実証 (JJ.1):
      - 2つのワーカーが独立 Worktree 上で並行実行され、独立した成果物と Evidence Bundle を作成し、親オーケストレーターがこれらを安全に統合して Release Candidate を発行できることを実証。
      - 片方のワーカーが失敗した際に未承認成果の統合が遮断されることの実証。
+- [ ] 機能KK (Stage 3 標準CLIワーカー起動コマンド修正 & パラメータ拡張 Stage 3 Standard CLI Worker Command & Parameter Extension):
+  1. CLI コマンド引数順序の修正 (KK.1 / P0):
+     - `run_workers()` におけるデフォルト CLI コマンドを `["python3", "-m", "auto_developer.cli", "--work-dir", str(wt_path), "run"]` に修正し、サブコマンドの前に `--work-dir` を配置して引数解析エラー（Exit 2）を解消する。
+  2. ワーカー引数・環境変数の明示的設定 (KK.2):
+     - `TeamWorkerSpec` に `extra_args` および `env` フィールドを追加し、ワーカー起動時に `--mock` や固有の引数・環境変数を透過的に渡せるよう拡張する。
+- [ ] 機能LL (Stage 3 統合前 Evidence Bundle の Worktree 外保全 & ハッシュ照合 Stage 3 Permanent Evidence Bundle Preservation & Hash Verification):
+  1. Worktree 削除前の Evidence Bundle 保全 (LL.1 / P1):
+     - ワーカー完了後、IntegrationGate による統合または Worktree クリーンアップの前に、各チームの Evidence Bundle を永続保存先（`.dev/integration_jobs/<job_id>/evidence/<team_id>.zip`）へ退避コピーする。
+  2. SHA-256 整合性検査と返却パス更新 (LL.2):
+     - 退避前後の SHA-256 チェックサムを照合し、不整合時は即座にエラーとして遮断する。
+     - `TeamExecutionResult.bundle_path` を保全後の恒久パスへ更新し、Worktree が削除された後でも呼び出し元が返却されたパスから有効な Evidence Bundle を監査・取得できることを保証する。
+- [ ] 機能MM (Stage 3 実サブプロセス 2チーム並行実行 & 意味的機能結合 E2E 受入実証 Stage 3 Real Subprocess Multi-Worker E2E & Semantic Integration Verification):
+  1. 2つの実サブプロセスによる並行稼働受入実証 (MM.1 / P2):
+     - `worker_fn` を使わず、実サブプロセス（`python3 -m auto_developer.cli --work-dir <wt> run --mock` 等）を2本同時に独立 Worktree 上で起動・監督し、並行開発を完遂することの実証。
+  2. Core / UI 意味的機能結合検証 (MM.2):
+     - Core チームのモジュールと UI チームのモジュールを別々のワーカーが実装・コミットし、統合検証スクリプトが両者の実インポート・結合呼び出しを検証して Exit 0 となり、Release Candidate が発行されることの実証。
+     - クリーンアップ後も全 Evidence Bundle が実在し、独立 Verifier で `VERIFIED` となることの確認。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
