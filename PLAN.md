@@ -16,7 +16,7 @@
 - なし（既存テストの破壊的変更は行わず、新規テスト追加と既存合格の維持を徹底）
 
 ## ステップ
-- [ ] 1. TestResult 構造化判定（`testsRun >= 1`, `len(failures) >= 1`, `len(errors) == 0`、例外偽装排除）の実装と単体テスト（Red-First）（BBB.1）
+- [x] 1. TestResult 構造化判定（`testsRun >= 1`, `len(failures) >= 1`, `len(errors) == 0`、例外偽装排除）の実装と単体テスト（Red-First）（BBB.1）
 - [ ] 2. OS権限レベルのリポジトリ読取専用ロックダウン（`0o555`/`0o444`、例外安全な権限復元）の実装と単体テスト（Red-First）（BBB.2）
 - [ ] 3. 統合受入実証（例外偽装排除 & 絶対パス書き換え阻止）と全体検証ゲート合格確認、Evidence Bundle 生成（BBB.3）
 

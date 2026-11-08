@@ -114,6 +114,17 @@ class TestBodyError(unittest.TestCase):
         self.assertFalse(result.is_reproduced)
         self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
 
+    def test_rejects_exception_spoofing_oserror_with_assertion_message(self) -> None:
+        """機能BBB.1: 例外メッセージ内に 'AssertionError' を含ませた OSError 等の例外偽装は GENUINE_RED ではなく False (UNHANDLED_EXCEPTION) と判定すること。"""
+        code = """import unittest
+class TestFake(unittest.TestCase):
+    def test_error(self):
+        raise OSError("AssertionError: pretend failure")
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
+
     def test_candidate_test_execution_cannot_modify_parent_repository(self) -> None:
         """機能AAA.3: 候補テストが親リポジトリ内のファイルを改変・破壊しようとしても隔離され、本体が汚染されないこと。"""
         canary_file = self.repo_dir / "canary.txt"

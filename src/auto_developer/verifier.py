@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import subprocess
@@ -8,6 +9,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 class DeterministicVerifier:
@@ -122,6 +124,40 @@ class RedTestVerifier:
         code = test_file_path.read_text(encoding="utf-8")
         return self.verify_candidate_test(code, timeout_sec=timeout_sec)
 
+    RUNNER_CODE = """
+import json
+import sys
+import unittest
+
+search_dir = sys.argv[1]
+pattern = sys.argv[2]
+
+loader = unittest.defaultTestLoader
+try:
+    suite = loader.discover(start_dir=search_dir, pattern=pattern)
+except Exception as e:
+    data = {
+        "tests_run": 0,
+        "failures": [],
+        "errors": [{"test": "loader", "err": str(e)}],
+    }
+    print("===AUTO_DEV_TEST_RESULT===")
+    print(json.dumps(data))
+    sys.exit(1)
+
+result = unittest.TestResult()
+suite.run(result)
+
+data = {
+    "tests_run": result.testsRun,
+    "failures": [{"test": str(test), "err": err} for test, err in result.failures],
+    "errors": [{"test": str(test), "err": err} for test, err in result.errors],
+}
+print("===AUTO_DEV_TEST_RESULT===")
+print(json.dumps(data))
+sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.errors) == 0) else 1)
+"""
+
     def _execute_test(
         self,
         test_file: Path,
@@ -129,7 +165,7 @@ class RedTestVerifier:
         timeout_sec: int,
         sandbox_dir: Path | None = None,
     ) -> RedVerificationResult:
-        """unittest discover で候補テストを実行し、Red/Green/無効を判定する。
+        """構造化 TestResult を用いて候補テストを実行し、Red/Green/無効を判定する。
         本体リポジトリ汚染を防ぐため、実行作業ディレクトリは使い捨ての sandbox_dir に隔離し、
         シークレット等の機密環境変数を除外サニタイズして実行する。
         """
@@ -150,12 +186,9 @@ class RedTestVerifier:
 
         cmd = [
             sys.executable,
-            "-m",
-            "unittest",
-            "discover",
-            "-s",
+            "-c",
+            self.RUNNER_CODE,
             search_dir,
-            "-p",
             test_file.name,
         ]
 
@@ -188,7 +221,86 @@ class RedTestVerifier:
 
         output = (proc.stdout + "\n" + proc.stderr).strip()
 
-        # 判定 A: 実行件数チェック (0件実行 / Exit 5 NO TESTS RAN)
+        # 構造化 TestResult (JSON) の抽出
+        marker = "===AUTO_DEV_TEST_RESULT==="
+        parsed_result: dict[str, Any] | None = None
+        if marker in proc.stdout:
+            try:
+                json_part = proc.stdout.split(marker, 1)[1].strip()
+                parsed_result = json.loads(json_part)
+            except (json.JSONDecodeError, IndexError, ValueError):
+                parsed_result = None
+
+        if parsed_result is not None:
+            tests_run: int = parsed_result.get("tests_run", 0)
+            failures: list[dict[str, str]] = parsed_result.get("failures", [])
+            errors: list[dict[str, str]] = parsed_result.get("errors", [])
+
+            # 判定 A: 実行件数チェック (0件実行)
+            if tests_run == 0 or proc.returncode == 5:
+                return RedVerificationResult(
+                    is_reproduced=False,
+                    exit_code=proc.returncode,
+                    reason="NO_TESTS_RAN",
+                    output=output,
+                    reason_detail="No test methods were executed during unittest run (ran_count=0).",
+                )
+
+            # 判定 B: すでに Green (エラーも失敗もなし)
+            if tests_run > 0 and len(failures) == 0 and len(errors) == 0:
+                return RedVerificationResult(
+                    is_reproduced=False,
+                    exit_code=0,
+                    reason="ALREADY_GREEN",
+                    output=output,
+                    reason_detail="Candidate test passed against current codebase without failures.",
+                )
+
+            # 判定 C / D / F: エラー (errors) が存在する場合
+            if len(errors) > 0:
+                err_text = " ".join(e.get("err", "") for e in errors)
+                # インポート不能 / モジュール未発見
+                if (
+                    "ImportError" in err_text
+                    or "ModuleNotFoundError" in err_text
+                    or any("_FailedTest" in str(e) for e in errors)
+                ):
+                    return RedVerificationResult(
+                        is_reproduced=False,
+                        exit_code=proc.returncode,
+                        reason="IMPORT_ERROR",
+                        output=output,
+                        reason_detail="Test failed due to ImportError / ModuleNotFoundError.",
+                    )
+                # setUp() / tearDown() での環境例外
+                if "in setUp" in err_text or "in tearDown" in err_text:
+                    return RedVerificationResult(
+                        is_reproduced=False,
+                        exit_code=proc.returncode,
+                        reason="SETUP_ERROR",
+                        output=output,
+                        reason_detail="Test failure occurred during setUp/tearDown rather than test body assertion.",
+                    )
+                # テスト本体内での予期せぬ例外 (アサーション失敗ではない)
+                return RedVerificationResult(
+                    is_reproduced=False,
+                    exit_code=proc.returncode,
+                    reason="UNHANDLED_EXCEPTION",
+                    output=output,
+                    reason_detail="Test exited with error/exception without an assertion failure (failures=0, errors>0).",
+                )
+
+            # 判定 E: アサーション失敗 (failures > 0, errors == 0) による真正な Red
+            if len(failures) > 0:
+                return RedVerificationResult(
+                    is_reproduced=True,
+                    exit_code=proc.returncode,
+                    reason="GENUINE_RED",
+                    output=output,
+                    reason_detail="Candidate test failed as expected with assertion failure (Genuine Red).",
+                )
+
+        # フォールバック (構造化 JSON が取得できなかった場合)
         m_ran = re.search(r"Ran (\d+) tests?", output)
         ran_count = int(m_ran.group(1)) if m_ran else 0
         if ran_count == 0 or "NO TESTS RAN" in output or proc.returncode == 5:
@@ -200,7 +312,6 @@ class RedTestVerifier:
                 reason_detail="No test methods were executed during unittest run (ran_count=0).",
             )
 
-        # 判定 B: すでに Green
         if proc.returncode == 0:
             return RedVerificationResult(
                 is_reproduced=False,
@@ -210,7 +321,6 @@ class RedTestVerifier:
                 reason_detail="Candidate test passed against current codebase without failures.",
             )
 
-        # 判定 C: インポート不能 / モジュール未発見
         if (
             "ImportError: Failed to import test module" in output
             or "ModuleNotFoundError:" in output
@@ -224,7 +334,6 @@ class RedTestVerifier:
                 reason_detail="Test failed due to ImportError / ModuleNotFoundError.",
             )
 
-        # 判定 D: setUp() / tearDown() での環境・ハーネス例外 (誤検知防止)
         if "in setUp" in output or "in tearDown" in output:
             return RedVerificationResult(
                 is_reproduced=False,
@@ -234,21 +343,10 @@ class RedTestVerifier:
                 reason_detail="Test failure occurred during setUp/tearDown rather than test body assertion.",
             )
 
-        # 判定 E: アサーション失敗 (AssertionError / FAIL:) による真正な Red
-        if "AssertionError" in output or "FAIL:" in output:
-            return RedVerificationResult(
-                is_reproduced=True,
-                exit_code=proc.returncode,
-                reason="GENUINE_RED",
-                output=output,
-                reason_detail="Candidate test failed as expected with assertion failure (Genuine Red).",
-            )
-
-        # 判定 F: アサーション失敗を伴わない例外 (ERROR: / 環境エラー / 予期せぬ実行時エラー)
         return RedVerificationResult(
             is_reproduced=False,
             exit_code=proc.returncode,
             reason="UNHANDLED_EXCEPTION",
             output=output,
-            reason_detail="Test exited with error/exception without an assertion failure (FAIL: / AssertionError).",
+            reason_detail="Test exited with error/exception without structured test result.",
         )
