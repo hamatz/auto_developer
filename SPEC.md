@@ -280,20 +280,29 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   2. Core / UI 意味的機能結合検証 (MM.2):
      - Core チームのモジュールと UI チームのモジュールを別々のワーカーが実装・コミットし、統合検証スクリプトが両者の実インポート・結合呼び出しを検証して Exit 0 となり、Release Candidate が発行されることの実証。
      - クリーンアップ後も全 Evidence Bundle が実在し、独立 Verifier で `VERIFIED` となることの確認。
-- [ ] 機能NN (Stage 3 Evidence退避失敗時の原本保護 & 原子的保全 Stage 3 Original Worktree Protection on Preservation Failure & Atomic Storage):
+- [x] 機能NN (Stage 3 Evidence退避失敗時の原本保護 & 原子的保全 Stage 3 Original Worktree Protection on Preservation Failure & Atomic Storage):
   1. 退避未完了 Worktree の選択的原本保護 (NN.1 / P0):
      - `cleanup_workers()` に `team_results` 引数を追加し、各チームの実行結果を参照可能にする。
      - Evidence Bundle の Worktree 外退避が未完了（`BUNDLE_PRESERVATION_FAILED`, `BUNDLE_CORRUPTED`、または保全パスが存在しない）チームの Worktree は、`finally` 節においても削除せずディスク上に確実に保全（原本保護）する。
   2. 一時ファイル & `os.replace` による原子的保全 (NN.2):
      - `preserve_team_bundles()` において、保存先へ直接上書きコピーせず、同一ディレクトリ内のテンポラリファイル（`<dest_path>.tmp_<uuid>`）にコピー。
      - 一時ファイルの SHA-256 チェックサムを元 Bundle と照合し、完全一致した場合のみ `os.replace()` で原子的に確定置換する。失敗時は一時ファイルを安全に削除し、既存の有効な Evidence を汚染・破壊しない。
-- [ ] 機能OO (Stage 3 成果保全障害注入テスト & 受入実証 Stage 3 Fault Injection Verification & Full Acceptance):
+- [x] 機能OO (Stage 3 成果保全障害注入テスト & 受入実証 Stage 3 Fault Injection Verification & Full Acceptance):
   1. 退避失敗・原本保護・部分失敗の障害注入実証 (OO.1):
      - `shutil.copy2` / `os.replace` に `OSError` を注入するテストを追加し、退避失敗時でも Worktree とその中の Evidence Bundle が削除されずディスク上に物理残存することを実証。
      - Team A 成功 / Team B 失敗の部分退避失敗において、Team A はクリーンアップされ、失敗した Team B の Worktree のみ原本保護されることを実証。
   2. 全体検証ゲート通過と Evidence Bundle 生成・検証 (OO.2):
      - 全自動検証ゲート（175+ テスト、Ruff、Mypy）の合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [ ] 機能PP (Stage 3 既存Evidenceの非破壊保全 & 衝突拒否 Stage 3 Non-destructive Evidence Preservation & Collision Guard):
+  1. 既存 Evidence の非破壊照合 & 同一ハッシュ冪等再利用 (PP.1 / P1):
+     - `preserve_team_bundles()` において、恒久保存先（`dest_path`）が既に存在する場合、既存ファイルの SHA-256 と退避対象 Bundle の SHA-256 を照合する。
+     - 両者の SHA-256 が完全一致する場合、上書きコピーを実行せず既存ファイルを再利用（冪等成功）として扱い、`res.bundle_path = dest_path`, `res.evidence_preserved = True` を設定する。
+  2. 異ハッシュ衝突時の上書き拒絶 & 原本保護 (PP.2 / P1):
+     - 既存ファイルが存在し SHA-256 が異なる場合、既存の過去 Evidence を破壊・上書きしないよう即座にコピーを中止（Fail-Closed）し、`res.status = "BUNDLE_PRESERVATION_COLLISION"` を記録して統合を安全停止する。
+     - 退避未完了として扱うことで、既存の保存先 Evidence を保護すると同時に、退避に失敗した新しい Worktree の削除も抑止して双方の成果を完全保全する。
+  3. 冪等保存・衝突遮断の回帰テスト実証 (PP.3):
+     - 同一 Bundle の冪等保存成功、および内容が異なる Bundle の衝突検知・上書き遮断・原本保護を検証する決定論的テストを追加。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
