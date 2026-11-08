@@ -7,19 +7,19 @@
 -->
 
 ## 現在の目標
-- Phase 22: Stage 2 Integration Worktree 分離とクラッシュ復旧の完全性 (Sol氏レビュー対応: P1-1, P1-2, P1-3, P1-4)
-  - P1-1: 専用 Integration Worktree の導入と親作業領域の完全非汚染化
-  - P1-2: ライフサイクル管理（try/finally）と例外時の安全隔離・復旧
-  - P1-3: 受入テストの偽陽性排除（ImportError 握りつぶし排除と真の結合検証）
-  - P1-4: 競合時のタイムスタンプ付き隔離ブランチ明示と復旧不能時（RECOVERY_REQUIRED）の確実な管理
+- Phase 23: Stage 2 統合クラッシュ耐性パック (Integration Crash Consistency Pack: Sol氏レビュー対応 P1-A, P1-B, P1-C, P1-D)
+  - P1-A: Worktree クリーンアップ成否の `IntegrationResult.details` への明示的記録
+  - P1-B: 隔離ブランチリネーム失敗時の Fail-Closed `RECOVERY_REQUIRED` 遮断
+  - P1-C: `IntegrationJobState` の原子的永続化と Git 実態照合による再開・復旧
+  - P1-D: 強制終了（SIGKILL 模擬）後の自律復旧・再開の決定論的受入テスト実証
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - なし
 
 ## ステップ
-- [x] 1. `WorktreeManager` による専用 Integration Worktree の生成・操作・クリーンアップ、および例外時も含めた親作業ツリーの完全非汚染化の実装（P1-1, P1-2）と単体テスト（Red-First）
-- [x] 2. 競合時のタイムスタンプ付き隔離ブランチ明示化と復旧不能状態（RECOVERY_REQUIRED）管理の実装（P1-4）と単体テスト
-- [x] 3. 受入テストの偽陽性排除（契約テストの厳格化）と全機能結合・安全隔離決定論的受入テストの実証（P1-3）および全体検証ゲート合格確認
+- [ ] 1. Worktree クリーンアップ成否の `IntegrationResult.details` 記録・明示化、および隔離ブランチリネーム失敗時の `RECOVERY_REQUIRED` 遮断の実装（CC.1）と単体テスト（Red-First）
+- [ ] 2. `IntegrationJobState` の原子的永続化と Git 実態照合による再開・復旧（`recover_or_resume`）の実装（CC.2, CC.3）と単体テスト
+- [ ] 3. マージ途中・検証途中の強制終了（クラッシュ模擬）からの自律復旧・再開決定論的受入テストの実証（CC.4）および全体検証ゲート合格確認
 
 ## 止まっていること・判断待ち
 - なし

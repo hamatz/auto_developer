@@ -190,7 +190,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   5. 実機能結合の決定論的受入テスト (P1-3):
      - Core チームの計算関数を UI チームがインポートして呼び出す実機能結合テストを追加し、マージ後の全体検証通過を実証。
      - API 不整合（引数不一致など意味的競合）による統合後全体検証失敗・安全隔離シナリオを実証。
-- [ ] 機能BB (Stage 2: 専用 Integration Worktree 分離とクラッシュ復旧の完全性 Integration Worktree & Crash Recovery):
+- [x] 機能BB (Stage 2: 専用 Integration Worktree 分離とクラッシュ復旧の完全性 Integration Worktree & Crash Recovery):
   1. 専用 Integration Worktree による親作業領域の完全非汚染化 (BB.1 / P1-1):
      - `execute_integration`: 呼び出し元作業ディレクトリ（親）上で直接 `git checkout` やマージを行わず、`WorktreeManager` を利用して専用の一時 Worktree（`.dev/worktrees/integration-<job_id>`）を新規ブランチ（`integration/<job_id>`）で作成し、その中で順次マージおよび全体検証を実行する。
      - 呼び出し元（親）の作業ディレクトリおよびカレントブランチ・作業ツリーは、統合処理の開始から終了（成功・失敗問わず）まで一切変更・切り替えされない。
@@ -204,6 +204,19 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. 受入テストの偽陽性排除と厳格な機能結合検証 (BB.4 / P1-3):
      - 契約受入テスト（`test_contract.py`）内の `except ImportError: return` を排除し、必要なモジュール（`core.app`, `ui.view`）のインポート失敗や期待値不一致は必ずテスト失敗（Exit 1）として検知する。
      - 統合前に契約テストが誤って実行されないようテスト実行条件・スコープを整理し、結合成功時のみ Exit 0、不整合時は即座に Exit 1 となる決定論的検証を保証する。
+- [ ] 機能CC (Stage 2: 統合クラッシュ耐性パック Integration Crash Consistency Pack):
+  1. クリーンアップ状態の明示と隔離リネームの Fail-Closed 検査 (CC.1 / P1-A, P1-B):
+     - Worktree の後片付け成否を `IntegrationResult.details` の `cleanup_status` ("SUCCESS" | "FAILED")、`worktree_path`、`cleanup_error` に記録し、クリーンアップ失敗時は警告またはエラー情報として呼び出し元へ明示する。
+     - 競合（CONFLICT）や全体検証失敗（VERIFICATION_FAILED）時の隔離ブランチリネーム（`git branch -m`）の実行結果を検証し、リネームに失敗した場合は推測で処理を完了せず即座に `status="RECOVERY_REQUIRED"` を返す。
+  2. 統合状態の原子的永続化 (CC.2 / P1-C):
+     - 統合ジョブの進捗状態を管理する `IntegrationJobState` を定義し、`INITIALIZED` -> `AUDITED` -> `WORKTREE_CREATED` -> `MERGING` -> `VERIFYING` -> `RC_ISSUED` (完了時は `COMPLETED`、失敗時は `FAILED` または `RECOVERY_REQUIRED`) の状態遷移を記録する。
+     - 状態ファイルは `.dev/integration_jobs/<job_id>.json` へ一時ファイル + `os.replace` によるアトミック書き込みを行い、プロセスクラッシュ時の破損を防止する。
+  3. Git 実態照合による自律クラッシュ復旧 (CC.3 / P1-C, P1-D):
+     - 統合処理が SIGKILL や電源断等で突然死した後の再開・復旧処理（`recover_or_resume`）を実装する。
+     - 保存された状態ファイルを鵜呑みにせず、実際の Git 状態（Worktree の実在、統合ブランチの HEAD、マージ状態、RC タグ）と照合して安全な復旧経路を選択する。
+     - 途中で孤立した Worktree やロックが存在する場合は安全に回収・隔離し、作業をクリーンな状態へ復元または安全に再開する。
+  4. クラッシュ復旧の決定論的受入テスト (CC.4 / P1-D):
+     - マージ途中や全体検証途中でプロセスが強制終了された状態を再現し、次回実行時に安全に検知・復旧（クリーンアップまたは再開）できることを実証する決定論的受入テストを追加。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
