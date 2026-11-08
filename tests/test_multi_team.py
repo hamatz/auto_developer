@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -18,6 +19,8 @@ from auto_developer.multi_team import (
     TeamExecutionResult,
     TeamWorkerSpec,
     WorkerProcessHandle,
+    WorkerRegistration,
+    WorkerRegistry,
     has_active_processes_in_group,
 )
 
@@ -1608,6 +1611,72 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         finally:
             p.kill()
             p.wait()
+
+    def test_worker_registry_persists_and_reloads_worker_state_atomically(self) -> None:
+        """VV.1: WorkerRegistry がワーカー起動・状態更新を workers.json へ原子的に永続化・復元できることの実証。"""
+        job_id = "job-registry-test"
+        registry = WorkerRegistry(repo_dir=self.repo_dir, job_id=job_id)
+
+        # 1. 初期状態は空
+        self.assertEqual(registry.load(), {})
+
+        # 2. ワーカー登録
+        now = time.time()
+        reg1 = WorkerRegistration(
+            team_id="team-alpha",
+            pid=12345,
+            pgid=12345,
+            worktree_path="/path/to/alpha",
+            base_branch="main",
+            branch_name="team/team-alpha",
+            status="RUNNING",
+            start_time=now,
+            updated_at=now,
+        )
+        registry.register_worker(reg1)
+
+        # ディスクから独立インスタンスで読み込み確認
+        reg_reader = WorkerRegistry(repo_dir=self.repo_dir, job_id=job_id)
+        workers = reg_reader.load()
+        self.assertIn("team-alpha", workers)
+        self.assertEqual(workers["team-alpha"].pid, 12345)
+        self.assertEqual(workers["team-alpha"].status, "RUNNING")
+
+        # 3. 状態更新
+        reg_reader.update_status("team-alpha", "COMPLETED", details={"exit_code": 0})
+        workers_updated = registry.load()
+        self.assertEqual(workers_updated["team-alpha"].status, "COMPLETED")
+        self.assertEqual(workers_updated["team-alpha"].details.get("exit_code"), 0)
+
+        # 4. run_workers が自動的に registry に永続化することの検証
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id=job_id,
+            teams=[
+                TeamWorkerSpec(team_id="team-runner-reg"),
+            ],
+            base_branch="main",
+        )
+        orchestrator.prepare_workers(config)
+
+        def cmd_factory(team_id: str, path: Path) -> list[str]:
+            return ["python3", "-c", "import sys; sys.exit(0)"]
+
+        results = orchestrator.run_workers(
+            config=config,
+            worker_cmd_factory=cmd_factory,
+            timeout_sec=5.0,
+        )
+        self.assertTrue(results["team-runner-reg"].success)
+
+        # run_workers 完了後、workers.json に team-runner-reg が COMPLETED として記録されていること
+        final_workers = registry.load()
+        self.assertIn("team-runner-reg", final_workers)
+        self.assertEqual(final_workers["team-runner-reg"].status, "COMPLETED")
+        self.assertTrue(final_workers["team-runner-reg"].pid > 0)
+        self.assertTrue(final_workers["team-runner-reg"].pgid > 0)
+
+        orchestrator.worktree_manager.remove_worktree("team-runner-reg", force=True, delete_branch=True, purge_unmerged=True)
 
 
 if __name__ == "__main__":
