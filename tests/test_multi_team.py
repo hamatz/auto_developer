@@ -1942,5 +1942,59 @@ os.kill(os.getpid(), signal.SIGKILL)
                 pass
 
 
+    def test_recover_multi_team_job_preserves_unmanaged_or_outside_directory(self) -> None:
+        """WW.2: Registryに管理対象外または境界外のパスが指定された場合でも、安全境界により絶対に削除されないことを実証。"""
+        job_id = "job-outside-path-test"
+        registry = WorkerRegistry(repo_dir=self.repo_dir, job_id=job_id)
+
+        # リポジトリ外に削除されては困る検証用ディレクトリとファイルを作成
+        keep_me_dir = self.repo_dir.parent / "keep-me"
+        keep_me_dir.mkdir(parents=True, exist_ok=True)
+        important_file = keep_me_dir / "important.txt"
+        important_file.write_text("DO_NOT_DELETE", encoding="utf-8")
+
+        # 恒久保存先に確定済み Evidence を用意して cleanup 処理まで進める
+        evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        dest_bundle = evidence_dir / "team-outside.zip"
+        dest_bundle.write_bytes(b"PK\x03\x04CONFIRMED_DATA")
+
+        now = time.time()
+        reg = WorkerRegistration(
+            team_id="team-outside",
+            pid=99995,
+            pgid=99995,
+            worktree_path=str(keep_me_dir),
+            base_branch="main",
+            branch_name="team/team-outside",
+            status="RUNNING",
+            start_time=now,
+            updated_at=now,
+        )
+        registry.save({"team-outside": reg})
+
+        try:
+            orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+            rec_result: MultiTeamRecoveryResult = orchestrator.recover_multi_team_job(
+                job_id=job_id,
+                cleanup=True,
+            )
+
+            # リポジトリ外部のディレクトリおよびファイルが一切削除されずに残存していること
+            self.assertTrue(
+                keep_me_dir.exists(),
+                "Outside directory must NOT be deleted by recovery cleanup",
+            )
+            self.assertTrue(
+                important_file.exists(),
+                "Files inside outside directory must NOT be deleted by recovery cleanup",
+            )
+            self.assertEqual(important_file.read_text(encoding="utf-8"), "DO_NOT_DELETE")
+            self.assertIn("team-outside", rec_result.unverified_worktrees)
+        finally:
+            if keep_me_dir.exists():
+                shutil.rmtree(keep_me_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

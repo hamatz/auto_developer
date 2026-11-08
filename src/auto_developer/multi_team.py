@@ -96,6 +96,7 @@ class MultiTeamRecoveryResult:
     job_id: str
     reclaimed_orphans: list[str] = field(default_factory=list)
     unverified_processes: list[str] = field(default_factory=list)
+    unverified_worktrees: list[str] = field(default_factory=list)
     rescued_bundles: list[str] = field(default_factory=list)
     reused_bundles: list[str] = field(default_factory=list)
     pipeline_result: MultiTeamResult | None = None
@@ -599,14 +600,30 @@ class MultiTeamOrchestrator:
             )
 
             if cleanup:
+                registered_wts = {wt.team_id: wt for wt in self.worktree_manager.list_worktrees()}
+                base_dir = self.worktree_manager.worktree_base.resolve()
                 for tid, w in workers.items():
                     wt_p = Path(w.worktree_path)
                     try:
+                        resolved_wt = wt_p.resolve()
+                        is_within_base = resolved_wt.is_relative_to(base_dir)
+                    except (ValueError, OSError):
+                        is_within_base = False
+
+                    # WW.2: 安全境界検査: worktree_base 配下かつ Git 登録済みであること
+                    if not is_within_base or tid not in registered_wts:
+                        logger.warning(
+                            "Worktree path for team '%s' (%s) is outside base directory or not registered in git; preserving untouched",
+                            tid,
+                            w.worktree_path,
+                        )
+                        result.unverified_worktrees.append(tid)
+                        continue
+
+                    try:
                         self.worktree_manager.remove_worktree(tid, force=True)
-                    except (subprocess.SubprocessError, OSError) as exc:
+                    except (subprocess.SubprocessError, OSError, WorktreeError) as exc:
                         logger.debug("Worktree removal non-fatal error for %s: %s", tid, exc)
-                    if wt_p.exists():
-                        shutil.rmtree(wt_p, ignore_errors=True)
 
         return result
 
