@@ -469,7 +469,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. 決定論的受入実証と全体検証ゲート合格確認 (CCC.4 / Phase 43 完了判定):
      - モンキーパッチによるガード弛緩の遮断、root 実行拒否、および「シードバグの監査指摘 → 隔離Red検証 → PLAN.md自動登録」が人間の介在ゼロで完結することを実証する単体・受入テストスイート（Red-First）。
      - 全自動検証ゲート（227+ テスト、Ruff、Mypy）の完全合格確認。
-- [ ] 機能DDD (Stage 4 物理クローン隔離 & パイプライン接続修正 Stage 4 Physical Clone Isolation & Pipeline Interoperability):
+- [x] 機能DDD (Stage 4 物理クローン隔離 & パイプライン接続修正 Stage 4 Physical Clone Isolation & Pipeline Interoperability):
   1. 候補テストの物理的クローン隔離実行 (DDD.1 / Sol氏 P0指摘):
      - `RedTestVerifier` において、元リポジトリのパス上での直接実行（および chmod による一時ロックダウン）を廃止。
      - テスト検証ごとに、元リポジトリから隔離された一時クローン（clean temporary clone）を作業環境として生成し、その閉じた環境内で候補テストを実行する。
@@ -486,6 +486,20 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 単にテストコード内で修正するだけでなく、`AuditDispatcher` で登録されたタスクを `TaskDispatcher.get_next_pending_task()` で取得し、Maker インターフェースへ渡して修正・Green化・免疫テスト昇格まで完結する実運用E2E受入テストを追加。
      - `os.chmod` で書き込み権限を復活させて元リポジトリを改変しようとする敵対的テストが実行されても、元リポジトリのファイルが物理的に無傷であることを実証する隔離テスト。
      - 全自動検証ゲート（246+ テスト、Ruff、Mypy）の完全合格確認と Evidence Bundle 生成。
+- [ ] 機能EEE (Stage 4 異系統LLM独立監査ランナー & Before/After確定 Stage 4 Cross-Model Independent Audit Runner & Evidence Confirmation):
+  1. 異系統LLM独立監査ポリシーとモデル強制 (EEE.1 / Sol氏 監査設計合意):
+     - `AuditConfig` / `OrchestratorConfig` において `maker_model` と `checker_model` / `auditor_model` のモデルファミリを検証。
+     - 同一モデルまたは同系統モデルの指定を検知した場合は Fail-Closed（Exit 2）で起動を拒否し、異系統LLM（例: Maker=Gemini 3.8 Flash, Checker/Auditor=Claude Opus 5.5）による独立監査を強制する。
+  2. 構造化監査プロンプトと独立監査役アダプタ (EEE.2 / 独立監査実装):
+     - `IndependentAuditRunner`: SPEC.md と git diff のみを厳格に入力とし、会話ログや内部状態を一切遮断した独立プロンプトを構築して別系統LLMに送信・実行。
+     - 返却された監査結果から `list[AuditFinding]` を抽出し、Finding ID、再現コード、修正方針を構造化してパース・検証する。
+  3. Before Red / After Green 証跡バインディングと免疫テスト自動昇格 (EEE.3 / 確定ゲート強化):
+     - Maker が AUD タスクを実装した際、修正前の再現テストが Red であったこと（Before Red）と、修正後の再現テストが Green であったこと（After Green）を決定論的に検証。
+     - この Before/After 証跡を Evidence Record に拘束（`evidence.verification.red_green_proof`）してコミット確定。
+     - 合格した再現テストを `tests/immunity/` 配下に正式な免疫テスト（`test_immunity_<finding_id>.py`）として安全に自動昇格・配置する。
+  4. LESSONS.md への自動教訓記録と全体検証ゲート合格確認 (EEE.4 / Phase 45 完了判定):
+     - AUD タスク解決完了時に、Finding 情報（Context, Trap, Rule, Immunity Test）を抽出し、`LESSONS.md` の記録フォーマットに従って自動追記・永続化する。
+     - 決定論的受入実証テスト（Red-First）を追加し、全体検証ゲート（252+ テスト、Ruff、Mypy）の完全合格確認。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
