@@ -14,11 +14,11 @@
   - Level 7 E2E受入テストの強化 & 検証ゲート完全合格: `TaskDispatcher.get_next_pending_task()` 経由で Maker へタスクが届く実運用E2E、`os.chmod` 改変阻止テスト、全体検証ゲート（246+ テスト）合格確認、Evidence Bundle 生成（機能DDD.4）
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- なし（既存テストの破壊的変更は行わず、新規テスト追加と既存合格の維持を徹底）
+- `tests/test_audit_dispatch.py`, `tests/test_immunity_and_red_acceptance.py`: 機能DDD.2（タスク書式統一）に伴い、`AuditDispatcher` が出力するタスク書式が `- [ ] AUD-<id>. Fix: [<id>] ...` に更新されたため、該当アサーションの文字列照合を更新。
 
 ## ステップ
 - [x] 1. 候補テストの物理的クローン隔離実行（元リポジトリ汚染の完全遮断）の実装と単体テスト（Red-First）（DDD.1）
-- [ ] 2. タスク書式統一（AUD-<finding_id>. プレフィックス）と TaskDispatcher 連携の実装と単体テスト（Red-First）（DDD.2）
+- [x] 2. タスク書式統一（AUD-<finding_id>. プレフィックス）と TaskDispatcher 連携の実装と単体テスト（Red-First）（DDD.2）
 - [ ] 3. 監査Findingと再現テストの永続化管理（.dev/audit/）の実装と単体テスト（Red-First）（DDD.3）
 - [ ] 4. Level 7 E2E受入テストの強化（Makerタスク取得・修正実証 & chmod改変阻止）と全体検証ゲート合格確認、Evidence Bundle 生成（DDD.4）
 

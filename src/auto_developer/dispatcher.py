@@ -123,9 +123,10 @@ class AuditDispatcher:
             finding.status = "DISPATCHED"
             return finding
 
-        # 3. タスク行の作成と挿入
+        # 3. タスク行の作成と挿入 (TaskDispatcher互換書式)
+        task_id = f"AUD-{finding.finding_id}"
         task_line = (
-            f"- [ ] Fix: [{finding.finding_id}] {finding.description} "
+            f"- [ ] {task_id}. Fix: [{finding.finding_id}] {finding.description} "
             f"(Severity: {finding.severity}, Loc: {finding.location})"
         )
 

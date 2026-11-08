@@ -255,9 +255,9 @@ class ZeroDivisionReproTest(unittest.TestCase):
         self.assertEqual(len(dispatched), 1)
         self.assertEqual(dispatched[0].status, "DISPATCHED")
 
-        # PLAN.md に修正タスクが登録されていることを検証
+        # PLAN.md に修正タスクが登録されていることを検証 (AUD-<id>. 書式)
         plan_content = plan_file.read_text(encoding="utf-8")
-        self.assertIn("- [ ] Fix: [BUG-DIV-ZERO] Zero division does not return -1.0 as specified", plan_content)
+        self.assertIn("- [ ] AUD-BUG-DIV-ZERO. Fix: [BUG-DIV-ZERO] Zero division does not return -1.0 as specified", plan_content)
         self.assertIn("Severity: P1", plan_content)
 
         # 3. Maker がタスクに着手し、コードを修正 (バグ解消)
