@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from auto_developer.audit import AuditFinding
+    from auto_developer.audit_store import AuditStore
     from auto_developer.verifier import RedTestVerifier
 
 from auto_developer.models import Task
@@ -87,6 +88,7 @@ class AuditDispatcher:
         self,
         repo_dir: Path | str | None = None,
         verifier: RedTestVerifier | None = None,
+        audit_store: AuditStore | None = None,
     ) -> None:
         self.repo_dir = Path(repo_dir) if repo_dir else Path.cwd()
         if verifier is None:
@@ -95,6 +97,13 @@ class AuditDispatcher:
             self.verifier = RedTestVerifier(repo_dir=self.repo_dir)
         else:
             self.verifier = verifier
+
+        if audit_store is None:
+            from auto_developer.audit_store import AuditStore
+
+            self.audit_store = AuditStore(audit_dir=self.repo_dir / ".dev" / "audit")
+        else:
+            self.audit_store = audit_store
 
     def dispatch_finding(
         self,
@@ -123,9 +132,10 @@ class AuditDispatcher:
             finding.status = "DISPATCHED"
             return finding
 
-        # 3. タスク行の作成と挿入
+        # 3. タスク行の作成と挿入 (TaskDispatcher互換書式)
+        task_id = f"AUD-{finding.finding_id}"
         task_line = (
-            f"- [ ] Fix: [{finding.finding_id}] {finding.description} "
+            f"- [ ] {task_id}. Fix: [{finding.finding_id}] {finding.description} "
             f"(Severity: {finding.severity}, Loc: {finding.location})"
         )
 
@@ -146,6 +156,7 @@ class AuditDispatcher:
 
         target_plan.write_text("\n".join(lines) + "\n", encoding="utf-8")
         finding.status = "DISPATCHED"
+        self.audit_store.save_finding(finding)
         return finding
 
     def process_findings(

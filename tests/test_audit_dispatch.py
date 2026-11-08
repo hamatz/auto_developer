@@ -10,7 +10,7 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 from auto_developer.audit import AuditFinding
-from auto_developer.dispatcher import AuditDispatcher
+from auto_developer.dispatcher import AuditDispatcher, TaskDispatcher
 from auto_developer.verifier import RedTestVerifier
 
 
@@ -52,7 +52,7 @@ class T(unittest.TestCase):
         self.assertEqual(result_finding.status, "DISPATCHED")
 
         content = self.plan_path.read_text(encoding="utf-8")
-        self.assertIn("- [ ] Fix: [FINDING-001] AST check missing else branch validation", content)
+        self.assertIn("- [ ] AUD-FINDING-001. Fix: [FINDING-001] AST check missing else branch validation", content)
         self.assertIn("Severity: P1", content)
         self.assertIn("Loc: src/auto_developer/guard.py:45", content)
 
@@ -128,6 +128,36 @@ class T(unittest.TestCase):
         content = self.plan_path.read_text(encoding="utf-8")
         self.assertIn("BATCH-001", content)
         self.assertNotIn("BATCH-002", content)
+
+    def test_dispatched_task_is_recognized_by_task_dispatcher(self) -> None:
+        """機能DDD.2: AuditDispatcherで登録されたタスクがTaskDispatcherで認識され、
+        次の未完了タスクとして取り出せ、mark_task_statusで更新できること。
+        """
+        finding = AuditFinding(
+            finding_id="F-001",
+            severity="P1",
+            spec_reference="SPEC.md DDD.2",
+            location="guard.py:10",
+            description="Interoperability test",
+            reproduction_test_code="import unittest\nclass T(unittest.TestCase):\n    def test_f(self):\n        self.assertEqual(1, 2)",
+        )
+
+        res = self.dispatcher.dispatch_finding(finding, plan_path=self.plan_path)
+        self.assertEqual(res.status, "DISPATCHED")
+
+        # TaskDispatcher での読み込みとタスク取得
+        task_dispatcher = TaskDispatcher()
+        tasks = task_dispatcher.parse_plan(self.plan_path)
+        next_task = task_dispatcher.get_next_pending_task(tasks)
+
+        self.assertIsNotNone(next_task, "Dispatched task must be recognized by TaskDispatcher!")
+        self.assertEqual(next_task.task_id, "AUD-F-001")
+        self.assertIn("Fix: [F-001] Interoperability test", next_task.title)
+
+        # ステータス更新 (completed) の検証
+        task_dispatcher.mark_task_status(self.plan_path, next_task, "completed")
+        updated_content = self.plan_path.read_text(encoding="utf-8")
+        self.assertIn("- [x] AUD-F-001. Fix: [F-001] Interoperability test", updated_content)
 
 
 if __name__ == "__main__":

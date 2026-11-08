@@ -284,6 +284,59 @@ else:
         self.assertFalse(result.is_reproduced)
         self.assertEqual(result.reason, "TOP_LEVEL_EXEC_FORBIDDEN")
 
+    def test_candidate_executes_in_isolated_clone_and_preserves_parent(self) -> None:
+        """機能DDD.1: 候補テストは元リポジトリとは独立した一時クローン内で実行され、
+        テストメソッド内で os.chmod を用いてファイルを書き換えても、
+        元リポジトリの canary.txt は物理的に無傷のまま保護されること。
+        """
+        import subprocess
+
+        # 1. 元リポジトリを初期化して canary.txt をコミット
+        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "TestUser"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True)
+        canary = self.repo_dir / "canary.txt"
+        canary.write_text("ORIGINAL_CANARY", encoding="utf-8")
+        subprocess.run(["git", "add", "canary.txt"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init canary"], cwd=self.repo_dir, check=True)
+
+        canary_abs_path = str(canary.resolve())
+
+        # 2. 候補テスト: 相対パスおよび絶対パスで canary.txt の chmod 権限復元 & 書き換えを試みる
+        code = f"""import os
+import unittest
+from pathlib import Path
+
+class HostileChmodTest(unittest.TestCase):
+    def test_tamper(self):
+        # 実行時ディレクトリの canary を改変試行
+        p_local = Path("canary.txt")
+        if p_local.exists():
+            os.chmod(p_local, 0o644)
+            p_local.write_text("TAMPERED_LOCAL")
+        # 元リポジトリの絶対パスへも chmod して改変試行
+        p_abs = Path(r"{canary_abs_path}")
+        if p_abs.exists():
+            try:
+                os.chmod(p_abs, 0o644)
+                p_abs.write_text("TAMPERED_ABSOLUTE")
+            except Exception:
+                pass
+        self.assertEqual(1, 2)
+"""
+        result = self.verifier.verify_candidate_test(code)
+
+        # 3. アサーション失敗により Red と判定される
+        self.assertTrue(result.is_reproduced)
+        self.assertEqual(result.reason, "GENUINE_RED")
+
+        # 4. 元リポジトリの canary.txt は絶対に改変されていないこと (物理的不変性)
+        self.assertEqual(
+            canary.read_text(encoding="utf-8"),
+            "ORIGINAL_CANARY",
+            "Parent repository's canary.txt must remain pristine!",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
