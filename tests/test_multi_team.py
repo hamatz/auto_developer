@@ -651,6 +651,80 @@ class TestMultiTeamOrchestration(unittest.TestCase):
             if verify_script.exists():
                 verify_script.unlink()
 
+    def test_cleanup_workers_preserves_worktree_when_evidence_preservation_fails(self) -> None:
+        """NN.1: Evidence 退避失敗時に原本 Worktree が削除されず保全されることの実証。"""
+        job_id = "job-preserve-fail-test"
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id=job_id,
+            teams=[
+                TeamWorkerSpec(team_id="team-preserve-target"),
+            ],
+            base_branch="main",
+        )
+
+        def mock_worker(team_id: str, wt_path: Path) -> TeamExecutionResult:
+            target = wt_path / "work.txt"
+            target.write_text("important work\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=wt_path, check=True)
+            subprocess.run(["git", "commit", "-m", "feat: work"], cwd=wt_path, check=True)
+            rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt_path, capture_output=True, text=True, check=True).stdout.strip()
+            tree_sha = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=wt_path, capture_output=True, text=True, check=True).stdout.strip()
+            import hashlib
+            spec_sha = hashlib.sha256((wt_path / "SPEC.md").read_bytes()).hexdigest()
+
+            ev_store = EvidenceStore(repo_dir=wt_path)
+            ev_store.issue_evidence(
+                task_id=f"task-{team_id}",
+                checkpoint=self.base_commit,
+                tree_sha=tree_sha,
+                spec_sha=spec_sha,
+            )
+            ev_store.archive_record(
+                task_id=f"task-{team_id}",
+                status="COMPLETED",
+                commit_info={"sha": rev, "tree_sha": tree_sha},
+                checker_info={"decision": "APPROVE", "reason": "Approved"},
+                verification_info={"exit_code": 0},
+            )
+            bundles_dir = wt_path / ".dev" / "bundles"
+            bundles_dir.mkdir(parents=True, exist_ok=True)
+            bundle_p = bundles_dir / f"bundle_{team_id}.zip"
+            bundler = EvidenceBundler(repo_dir=wt_path)
+            bundler.create_bundle(dest_path=bundle_p)
+
+            return TeamExecutionResult(
+                team_id=team_id,
+                success=True,
+                status="SUCCESS",
+                branch=f"team/{team_id}",
+                head_commit=rev,
+                bundle_path=bundle_p,
+            )
+
+        wt_path = orchestrator.worktree_manager.worktree_base / "team-preserve-target"
+
+        # shutil.copy2 に例外を注入して退避コピーを失敗させる
+        with unittest.mock.patch("shutil.copy2", side_effect=OSError("injected storage failure")):
+            multi_res = orchestrator.execute_multi_team_pipeline(
+                config=config,
+                worker_fn=mock_worker,
+                cleanup=True,
+            )
+
+        # 統合は拒否されること
+        self.assertFalse(multi_res.success)
+        self.assertEqual(multi_res.status, "WORKER_FAILED")
+        self.assertEqual(multi_res.team_results["team-preserve-target"].status, "BUNDLE_PRESERVATION_FAILED")
+
+        # 原本保護: 退避に失敗した Worktree および内部の Bundle が削除されずに残っていること
+        self.assertTrue(wt_path.exists(), f"Original worktree {wt_path} must be preserved when preservation fails")
+        original_bundle = wt_path / ".dev" / "bundles" / "bundle_team-preserve-target.zip"
+        self.assertTrue(original_bundle.exists(), f"Original bundle {original_bundle} must be preserved on disk")
+
+        # 手動で後片付け
+        orchestrator.worktree_manager.remove_worktree("team-preserve-target", force=True, delete_branch=True, purge_unmerged=True)
+
 
 if __name__ == "__main__":
     unittest.main()
