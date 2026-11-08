@@ -159,6 +159,74 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         good_dir = orchestrator.worktree_manager.worktree_base / "team-good"
         self.assertFalse(good_dir.exists())
 
+    def test_run_workers_executes_in_parallel_and_collects_results(self) -> None:
+        """II.1, II.2: run_workers が各チームを並行実行し、結果と成果物バンドルを収集できることの実証。"""
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id="job-parallel-test",
+            teams=[
+                TeamWorkerSpec(team_id="team-alpha"),
+                TeamWorkerSpec(team_id="team-beta"),
+            ],
+            base_branch="main",
+        )
+        orchestrator.prepare_workers(config)
+
+        def mock_worker(team_id: str, wt_path: Path) -> TeamExecutionResult:
+            f = wt_path / f"{team_id}.txt"
+            f.write_text(f"work done by {team_id}\n", encoding="utf-8")
+            subprocess.run(["git", "add", f"{team_id}.txt"], cwd=wt_path, check=True)
+            subprocess.run(["git", "commit", "-m", f"feat: {team_id} work"], cwd=wt_path, check=True)
+            rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt_path, capture_output=True, text=True, check=True).stdout.strip()
+            bundle_p = wt_path / f"bundle_{team_id}.zip"
+            bundle_p.write_text("dummy bundle", encoding="utf-8")
+            return TeamExecutionResult(
+                team_id=team_id,
+                success=True,
+                status="SUCCESS",
+                head_commit=rev,
+                bundle_path=bundle_p,
+            )
+
+        results = orchestrator.run_workers(config, worker_fn=mock_worker)
+        self.assertEqual(len(results), 2)
+        self.assertTrue(results["team-alpha"].success)
+        self.assertTrue(results["team-beta"].success)
+        self.assertIsNotNone(results["team-alpha"].head_commit)
+        self.assertIsNotNone(results["team-beta"].head_commit)
+
+        orchestrator.cleanup_workers(config)
+
+    def test_run_workers_handles_worker_crash_or_failure(self) -> None:
+        """II.1, II.2: いずれかのワーカーが例外や失敗を起こした際、安全にエラー結果を記録することの実証。"""
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id="job-crash-test",
+            teams=[
+                TeamWorkerSpec(team_id="team-ok"),
+                TeamWorkerSpec(team_id="team-fail"),
+            ],
+            base_branch="main",
+        )
+        orchestrator.prepare_workers(config)
+
+        def mock_failing_worker(team_id: str, wt_path: Path) -> TeamExecutionResult:
+            if team_id == "team-fail":
+                raise RuntimeError("Worker process crashed unexpectedly")
+            return TeamExecutionResult(
+                team_id=team_id,
+                success=True,
+                status="SUCCESS",
+                bundle_path=wt_path / "bundle.zip",
+            )
+
+        results = orchestrator.run_workers(config, worker_fn=mock_failing_worker)
+        self.assertTrue(results["team-ok"].success)
+        self.assertFalse(results["team-fail"].success)
+        self.assertEqual(results["team-fail"].status, "CRASHED")
+
+        orchestrator.cleanup_workers(config)
+
 
 if __name__ == "__main__":
     unittest.main()
