@@ -343,7 +343,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `README.md` および `docs/designs/autonomous_pipeline_orchestrator.md` に「実装状況マトリクス（実装・検証完了 / 開発中 / 将来マイルストーン）」を追加し、北極星アーキテクチャ図と現在地を明確化。
      - 全自動検証ゲート（181+ テスト、Ruff、Mypy）の合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
-- [ ] 機能TT (Stage 3 プロセスグループ実行中判定の厳格化とアクティブハンドル寿命管理 Stage 3 Process Group Active State Verification & Handle Lifecycle):
+- [x] 機能TT (Stage 3 プロセスグループ実行中判定の厳格化とアクティブハンドル寿命管理 Stage 3 Process Group Active State Verification & Handle Lifecycle):
   1. プロセスグループ実行中判定の厳格化 (TT.1 / P1):
      - `terminate_worker_process_group()` において、単なる `killpg(pgid, 0)` の消滅待ちではなく、プロセスグループ内に「実行中プロセス（非ゾンビ）」が残存していないことを直接検査する判定ロジックを実装。
      - Linux 環境では `/proc` を走査して対象 PGID のプロセス状態（`State: Z/X` 除外）を確認し、macOS/BSD/その他環境では `ps -eo pid=,pgid=,stat=` を用いて検査。
@@ -353,6 +353,15 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 終了確認済みのワーカーはアクティブ対象から除外し、OSによるPID/PGID再利用時の無関係なプロセスグループ誤爆を物理的に防止する。
   3. 2ワーカー並行停止テストの決定論的実証、全体検証ゲート通過、および Evidence Bundle 生成・検証 (TT.3):
      - 独立実行環境において `test_terminate_all_workers_terminates_running_subprocesses` を含む全 23 件の multi-team テストが 100% 決定論的に合格することを実証。
+     - 全自動検証ゲート（181+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [ ] 機能UU (Stage 3 ワーカー停止失敗時のハンドル保持と再試行回収保証 Stage 3 Termination Failure Handle Retention & Recovery Retry):
+  1. 停止失敗時のハンドル維持 (UU.1 / P1):
+     - `terminate_worker_process_group()` において、プロセスグループ内に実行中プロセスが残存している場合（`still_alive == True`）は、`self._active_workers` および `self._all_worker_handles` からハンドルを破棄せず監督対象として保持する。
+     - `_worker_history[team_id]` には `status: "TERMINATION_FAILED"` および失敗時刻を記録する。
+  2. 再試行による回収能力の実証 (UU.2 / P1):
+     - 一度停止に失敗したワーカーであっても、ハンドルが保持されているため、後続の `terminate_worker_process_group()` または `terminate_all_workers()` による再試行で回収可能であることを Red-First テストで実証する（「停止失敗 → ハンドル保持 → 再回収成功」）。
+  3. 全体検証ゲート通過、および Evidence Bundle 生成・検証 (UU.3):
      - 全自動検証ゲート（181+ テスト、Ruff、Mypy）の合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
 
