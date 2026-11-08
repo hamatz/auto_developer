@@ -21,6 +21,22 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-08] 同一OSユーザー環境でのファイル権限ロックダウンの限界と一時クローン隔離 (Physical Clone Isolation)
+- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`)
+- Trap: `0o555`/`0o444` によるOSパーミッション剥奪を行っても、テストプロセスが元リポジトリと同じOSユーザーで実行されている限り、テストメソッド内で `os.chmod()` を呼べば書き込み権限を復活させて元リポジトリを改変できてしまい、AST制限やchmodの多重化では根本解決にならなかった。
+- Rule: 信頼できないコードの実行では、元リポジトリのパス上で直接実行してはならない。必ず独立した検証用一時クローン（または分離Worktree）を生成し、その閉じた環境内で実行することで、テストが内部でどんなchmodやファイル書き換えを行おうと、元リポジトリの物理的不変性を完全に保証する。
+- Rung: 作り（物理的一時クローン隔離） & 検査
+- Immunity Test: `tests/test_red_verifier.py`, `tests/test_immunity_and_red_acceptance.py`
+- Proof: テストメソッド内で `os.chmod` を呼んで元リポジトリの改変を試みるテストを実行させても、元リポジトリが物理的に無傷であることを実証。
+
+### [2026-11-08] パイプライン連携モジュール間でのタスク書式・IDスキーマの断絶 (Task Format Interoperability)
+- Context: `src/auto_developer/dispatcher.py` (`TaskDispatcher` vs `AuditDispatcher`)
+- Trap: `AuditDispatcher` が出力するタスク書式（`- [ ] Fix: [ID] ...`）が、既存の `TaskDispatcher.TASK_PATTERN`（`- [ ] <task_id>. <title>`）と一致していなかったため、PLAN.md に登録されたタスクが `parse_plan()` で認識されず、次の Maker にタスクが渡らないというパイプライン断絶が発生した。
+- Rule: タスクを自動登録するコンポーネントは、下流のディスパッチャが要求する正規表現スキーマに厳格に従い、一意なタスクIDプレフィックス（`AUD-<finding_id>.`）を付与する。連携受入テストで登録から取得・ステータス更新までをエンドツーエンドで検証する。
+- Rung: 作り（タスクIDスキーマ統一） & 検査（受入テスト）
+- Immunity Test: `tests/test_audit_dispatch.py`
+- Proof: 登録されたタスクが `TaskDispatcher.parse_plan()` および `get_next_pending_task()` で正常に抽出され、Makerに引き渡せることを実証。
+
 ### [2026-11-08] 新規免疫テスト追加による既存ガードの弛緩・モンキーパッチ汚染 (Mutual Non-Interference)
 - Context: `src/auto_developer/guard.py` (`GitGuard.check_protected_files_untouched`), `verifier.py`
 - Trap: 免疫テスト追加を許可する際、新規テストファイルの中身でモジュールインポート時やトップレベルでバグ関数を正しい実装にモンキーパッチ（動的差し替え）されると、Python unittest の同一プロセス実行により既存の失敗テストが通過（FAILED → OK）してしまい、「追加がガードを緩める」という重大なセキュリティホールが存在した。

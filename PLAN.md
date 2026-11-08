@@ -7,20 +7,20 @@
 -->
 
 ## 現在の目標
-- Phase 43: Stage 4 — 自己改善パイプライン接続 & 監査自動タスク登録 (Stage 4 Self-Improvement Pipeline & Audit Task Dispatching)
-  - 防壁の穴封鎖: 新規免疫テスト追加時の既存テスト不干渉検証（Mutual Non-Interference Guard）、トップレベルAST検査（動的モンキーパッチ・実行文の遮断）、root実行時のFail-Closed（機能CCC.1）
-  - 独立監査役ランナーと構造化 Finding モデル: `AuditRunner` および `AuditFinding` モデルの実装（機能CCC.2）
-  - 監査指摘から Red 検証を経て `PLAN.md` への修正タスク自動登録: `RedTestVerifier` の結果に基づく `TaskDispatcher` への自動タスクディスパッチ（機能CCC.3）
-  - 決定論的受入実証 & 全自動検証ゲート完全合格（227+ テスト）（機能CCC.4）
+- Phase 44: Stage 4 — 物理クローン隔離 & パイプライン接続修正 (Stage 4 Physical Clone Isolation & Pipeline Interoperability)
+  - 候補テストの物理的クローン隔離実行: 元リポジトリへの直接実行およびパーミッション剥奪を廃止し、独立した検証用一時クローン（clean temporary clone）上で実行して元リポジトリの物理的不変性を 100% 保証（機能DDD.1）
+  - タスク書式統一と TaskDispatcher 連携: `AuditDispatcher` が追記するタスクに `AUD-<finding_id>.` プレフィックスを付与し、`TaskDispatcher.parse_plan()` / `get_next_pending_task()` との連携を保証（機能DDD.2）
+  - 監査Findingと再現テストの永続化管理: `.dev/audit/findings/` および `.dev/audit/repro_tests/` への構造化保存と参照性確保（機能DDD.3）
+  - Level 7 E2E受入テストの強化 & 検証ゲート完全合格: `TaskDispatcher.get_next_pending_task()` 経由で Maker へタスクが届く実運用E2E、`os.chmod` 改変阻止テスト、全体検証ゲート（246+ テスト）合格確認、Evidence Bundle 生成（機能DDD.4）
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- `tests/test_red_verifier.py`: `test_rejects_empty_or_no_test_methods` において `x = 10` のトップレベル代入文が含まれていたため、機能CCC.1のトップレベルAST検査導入に伴い `TOP_LEVEL_EXEC_FORBIDDEN` となっていた。純粋にテストが存在しないケースを検証するためコメントのみのコードへ更新。
+- なし（既存テストの破壊的変更は行わず、新規テスト追加と既存合格の維持を徹底）
 
 ## ステップ
-- [x] 1. 防壁の穴封鎖（既存テスト不干渉検証、トップレベルAST検査、root実行Fail-Closed）の実装と単体テスト（Red-First）（CCC.1）
-- [x] 2. 独立監査役ランナー `AuditRunner` と `AuditFinding` モデルの実装と単体テスト（Red-First）（CCC.2）
-- [x] 3. 監査指摘からRed検証を経て `PLAN.md` への修正タスク自動登録（パイプライン接続）の実装と単体テスト（Red-First）（CCC.3）
-- [x] 4. 決定論的受入実証（シードバグの監査指摘 → 隔離Red検証 → PLAN.md自動登録）と全体検証ゲート合格確認、Evidence Bundle 生成（CCC.4）
+- [ ] 1. 候補テストの物理的クローン隔離実行（元リポジトリ汚染の完全遮断）の実装と単体テスト（Red-First）（DDD.1）
+- [ ] 2. タスク書式統一（AUD-<finding_id>. プレフィックス）と TaskDispatcher 連携の実装と単体テスト（Red-First）（DDD.2）
+- [ ] 3. 監査Findingと再現テストの永続化管理（.dev/audit/）の実装と単体テスト（Red-First）（DDD.3）
+- [ ] 4. Level 7 E2E受入テストの強化（Makerタスク取得・修正実証 & chmod改変阻止）と全体検証ゲート合格確認、Evidence Bundle 生成（DDD.4）
 
 ## 止まっていること・判断待ち
 - なし

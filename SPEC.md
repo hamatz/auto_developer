@@ -454,7 +454,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   3. 決定論的受入実証と全体検証ゲート合格確認 (BBB.3 / Phase 42 完了判定):
      - 例外メッセージ偽装（`OSError("AssertionError: ...")`）の排除、および絶対パス指定による本体書き換えが OS レベルで `PermissionError` となり本体が完全に無傷であることを実証する単体・受入テストスイート（Red-First）。
      - 全自動検証ゲート（222+ テスト、Ruff、Mypy）の完全合格確認。
-- [ ] 機能CCC (Stage 4 自己改善パイプライン接続 & 監査自動タスク登録 Stage 4 Self-Improvement Pipeline & Audit Task Dispatching):
+- [x] 機能CCC (Stage 4 自己改善パイプライン接続 & 監査自動タスク登録 Stage 4 Self-Improvement Pipeline & Audit Task Dispatching):
   1. 防壁の穴封鎖 (CCC.1 / Sol氏 P0 & P1指摘):
      - 既存テスト不干渉検証 (Mutual Non-Interference Guard): 新規免疫テスト追加前後の既存テストスイート実行結果（テスト総数・パス件数）を比較し、既存テストの成否や結果が一切変化しないことを機械的に証明する。
      - トップレベル AST 検査 (Top-level AST Validator): 候補テストコードのトップレベル構造を検査し、`import`、`class`、`def` 定義以外のトップレベル実行文（モンキーパッチやグローバル変数・関数の動的差し替え）を Fail-Closed で即時拒絶（`False`）する。
@@ -469,6 +469,23 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. 決定論的受入実証と全体検証ゲート合格確認 (CCC.4 / Phase 43 完了判定):
      - モンキーパッチによるガード弛緩の遮断、root 実行拒否、および「シードバグの監査指摘 → 隔離Red検証 → PLAN.md自動登録」が人間の介在ゼロで完結することを実証する単体・受入テストスイート（Red-First）。
      - 全自動検証ゲート（227+ テスト、Ruff、Mypy）の完全合格確認。
+- [ ] 機能DDD (Stage 4 物理クローン隔離 & パイプライン接続修正 Stage 4 Physical Clone Isolation & Pipeline Interoperability):
+  1. 候補テストの物理的クローン隔離実行 (DDD.1 / Sol氏 P0指摘):
+     - `RedTestVerifier` において、元リポジトリのパス上での直接実行（および chmod による一時ロックダウン）を廃止。
+     - テスト検証ごとに、元リポジトリから隔離された一時クローン（clean temporary clone）を作業環境として生成し、その閉じた環境内で候補テストを実行する。
+     - 候補テストがテストメソッド内で `os.chmod()` や絶対パスでのファイル書き換えを行おうとしても、元リポジトリのファイルシステムには一切到達できず、物理的不変性を 100% 保証する。
+  2. タスク書式統一と TaskDispatcher 連携 (DDD.2 / Sol氏 P1指摘):
+     - `AuditDispatcher` が `PLAN.md` に追記するタスク書式を、`TaskDispatcher.TASK_PATTERN` に完全合致させ、タスクIDプレフィックス `AUD-<finding_id>.` を付与する。
+     - 例: `- [ ] AUD-FINDING-001. Fix: [FINDING-001] <description> (Severity: <severity>, Loc: <location>)`
+     - 登録されたタスクが `TaskDispatcher.parse_plan()` で正しくパースされ、`get_next_pending_task()` で次の未完了タスクとして取り出せ、`mark_task_status()` で更新できることを保証する。
+     - Finding ID による二重登録防止（Idempotency）も維持。
+  3. 監査Findingと再現テストの永続化管理 (DDD.3 / Sol氏 改善指摘):
+     - 監査役から生成された Finding および再現テストコードを、`.dev/audit/findings/<finding_id>.json` および `.dev/audit/repro_tests/<finding_id>.py` として永続化保存する。
+     - 後続の Maker が修正作業時に、Finding の詳細（深刻度、場所、仕様参照、再現コードのパスやハッシュ）をいつでも確実に参照・再実行できるようにする。
+  4. Level 7 E2E受入テストの強化と全体検証ゲート合格確認 (DDD.4 / Phase 44 完了判定):
+     - 単にテストコード内で修正するだけでなく、`AuditDispatcher` で登録されたタスクを `TaskDispatcher.get_next_pending_task()` で取得し、Maker インターフェースへ渡して修正・Green化・免疫テスト昇格まで完結する実運用E2E受入テストを追加。
+     - `os.chmod` で書き込み権限を復活させて元リポジトリを改変しようとする敵対的テストが実行されても、元リポジトリのファイルが物理的に無傷であることを実証する隔離テスト。
+     - 全自動検証ゲート（246+ テスト、Ruff、Mypy）の完全合格確認と Evidence Bundle 生成。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
