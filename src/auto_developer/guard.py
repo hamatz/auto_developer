@@ -1,10 +1,112 @@
 from __future__ import annotations
 
+import ast
+import json
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from auto_developer.models import Task
+
+
+def is_safe_main_guard(stmt: ast.If) -> bool:
+    """if __name__ == '__main__': unittest.main() のイディオムのみを安全と判定する。
+    呼び出し対象が unittest.main() 以外の任意関数呼び出しである場合は遮断する。
+    """
+    test_node = stmt.test
+    is_name_check = False
+    if (
+        isinstance(test_node, ast.Compare)
+        and len(test_node.ops) == 1
+        and isinstance(test_node.ops[0], ast.Eq)
+    ):
+        left = test_node.left
+        comparator = test_node.comparators[0]
+        if (
+            isinstance(left, ast.Name)
+            and left.id == "__name__"
+            and isinstance(comparator, ast.Constant)
+            and comparator.value == "__main__"
+        ) or (
+            isinstance(comparator, ast.Name)
+            and comparator.id == "__name__"
+            and isinstance(left, ast.Constant)
+            and left.value == "__main__"
+        ):
+            is_name_check = True
+
+    if not is_name_check:
+        return False
+
+    # else: 節が存在する場合、モジュールインポート時の迂回実行となるため即時拒絶 (Fail-Closed)
+    if getattr(stmt, "orelse", None):
+        return False
+
+    # body が空の場合は拒絶
+    if not stmt.body:
+        return False
+
+    for body_stmt in stmt.body:
+        if isinstance(body_stmt, ast.Expr) and isinstance(body_stmt.value, ast.Call):
+            call_func = body_stmt.value.func
+            if (
+                isinstance(call_func, ast.Attribute)
+                and call_func.attr == "main"
+                and isinstance(call_func.value, ast.Name)
+                and call_func.value.id == "unittest"
+            ):
+                continue
+        return False
+    return True
+
+
+def validate_test_ast(target: str | Path | ast.AST) -> bool:
+    """候補テストおよび免疫テストのトップレベル構造を検査し、モンキーパッチや副作用を遮断する。"""
+    if isinstance(target, ast.AST):
+        tree = target
+    elif isinstance(target, Path):
+        try:
+            content = target.read_text(encoding="utf-8")
+            tree = ast.parse(content)
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            return False
+    elif isinstance(target, str):
+        try:
+            tree = ast.parse(target)
+        except (SyntaxError, UnicodeDecodeError):
+            return False
+    else:
+        return False
+
+    for stmt in getattr(tree, "body", []):
+        if isinstance(
+            stmt,
+            (
+                ast.Import,
+                ast.ImportFrom,
+                ast.ClassDef,
+            ),
+        ):
+            continue
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # setUpModule / tearDownModule / load_tests 等のモジュールレベル副作用関数は禁止
+            if stmt.name in ("setUpModule", "tearDownModule", "setUp", "tearDown", "load_tests"):
+                return False
+            continue
+        # docstring または コメント相当の文字列定数 Expr のみ許可
+        if (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and isinstance(stmt.value.value, str)
+        ):
+            continue
+        # if __name__ == '__main__': ガード (unittest.main() のみ)
+        if isinstance(stmt, ast.If) and is_safe_main_guard(stmt):
+            continue
+        # それ以外 (ast.Assign, ast.Call 等のトップレベル実行文) はモンキーパッチ・副作用として禁止
+        return False
+    return True
 
 
 class GitGuard:
@@ -76,8 +178,117 @@ class GitGuard:
         proc_status = self._run_git(["status", "--porcelain"])
         return bool(proc_status.stdout.strip())
 
+    def _run_test_subset(
+        self, candidate_file: str, test_files: list[str], timeout_sec: int = 30
+    ) -> dict[str, Any] | None:
+        """テスト群を独立プロセスで実行し、構造化された実行結果を取得する。"""
+        import sys
+        runner_script = """
+import json, os, sys, unittest
+
+candidate_file = sys.argv[1]
+test_files = sys.argv[2:]
+
+if candidate_file != "NONE" and os.path.exists(candidate_file):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_candidate_module", candidate_file)
+    if spec and spec.loader:
+        mod = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(mod)
+        except Exception:
+            pass
+
+loader = unittest.TestLoader()
+suite = unittest.TestSuite()
+for f in test_files:
+    dir_name = os.path.dirname(f)
+    base_name = os.path.basename(f)
+    try:
+        loaded = loader.discover(start_dir=dir_name, pattern=base_name)
+        suite.addTests(loaded)
+    except Exception:
+        pass
+
+result = unittest.TestResult()
+suite.run(result)
+
+data = {
+    "tests_run": result.testsRun,
+    "failures": len(result.failures),
+    "errors": len(result.errors),
+    "failed_tests": sorted([str(t[0]) for t in result.failures]),
+    "error_tests": sorted([str(t[0]) for t in result.errors]),
+}
+print("===MUTUAL_RESULT===")
+print(json.dumps(data))
+"""
+        cmd = [
+            sys.executable,
+            "-c",
+            runner_script,
+            candidate_file,
+            *test_files,
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=self.repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+                check=False,
+            )
+            marker = "===MUTUAL_RESULT==="
+            if marker in proc.stdout:
+                json_str = proc.stdout.split(marker, 1)[1].strip()
+                return json.loads(json_str)  # type: ignore[no-any-return]
+            return None
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+            return None
+
+    def verify_mutual_non_interference(self, candidate_rel_path: str, timeout_sec: int = 30) -> bool:
+        """新規免疫テスト候補が、既存テストスイートの実行結果に副作用・干渉（成否改変）を及ぼさないことを、
+        事前・事後の実行結果比較によって機械的に証明する。
+        """
+        candidate_path = (self.repo_dir / candidate_rel_path).resolve()
+        if not candidate_path.exists():
+            return False
+
+        # 1. AST 検査
+        if not validate_test_ast(candidate_path):
+            return False
+
+        # 2. 既存テストスイートの特定 (candidate_path を除くすべての test_*.py)
+        tests_dir = self.repo_dir / "tests"
+        if not tests_dir.exists():
+            return True
+
+        existing_files: list[str] = []
+        for f in tests_dir.rglob("test_*.py"):
+            if f.is_file() and f.resolve() != candidate_path:
+                existing_files.append(str(f.resolve()))
+
+        if not existing_files:
+            return True
+
+        # 3. 事前ベースライン (NONE: 候補モジュールをインポートしない状態)
+        res_before = self._run_test_subset("NONE", existing_files, timeout_sec=timeout_sec)
+        if res_before is None:
+            return False
+
+        # 4. 事後比較 (候補モジュールを事前インポートした状態)
+        res_after = self._run_test_subset(str(candidate_path), existing_files, timeout_sec=timeout_sec)
+        if res_after is None:
+            return False
+
+        # 5. 既存テストの結果 (tests_run, failures, errors, failed_tests, error_tests) が完全一致すること
+        return res_before == res_after
+
     def _is_valid_new_immunity_file(self, rel_path: str) -> bool:
-        """新規免疫テストファイルが通常ファイルかつ命名規則を満たし、シンボリックリンクでないかを検査する。"""
+        """新規免疫テストファイルが通常ファイルかつ命名規則を満たし、シンボリックリンクでなく、
+        トップレベルにモンキーパッチ等の動的実行文を含まないかを検査する。
+        """
         if not self.VALID_IMMUNITY_FILE_PATTERN.match(rel_path):
             return False
         target = self.repo_dir / rel_path
@@ -85,7 +296,9 @@ class GitGuard:
             return False
         if target.is_symlink():
             return False
-        return target.is_file()
+        if not target.is_file():
+            return False
+        return validate_test_ast(target)
 
     def check_protected_files_untouched(
         self, checkpoint: str, allow_immunity_additions: bool = False

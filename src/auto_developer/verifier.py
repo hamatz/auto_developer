@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from auto_developer.guard import validate_test_ast
+
 
 class DeterministicVerifier:
     """ローカル検証スクリプトの実行と判定を担当。"""
@@ -80,7 +82,17 @@ class RedTestVerifier:
                 reason_detail=f"SyntaxError: {e}",
             )
 
-        # 2. テストケースの存在確認
+        # 2. トップレベル AST 検査 (モンキーパッチ・実行文の遮断)
+        if not validate_test_ast(tree):
+            return RedVerificationResult(
+                is_reproduced=False,
+                exit_code=1,
+                reason="TOP_LEVEL_EXEC_FORBIDDEN",
+                output="Top-level executable statements, monkeypatching, or forbidden module hooks detected in candidate test.",
+                reason_detail="Candidate test contains top-level executable statements or forbidden hooks (AST validation failed).",
+            )
+
+        # 3. テストケースの存在確認
         has_test_class = any(
             isinstance(node, ast.ClassDef)
             and any(
@@ -246,6 +258,16 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         シークレット等の機密環境変数を除外サニタイズした上で、本体作業ツリーを OS 権限レベルで
         読取専用にロックダウンして実行する。
         """
+        # 0. root (UID 0) 実行検知と安全遮断 (OSパーミッション迂回の防止)
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            return RedVerificationResult(
+                is_reproduced=False,
+                exit_code=1,
+                reason="ROOT_EXECUTION_FORBIDDEN",
+                output="Running candidate tests as root (UID 0) bypasses OS permission lockdown and is forbidden.",
+                reason_detail="Running candidate tests as root (UID 0) bypasses OS permission lockdown and is forbidden.",
+            )
+
         # 1. 環境変数のサニタイズ（シークレット・APIキーの除外）
         sanitized_env: dict[str, str] = {}
         for k, v in os.environ.items():

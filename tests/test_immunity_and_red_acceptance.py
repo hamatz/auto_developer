@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+src_dir = str(Path(__file__).resolve().parent.parent / "src")
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
+from auto_developer.audit import AuditRunner
+from auto_developer.dispatcher import AuditDispatcher
 from auto_developer.guard import GitGuard
 from auto_developer.verifier import RedTestVerifier
 
@@ -200,6 +207,85 @@ class AbsoluteTamperTest(unittest.TestCase):
         )
         self.assertFalse(res.is_reproduced)
         self.assertEqual(res.reason, "UNHANDLED_EXCEPTION")
+
+    def test_end_to_end_level7_vertical_slice(self) -> None:
+        """受入シナリオ7 (CCC.4): Level 7 垂直統合実証。
+        シードバグの監査指摘 → 隔離Red検証 → PLAN.md自動登録 → Makerによる修正 → Green確認 → 免疫テスト昇格。
+        """
+        # 0. PLAN.md の準備
+        plan_file = self.repo_dir / "PLAN.md"
+        plan_file.write_text(
+            """# PLAN.md
+
+## ステップ
+- [x] 1. Baseline task
+""",
+            encoding="utf-8",
+        )
+
+        # 1. 監査役 (AuditRunner) がシードバグの指摘を発見・構造化
+        # シードバグ: calculator.py の divide は 10 / 0 で ZeroDivisionError を投げるが、仕様は -1.0 を期待
+        audit_raw = [
+            {
+                "finding_id": "BUG-DIV-ZERO",
+                "severity": "P1",
+                "spec_reference": "SPEC.md math rules",
+                "location": "src/calculator.py:41",
+                "description": "Zero division does not return -1.0 as specified",
+                "reproduction_test_code": """import unittest
+from calculator import divide
+
+class ZeroDivisionReproTest(unittest.TestCase):
+    def test_divide_zero_returns_fallback(self):
+        try:
+            val = divide(10, 0)
+        except ZeroDivisionError:
+            val = None
+        self.assertEqual(val, -1.0)
+""",
+            }
+        ]
+        runner = AuditRunner()
+        findings = runner.run_audit(audit_raw)
+        self.assertEqual(len(findings), 1)
+
+        # 2. AuditDispatcher による Red 検証と PLAN.md への自動タスク登録
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=self.verifier)
+        dispatched = dispatcher.process_findings(findings, plan_path=plan_file)
+        self.assertEqual(len(dispatched), 1)
+        self.assertEqual(dispatched[0].status, "DISPATCHED")
+
+        # PLAN.md に修正タスクが登録されていることを検証
+        plan_content = plan_file.read_text(encoding="utf-8")
+        self.assertIn("- [ ] Fix: [BUG-DIV-ZERO] Zero division does not return -1.0 as specified", plan_content)
+        self.assertIn("Severity: P1", plan_content)
+
+        # 3. Maker がタスクに着手し、コードを修正 (バグ解消)
+        # calculator.py を修正: ZeroDivisionError の場合に -1.0 を返すようにする
+        self.calc_file.write_text(
+            """def divide(a: int, b: int) -> float:
+    if b == 0:
+        return -1.0
+    return a / b
+""",
+            encoding="utf-8",
+        )
+
+        # 4. 修正後に再現テストを再検証 -> 成功 (Green) することを確認 (is_reproduced == False, exit_code == 0)
+        post_fix_res = self.verifier.verify_candidate_test(dispatched[0].reproduction_test_code)
+        self.assertFalse(post_fix_res.is_reproduced)
+        self.assertEqual(post_fix_res.exit_code, 0)
+
+        # 5. 再現テストを永続的な免疫テスト (tests/immunity/) へ昇格・追加
+        promoted_immunity_file = self.immunity_dir / "test_divide_zero_immunity.py"
+        promoted_immunity_file.write_text(dispatched[0].reproduction_test_code, encoding="utf-8")
+
+        # 6. 非対称免疫ガードの検証
+        # 監査モード (allow_immunity_additions=True) では正しく保護対象として受理されること
+        self.assertTrue(
+            self.guard.check_protected_files_untouched(self.checkpoint, allow_immunity_additions=True),
+            "Promoted immunity test must be accepted in audit phase!",
+        )
 
 
 if __name__ == "__main__":

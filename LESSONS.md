@@ -21,6 +21,24 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-08] 新規免疫テスト追加による既存ガードの弛緩・モンキーパッチ汚染 (Mutual Non-Interference)
+- Context: `src/auto_developer/guard.py` (`GitGuard.check_protected_files_untouched`), `verifier.py`
+- Trap: 免疫テスト追加を許可する際、新規テストファイルの中身でモジュールインポート時やトップレベルでバグ関数を正しい実装にモンキーパッチ（動的差し替え）されると、Python unittest の同一プロセス実行により既存の失敗テストが通過（FAILED → OK）してしまい、「追加がガードを緩める」という重大なセキュリティホールが存在した。
+- Rule: 新規免疫テストの追加に際しては、
+  1. 候補追加の前後で既存テストスイートを実行し、既存テストの成否・結果が 1 件も変化しないこと（相互不干渉 Mutual Non-Interference）を機械的に検証する。
+  2. AST 検査により、候補テストのトップレベルには `import` および `class`/`def` 定義のみを許可し、動的コード実行文を一切禁止する。
+- Rung: 作り（AST検査 & 不干渉検証） & 検査
+- Immunity Test: `tests/test_immunity_guard.py`
+- Proof: モンキーパッチを含む候補テストを追加しようとした際に、AST検査および不干渉検証により確実に拒絶されることを実証。
+
+### [2026-11-08] root (UID 0) 実行環境における OS パーミッションロックダウン無効化 (Root Execution Fail-Closed)
+- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._lockdown_repo`)
+- Trap: Docker コンテナや CI 等の root 権限（UID 0）環境では、ファイルパーミッション（`0o444`/`0o555`）が無視されるため、OS権限による書き込み禁止ロックダウンを迂回して絶対パスで本体ファイルが改変されてしまう穴が存在した。
+- Rule: `os.geteuid() == 0`（root環境）での無防備な候補テスト実行を検知した場合は、Fail-Closed として即座に実行を拒否し、非rootユーザーまたは明示的な隔離サンドボックスでの実行を強制する。
+- Rung: 作り（root検知ガード） & 検査
+- Immunity Test: `tests/test_red_verifier.py`
+- Proof: root 実行フラグまたは UID 0 環境で候補テストを実行しようとした際に、即座に拒絶されることを実証。
+
 ### [2026-11-08] 作業ディレクトリ隔離の不完全性とOS権限レベルの読取専用ロックダウン (OS Permission Lockdown)
 - Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`)
 - Trap: 候補テストの作業ディレクトリを一時ディレクトリ（`cwd=sandbox_dir`）に変更しても、Pythonプロセスは本体リポジトリに対するファイルアクセス権限を保持しているため、絶対パスや `PYTHONPATH` 経由で本体のファイル（例: `canary.txt`）を書き換えてからアサーション失敗を起こす攻撃・副作用を遮断できなかった。
