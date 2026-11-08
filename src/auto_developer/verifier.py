@@ -52,6 +52,10 @@ class RedVerificationResult:
 class RedTestVerifier:
     """監査役や外部から提示されたテスト候補が、現在のコードベースで確実に Red になるかを判定するハーネス。"""
 
+    SECRET_ENV_PATTERN = re.compile(
+        r"(TOKEN|SECRET|KEY|AUTH|CREDENTIAL|PASSWORD|PASS|API|PRIVATE)", re.IGNORECASE
+    )
+
     def __init__(self, repo_dir: Path | None = None) -> None:
         self.repo_dir = repo_dir or Path.cwd()
 
@@ -96,9 +100,12 @@ class RedTestVerifier:
 
         # 3. 一時ファイルに書き出して実行
         with tempfile.TemporaryDirectory() as tmpdir:
-            test_file = Path(tmpdir) / "test_candidate.py"
+            sandbox_path = Path(tmpdir)
+            test_file = sandbox_path / "test_candidate.py"
             test_file.write_text(test_code, encoding="utf-8")
-            return self._execute_test(test_file, tmpdir, timeout_sec)
+            return self._execute_test(
+                test_file, tmpdir, timeout_sec, sandbox_dir=sandbox_path
+            )
 
     def verify_candidate_test_file(
         self, test_file_path: Path, timeout_sec: int = 30
@@ -116,14 +123,30 @@ class RedTestVerifier:
         return self.verify_candidate_test(code, timeout_sec=timeout_sec)
 
     def _execute_test(
-        self, test_file: Path, search_dir: str, timeout_sec: int
+        self,
+        test_file: Path,
+        search_dir: str,
+        timeout_sec: int,
+        sandbox_dir: Path | None = None,
     ) -> RedVerificationResult:
-        """unittest discover で候補テストを実行し、Red/Green/無効を判定する。"""
-        env = os.environ.copy()
-        src_path = str(self.repo_dir / "src")
-        repo_path = str(self.repo_dir)
-        existing_pythonpath = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = f"{src_path}:{repo_path}:{existing_pythonpath}".strip(":")
+        """unittest discover で候補テストを実行し、Red/Green/無効を判定する。
+        本体リポジトリ汚染を防ぐため、実行作業ディレクトリは使い捨ての sandbox_dir に隔離し、
+        シークレット等の機密環境変数を除外サニタイズして実行する。
+        """
+        # 1. 環境変数のサニタイズ（シークレット・APIキーの除外）
+        sanitized_env: dict[str, str] = {}
+        for k, v in os.environ.items():
+            if self.SECRET_ENV_PATTERN.search(k):
+                continue
+            sanitized_env[k] = v
+
+        src_path = str((self.repo_dir / "src").resolve())
+        repo_path = str(self.repo_dir.resolve())
+        existing_pythonpath = sanitized_env.get("PYTHONPATH", "")
+        sanitized_env["PYTHONPATH"] = f"{src_path}:{repo_path}:{existing_pythonpath}".strip(":")
+
+        # 2. 実行作業ディレクトリの隔離 (本体 repo_dir への書き込み防止)
+        exec_cwd = sandbox_dir or Path(search_dir)
 
         cmd = [
             sys.executable,
@@ -139,8 +162,8 @@ class RedTestVerifier:
         try:
             proc = subprocess.run(
                 cmd,
-                cwd=self.repo_dir,
-                env=env,
+                cwd=exec_cwd,
+                env=sanitized_env,
                 capture_output=True,
                 text=True,
                 timeout=timeout_sec,

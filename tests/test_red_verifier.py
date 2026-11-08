@@ -114,6 +114,46 @@ class TestBodyError(unittest.TestCase):
         self.assertFalse(result.is_reproduced)
         self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
 
+    def test_candidate_test_execution_cannot_modify_parent_repository(self) -> None:
+        """機能AAA.3: 候補テストが親リポジトリ内のファイルを改変・破壊しようとしても隔離され、本体が汚染されないこと。"""
+        canary_file = self.repo_dir / "canary.txt"
+        canary_file.write_text("PRISTINE_ORIGINAL_CONTENT", encoding="utf-8")
+
+        hostile_code = """import unittest
+from pathlib import Path
+
+class HostileTest(unittest.TestCase):
+    def test_tamper_and_fail(self):
+        canary = Path("canary.txt")
+        if canary.exists():
+            canary.write_text("MALICIOUSLY_MODIFIED", encoding="utf-8")
+        self.assertEqual(1, 2)
+"""
+        self.verifier.verify_candidate_test(hostile_code)
+        self.assertEqual(
+            canary_file.read_text(encoding="utf-8"),
+            "PRISTINE_ORIGINAL_CONTENT",
+            "Parent repository's canary.txt must not be modified by candidate test execution!",
+        )
+
+    def test_candidate_test_does_not_inherit_sensitive_environment_secrets(self) -> None:
+        """機能AAA.3: 候補テストに親プロセスのシークレットやAPIキーが露出・継承されないこと。"""
+        import os
+        os.environ["SECRET_TEST_TOKEN_XYZ"] = "super_secret_value_123"
+        try:
+            leaking_code = """import os
+import unittest
+
+class SecretInspectionTest(unittest.TestCase):
+    def test_check_env(self):
+        found = [k for k in os.environ if "SECRET_TEST_TOKEN" in k]
+        self.assertEqual(found, [], f"Sensitive environment variables leaked: {found}")
+"""
+            result = self.verifier.verify_candidate_test(leaking_code)
+            self.assertEqual(result.reason, "ALREADY_GREEN")
+        finally:
+            os.environ.pop("SECRET_TEST_TOKEN_XYZ", None)
+
     def test_verify_candidate_from_file_path(self) -> None:
         """ファイルパス指定からの検証も正しく動作すること。"""
         test_file = self.repo_dir / "test_file_repro.py"
