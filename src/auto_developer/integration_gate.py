@@ -682,7 +682,7 @@ class IntegrationGate:
         if job_state.state == "COMPLETED":
             return True, "ALREADY_COMPLETED", {"rc_tag": job_state.rc_tag, "rc_commit": job_state.rc_commit}
 
-        # DD.3: RC タグが既に発行されているかの実態検査 (RC発行後・COMPLETED保存前のクラッシュ復旧)
+        # DD.3, EE.1: RC タグが既に発行されているかの実態検査 (RC発行後・COMPLETED保存前のクラッシュ復旧)
         rc_tag = f"rc/{job_id}"
         tag_check = self._run_git(["rev-parse", "--verify", f"refs/tags/{rc_tag}"], check=False)
         if tag_check.returncode == 0:
@@ -690,10 +690,24 @@ class IntegrationGate:
             # 孤立 Worktree が残っていれば解放
             cleaned_id = re.sub(r"[^a-z0-9_-]", "-", job_id.lower()).strip("-")
             wt_team_id = f"int-{cleaned_id}"[:64]
+            wt_path = self.worktree_manager.worktree_base / wt_team_id
+
+            removal_error: str | None = None
             try:
                 self.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=False)
             except (OSError, subprocess.CalledProcessError, WorktreeError, RuntimeError) as err:
+                removal_error = str(err)
                 logger.warning("Failed to remove worktree during RC recovery: %s", err)
+
+            # EE.1 / P0 Fail-Closed ガード: 削除失敗または残存時は RECOVERY_REQUIRED
+            still_exists = wt_path.exists() or any(wt.team_id == wt_team_id for wt in self.worktree_manager.list_worktrees())
+            if removal_error is not None or still_exists:
+                job_state.state = "RECOVERY_REQUIRED"
+                err_msg = removal_error or f"Worktree '{wt_team_id}' still exists after removal attempt during RC recovery"
+                job_state.details["error"] = err_msg
+                job_state.save(self.jobs_dir)
+                return False, "RECOVERY_REQUIRED", {"worktree_cleanup_failed": True, "error": err_msg}
+
             job_state.state = "COMPLETED"
             job_state.rc_commit = existing_rc_commit
             job_state.rc_tag = rc_tag
@@ -705,7 +719,7 @@ class IntegrationGate:
         wt_team_id = f"int-{cleaned_id}"[:64]
         wt_path = self.worktree_manager.worktree_base / wt_team_id
 
-        removal_error: str | None = None
+        removal_error = None
         try:
             self.worktree_manager.remove_worktree(wt_team_id, force=True, delete_branch=False)
         except (OSError, subprocess.CalledProcessError, WorktreeError, RuntimeError) as err:

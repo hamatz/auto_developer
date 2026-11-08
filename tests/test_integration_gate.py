@@ -1273,6 +1273,40 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         self.assertEqual(result.status, "SUCCESS")
         self.assertEqual(result.release_candidate_commit, expected_rc_commit)
 
+    def test_recover_interrupted_job_fails_closed_when_rc_exists_but_worktree_removal_fails(self) -> None:
+        """EE.1 / P0: RC タグが存在する状態でも Worktree 削除に失敗した場合は Fail-Closed で RECOVERY_REQUIRED となることの実証。"""
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        job_id = "job-rc-wt-fail-closed"
+        rc_tag = f"rc/{job_id}"
+        # RC タグを作成
+        self._run_git(["tag", rc_tag, self.base_commit], check=True)
+
+        state = IntegrationJobState(
+            job_id=job_id,
+            state="MERGING",
+            base_commit=self.base_commit,
+            integration_branch=f"integration/{job_id}",
+            rc_commit=self.base_commit,
+            rc_tag=rc_tag,
+        )
+        state.save(gate.jobs_dir)
+
+        # Worktree 削除処理に例外を注入 (Sol氏の再現シナリオ)
+        with unittest.mock.patch.object(
+            gate.worktree_manager,
+            "remove_worktree",
+            side_effect=RuntimeError("injected worktree failure"),
+        ):
+            success, status, details = gate.recover_interrupted_job(job_id)
+
+        self.assertFalse(success)
+        self.assertEqual(status, "RECOVERY_REQUIRED")
+        self.assertTrue(details.get("worktree_cleanup_failed"))
+
+        persisted = IntegrationJobState.load(gate.jobs_dir, job_id)
+        self.assertIsNotNone(persisted)
+        self.assertEqual(persisted.state, "RECOVERY_REQUIRED")
+
 
 if __name__ == "__main__":
     unittest.main()
