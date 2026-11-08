@@ -323,6 +323,76 @@ auto-dev rollback-step --checkpoint <commit_hash> --task-id <id> --reason "原�
 
 ---
 
+## 🏗️ アーキテクチャと実装ロードマップ (Architecture & Roadmap Matrix)
+
+Auto Developer は、単一ワーカーの厳格な直列実行（Stage 1）から、複数チームによる並列自律開発・監査・多段配信（Stage 5）までを見据えた段階的アーキテクチャを採用しています。
+
+```mermaid
+flowchart TD
+    subgraph Host ["Orchestration Boundary (親プロセス / 監督層)"]
+        State[("JobState (.dev/job_state.json)<br/>永続化 & クラッシュ復旧")]
+        MultiOrch["MultiTeamOrchestrator<br/>(並列ワーカー監督 & PGID ライフサイクル管理)"]
+        State <--> MultiOrch
+    end
+
+    subgraph Workers ["Worker Execution Layer (物理 Worktree 分離)"]
+        direction LR
+        subgraph TeamA ["Team Core (Worktree: team-core)"]
+            GuardA["BoundaryGuard (領空検査)"]
+            RunnerA["CLI Worker A<br/>(NightlyOrchestrator)"]
+            BundleA["Evidence Bundle A"]
+            GuardA --- RunnerA --> BundleA
+        end
+        subgraph TeamB ["Team UI (Worktree: team-ui)"]
+            GuardB["BoundaryGuard (領空検査)"]
+            RunnerB["CLI Worker B<br/>(NightlyOrchestrator)"]
+            BundleB["Evidence Bundle B"]
+            GuardB --- RunnerB --> BundleB
+        end
+    end
+
+    subgraph Preservation ["Non-destructive Evidence Preservation (排他保全)"]
+        LinkAtomic["os.link 排他的確定<br/>(TOCTOU 上書き完全遮断)"]
+        Idempotent["同一ハッシュ: 冪等再利用<br/>異ハッシュ: 衝突拒否 & 原本保護"]
+        PermBase[(".dev/integration_jobs/<job_id>/evidence/<team_id>.zip")]
+        LinkAtomic --> Idempotent --> PermBase
+    end
+
+    subgraph Gate ["Integration Gate (独立結合 & RC確定)"]
+        IntWT["Integration Worktree (int-<job_id>)"]
+        GateVerify["結合検証スクリプト実行<br/>(Core + UI の意味論的結合)"]
+        RC["Release Candidate タグ発行<br/>refs/tags/rc/<job_id>"]
+        IntWT --> GateVerify --> RC
+    end
+
+    subgraph Delivery ["Audit & Handoff (人間への引き継ぎ)"]
+        BundlePkg["Evidence Bundle ZIP<br/>(Tree SHA / Manifest 拘束)"]
+        Brief["Morning Brief (NIGHTLY_REPORT.md)<br/>意思決定支援レポート"]
+        VerifierTool["独立監査 (auto-dev verify-bundle)"]
+        RC --> BundlePkg --> VerifierTool
+        RC --> Brief
+    end
+
+    MultiOrch -->|"1. 並行 Worktree 準備 & 起動"| Workers
+    Workers -->|"2. 成果 Bundle 収集"| Preservation
+    Preservation -->|"3. 監査済み成果引き渡し"| Gate
+    MultiOrch -->|"4. 安全なクリーンアップ<br/>(失敗時は原本 Worktree を保護)"| Workers
+```
+
+### 実装状況・ロードマップ対比表
+
+現在、**Stage 1 〜 Stage 3 の全機能が実装・実証済み（Tested & Verified）** です。
+
+| Stage | レイヤ / マイルストーン | 主な責務・機能 | ステータス | 独立検証状況 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Stage 1** | **Single Worker Serial Pipeline** | ・EGM 規律 [Maker → Verify → Checker → Commit]<br/>・保護ファイル外部不変条件検査<br/>・決定論的 Evidence Token 発行 & ワンタイム消費<br/>・Quarantine 隔離退避 & 状態永続化 (`--resume`) | **実装・実証完了**<br/>(Phase 1〜15) | ✅ 自動検証ゲート合格<br/>✅ 受入テスト合格 |
+| **Stage 2** | **Evidence Bundling & Audit Tooling** | ・提出用 Evidence Bundle ZIP パッケージング<br/>・機密情報（`.env` 等）排除・サニタイズ<br/>・Tree SHA / Manifest 暗号学的拘束<br/>・独立監査 CLI (`auto-dev verify-bundle`) | **実装・実証完了**<br/>(Phase 16〜25) | ✅ 独立復元・改ざん検知テスト合格<br/>✅ 第三者監査検証合格 |
+| **Stage 3** | **Multi-Team Parallel Worktree Orchestration** | ・`MultiTeamOrchestrator` & `WorktreeManager`<br/>・チーム別 Worktree 物理分離 & `BoundaryGuard` 領空検査<br/>・`start_new_session` & 起動時 PGID 保持によるプロセスグループ監督<br/>・決定論的孤児防止（親先行終了時の孫回収、ゾンビ誤認排除）<br/>・`os.link` による排他的・原子的 Evidence 保全 (TOCTOU 排除)<br/>・異ハッシュ衝突時の原本 Worktree 保護 & 冪等再利用<br/>・2-Phase 統合ゲート (`IntegrationGate`) & 原子的 RC 発行 | **実装・実証完了**<br/>(Phase 26〜33) | ✅ 全 23 単体・E2E テスト合格<br/>✅ 2 プロセス同時保存独立試験合格<br/>✅ 孤児回収・ゾンビ排除実証合格 |
+| **Stage 4** | **Semantic Conflict Detection & Resolution** | ・複数チームブランチ統合時の意味論的矛盾検出<br/>・型・インターフェース互換性自動解析<br/>・LLM 支援による競合解消調停（Arbitrator） | **設計完了 / 実装中**<br/>(Next Phase) | 📋 設計承認済み<br/>🔄 順次実装予定 |
+| **Stage 5** | **Multi-Stage Delivery & Verification Promotion** | ・Staging / Production 多段デリバリーパイプライン<br/>・Canary 検証 & 自動ロールバックプロモーション<br/>・分散オーケストレーション連携 | **ロードマップ**<br/>(Future Milestone) | 🔭 将来計画 |
+
+---
+
 ## 📁 ディレクトリ構成
 
 ```text
