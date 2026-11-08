@@ -17,7 +17,7 @@
 
 ## ステップ
 - [x] 1. `recover_interrupted_job` における証拠欠落時の Fail-Closed 遮断（FF.1, FF.2）の実装と単体テスト（Red-First）
-- [ ] 2. Stage 3 MultiTeamOrchestrator の基本データ構造（`TeamWorkerSpec`, `MultiTeamConfig`, `MultiTeamResult`）と契約（GG.1, GG.2）の実装と単体テスト
+- [x] 2. Stage 3 MultiTeamOrchestrator の基本データ構造（`TeamWorkerSpec`, `MultiTeamConfig`, `MultiTeamResult`）と契約（GG.1, GG.2）の実装と単体テスト
 - [ ] 3. 決定論的受入・回帰テスト実証（FF.3）、全体検証ゲート合格確認、および Evidence Bundle 生成・検証
 
 ## 止まっていること・判断待ち
