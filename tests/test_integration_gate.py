@@ -985,6 +985,70 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         updated_data = json.loads(state_file.read_text(encoding="utf-8"))
         self.assertEqual(updated_data.get("state"), "RECOVERED")
 
+    def test_execute_integration_recovers_and_resumes_after_simulated_sigkill_crash(self) -> None:
+        """CC.4 / P1-D: マージ途中の強制終了（クラッシュ模擬）後、resume=True で安全に復旧・統合完遂できることの実証。"""
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/core/app.py",
+            content="# Core logic\ndef get_core():\n    return 42\n",
+        )
+        ui_bundle, ui_commit = self._create_team_work_and_bundle(
+            team_id="ui",
+            branch="feature/team-ui",
+            file_path="src/ui/view.py",
+            content="from core.app import get_core\n\ndef render():\n    return f'Render: {get_core()}'\n",
+        )
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+            TeamIntegrationInput(team_id="ui", bundle_path=ui_bundle, branch="feature/team-ui", head_commit=ui_commit),
+        ]
+
+        job_id = "job-sigkill-resume"
+        branch_name = f"integration/{job_id}"
+        wt_id = "int-job-sigkill-resume"
+
+        # 模擬クラッシュの作成: 孤立 Worktree と未完了ブランチを生成し、状態を MERGING で保存（SIGKILL 発生をシミュレート）
+        target_dir = gate.worktree_manager.create_worktree(team_id=wt_id, base_branch="main", branch_name=branch_name)
+        state_dir = self.repo_dir / ".dev" / "integration_jobs"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        state_file = state_dir / f"{job_id}.json"
+        state_file.write_text(
+            json.dumps({
+                "job_id": job_id,
+                "state": "MERGING",
+                "integration_branch": branch_name,
+                "worktree_path": str(target_dir),
+                "base_commit": self.base_commit,
+                "updated_at": time.time(),
+            }),
+            encoding="utf-8",
+        )
+
+        # 復旧再開実行 (resume=True)
+        result = gate.execute_integration(
+            job_id=job_id,
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+            resume=True,
+        )
+
+        # クラッシュが安全に復旧され、統合が最後まで正常に完遂すること
+        self.assertTrue(result.success)
+        self.assertEqual(result.status, "SUCCESS")
+        self.assertEqual(result.integration_branch, branch_name)
+        self.assertIsNotNone(result.release_candidate_commit)
+
+        # 過去のクラッシュしたブランチが quarantine/...-crashed-... に退避されていること
+        branch_list = self._run_git(["branch", "--list", "quarantine/*"]).stdout
+        self.assertIn(f"quarantine/integration-{job_id}-crashed-", branch_list)
+
+        # 最終状態ファイルが COMPLETED に更新されていること
+        final_state = json.loads(state_file.read_text(encoding="utf-8"))
+        self.assertEqual(final_state.get("state"), "COMPLETED")
+
 
 if __name__ == "__main__":
     unittest.main()

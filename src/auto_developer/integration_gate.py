@@ -317,11 +317,14 @@ class IntegrationGate:
         base_commit: str = "main",
         verify_script: Path | None = None,
         timeout_sec: int = 300,
+        resume: bool = False,
     ) -> IntegrationResult:
         """独立自律チーム統合パイプラインのエンドツーエンド実行。
 
         BB.1: 専用 Integration Worktree を用いて親の作業ツリーを完全非汚染に保持する。
         BB.2: try / finally により例外発生時も Worktree を確実に破棄し安全に結果を返却する。
+        CC.2: 各フェーズの進捗を IntegrationJobState へ原子的永続化する。
+        CC.3: resume=True 時は前回の未完了クラッシュ状態を安全に復旧・隔離してから再開する。
         """
         # P0-2: 実行開始前の作業ツリーがクリーンであることを検査
         clean_proc = self._run_git(["status", "--porcelain"], check=False)
@@ -332,10 +335,24 @@ class IntegrationGate:
                 errors=["Working tree contains uncommitted changes. Clean working tree is required before integration."],
             )
 
+        integration_branch = f"integration/{job_id}"
+
+        # CC.3: クラッシュ復旧・再開処理
+        if resume:
+            existing_state = IntegrationJobState.load(self.jobs_dir, job_id)
+            if existing_state and existing_state.state not in ("COMPLETED", "RECOVERED"):
+                rec_ok, rec_status, _rec_details = self.recover_interrupted_job(job_id)
+                if not rec_ok:
+                    return IntegrationResult(
+                        success=False,
+                        status=rec_status,
+                        integration_branch=integration_branch,
+                        errors=[f"Failed to recover interrupted integration job '{job_id}' before resuming."],
+                    )
+
         current_branch_proc = self._run_git(["branch", "--show-current"], check=False)
         original_branch = current_branch_proc.stdout.strip() or base_commit
 
-        integration_branch = f"integration/{job_id}"
         # CC.2: 統合ジョブ状態の初期化・原子的永続化
         job_state = IntegrationJobState(
             job_id=job_id,
