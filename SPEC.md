@@ -427,7 +427,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   3. 決定論的受入実証と全体検証ゲート合格確認 (ZZ.3):
      - 既存免疫テストの改変が遮断されること、新規免疫テストの追加のみが許可されること、および `RedTestVerifier` が真のバグのみを Red として検知することを実証するテストスイート。
      - 全自動検証ゲート（200+ テスト、Ruff、Mypy）の完全合格確認。
-- [ ] 機能AAA (Stage 4 実行隔離 & 厳格Red検証 & 免疫防壁堅牢化 Stage 4 Isolated Red-Verification & Hardened Immunity Guard):
+- [x] 機能AAA (Stage 4 実行隔離 & 厳格Red検証 & 免疫防壁堅牢化 Stage 4 Isolated Red-Verification & Hardened Immunity Guard):
   1. 免疫テスト追加の厳格制限 (AAA.1 / Sol氏 P1指摘):
      - `GitGuard.check_protected_files_untouched(checkpoint, allow_immunity_additions=True)` を強化。
      - `tests/immunity/` 配下への追加許可対象を「通常ファイル（`is_file() and not is_symlink()`）」かつ「テスト命名規則 `test_*.py`（正規表現 `^tests/immunity/test_[a-zA-Z0-9_\-]+\.py$`）」に厳格限定する。
@@ -443,6 +443,17 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. 決定論的受入実証と全体検証ゲート合格確認 (AAA.4 / Phase 41 完了判定):
      - 非通常ファイル・シンボリックリンクの遮断、0件実行・環境エラーの排除、および本体汚染テストからの完全隔離を実証する単体・受入テストスイート（Red-First）。
      - 全自動検証ゲート（214+ テスト、Ruff、Mypy）の完全合格確認。
+- [ ] 機能BBB (Stage 4 OS権限ロックダウン & TestResult構造化判定 Stage 4 OS-level Permission Lockdown & Structured TestResult Verification):
+  1. TestResult 構造化判定 (BBB.1 / Sol氏 P1指摘):
+     - `RedTestVerifier` において、出力の正規表現/文字列マッチ（`"AssertionError" in output`）による判定を廃止し、Python `unittest.TestResult` の構造化結果（`testsRun >= 1`, `len(failures) >= 1`, `len(errors) == 0`）により厳密判定する。
+     - `raise OSError("AssertionError: pretend failure")` などの例外メッセージ偽装は `errors`（非期待の例外・環境障害）として記録されるため、`UNHANDLED_EXCEPTION` として確実に `False` 判定（偽Redの完全排除）。
+  2. OS権限レベルの本体作業ツリー読取専用ロックダウン (BBB.2 / Sol氏 P0指摘):
+     - `RedTestVerifier._execute_test()` において、候補テスト実行中、対象リポジトリ（`self.repo_dir`）配下のディレクトリおよび通常ファイルから書き込み権限を一時的に剥奪（`a-w`, `0o555` / `0o444`）し、OS権限レベルで読取専用化する。
+     - 候補テストが絶対パスや `PYTHONPATH` 経由で本体ファイルを改変（作成・書き換え・削除）しようとしても、OSの `PermissionError: [Errno 13] Permission denied` によって物理遮断される。
+     - `finally` ブロックで元のファイル・ディレクトリ権限を確実に復元する（コンテキストマネージャ等による例外安全性の保証）。
+  3. 決定論的受入実証と全体検証ゲート合格確認 (BBB.3 / Phase 42 完了判定):
+     - 例外メッセージ偽装（`OSError("AssertionError: ...")`）の排除、および絶対パス指定による本体書き換えが OS レベルで `PermissionError` となり本体が完全に無傷であることを実証する単体・受入テストスイート（Red-First）。
+     - 全自動検証ゲート（222+ テスト、Ruff、Mypy）の完全合格確認。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
