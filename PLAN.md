@@ -7,18 +7,19 @@
 -->
 
 ## 現在の目標
-- Phase 26: Stage 2 完全完了 (RC 復旧時の証拠欠落ガード: Sol氏レビュー対応 P1) & Stage 3 MultiTeamOrchestrator 始動
-  - P1: `recover_interrupted_job` における証拠欠落（verified_commits未記録、rc_commit/統合ブランチ未存在）時の Fail-Closed 遮断（機能FF.1, FF.2）
-  - 回帰実証: 決定論的受入・回帰テスト実証（機能FF.3）
-  - Stage 3 始動: MultiTeamOrchestrator 基本データ構造と契約（機能GG.1, GG.2）
+- Phase 27: Stage 3 実ワーカー並行実行 & Worktree 堅牢化 (Sol氏レビュー対応 P1-1, P1-2 & 並行開発実証)
+  - P1-1: `cleanup_workers` の Worktree 削除成否判定の実態整合（機能HH.1）
+  - P1-2: `MultiTeamConfig` の重複チームID拒絶 & `prepare_workers` の原子的準備・ロールバック（機能HH.2）
+  - 実並行実行: 複数ワーカーの実並行プロセス実行・監督および成果統合（機能II.1, II.2）
+  - 受入実証: 2ワーカー並行実行 & 成果統合・RC発行受入テスト（機能JJ.1）
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- tests/test_integration_gate.py の test_recover_interrupted_job_fails_closed_when_rc_exists_but_worktree_removal_fails: 機能FF.1（RC復旧時の verified_commits 必須化）に伴い、テスト用の JobState に正当な監査コミット verified_commits={"team-test": self.base_commit} を補完。
+- なし
 
 ## ステップ
-- [x] 1. `recover_interrupted_job` における証拠欠落時の Fail-Closed 遮断（FF.1, FF.2）の実装と単体テスト（Red-First）
-- [x] 2. Stage 3 MultiTeamOrchestrator の基本データ構造（`TeamWorkerSpec`, `MultiTeamConfig`, `MultiTeamResult`）と契約（GG.1, GG.2）の実装と単体テスト
-- [x] 3. 決定論的受入・回帰テスト実証（FF.3）、全体検証ゲート合格確認、および Evidence Bundle 生成・検証
+- [x] 1. Worktree 管理堅牢化（重複チームID拒絶、原子的準備・自動ロールバック、削除成否実態判定: HH.1, HH.2）の実装と単体テスト（Red-First）
+- [x] 2. 複数ワーカーの実並行プロセス実行・監督（`run_workers`）および成果統合パイプライン（II.1, II.2）の実装と単体テスト
+- [x] 3. 2ワーカー並行稼働・成果物収集・統合ゲートRC発行の決定論的受入テスト実証（JJ.1）、全体検証ゲート合格確認、および Evidence Bundle 生成・検証
 
 ## 止まっていること・判断待ち
 - なし

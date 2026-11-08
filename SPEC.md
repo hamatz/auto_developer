@@ -235,18 +235,34 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   3. 決定論的受入・回帰テストの実証 (EE.3 / P0):
      - テスト1: RC タグが存在する状態で Worktree 削除に失敗した際、`RECOVERY_REQUIRED` で遮断されることの実証。
      - テスト2: RC タグが存在するが、保存された統合成果と SHA 不一致または未統合コミットである際、`RECOVERY_REQUIRED` で遮断されることの実証。
-- [ ] 機能FF (Stage 2 完全完了: RC 復旧時の証拠欠落ガード Stage 2 Final Closure: Missing Evidence Guard in RC Recovery):
+- [x] 機能FF (Stage 2 完全完了: RC 復旧時の証拠欠落ガード Stage 2 Final Closure: Missing Evidence Guard in RC Recovery):
   1. 監査済みチーム成果未記録時の Fail-Closed 遮断 (FF.1 / P1):
      - `recover_interrupted_job` において、`rc/<job_id>` タグ検出時、`job_state.verified_commits` が空（未記録）の場合は即座に `status="RECOVERY_REQUIRED"` で遮断する。
   2. 照合根拠欠落時の Fail-Closed 遮断 (FF.2 / P1):
      - `job_state.rc_commit` が未記録、かつ統合ブランチ（`refs/heads/<integration_branch>`）が存在しない場合、RC タグの正当性を証明する根拠が欠落していると判断し、推測で `ALREADY_COMPLETED` とせず確実に `status="RECOVERY_REQUIRED"` で遮断する。
   3. 決定論的受入・回帰テストの実証 (FF.3 / P1):
      - JobState が INITIALIZED かつ verified_commits が空、統合ブランチなしの状態で同名 RC タグが存在する際、`RECOVERY_REQUIRED` で遮断されることを実証する回帰テストを追加。
-- [ ] 機能GG (Stage 3 MultiTeamOrchestrator 始動: 複数ワーカー並行実行・統合基盤 MultiTeam Orchestration Foundation):
+- [x] 機能GG (Stage 3 MultiTeamOrchestrator 始動: 複数ワーカー並行実行・統合基盤 MultiTeam Orchestration Foundation):
   1. 複数チーム並行実行データ構造と契約 (GG.1):
      - `TeamWorkerSpec`, `MultiTeamConfig`, `MultiTeamResult` などのデータ構造を定義し、複数ワーカーの Worktree 分割と成果統合の不変条件を確立する。
   2. 独立ワーカーオーケストレーション基盤 (GG.2):
      - 各チームの独立 Worktree 上での実行・成果収集（Evidence Bundle 収集）と `IntegrationGate` への安全な引き渡しパイプラインの基本実装。
+- [ ] 機能HH (Stage 3 Worktree 管理堅牢化 & トランザクション準備 Stage 3 Worktree Robustness & Atomic Preparation):
+  1. Worktree 削除成否判定の実態整合 (HH.1 / P1-1):
+     - `cleanup_workers()` において、`remove_worktree` の戻り値（ブランチ削除フラグ）に依存せず、Worktree ディレクトリの消滅および Git 管理下の解放実態に基づいて削除成功（`True`）を判定する。
+  2. 重複チームID拒否 & Worktree 原子的準備 (HH.2 / P1-2):
+     - `MultiTeamConfig` において重複した `team_id` が渡された場合、即座に拒絶（`ValueError`）。
+     - `prepare_workers()` において一部チームの Worktree 作成が失敗した場合、作成済みの全 Worktree を安全に自動ロールバック解放し、孤立 Worktree を残さないトランザクション的準備を保証する。
+- [ ] 機能II (Stage 3 実ワーカー並行実行 & 成果統合パイプライン MultiTeam Parallel Execution & Integrated Delivery):
+  1. 複数ワーカーの実並行プロセス実行と監督 (II.1):
+     - `MultiTeamOrchestrator.run_workers()` を実装し、各チームの独立 Worktree 上でワーカープロセス（`NightlyOrchestrator` / コマンド）を並行起動・監視する。
+     - タイムアウトおよびエラー発生時のプロセス回収・安全停止を担保。
+  2. 成果収集・ワーカー失敗遮断・統合ハンドオフ (II.2):
+     - 各ワーカーが完了時に生成した Evidence Bundle を収集し、いずれかのワーカーが失敗した場合は未承認成果を統合せず `WORKER_FAILED` で安全停止。双方が成功した場合のみ `IntegrationGate` へ引き渡して統合検証・RC発行。
+- [ ] 機能JJ (Stage 3 決定論的受入・並行実行実証 Stage 3 Deterministic Multi-Worker Acceptance Verification):
+  1. 2ワーカー並行稼働 & 成果統合受入テストの実証 (JJ.1):
+     - 2つのワーカーが独立 Worktree 上で並行実行され、独立した成果物と Evidence Bundle を作成し、親オーケストレーターがこれらを安全に統合して Release Candidate を発行できることを実証。
+     - 片方のワーカーが失敗した際に未承認成果の統合が遮断されることの実証。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

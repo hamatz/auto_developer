@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import re
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -42,6 +44,11 @@ class MultiTeamConfig:
     def __post_init__(self) -> None:
         if not VALID_TEAM_ID_PATTERN.match(self.job_id):
             raise ValueError(f"Invalid job_id '{self.job_id}': must match '^[a-zA-Z0-9_-]+$'")
+        seen_team_ids: set[str] = set()
+        for team in self.teams:
+            if team.team_id in seen_team_ids:
+                raise ValueError(f"Duplicate team_id '{team.team_id}' found in MultiTeamConfig")
+            seen_team_ids.add(team.team_id)
 
 
 @dataclass
@@ -88,29 +95,205 @@ class MultiTeamOrchestrator:
         )
 
     def prepare_workers(self, config: MultiTeamConfig) -> dict[str, Path]:
-        """各チーム用の独立した専用 Worktree を作成し、パスの辞書を返す。"""
+        """各チーム用の独立した専用 Worktree を作成し、パスの辞書を返す。
+
+        HH.2 / P1-2: トランザクション的準備。作成途中で失敗した場合は、作成済みの Worktree を自動ロールバックする。
+        """
         paths: dict[str, Path] = {}
-        for team in config.teams:
-            branch_name = f"team/{team.team_id}"
-            wt_path = self.worktree_manager.create_worktree(
-                team_id=team.team_id,
-                base_branch=team.base_branch or config.base_branch,
-                branch_name=branch_name,
-            )
-            paths[team.team_id] = wt_path
-        return paths
+        created_team_ids: list[str] = []
+        try:
+            for team in config.teams:
+                branch_name = f"team/{team.team_id}"
+                wt_path = self.worktree_manager.create_worktree(
+                    team_id=team.team_id,
+                    base_branch=team.base_branch or config.base_branch,
+                    branch_name=branch_name,
+                )
+                created_team_ids.append(team.team_id)
+                paths[team.team_id] = wt_path
+            return paths
+        except Exception as err:
+            logger.warning("Preparation failed during worktree creation; rolling back created worktrees: %s", err)
+            for tid in created_team_ids:
+                try:
+                    self.worktree_manager.remove_worktree(tid, force=True, delete_branch=True, purge_unmerged=True)
+                except (OSError, subprocess.CalledProcessError, WorktreeError, RuntimeError) as rb_err:
+                    logger.error("Failed to rollback worktree for team '%s': %s", tid, rb_err)
+            raise
 
     def cleanup_workers(self, config: MultiTeamConfig, force: bool = True) -> dict[str, bool]:
-        """作成された全チームの Worktree を解放する。"""
+        """作成された全チームの Worktree を解放する。
+
+        HH.1 / P1-1: 削除成否判定を Worktree ディレクトリの消滅および Git 実態に基づいて判定する。
+        """
         cleanup_statuses: dict[str, bool] = {}
         for team in config.teams:
+            wt_path = self.worktree_manager.worktree_base / team.team_id
             try:
-                res = self.worktree_manager.remove_worktree(team.team_id, force=force)
-                cleanup_statuses[team.team_id] = res
+                self.worktree_manager.remove_worktree(team.team_id, force=force)
             except (OSError, subprocess.CalledProcessError, WorktreeError, RuntimeError) as err:
                 logger.warning("Failed to remove worktree for team '%s': %s", team.team_id, err)
-                cleanup_statuses[team.team_id] = False
+
+            # 実態照合による判定 (ディレクトリが存在せず、Git管理下のWorktree一覧からも消滅していること)
+            still_exists = wt_path.exists() or any(
+                wt.team_id == team.team_id for wt in self.worktree_manager.list_worktrees()
+            )
+            cleanup_statuses[team.team_id] = not still_exists
         return cleanup_statuses
+
+    def run_workers(
+        self,
+        config: MultiTeamConfig,
+        worker_cmd_factory: Callable[[str, Path], list[str]] | None = None,
+        worker_fn: Callable[[str, Path], TeamExecutionResult] | None = None,
+        timeout_sec: float = 120.0,
+    ) -> dict[str, TeamExecutionResult]:
+        """II.1, II.2: 各チームワーカーを並行実行し、結果・コミット・成果物バンドルを収集する。"""
+        results: dict[str, TeamExecutionResult] = {}
+        paths = {
+            team.team_id: self.worktree_manager.worktree_base / team.team_id
+            for team in config.teams
+        }
+
+        def execute_single_team(team: TeamWorkerSpec) -> TeamExecutionResult:
+            wt_path = paths[team.team_id]
+            if not wt_path.exists():
+                return TeamExecutionResult(
+                    team_id=team.team_id,
+                    success=False,
+                    status="WORKTREE_NOT_FOUND",
+                    details={"error": f"Worktree not found at {wt_path}"},
+                )
+
+            if worker_fn is not None:
+                try:
+                    return worker_fn(team.team_id, wt_path)
+                except (OSError, subprocess.CalledProcessError, RuntimeError, ValueError) as err:
+                    logger.error("Worker function for team '%s' crashed: %s", team.team_id, err)
+                    return TeamExecutionResult(
+                        team_id=team.team_id,
+                        success=False,
+                        status="CRASHED",
+                        details={"error": str(err)},
+                    )
+
+            cmd = None
+            if worker_cmd_factory is not None:
+                cmd = worker_cmd_factory(team.team_id, wt_path)
+            elif team.assigned_tasks:
+                cmd = ["python3", "-m", "auto_developer.cli", "run", "--work-dir", str(wt_path)]
+
+            if not cmd:
+                return TeamExecutionResult(
+                    team_id=team.team_id,
+                    success=False,
+                    status="NO_COMMAND",
+                    details={"error": "No command or worker function provided"},
+                )
+
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=wt_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_sec,
+                    check=False,
+                )
+                head_rev = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=wt_path,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                head_commit = head_rev.stdout.strip() if head_rev.returncode == 0 else None
+
+                bundle_path = None
+                bundles_dir = wt_path / ".dev" / "bundles"
+                if bundles_dir.exists():
+                    zips = sorted(bundles_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+                    if zips:
+                        bundle_path = zips[0]
+
+                success = proc.returncode == 0
+                return TeamExecutionResult(
+                    team_id=team.team_id,
+                    success=success,
+                    status="SUCCESS" if success else "FAILED",
+                    branch=f"team/{team.team_id}",
+                    head_commit=head_commit,
+                    bundle_path=bundle_path,
+                    details={
+                        "exit_code": proc.returncode,
+                        "stdout": proc.stdout[-500:] if proc.stdout else "",
+                        "stderr": proc.stderr[-500:] if proc.stderr else "",
+                    },
+                )
+            except subprocess.TimeoutExpired:
+                logger.error("Team '%s' timed out after %s seconds", team.team_id, timeout_sec)
+                return TeamExecutionResult(
+                    team_id=team.team_id,
+                    success=False,
+                    status="TIMEOUT",
+                    details={"error": f"Timed out after {timeout_sec}s"},
+                )
+            except (OSError, subprocess.CalledProcessError, RuntimeError) as err:
+                logger.error("Unexpected error executing team '%s': %s", team.team_id, err)
+                return TeamExecutionResult(
+                    team_id=team.team_id,
+                    success=False,
+                    status="CRASHED",
+                    details={"error": str(err)},
+                )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(config.teams) or 1) as executor:
+            future_to_team = {
+                executor.submit(execute_single_team, team): team.team_id
+                for team in config.teams
+            }
+            for future in concurrent.futures.as_completed(future_to_team):
+                tid = future_to_team[future]
+                try:
+                    res = future.result()
+                    results[tid] = res
+                except (OSError, subprocess.CalledProcessError, RuntimeError, ValueError) as err:
+                    results[tid] = TeamExecutionResult(
+                        team_id=tid,
+                        success=False,
+                        status="CRASHED",
+                        details={"error": str(err)},
+                    )
+
+        return results
+
+    def execute_multi_team_pipeline(
+        self,
+        config: MultiTeamConfig,
+        worker_cmd_factory: Callable[[str, Path], list[str]] | None = None,
+        worker_fn: Callable[[str, Path], TeamExecutionResult] | None = None,
+        verify_script: Path | None = None,
+        timeout_sec: float = 120.0,
+        cleanup: bool = True,
+    ) -> MultiTeamResult:
+        """複数チームの Worktree 準備・並行実行・成果収集・統合を包括実行する。"""
+        try:
+            self.prepare_workers(config)
+            team_results = self.run_workers(
+                config,
+                worker_cmd_factory=worker_cmd_factory,
+                worker_fn=worker_fn,
+                timeout_sec=timeout_sec,
+            )
+            multi_result = self.integrate_team_results(
+                config=config,
+                team_results=team_results,
+                verify_script=verify_script,
+            )
+            return multi_result
+        finally:
+            if cleanup:
+                self.cleanup_workers(config)
 
     def integrate_team_results(
         self,
