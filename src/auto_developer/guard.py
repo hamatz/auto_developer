@@ -22,6 +22,7 @@ class GitGuard:
         re.compile(r"^scripts/verify_local\.sh$"),
     )
     IMMUNITY_PATTERN = re.compile(r"^tests/immunity/")
+    VALID_IMMUNITY_FILE_PATTERN = re.compile(r"^tests/immunity/test_[a-zA-Z0-9_\-]+\.py$")
 
     def __init__(self, repo_dir: Path | None = None) -> None:
         self.repo_dir = repo_dir or Path.cwd()
@@ -75,12 +76,24 @@ class GitGuard:
         proc_status = self._run_git(["status", "--porcelain"])
         return bool(proc_status.stdout.strip())
 
+    def _is_valid_new_immunity_file(self, rel_path: str) -> bool:
+        """新規免疫テストファイルが通常ファイルかつ命名規則を満たし、シンボリックリンクでないかを検査する。"""
+        if not self.VALID_IMMUNITY_FILE_PATTERN.match(rel_path):
+            return False
+        target = self.repo_dir / rel_path
+        if not target.exists():
+            return False
+        if target.is_symlink():
+            return False
+        return target.is_file()
+
     def check_protected_files_untouched(
         self, checkpoint: str, allow_immunity_additions: bool = False
     ) -> bool:
         """チェックポイント以降に変更されたファイル（未追跡・ステージ済を含む）に保護対象が含まれていないか検査する。
         allow_immunity_additions=True の場合、tests/immunity/ 配下への新規テスト追加のみ許可し、
         既存の免疫テストの変更・削除・改変は依然として厳格に遮断する。
+        さらに、新規追加されるファイルは通常ファイル（非symlink）かつ test_*.py の命名規則を満たす必要がある。
         """
         if not allow_immunity_additions:
             files_to_check: set[str] = set()
@@ -152,6 +165,8 @@ class GitGuard:
                         return False
                     if not status_code.startswith("A"):
                         return False
+                    if not self._is_valid_new_immunity_file(p_clean):
+                        return False
 
         # B-2: status による検査 (未追跡・ステージ状態)
         for line in proc_status.stdout.splitlines():
@@ -169,8 +184,12 @@ class GitGuard:
                     if p in existing_immunity_files:
                         return False
                     if xy == "??":
+                        if not self._is_valid_new_immunity_file(p):
+                            return False
                         continue
                     if "M" in xy or "D" in xy or "R" in xy:
+                        return False
+                    if not self._is_valid_new_immunity_file(p):
                         return False
 
         return True

@@ -413,7 +413,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 「有効な Evidence が存在しても、未確認ワーカーが残っている場合は統合処理に進まず status が RECOVERY_REQUIRED となり、Worktree も削除されない」ことを実証する単体・受入テスト（Red-First）。
      - 全自動検証ゲート（198+ テスト、Ruff、Mypy）の完全合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
-- [ ] 機能ZZ (Stage 4 非対称免疫保護 & 再現テスト検証ハーネス Stage 4 Asymmetric Immunity Guard & Red-Verification Harness):
+- [x] 機能ZZ (Stage 4 非対称免疫保護 & 再現テスト検証ハーネス Stage 4 Asymmetric Immunity Guard & Red-Verification Harness):
   1. 非対称免疫ガードの実装 (ZZ.1):
      - `GitGuard.check_protected_files_untouched(checkpoint, allow_immunity_additions=False)` を拡張。
      - 既定の通常 Maker 実行時（`allow_immunity_additions=False`）は従来通り `tests/immunity/` の作成・変更・削除を全面禁止する。
@@ -427,6 +427,22 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   3. 決定論的受入実証と全体検証ゲート合格確認 (ZZ.3):
      - 既存免疫テストの改変が遮断されること、新規免疫テストの追加のみが許可されること、および `RedTestVerifier` が真のバグのみを Red として検知することを実証するテストスイート。
      - 全自動検証ゲート（200+ テスト、Ruff、Mypy）の完全合格確認。
+- [ ] 機能AAA (Stage 4 実行隔離 & 厳格Red検証 & 免疫防壁堅牢化 Stage 4 Isolated Red-Verification & Hardened Immunity Guard):
+  1. 免疫テスト追加の厳格制限 (AAA.1 / Sol氏 P1指摘):
+     - `GitGuard.check_protected_files_untouched(checkpoint, allow_immunity_additions=True)` を強化。
+     - `tests/immunity/` 配下への追加許可対象を「通常ファイル（`is_file() and not is_symlink()`）」かつ「テスト命名規則 `test_*.py`（正規表現 `^tests/immunity/test_[a-zA-Z0-9_\-]+\.py$`）」に厳格限定する。
+     - 非Pythonファイル（例: `not_a_test.txt`）やシンボリックリンク（例: `test_link.py -> /etc/hosts`）の追加は、`allow_immunity_additions=True` であっても Fail-Closed で即時拒絶（`False`）する。
+  2. Red判定の構造化厳格化 (AAA.2 / Sol氏 P1指摘):
+     - `RedTestVerifier` において、実行テスト件数および失敗種別の構造化検証を導入。
+     - 実行されたテスト件数が 1 件以上（`ran_tests >= 1`）であることを必須とする（`class TestX(unittest.TestCase): pass` や空テストによる Exit 5 `NO TESTS RAN` を `NO_TESTS_RAN` として確実に `False` 判定）。
+     - `setUp()` 等の環境例外（`OSError`、環境不備等）による偽の失敗を排除し、アサーション失敗（`AssertionError` または `FAIL:`）による真正な不具合再現のみを `GENUINE_RED` として判定する。
+  3. 候補テスト実行の物理隔離 (AAA.3 / Sol氏 P0相当指摘):
+     - `RedTestVerifier` による候補テストの実行を、本体リポジトリ作業ツリーから完全に物理隔離する。
+     - 使い捨ての一時クリーン環境（一時 Worktree または隔離された独立スクラッチディレクトリ）で実行し、本体作業ツリーに対する副作用（テストコードによるファイル作成・書き換え・削除）を物理遮断する。
+     - 実行プロセスにはシークレットや不要な環境変数を渡さず（除外サニタイズ）、本体の `canary.txt` 等を改ざんしようとする敵対的テストが実行されても本体が一切汚染されないことを保証する。
+  4. 決定論的受入実証と全体検証ゲート合格確認 (AAA.4 / Phase 41 完了判定):
+     - 非通常ファイル・シンボリックリンクの遮断、0件実行・環境エラーの排除、および本体汚染テストからの完全隔離を実証する単体・受入テストスイート（Red-First）。
+     - 全自動検証ゲート（214+ テスト、Ruff、Mypy）の完全合格確認。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

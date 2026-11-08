@@ -21,6 +21,30 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-08] 再現テスト候補実行による本体作業ツリー汚染・副作用の物理隔離 (Candidate Test Isolation)
+- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`)
+- Trap: 監査役や外部AIから提示された未検証の再現テスト候補を `cwd=self.repo_dir` かつ現プロセスの環境変数で直接実行したため、候補テスト内のコードが本体リポジトリのファイル（例: `canary.txt`）を書き換えてからアサーション失敗を起こした場合に、本体を汚染したまま `GENUINE_RED` と判定して通過してしまう重大な脆弱性があった。
+- Rule: 候補テストは本体リポジトリ内で直接実行してはならない。必ず使い捨ての一時 Worktree または隔離された独立スクラッチ環境に展開して実行し、環境変数もシークレットを除外サニタイズして本体への副作用を物理的に遮断する。
+- Rung: 作り（隔離実行） & 検査（受入テスト）
+- Immunity Test: `tests/test_immunity_and_red_acceptance.py` (`test_candidate_test_cannot_modify_parent_repository`)
+- Proof: 意図的に本体リポジトリのファイルを改変しようとする敵対的テスト候補を実行させ、本体ファイルが一切改変されず防御されることを実証。
+
+### [2026-11-08] unittest 0件実行 (Exit 5) および環境例外の偽Red誤判定 (Structured Red Verification)
+- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`)
+- Trap: `unittest discover` の終了コードが非ゼロ（`exit_code != 0`）で `ImportError` の文字列がなければ一律 `GENUINE_RED` と判定したため、テストメソッドを持たない空テスト（Exit 5: `NO TESTS RAN`）や `setUp()` での `OSError` などのテスト環境例外をバグ再現と誤認する漏れがあった。
+- Rule: 単に終了コードを見るだけでなく、実行テスト件数が1件以上（`Ran N tests` where N >= 1）であること、および実際のアサーション失敗（`AssertionError` または `FAIL:`）が発生していることを構造的に検証し、0件実行や環境例外を確実に弾く。
+- Rung: 作り & 検査
+- Immunity Test: `tests/test_red_verifier.py` (`test_rejects_zero_tests_ran_exit_code_5`, `test_rejects_setup_environment_oserror`)
+- Proof: テストメソッドのないテストクラスを与えた際に `is_reproduced=False` (`NO_TESTS_RAN`) となり、`setUp()` で `OSError` が起きた際に `SETUP_ERROR` として弾かれることを実証。
+
+### [2026-11-08] 免疫ディレクトリへの非テスト・シンボリックリンク追加の遮断 (Strict Immunity File Validation)
+- Context: `src/auto_developer/guard.py` (`GitGuard.check_protected_files_untouched`)
+- Trap: `allow_immunity_additions=True` において未追跡・新規追加ファイルであれば何でも許可したため、非Pythonファイル（`not_a_test.txt`）やホスト重要ファイルを指すシンボリックリンク（`test_link.py -> /etc/hosts`）が素通りして追加されてしまう脆弱性があった。
+- Rule: 免疫ディレクトリ（`tests/immunity/`）への新規追加は、「通常ファイル（`is_file() and not is_symlink()`）」かつ「テスト命名規則 `test_*.py`」を満たすファイルのみに厳格限定し、それ以外は Fail-Closed で即時遮断する。
+- Rung: 作り（ガード実装） & 検査
+- Immunity Test: `tests/test_immunity_guard.py` (`test_asymmetric_mode_rejects_non_test_files`, `test_asymmetric_mode_rejects_symlinks`)
+- Proof: `not_a_test.txt` や `/etc/hosts` への symlink を追加しようとした際に即座に `False` で拒絶されることを実証。
+
 ### [2026-11-08] 外部プロセス自律回収時の同一性・所属関係照合と統合遮断 (PID & PGID Fail-Closed)
 - Context: `src/auto_developer/multi_team.py` (`recover_multi_team_job`, `WorkerRegistry`)
 - Trap: PID の OS 開始識別子照合だけを行い、Registry の PGID の正当性を検証せずに `os.killpg(w.pgid)` を送ったため、改ざんや誤設定で別プロセスの PGID が指定された場合に無関係なプロセスグループを誤停止する脆弱性があった。また、照合に失敗して停止を保留した未確認ワーカー（`unverified_processes`）が残っているのに、Evidence が揃っているだけで統合ゲートや Worktree 削除に進めてしまう漏れがあった。

@@ -64,8 +64,12 @@ from calculator import divide
 
 class DivideBugReproTest(unittest.TestCase):
     def test_divide_zero_expected_behavior(self):
-        # 期待仕様: ゼロ除算時は -1.0 を返す（または特定の振る舞い）
-        self.assertEqual(divide(10, 0), -1.0, "Bug reproduced: currently raises ZeroDivisionError instead of -1.0")
+        # 期待仕様: ゼロ除算時は -1.0 を返す
+        try:
+            res = divide(10, 0)
+        except ZeroDivisionError:
+            res = None
+        self.assertEqual(res, -1.0, "Bug reproduced: currently raises ZeroDivisionError instead of -1.0")
 """
         # 1. RedTestVerifier による客観的再現判定
         red_result = self.verifier.verify_candidate_test(candidate_bug_test)
@@ -134,6 +138,30 @@ class Broken(unittest.TestCase
         result_syntax = self.verifier.verify_candidate_test(syntax_err_code)
         self.assertFalse(result_syntax.is_reproduced)
         self.assertEqual(result_syntax.reason, "SYNTAX_ERROR")
+
+    def test_end_to_end_hostile_candidate_test_isolated(self) -> None:
+        """受入シナリオ4 (AAA.3/P0): 敵対的候補テストが本体リポジトリを改ざんしようとしても、物理隔離され本体が保護されること。"""
+        canary = self.repo_dir / "canary.txt"
+        canary.write_text("PRISTINE_CANARY", encoding="utf-8")
+
+        hostile_code = """import unittest
+from pathlib import Path
+
+class MaliciousCandidateTest(unittest.TestCase):
+    def test_tamper_repo(self):
+        p = Path("canary.txt")
+        if p.exists():
+            p.write_text("HACKED_CANARY", encoding="utf-8")
+        self.assertEqual(1, 2, "Intentional failure after tampering")
+"""
+        res = self.verifier.verify_candidate_test(hostile_code)
+        self.assertTrue(res.is_reproduced)
+        # 本体の canary.txt は絶対に改変されていないこと
+        self.assertEqual(
+            canary.read_text(encoding="utf-8"),
+            "PRISTINE_CANARY",
+            "Parent repository canary.txt must remain pristine!",
+        )
 
 
 if __name__ == "__main__":
