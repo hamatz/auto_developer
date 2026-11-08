@@ -572,6 +572,65 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
         main_commit = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
         self.assertEqual(main_commit, self.base_commit)
 
+    def test_integration_preserves_parent_workspace_and_branch(self) -> None:
+        """P1-1: execute_integration 実行中・実行後も呼び出し元のブランチおよび作業ツリーが一切切り替わらない。"""
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/core/app.py",
+            content="# Core logic\ndef get_core():\n    return 42\n",
+        )
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+        ]
+
+        # 呼び出し前: main ブランチにいること
+        self.assertEqual(self._run_git(["branch", "--show-current"]).stdout.strip(), "main")
+
+        result = gate.execute_integration(
+            job_id="job-preserves-parent",
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+        )
+        self.assertTrue(result.success)
+
+        # 呼び出し後: 親リポジトリのカレントブランチは依然として main であり、HEAD も不変であること
+        current_branch = self._run_git(["branch", "--show-current"]).stdout.strip()
+        self.assertEqual(current_branch, "main", f"Parent branch was modified to '{current_branch}'!")
+        current_head = self._run_git(["rev-parse", "HEAD"]).stdout.strip()
+        self.assertEqual(current_head, self.base_commit)
+
+    def test_integration_rc_breach_preserves_parent_workspace_and_cleans_worktree(self) -> None:
+        """P1-2: RCタグ衝突時にも親の作業ツリーは保護され、Worktree が適切に破棄される。"""
+        core_bundle, core_commit = self._create_team_work_and_bundle(
+            team_id="core",
+            branch="feature/team-core",
+            file_path="src/core/app.py",
+            content="# Core logic\ndef get_core():\n    return 42\n",
+        )
+        gate = IntegrationGate(repo_dir=self.repo_dir)
+        inputs = [
+            TeamIntegrationInput(team_id="core", bundle_path=core_bundle, branch="feature/team-core", head_commit=core_commit),
+        ]
+
+        # 異なるコミットを指す既存の RC タグを作成しておく
+        self._run_git(["tag", "rc/job-rc-conflict", self.base_commit])
+
+        result = gate.execute_integration(
+            job_id="job-rc-conflict",
+            inputs=inputs,
+            base_commit="main",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "RC_TAG_IMMUTABLE_BREACH")
+
+        # 親リポジトリのカレントブランチは依然として main であること
+        current_branch = self._run_git(["branch", "--show-current"]).stdout.strip()
+        self.assertEqual(current_branch, "main", f"Parent branch was modified to '{current_branch}'!")
+
     def test_two_team_integration_semantic_mismatch_quarantine_scenario(self) -> None:
         """P1-3: Gitコンフリクトはないが API 不整合（意味的競合）で結合テストが失敗するケースの安全隔離。"""
         # Core チームは数値を返すべき関数で文字列を返す (API 契約違反)
