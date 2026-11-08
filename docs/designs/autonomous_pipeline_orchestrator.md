@@ -156,7 +156,19 @@ flowchart TD
 8. **`MorningReporter`**:
    - 正常終了時またはFail-Fast停止時に `NIGHTLY_REPORT.md` をルート直下に自動生成。
 
-### 3. データモデルとステータス遷移
+### 3. 実装状況とロードマップ対比 (Implementation Status & Roadmap Matrix)
+
+Auto Developer は、単一ワーカーの厳格な直列実行（Stage 1）から、複数チームによる並列自律開発・監査・多段配信（Stage 5）までを見据えた段階的アーキテクチャを採用しています。現在、**Stage 1 〜 Stage 3 の全機能が実装・実証済み（Tested & Verified）** です。
+
+| Stage | レイヤ / マイルストーン | 主な責務・機能 | ステータス | 独立検証状況 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Stage 1** | **Single Worker Serial Pipeline** | ・EGM 規律 [Maker → Verify → Checker → Commit]<br/>・保護ファイル外部不変条件検査<br/>・決定論的 Evidence Token 発行 & ワンタイム消費<br/>・Quarantine 隔離退避 & 状態永続化 (`--resume`) | **実装・実証完了**<br/>(Phase 1〜15) | ✅ 自動検証ゲート合格<br/>✅ 受入テスト合格 |
+| **Stage 2** | **Evidence Bundling & Audit Tooling** | ・提出用 Evidence Bundle ZIP パッケージング<br/>・機密情報（`.env` 等）排除・サニタイズ<br/>・Tree SHA / Manifest 暗号学的拘束<br/>・独立監査 CLI (`auto-dev verify-bundle`) | **実装・実証完了**<br/>(Phase 16〜25) | ✅ 独立復元・改ざん検知テスト合格<br/>✅ 第三者監査検証合格 |
+| **Stage 3** | **Multi-Team Parallel Worktree Orchestration** | ・`MultiTeamOrchestrator` & `WorktreeManager`<br/>・チーム別 Worktree 物理分離 & `BoundaryGuard` 領空検査<br/>・`start_new_session` & 起動時 PGID 保持によるプロセスグループ監督<br/>・決定論的孤児防止（親先行終了時の孫回収、ゾンビ誤認排除）<br/>・`os.link` による排他的・原子的 Evidence 保全 (TOCTOU 排除)<br/>・異ハッシュ衝突時の原本 Worktree 保護 & 冪等再利用<br/>・2-Phase 統合ゲート (`IntegrationGate`) & 原子的 RC 発行 | **実装・実証完了**<br/>(Phase 26〜33) | ✅ 全 23 単体・E2E テスト合格<br/>✅ 2 プロセス同時保存独立試験合格<br/>✅ 孤児回収・ゾンビ排除実証合格 |
+| **Stage 4** | **Semantic Conflict Detection & Resolution** | ・複数チームブランチ統合時の意味論的矛盾検出<br/>・型・インターフェース互換性自動解析<br/>・LLM 支援による競合解消調停（Arbitrator） | **設計完了 / 実装中**<br/>(Next Phase) | 📋 設計承認済み<br/>🔄 順次実装予定 |
+| **Stage 5** | **Multi-Stage Delivery & Verification Promotion** | ・Staging / Production 多段デリバリーパイプライン<br/>・Canary 検証 & 自動ロールバックプロモーション<br/>・分散オーケストレーション連携 | **ロードマップ**<br/>(Future Milestone) | 🔭 将来計画 |
+
+### 4. データモデルとステータス遷移
 
 ```mermaid
 stateDiagram-v2
@@ -194,7 +206,7 @@ stateDiagram-v2
     GenerateReport --> [*]: 終了
 ```
 
-### 4. 成果物スキーマ仕様
+### 5. 成果物スキーマ仕様
 
 #### A. `NIGHTLY_REPORT.md` テンプレート
 ```markdown

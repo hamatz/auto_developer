@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -87,6 +88,16 @@ class MultiTeamResult:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class WorkerProcessHandle:
+    """SS.1: ワーカープロセスの実行ハンドルおよび起動時に確定されたプロセスグループ情報。"""
+
+    team_id: str
+    proc: subprocess.Popen[str]
+    pid: int
+    pgid: int
+
+
 class MultiTeamOrchestrator:
     """Stage 3: 複数チームワーカーの独立 Worktree 分割・並行実行・成果統合を統括する。"""
 
@@ -102,35 +113,36 @@ class MultiTeamOrchestrator:
             repo_dir=repo_dir,
             worktree_manager=self.worktree_manager,
         )
-        self._active_workers: dict[str, subprocess.Popen[str]] = {}
+        self._active_workers: dict[str, WorkerProcessHandle] = {}
+        self._all_worker_handles: dict[str, WorkerProcessHandle] = {}
         self._workers_lock = threading.Lock()
 
     def terminate_worker_process_group(self, team_id: str, timeout: float = 2.0) -> bool:
-        """RR.2: 指定されたワーカーのプロセスグループ全体（PGID）を安全に終了・回収する。"""
+        """RR.2, SS.1: 指定されたワーカーのプロセスグループ全体（起動時確定PGID）を安全に終了・回収する。"""
         with self._workers_lock:
-            proc = self._active_workers.get(team_id)
-        if proc is None:
+            handle = self._active_workers.get(team_id) or self._all_worker_handles.get(team_id)
+        if handle is None:
             return False
 
-        pgid: int | None = None
-        try:
-            pgid = os.getpgid(proc.pid)
-        except (ProcessLookupError, OSError):
-            pass
+        pgid = handle.pgid
+        proc = handle.proc
 
+        # 1. プロセスグループ全体に SIGTERM 送信
         try:
-            if pgid is not None and hasattr(os, "killpg"):
+            if hasattr(os, "killpg"):
                 os.killpg(pgid, signal.SIGTERM)
             else:
                 proc.terminate()
         except (ProcessLookupError, OSError):
             pass
 
+        # プロセスの終了待機
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            # 2. タイムアウト時は SIGKILL 送信
             try:
-                if pgid is not None and hasattr(os, "killpg"):
+                if hasattr(os, "killpg"):
                     os.killpg(pgid, signal.SIGKILL)
                 else:
                     proc.kill()
@@ -138,14 +150,38 @@ class MultiTeamOrchestrator:
             except (ProcessLookupError, OSError):
                 pass
 
+        # 3. 親プロセス先行終了時でも残存した孫プロセス・子孫プロセスを刈り取るため SIGKILL を送信
+        if hasattr(os, "killpg"):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+
+        # 4. プロセスグループ内に実行中プロセスが残っていないか検証 (終了反映を最大1秒待機)
+        still_alive = True
+        if hasattr(os, "killpg"):
+            for _ in range(20):
+                try:
+                    os.killpg(pgid, 0)
+                    time.sleep(0.05)
+                except ProcessLookupError:
+                    still_alive = False
+                    break
+                except OSError:
+                    still_alive = False
+                    break
+        else:
+            still_alive = proc.poll() is None
+
         with self._workers_lock:
             self._active_workers.pop(team_id, None)
-        return True
+
+        return not still_alive
 
     def terminate_all_workers(self, timeout: float = 2.0) -> dict[str, bool]:
-        """RR.2: 実行中の全ワーカーのプロセスグループを安全に回収・終了する。"""
+        """RR.2, SS.1: 実行中および全ワーカーのプロセスグループを安全に回収・終了する。"""
         with self._workers_lock:
-            team_ids = list(self._active_workers.keys())
+            team_ids = list(set(list(self._active_workers.keys()) + list(self._all_worker_handles.keys())))
         results: dict[str, bool] = {}
         for tid in team_ids:
             results[tid] = self.terminate_worker_process_group(tid, timeout=timeout)
@@ -310,8 +346,16 @@ class MultiTeamOrchestrator:
                         popen_kwargs["start_new_session"] = True
 
                     proc = subprocess.Popen(cmd, **popen_kwargs)
+                    pgid = proc.pid
+                    if hasattr(os, "getpgid"):
+                        try:
+                            pgid = os.getpgid(proc.pid)
+                        except (ProcessLookupError, OSError):
+                            pgid = proc.pid
+                    handle = WorkerProcessHandle(team_id=team.team_id, proc=proc, pid=proc.pid, pgid=pgid)
                     with self._workers_lock:
-                        self._active_workers[team.team_id] = proc
+                        self._active_workers[team.team_id] = handle
+                        self._all_worker_handles[team.team_id] = handle
 
                     try:
                         stdout_str, stderr_str = proc.communicate(timeout=timeout_sec)

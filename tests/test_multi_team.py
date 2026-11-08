@@ -20,6 +20,47 @@ from auto_developer.multi_team import (
 )
 
 
+def _is_process_running(pid: int) -> bool:
+    """プロセスが実稼働中か確認する（ゾンビ状態 Z/X を除外）。"""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, OSError):
+        return False
+
+    # Linux: /proc/<pid>/status を検査して State: Z (zombie) または X (dead) を除外
+    proc_status = Path(f"/proc/{pid}/status")
+    if proc_status.exists():
+        try:
+            content = proc_status.read_text(encoding="utf-8")
+            for line in content.splitlines():
+                if line.startswith("State:"):
+                    state_tokens = line.split()
+                    if len(state_tokens) > 1:
+                        state_code = state_tokens[1].upper()
+                        if state_code in ("Z", "X"):
+                            return False
+                    break
+        except (OSError, IndexError):
+            return False
+
+    # macOS / BSD / Linux fallback: ps コマンドで stat を確認
+    try:
+        res = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode == 0:
+            stat = res.stdout.strip()
+            return bool(stat and not stat.startswith("Z"))
+        return False
+    except (subprocess.SubprocessError, OSError):
+        return True
+
+
 class TestMultiTeamOrchestration(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -1206,7 +1247,7 @@ class TestMultiTeamOrchestration(unittest.TestCase):
                 verify_script.unlink()
 
     def test_run_workers_process_group_termination_and_orphan_prevention(self) -> None:
-        """RR.2: タイムアウト時および強制停止時にプロセスグループ全体が回収され、孤児プロセスが残存しないことの実証。"""
+        """RR.2, SS.2: タイムアウト時および強制停止時にプロセスグループ全体が回収され、孤児プロセスが残存しないことの実証。"""
         import time
 
         job_id = "job-orphan-prevention-test"
@@ -1223,10 +1264,11 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         wt_path = orchestrator.worktree_manager.worktree_base / "team-orphan-test"
 
         # 子孫プロセス（sleep 60）を起動して自身の終了を待つスクリプト
+        # stdout/stderr を DEVNULL に向けてパイプ継承によるハングを防止
         # PIDをファイルに書き出す
         worker_script = (
             "import subprocess, sys, time\n"
-            "p = subprocess.Popen(['sleep', '60'])\n"
+            "p = subprocess.Popen(['sleep', '60'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
             "with open('child.pid', 'w') as f:\n"
             "    f.write(str(p.pid))\n"
             "sys.stdout.write('CHILD_READY\\n')\n"
@@ -1237,11 +1279,11 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         def cmd_factory(team_id: str, path: Path) -> list[str]:
             return ["python3", "-c", worker_script]
 
-        # 0.5 秒でタイムアウトさせる
+        # 2.0 秒でタイムアウトさせる（コンテナ等での起動遅延を許容し、child.pid の生成を確実に完了させる）
         results = orchestrator.run_workers(
             config=config,
             worker_cmd_factory=cmd_factory,
-            timeout_sec=0.5,
+            timeout_sec=2.0,
         )
 
         res = results["team-orphan-test"]
@@ -1253,21 +1295,20 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         self.assertTrue(pid_file.exists(), "child.pid file should have been written by worker")
         child_pid = int(pid_file.read_text().strip())
 
-        # 少し待って子プロセスがプロセスグループごと完全に終了していることを確認
-        time.sleep(0.3)
-        child_alive = True
-        try:
-            os.kill(child_pid, 0)
-        except ProcessLookupError:
-            child_alive = False
+        # 子プロセスがプロセスグループごと完全に終了していることを確認（ゾンビ状態を除外して判定）
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if not _is_process_running(child_pid):
+                break
+            time.sleep(0.05)
 
-        self.assertFalse(child_alive, f"Child process {child_pid} must be terminated and not orphaned")
+        self.assertFalse(_is_process_running(child_pid), f"Child process {child_pid} must be terminated and not orphaned")
 
         # クリーンアップ
         orchestrator.worktree_manager.remove_worktree("team-orphan-test", force=True, delete_branch=True, purge_unmerged=True)
 
     def test_terminate_all_workers_terminates_running_subprocesses(self) -> None:
-        """RR.2: terminate_all_workers が並行実行中の全ワーカーのプロセスグループを安全に回収することの実証。"""
+        """RR.2, SS.2: terminate_all_workers が並行実行中の全ワーカーのプロセスグループを安全に回収することの実証。"""
         import concurrent.futures
         import time
 
@@ -1288,7 +1329,7 @@ class TestMultiTeamOrchestration(unittest.TestCase):
 
         worker_script = (
             "import subprocess, sys, time\n"
-            "p = subprocess.Popen(['sleep', '60'])\n"
+            "p = subprocess.Popen(['sleep', '60'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
             "with open('child.pid', 'w') as f:\n"
             "    f.write(str(p.pid))\n"
             "sys.stdout.write('READY\\n')\n"
@@ -1334,18 +1375,79 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         for tid in ["team-term-1", "team-term-2"]:
             self.assertFalse(worker_results[tid].success)
 
-        # 両方の子孫プロセスがプロセスグループごと停止していること
-        time.sleep(0.3)
+        # 両方の子孫プロセスがプロセスグループごと停止していること（ゾンビ状態を除外して判定）
+        deadline = time.time() + 2.0
         for cpid in [cpid1, cpid2]:
-            alive = True
-            try:
-                os.kill(cpid, 0)
-            except ProcessLookupError:
-                alive = False
-            self.assertFalse(alive, f"Child process {cpid} should be terminated")
+            while time.time() < deadline:
+                if not _is_process_running(cpid):
+                    break
+                time.sleep(0.05)
+            self.assertFalse(_is_process_running(cpid), f"Child process {cpid} should be terminated")
 
         for tid in ["team-term-1", "team-term-2"]:
             orchestrator.worktree_manager.remove_worktree(tid, force=True, delete_branch=True, purge_unmerged=True)
+
+    def test_terminate_worker_kills_grandchild_when_parent_worker_exits_first(self) -> None:
+        """SS.1, SS.2: 親ワーカープロセスが先行終了した場合でも、起動時保持PGIDによって孫プロセスが確実に回収されることの実証。"""
+        import time
+
+        job_id = "job-parent-exited-first-test"
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id=job_id,
+            teams=[
+                TeamWorkerSpec(team_id="team-parent-exit"),
+            ],
+            base_branch="main",
+        )
+
+        orchestrator.prepare_workers(config)
+        wt = orchestrator.worktree_manager.worktree_base / "team-parent-exit"
+
+        # 孫プロセス（sleep 60）を起動し、PIDを書き出した後、親プロセスは直ちに exit(0) する
+        worker_script = (
+            "import subprocess, sys, time\n"
+            "p = subprocess.Popen(['sleep', '60'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "with open('grandchild.pid', 'w') as f:\n"
+            "    f.write(str(p.pid))\n"
+            "sys.stdout.write('STARTED\\n')\n"
+            "sys.stdout.flush()\n"
+            "sys.exit(0)\n"
+        )
+
+        def cmd_factory(team_id: str, path: Path) -> list[str]:
+            return ["python3", "-c", worker_script]
+
+        results = orchestrator.run_workers(
+            config=config,
+            worker_cmd_factory=cmd_factory,
+            timeout_sec=10.0,
+        )
+
+        # 親プロセスは正常終了している
+        self.assertTrue(results["team-parent-exit"].success)
+
+        # 孫プロセスのPIDを確認
+        pid_file = wt / "grandchild.pid"
+        self.assertTrue(pid_file.exists())
+        grandchild_pid = int(pid_file.read_text().strip())
+
+        # 親は終了したが孫プロセスはまだ動いている
+        self.assertTrue(_is_process_running(grandchild_pid), "Grandchild should initially still be running")
+
+        # terminate_worker_process_group を呼んで孫プロセスを回収できるか検証
+        # (親が死んでいるため、起動時に保持したPGIDが必要)
+        terminated = orchestrator.terminate_worker_process_group("team-parent-exit", timeout=1.0)
+        self.assertTrue(terminated, "terminate_worker_process_group should succeed using stored PGID")
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if not _is_process_running(grandchild_pid):
+                break
+            time.sleep(0.05)
+        self.assertFalse(_is_process_running(grandchild_pid), f"Grandchild process {grandchild_pid} must be terminated even if parent exited first")
+
+        orchestrator.worktree_manager.remove_worktree("team-parent-exit", force=True, delete_branch=True, purge_unmerged=True)
 
 
 if __name__ == "__main__":
