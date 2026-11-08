@@ -537,6 +537,120 @@ class TestMultiTeamOrchestration(unittest.TestCase):
             if verify_script.exists():
                 verify_script.unlink()
 
+    def test_multi_team_end_to_end_real_subprocess_workers_and_semantic_integration(self) -> None:
+        """MM.1, MM.2: 実サブプロセスによる2チーム並行稼働 & Core/UI 意味的機能結合の完全実証。"""
+        # 1. リポジトリの準備 (PLAN.md と local verify_local.sh)
+        plan_file = self.repo_dir / "PLAN.md"
+        plan_file.write_text("# PLAN.md\n\n## ステップ\n- [ ] 1. チーム機能の実装\n", encoding="utf-8")
+        scripts_dir = self.repo_dir / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        local_verify = scripts_dir / "verify_local.sh"
+        local_verify.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        local_verify.chmod(0o755)
+        self._run_git(["add", "PLAN.md", "scripts/verify_local.sh"])
+        self._run_git(["commit", "-m", "chore: setup plan and local verify"])
+
+        # 2. 統合検証スクリプト (Core と UI の意味的結合を実インポートして検証)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as script_file:
+            script_file.write(
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "PYTHONPATH=. python3 -c \"import sys; sys.path.insert(0, '.'); from src.ui.view import render_view; msg = render_view(); assert msg == 'UI View: Hello from Core', f'Mismatch: {msg}'\"\n"
+            )
+            verify_script = Path(script_file.name)
+        verify_script.chmod(0o755)
+
+        try:
+            job_id = "job-subprocess-e2e"
+            orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+
+            core_maker_cmd = (
+                "python3 -c \""
+                "import pathlib; "
+                "p = pathlib.Path('src/core'); p.mkdir(parents=True, exist_ok=True); "
+                "(pathlib.Path('src') / '__init__.py').touch(); "
+                "(p / '__init__.py').touch(); "
+                "(p / 'app.py').write_text('def get_core_message() -> str:\\n    return \\\"Hello from Core\\\"\\n', encoding='utf-8')\""
+            )
+            core_checker_cmd = "python3 -c \"import json; print(json.dumps({'decision': 'APPROVE', 'reason': 'Core approved'}))\""
+
+            ui_maker_cmd = (
+                "python3 -c \""
+                "import pathlib; "
+                "p = pathlib.Path('src/ui'); p.mkdir(parents=True, exist_ok=True); "
+                "(pathlib.Path('src') / '__init__.py').touch(); "
+                "(p / '__init__.py').touch(); "
+                "(p / 'view.py').write_text('from src.core.app import get_core_message\\ndef render_view() -> str:\\n    return f\\\"UI View: {get_core_message()}\\\"\\n', encoding='utf-8')\""
+            )
+            ui_checker_cmd = "python3 -c \"import json; print(json.dumps({'decision': 'APPROVE', 'reason': 'UI approved'}))\""
+
+            python_path = str(Path.cwd() / "src")
+            cwd_str = str(Path.cwd())
+            worker_env = {"PYTHONPATH": f"{python_path}:{cwd_str}"}
+
+            config = MultiTeamConfig(
+                job_id=job_id,
+                teams=[
+                    TeamWorkerSpec(
+                        team_id="team-core",
+                        extra_args=["--maker-cmd", core_maker_cmd, "--checker-cmd", core_checker_cmd],
+                        env=worker_env,
+                    ),
+                    TeamWorkerSpec(
+                        team_id="team-ui",
+                        extra_args=["--maker-cmd", ui_maker_cmd, "--checker-cmd", ui_checker_cmd],
+                        env=worker_env,
+                    ),
+                ],
+                base_branch="main",
+                integration_verify_script=verify_script,
+            )
+
+            # worker_fn や worker_cmd_factory を渡さず、標準の CLI サブプロセス並行実行を実行
+            multi_res = orchestrator.execute_multi_team_pipeline(
+                config=config,
+                verify_script=verify_script,
+                cleanup=True,
+            )
+
+            self.assertTrue(multi_res.success, f"Pipeline failed: {multi_res.details}")
+            self.assertEqual(multi_res.status, "SUCCESS")
+            self.assertEqual(multi_res.release_candidate_tag, f"rc/{job_id}")
+            self.assertIsNotNone(multi_res.release_candidate_commit)
+
+            # Git タグの存在とコミットの一致
+            tag_chk = self._run_git(["rev-parse", "--verify", f"refs/tags/rc/{job_id}"])
+            self.assertEqual(tag_chk.returncode, 0)
+            self.assertEqual(tag_chk.stdout.strip(), multi_res.release_candidate_commit)
+
+            # 各チームコミットが RC の祖先であること
+            for tid in ["team-core", "team-ui"]:
+                c = multi_res.team_results[tid].head_commit
+                assert c is not None
+                anc_chk = self._run_git(["merge-base", "--is-ancestor", c, multi_res.release_candidate_commit])
+                self.assertEqual(anc_chk.returncode, 0)
+
+            # Worktree がクリーンアップされ、Evidence Bundle は外出し保全されていること
+            expected_evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+            for tid in ["team-core", "team-ui"]:
+                wt_dir = orchestrator.worktree_manager.worktree_base / tid
+                self.assertFalse(wt_dir.exists())
+
+                bundle_p = multi_res.team_results[tid].bundle_path
+                self.assertIsNotNone(bundle_p)
+                assert bundle_p is not None
+                self.assertTrue(bundle_p.exists())
+                self.assertEqual(bundle_p.resolve(), (expected_evidence_dir / f"{tid}.zip").resolve())
+
+                # バンドルが VERIFIED であること
+                bundler = EvidenceBundler(repo_dir=self.repo_dir)
+                v_res = bundler.verify_bundle(bundle_p)
+                self.assertEqual(v_res.status, "VERIFIED")
+                self.assertEqual(len(v_res.errors), 0)
+        finally:
+            if verify_script.exists():
+                verify_script.unlink()
+
 
 if __name__ == "__main__":
     unittest.main()
