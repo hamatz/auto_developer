@@ -1347,6 +1347,74 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         for tid in ["team-term-1", "team-term-2"]:
             orchestrator.worktree_manager.remove_worktree(tid, force=True, delete_branch=True, purge_unmerged=True)
 
+    def test_terminate_worker_kills_grandchild_when_parent_worker_exits_first(self) -> None:
+        """SS.1: 親ワーカープロセスが先行終了した場合でも、起動時保持PGIDによって孫プロセスが確実に回収されることの実証。"""
+        import time
+
+        job_id = "job-parent-exited-first-test"
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id=job_id,
+            teams=[
+                TeamWorkerSpec(team_id="team-parent-exit"),
+            ],
+            base_branch="main",
+        )
+
+        orchestrator.prepare_workers(config)
+        wt = orchestrator.worktree_manager.worktree_base / "team-parent-exit"
+
+        # 孫プロセス（sleep 60）を起動し、PIDを書き出した後、親プロセスは直ちに exit(0) する
+        worker_script = (
+            "import subprocess, sys, time\n"
+            "p = subprocess.Popen(['sleep', '60'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "with open('grandchild.pid', 'w') as f:\n"
+            "    f.write(str(p.pid))\n"
+            "sys.stdout.write('STARTED\\n')\n"
+            "sys.stdout.flush()\n"
+            "sys.exit(0)\n"
+        )
+
+        def cmd_factory(team_id: str, path: Path) -> list[str]:
+            return ["python3", "-c", worker_script]
+
+        results = orchestrator.run_workers(
+            config=config,
+            worker_cmd_factory=cmd_factory,
+            timeout_sec=10.0,
+        )
+
+        # 親プロセスは正常終了している
+        self.assertTrue(results["team-parent-exit"].success)
+
+        # 孫プロセスのPIDを確認
+        pid_file = wt / "grandchild.pid"
+        self.assertTrue(pid_file.exists())
+        grandchild_pid = int(pid_file.read_text().strip())
+
+        # 親は終了したが孫プロセスはまだ動いている
+        alive_before = True
+        try:
+            os.kill(grandchild_pid, 0)
+        except ProcessLookupError:
+            alive_before = False
+        self.assertTrue(alive_before, "Grandchild should initially still be running")
+
+        # terminate_worker_process_group を呼んで孫プロセスを回収できるか検証
+        # (親が死んでいるため、起動時に保持したPGIDが必要)
+        terminated = orchestrator.terminate_worker_process_group("team-parent-exit", timeout=1.0)
+        self.assertTrue(terminated, "terminate_worker_process_group should succeed using stored PGID")
+
+        time.sleep(0.3)
+        alive_after = True
+        try:
+            os.kill(grandchild_pid, 0)
+        except ProcessLookupError:
+            alive_after = False
+        self.assertFalse(alive_after, f"Grandchild process {grandchild_pid} must be terminated even if parent exited first")
+
+        orchestrator.worktree_manager.remove_worktree("team-parent-exit", force=True, delete_branch=True, purge_unmerged=True)
+
 
 if __name__ == "__main__":
     unittest.main()
