@@ -403,7 +403,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 親プロセス SIGKILL クラッシュからの通し自律復旧受入テストの実証。
      - 全自動検証ゲート（184+ テスト、Ruff、Mypy）の合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
-- [ ] 機能YY (Stage 3 未確認ワーカー存在時の復旧抑止 & Worktree保全 Stage 3 Fail-Closed Unverified Worker Recovery & Worktree Preservation):
+- [x] 機能YY (Stage 3 未確認ワーカー存在時の復旧抑止 & Worktree保全 Stage 3 Fail-Closed Unverified Worker Recovery & Worktree Preservation):
   1. 未確認ワーカー存在時の統合ゲート進行抑止 & RECOVERY_REQUIRED 状態遷移 (YY.1 / P1):
      - `recover_multi_team_job()` において、`result.unverified_processes` が空でない（同一性・所属関係の照合に失敗して停止を保留したワーカーが存在する）場合は、たとえ全チームの Evidence Bundle が揃っていても `all_preserved` を `False` と判定し、統合ゲート（IntegrationGate）への進行を物理遮断する。
      - パイプラインステータスを `RECOVERY_REQUIRED` として安全に停止・保留する。
@@ -413,6 +413,20 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 「有効な Evidence が存在しても、未確認ワーカーが残っている場合は統合処理に進まず status が RECOVERY_REQUIRED となり、Worktree も削除されない」ことを実証する単体・受入テスト（Red-First）。
      - 全自動検証ゲート（198+ テスト、Ruff、Mypy）の完全合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [ ] 機能ZZ (Stage 4 非対称免疫保護 & 再現テスト検証ハーネス Stage 4 Asymmetric Immunity Guard & Red-Verification Harness):
+  1. 非対称免疫ガードの実装 (ZZ.1):
+     - `GitGuard.check_protected_files_untouched(checkpoint, allow_immunity_additions=False)` を拡張。
+     - 既定の通常 Maker 実行時（`allow_immunity_additions=False`）は従来通り `tests/immunity/` の作成・変更・削除を全面禁止する。
+     - 監査役フェーズ等の指定時（`allow_immunity_additions=True`）は、`tests/immunity/` 配下への新規ファイル追加（Git の `A` または `??`）のみを許可する。
+     - ただし、既存の免疫テストファイルの変更（`M`）、削除（`D`）、リネーム（`R`）は、`allow_immunity_additions=True` であっても依然として厳格に遮断（Fail-Closed）し、保護不変条件を維持する。
+     - `.github/`, `SPEC.md`, `scripts/verify_local.sh` への変更・追加・削除は常に全面禁止とする。
+  2. 再現テスト検証ハーネスの実装 (ZZ.2):
+     - 監査役から提示されたテストコード候補を実行・評価する `RedTestVerifier` を実装。
+     - 現在のコードベースに対して再現テストを実行し、確実に Red（アサーション失敗等による Exit != 0）となるか機械的に判定する。
+     - 現在のコードですでに Green（通過）してしまう指摘や、構文エラー・インポート不能等の無効なテストは「再現不成立」として False を返し、本物の不具合のみを篩い分ける。
+  3. 決定論的受入実証と全体検証ゲート合格確認 (ZZ.3):
+     - 既存免疫テストの改変が遮断されること、新規免疫テストの追加のみが許可されること、および `RedTestVerifier` が真のバグのみを Red として検知することを実証するテストスイート。
+     - 全自動検証ゲート（200+ テスト、Ruff、Mypy）の完全合格確認。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
