@@ -240,12 +240,17 @@ class MultiTeamOrchestrator:
             still_alive = proc.poll() is None
 
         with self._workers_lock:
-            self._active_workers.pop(team_id, None)
-            self._all_worker_handles.pop(team_id, None)
+            if not still_alive:
+                self._active_workers.pop(team_id, None)
+                self._all_worker_handles.pop(team_id, None)
+                status = "TERMINATED"
+            else:
+                # UU.1: 停止失敗時は監督ハンドルを保持し、再試行・再回収を可能にする
+                status = "TERMINATION_FAILED"
             self._worker_history[team_id] = {
                 "pid": handle.pid,
                 "pgid": handle.pgid,
-                "status": "TERMINATED" if not still_alive else "TERMINATION_FAILED",
+                "status": status,
                 "terminated_at": time.time(),
             }
 

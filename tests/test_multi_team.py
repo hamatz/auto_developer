@@ -1543,6 +1543,72 @@ class TestMultiTeamOrchestration(unittest.TestCase):
             p_active.kill()
             p_active.wait()
 
+    def test_terminate_worker_process_group_retains_active_handle_on_termination_failure(self) -> None:
+        """UU.1: 停止処理が失敗（プロセス残存）した場合、監督ハンドルが維持されTERMINATION_FAILEDが記録されることの実証。"""
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+
+        p = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        handle = WorkerProcessHandle(team_id="team-stubborn", proc=p, pid=p.pid, pgid=p.pid)
+        orchestrator._active_workers["team-stubborn"] = handle
+        orchestrator._all_worker_handles["team-stubborn"] = handle
+
+        try:
+            # has_active_processes_in_group が True を返し続ける（停止失敗）状況をシミュレート
+            with unittest.mock.patch("auto_developer.multi_team.has_active_processes_in_group", return_value=True):
+                success = orchestrator.terminate_worker_process_group("team-stubborn", timeout=0.1)
+
+            # 停止失敗が返されること
+            self.assertFalse(success)
+
+            # ハンドルが削除されずに維持されていること
+            self.assertIn("team-stubborn", orchestrator._active_workers)
+            self.assertIn("team-stubborn", orchestrator._all_worker_handles)
+
+            # 履歴ステータスが TERMINATION_FAILED となっていること
+            hist = orchestrator._worker_history.get("team-stubborn")
+            self.assertIsNotNone(hist)
+            assert hist is not None
+            self.assertEqual(hist["status"], "TERMINATION_FAILED")
+        finally:
+            p.kill()
+            p.wait()
+
+    def test_termination_failure_retry_and_recovery_flow(self) -> None:
+        """UU.2: 停止失敗時にハンドルが保持され、再試行（terminate_all_workers または個別呼出）で確実に回収されることの実証。"""
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+
+        p = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        handle = WorkerProcessHandle(team_id="team-retry", proc=p, pid=p.pid, pgid=p.pid)
+        orchestrator._active_workers["team-retry"] = handle
+        orchestrator._all_worker_handles["team-retry"] = handle
+
+        try:
+            # 1回目: 障害注入により停止失敗（プロセスが生存し続けたと仮定）
+            with unittest.mock.patch("auto_developer.multi_team.has_active_processes_in_group", return_value=True):
+                first_result = orchestrator.terminate_worker_process_group("team-retry", timeout=0.1)
+
+            self.assertFalse(first_result)
+            self.assertIn("team-retry", orchestrator._active_workers)
+            self.assertEqual(orchestrator._worker_history["team-retry"]["status"], "TERMINATION_FAILED")
+
+            # 2回目: 再試行（今度は正常に停止・回収される）
+            # terminate_all_workers を呼び出して、アクティブに残されたチームが対象になることを確認
+            second_results = orchestrator.terminate_all_workers(timeout=1.0)
+
+            self.assertIn("team-retry", second_results)
+            self.assertTrue(second_results["team-retry"])
+
+            # 再回収後はアクティブ監督対象から除外され、TERMINATED となること
+            self.assertNotIn("team-retry", orchestrator._active_workers)
+            self.assertEqual(orchestrator._worker_history["team-retry"]["status"], "TERMINATED")
+
+            # 3回目: 再度 terminate_all_workers を呼んでも対象が存在しないこと
+            third_results = orchestrator.terminate_all_workers(timeout=0.5)
+            self.assertEqual(len(third_results), 0)
+        finally:
+            p.kill()
+            p.wait()
+
 
 if __name__ == "__main__":
     unittest.main()
