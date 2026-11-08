@@ -19,7 +19,7 @@
 ## ステップ
 - [x] 1. 防壁の穴封鎖（既存テスト不干渉検証、トップレベルAST検査、root実行Fail-Closed）の実装と単体テスト（Red-First）（CCC.1）
 - [x] 2. 独立監査役ランナー `AuditRunner` と `AuditFinding` モデルの実装と単体テスト（Red-First）（CCC.2）
-- [ ] 3. 監査指摘からRed検証を経て `PLAN.md` への修正タスク自動登録（パイプライン接続）の実装と単体テスト（Red-First）（CCC.3）
+- [x] 3. 監査指摘からRed検証を経て `PLAN.md` への修正タスク自動登録（パイプライン接続）の実装と単体テスト（Red-First）（CCC.3）
 - [ ] 4. 決定論的受入実証（シードバグの監査指摘 → 隔離Red検証 → PLAN.md自動登録）と全体検証ゲート合格確認、Evidence Bundle 生成（CCC.4）
 
 ## 止まっていること・判断待ち
