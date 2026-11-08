@@ -5,6 +5,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -115,14 +116,80 @@ class RedTestVerifier:
                 reason_detail="No tests found",
             )
 
-        # 3. 一時ファイルに書き出して実行
+        # 3. 独立した一時クローン環境を作成して実行 (Physical Clone Isolation)
         with tempfile.TemporaryDirectory() as tmpdir:
-            sandbox_path = Path(tmpdir)
-            test_file = sandbox_path / "test_candidate.py"
+            clone_path = Path(tmpdir) / "isolated_repo"
+            self._create_isolated_clone(clone_path)
+            test_file = clone_path / "test_candidate.py"
             test_file.write_text(test_code, encoding="utf-8")
             return self._execute_test(
-                test_file, tmpdir, timeout_sec, sandbox_dir=sandbox_path
+                test_file, str(clone_path), timeout_sec, sandbox_dir=clone_path
             )
+
+    def _create_isolated_clone(self, target_dir: Path) -> Path:
+        """元リポジトリから隔離されたクリーンな一時クローン（作業コピー）を作成する。
+        Git リポジトリの場合は git clone --local --no-hardlinks で物理コピーを作成し、
+        非Gitリポジトリの場合は shutil.copytree で複製する。
+        """
+        resolved_repo = self.repo_dir.resolve()
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        is_git_repo = (resolved_repo / ".git").is_dir()
+        cloned_ok = False
+        if is_git_repo:
+            try:
+                res = subprocess.run(
+                    [
+                        "git",
+                        "clone",
+                        "--local",
+                        "--no-hardlinks",
+                        str(resolved_repo),
+                        str(target_dir),
+                    ],
+                    capture_output=True,
+                    check=False,
+                )
+                if res.returncode == 0:
+                    cloned_ok = True
+                    # 未コミットのファイル（ステージ済み・未追跡）も一時クローンへコピー
+                    self._sync_uncommitted_files(resolved_repo, target_dir)
+            except (OSError, subprocess.SubprocessError):
+                cloned_ok = False
+
+        if not cloned_ok:
+            if target_dir.exists():
+                shutil.rmtree(target_dir, ignore_errors=True)
+            shutil.copytree(
+                resolved_repo,
+                target_dir,
+                dirs_exist_ok=True,
+                symlinks=False,
+                ignore=shutil.ignore_patterns(".git", ".dev/bundles", "__pycache__"),
+            )
+
+        return target_dir
+
+    def _sync_uncommitted_files(self, source_repo: Path, target_repo: Path) -> None:
+        """元リポジトリの未コミットの変更・新規ファイルを一時クローンへ同期する。"""
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            res = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=source_repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                for line in res.stdout.splitlines():
+                    parts = line.strip().split(maxsplit=1)
+                    if len(parts) == 2:
+                        rel_path = parts[1]
+                        src_file = source_repo / rel_path
+                        tgt_file = target_repo / rel_path
+                        if src_file.is_file() and not src_file.is_symlink():
+                            tgt_file.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(src_file, tgt_file)
 
     def verify_candidate_test_file(
         self, test_file_path: Path, timeout_sec: int = 30
@@ -177,11 +244,13 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
     def _lockdown_repo(self, repo_dir: Path) -> Iterator[None]:
         """候補テスト実行中、対象リポジトリ配下の全ファイルおよびディレクトリから
         書き込み権限を一時的に剥奪（a-w）して OS 権限レベルで読取専用化し、
-        テスト終了後に元のパーミッションを確実に復元する。
+        さらに macOS では User Immutable Flag (chflags uchg) を設定して、
+        テスト終了後に元のパーミッションおよびフラグを確実に復元する。
         """
         original_modes: list[tuple[Path, int]] = []
         resolved_repo = repo_dir.resolve()
         write_mask = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+        has_chflags = sys.platform == "darwin" and shutil.which("chflags") is not None
 
         items: list[tuple[Path, int, bool]] = []
         try:
@@ -228,9 +297,27 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                         except OSError:
                             pass
 
+                # macOS の場合、カーネルレベルで chmod 権限復元を物理阻止する uchg フラグを設定
+                if has_chflags:
+                    with contextlib.suppress(OSError, subprocess.SubprocessError):
+                        subprocess.run(
+                            ["chflags", "-R", "uchg", str(resolved_repo)],
+                            capture_output=True,
+                            check=False,
+                        )
+
             yield
 
         finally:
+            # macOS の uchg フラグを解除
+            if has_chflags:
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    subprocess.run(
+                        ["chflags", "-R", "nouchg", str(resolved_repo)],
+                        capture_output=True,
+                        check=False,
+                    )
+
             # 復元: ディレクトリ (親) から先に元の書き込み権限を復元
             for p, mode in reversed(original_modes):
                 try:
@@ -254,9 +341,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         sandbox_dir: Path | None = None,
     ) -> RedVerificationResult:
         """構造化 TestResult を用いて候補テストを実行し、Red/Green/無効を判定する。
-        本体リポジトリ汚染を防ぐため、実行作業ディレクトリは使い捨ての sandbox_dir に隔離し、
-        シークレット等の機密環境変数を除外サニタイズした上で、本体作業ツリーを OS 権限レベルで
-        読取専用にロックダウンして実行する。
+        本体リポジトリ汚染を防ぐため、実行作業ディレクトリは使い捨ての一時クローン sandbox_dir に隔離し、
+        シークレット等の機密環境変数を除外サニタイズした上で、本体作業ツリーを OS 権限レベルおよび
+        カーネルファイルフラグで読取専用にロックダウンして実行する。
         """
         # 0. root (UID 0) 実行検知と安全遮断 (OSパーミッション迂回の防止)
         if hasattr(os, "geteuid") and os.geteuid() == 0:
@@ -275,13 +362,14 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 continue
             sanitized_env[k] = v
 
-        src_path = str((self.repo_dir / "src").resolve())
-        repo_path = str(self.repo_dir.resolve())
-        existing_pythonpath = sanitized_env.get("PYTHONPATH", "")
-        sanitized_env["PYTHONPATH"] = f"{src_path}:{repo_path}:{existing_pythonpath}".strip(":")
-
         # 2. 実行作業ディレクトリの隔離 (本体 repo_dir への書き込み防止)
         exec_cwd = sandbox_dir or Path(search_dir)
+
+        # PYTHONPATH は元リポジトリではなく、一時クローンのパスを設定
+        src_path = str((exec_cwd / "src").resolve())
+        repo_path = str(exec_cwd.resolve())
+        existing_pythonpath = sanitized_env.get("PYTHONPATH", "")
+        sanitized_env["PYTHONPATH"] = f"{src_path}:{repo_path}:{existing_pythonpath}".strip(":")
 
         cmd = [
             sys.executable,
