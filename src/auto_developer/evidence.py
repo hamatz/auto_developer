@@ -9,8 +9,13 @@ class EvidenceStore:
 
     def __init__(self, repo_dir: Path | None = None) -> None:
         self.repo_dir = repo_dir or Path.cwd()
-        self.evidence_dir = self.repo_dir / ".git" / "nightly_evidence"
-        self.records_dir = self.evidence_dir / "records"
+        git_path = self.repo_dir / ".git"
+        if git_path.is_dir():
+            self.evidence_dir = git_path / "nightly_evidence"
+            self.records_dir = self.evidence_dir / "records"
+        else:
+            self.evidence_dir = self.repo_dir / ".dev" / "evidence"
+            self.records_dir = self.evidence_dir
 
     def issue_evidence(
         self,

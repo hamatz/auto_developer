@@ -6,6 +6,8 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+from auto_developer.bundler import EvidenceBundler
+from auto_developer.evidence import EvidenceStore
 from auto_developer.multi_team import (
     MultiTeamConfig,
     MultiTeamOrchestrator,
@@ -38,7 +40,11 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         self._run_git(["config", "user.email", "multiteam@example.com"])
         readme = self.repo_dir / "README.md"
         readme.write_text("MultiTeam Repository\n", encoding="utf-8")
-        self._run_git(["add", "README.md"])
+        spec = self.repo_dir / "SPEC.md"
+        spec.write_text("# MultiTeam SPEC\n", encoding="utf-8")
+        gitignore = self.repo_dir / ".gitignore"
+        gitignore.write_text(".dev/\n*.zip\n", encoding="utf-8")
+        self._run_git(["add", "README.md", "SPEC.md", ".gitignore"])
         self._run_git(["commit", "-m", "init: base commit"])
         res = self._run_git(["rev-parse", "HEAD"])
         self.base_commit = res.stdout.strip()
@@ -226,6 +232,143 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         self.assertEqual(results["team-fail"].status, "CRASHED")
 
         orchestrator.cleanup_workers(config)
+
+    def test_multi_team_end_to_end_parallel_workers_and_integration(self) -> None:
+        """JJ.1: 2ワーカー並行稼働・成果物収集・統合ゲートRC発行のエンドツーエンド受入実証。"""
+        # 統合検証スクリプト (リポジトリ外に作成してクリーンツリーを維持)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as script_file:
+            script_file.write("#!/bin/sh\nexit 0\n")
+            verify_script = Path(script_file.name)
+        verify_script.chmod(0o755)
+
+        try:
+            orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+            config = MultiTeamConfig(
+                job_id="job-e2e-stage3",
+                teams=[
+                    TeamWorkerSpec(team_id="team-core"),
+                    TeamWorkerSpec(team_id="team-ui"),
+                ],
+                base_branch="main",
+                integration_verify_script=verify_script,
+            )
+
+            def mock_worker(team_id: str, wt_path: Path) -> TeamExecutionResult:
+                # チームWorktreeで成果物作成 & コミット
+                rel_file = f"src/{team_id.replace('-', '_')}.py"
+                target_file = wt_path / rel_file
+                target_file.parent.mkdir(parents=True, exist_ok=True)
+                target_file.write_text(f"# Work for {team_id}\ndef fn_{team_id.replace('-', '_')}(): pass\n", encoding="utf-8")
+                subprocess.run(["git", "add", "."], cwd=wt_path, check=True)
+                subprocess.run(["git", "commit", "-m", f"feat: {team_id} implementation"], cwd=wt_path, check=True)
+                rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt_path, capture_output=True, text=True, check=True).stdout.strip()
+                tree_sha = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=wt_path, capture_output=True, text=True, check=True).stdout.strip()
+                import hashlib
+                spec_sha = hashlib.sha256((wt_path / "SPEC.md").read_bytes()).hexdigest()
+
+                # 証跡レコードとバンドルの作成
+                ev_store = EvidenceStore(repo_dir=wt_path)
+                ev_store.issue_evidence(
+                    task_id=f"task-{team_id}",
+                    checkpoint=self.base_commit,
+                    tree_sha=tree_sha,
+                    spec_sha=spec_sha,
+                )
+                ev_store.archive_record(
+                    task_id=f"task-{team_id}",
+                    status="COMPLETED",
+                    commit_info={"sha": rev, "tree_sha": tree_sha},
+                    checker_info={"decision": "APPROVE", "reason": f"Audit approved {team_id}"},
+                    verification_info={"exit_code": 0},
+                )
+
+                bundles_dir = wt_path / ".dev" / "bundles"
+                bundles_dir.mkdir(parents=True, exist_ok=True)
+                bundle_p = bundles_dir / f"bundle_{team_id}.zip"
+                bundler = EvidenceBundler(repo_dir=wt_path)
+                bundler.create_bundle(dest_path=bundle_p)
+
+                return TeamExecutionResult(
+                    team_id=team_id,
+                    success=True,
+                    status="SUCCESS",
+                    branch=f"team/{team_id}",
+                    head_commit=rev,
+                    bundle_path=bundle_p,
+                )
+
+            multi_res = orchestrator.execute_multi_team_pipeline(
+                config=config,
+                worker_fn=mock_worker,
+                verify_script=verify_script,
+                cleanup=True,
+            )
+
+            self.assertTrue(multi_res.success)
+            self.assertEqual(multi_res.status, "SUCCESS")
+            self.assertEqual(multi_res.release_candidate_tag, "rc/job-e2e-stage3")
+            self.assertIsNotNone(multi_res.release_candidate_commit)
+
+            # Git リポジトリに RC タグが実際に存在することの検証
+            tag_chk = self._run_git(["rev-parse", "--verify", "refs/tags/rc/job-e2e-stage3"])
+            self.assertEqual(tag_chk.returncode, 0)
+            self.assertEqual(tag_chk.stdout.strip(), multi_res.release_candidate_commit)
+
+            # 各チームのコミットが RC コミットの祖先であることの検証
+            for tid in ["team-core", "team-ui"]:
+                team_commit = multi_res.team_results[tid].head_commit
+                assert team_commit is not None
+                ancestor_chk = self._run_git(["merge-base", "--is-ancestor", team_commit, multi_res.release_candidate_commit])
+                self.assertEqual(ancestor_chk.returncode, 0)
+
+            # Worktree がクリーンアップされていることの検証
+            for tid in ["team-core", "team-ui"]:
+                wt_dir = orchestrator.worktree_manager.worktree_base / tid
+                self.assertFalse(wt_dir.exists())
+        finally:
+            if verify_script.exists():
+                verify_script.unlink()
+
+    def test_multi_team_end_to_end_rejects_integration_on_worker_failure(self) -> None:
+        """JJ.1: 片方のワーカーが失敗した際、未承認成果が統合されず WORKER_FAILED となることの実証。"""
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id="job-e2e-fail",
+            teams=[
+                TeamWorkerSpec(team_id="team-success"),
+                TeamWorkerSpec(team_id="team-failing"),
+            ],
+            base_branch="main",
+        )
+
+        def mock_worker_with_failure(team_id: str, wt_path: Path) -> TeamExecutionResult:
+            if team_id == "team-failing":
+                return TeamExecutionResult(
+                    team_id=team_id,
+                    success=False,
+                    status="FAILED",
+                    details={"error": "Build failed on team-failing"},
+                )
+            return TeamExecutionResult(
+                team_id=team_id,
+                success=True,
+                status="SUCCESS",
+                bundle_path=wt_path / "bundle.zip",
+            )
+
+        multi_res = orchestrator.execute_multi_team_pipeline(
+            config=config,
+            worker_fn=mock_worker_with_failure,
+            cleanup=True,
+        )
+
+        self.assertFalse(multi_res.success)
+        self.assertEqual(multi_res.status, "WORKER_FAILED")
+        self.assertIsNone(multi_res.release_candidate_commit)
+
+        # RC タグが作成されていないことの検証
+        tag_chk = self._run_git(["rev-parse", "--verify", "refs/tags/rc/job-e2e-fail"], check=False)
+        self.assertNotEqual(tag_chk.returncode, 0)
 
 
 if __name__ == "__main__":

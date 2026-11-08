@@ -162,6 +162,7 @@ class EvidenceBundler:
                 self.repo_dir / ".git" / "nightly_evidence" / "records",
                 self.repo_dir / ".git" / "nightly_evidence" / "archive",
                 self.repo_dir / ".git" / "nightly_evidence",
+                self.repo_dir / ".dev" / "evidence" / "records",
                 self.repo_dir / ".dev" / "evidence",
             ]
 
