@@ -2050,5 +2050,63 @@ os.kill(os.getpid(), signal.SIGKILL)
             self.assertEqual(team_res.get("status"), "INVALID_EVIDENCE")
 
 
+    def test_recover_multi_team_job_skips_when_pid_does_not_belong_to_pgid(self) -> None:
+        """XX.1: PIDの開始識別子が正しくても、PIDが指定PGIDに所属していない場合は誤停止しないことを実証。"""
+        job_id = "job-pgid-mismatch-test"
+        registry = WorkerRegistry(repo_dir=self.repo_dir, job_id=job_id)
+
+        # 2つの無関係なプロセスAとプロセスBを別セッションで起動
+        p_a = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        p_b = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        pid_a = p_a.pid
+        pid_b = p_b.pid
+
+        # プロセスAの正しい開始識別子を取得
+        ident_a = get_process_start_identifier(pid_a)
+
+        now = time.time()
+        wt = self.repo_dir / ".dev" / "worktrees" / "team-probe"
+        wt.mkdir(parents=True, exist_ok=True)
+
+        # 不整合な組み合わせ: pid はプロセスA、pgid は無関係なプロセスB の PGID
+        reg = WorkerRegistration(
+            team_id="team-probe",
+            pid=pid_a,
+            pgid=pid_b,
+            worktree_path=str(wt),
+            base_branch="main",
+            branch_name="team/team-probe",
+            status="RUNNING",
+            start_time=now,
+            updated_at=now,
+            process_start_time=ident_a,
+        )
+        registry.save({"team-probe": reg})
+
+        try:
+            orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+            rec_result: MultiTeamRecoveryResult = orchestrator.recover_multi_team_job(job_id=job_id)
+
+            # 所属照合の不一致により、無関係なプロセスBが誤停止されず稼働を維持していること
+            self.assertTrue(
+                _is_process_running(pid_b),
+                "Unrelated process B must NOT be terminated when PID does not belong to PGID",
+            )
+            self.assertTrue(
+                _is_process_running(pid_a),
+                "Process A must also remain running",
+            )
+            self.assertNotIn("team-probe", rec_result.reclaimed_orphans)
+            self.assertIn("team-probe", rec_result.unverified_processes)
+        finally:
+            for p in (p_a, p_b):
+                try:
+                    if _is_process_running(p.pid):
+                        p.kill()
+                    p.wait(timeout=1.0)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+
+
 if __name__ == "__main__":
     unittest.main()

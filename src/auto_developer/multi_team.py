@@ -473,11 +473,30 @@ class MultiTeamOrchestrator:
 
             # Case 1: 孤児ワーカーが生存しているか検査
             if w.pgid > 0 and has_active_processes_in_group(w.pgid):
-                # WW.1: プロセス同一性照合（PID再利用・無関係プロセス誤停止の防止）
+                # WW.1, XX.1: プロセス同一性および所属照合（PID再利用・PGID不一致による無関係プロセス誤停止の防止）
                 curr_ident = get_process_start_identifier(w.pid)
                 identity_verified = False
-                if w.process_start_time and curr_ident:
-                    identity_verified = (curr_ident == w.process_start_time)
+                if w.process_start_time and curr_ident and curr_ident == w.process_start_time:
+                    # XX.1: PID が Registry に記録された PGID に実際に所属しているか確認
+                    if hasattr(os, "getpgid"):
+                        try:
+                            actual_pgid = os.getpgid(w.pid)
+                            if actual_pgid == w.pgid:
+                                identity_verified = True
+                            else:
+                                logger.warning(
+                                    "PID %s belongs to PGID %s, but registry specified PGID %s; skipping signal for safety",
+                                    w.pid,
+                                    actual_pgid,
+                                    w.pgid,
+                                )
+                        except (ProcessLookupError, OSError):
+                            logger.warning(
+                                "Cannot determine PGID for PID %s (process terminated or inaccessible); skipping signal for safety",
+                                w.pid,
+                            )
+                    else:
+                        identity_verified = True
 
                 if identity_verified:
                     # 孤児プロセスグループを安全に停止・回収
