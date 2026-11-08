@@ -7,18 +7,18 @@
 -->
 
 ## 現在の目標
-- Phase 38: Stage 3 PID-PGID所属照合 & EvidenceBundler独立実検証 (Sol氏レビュー残課題 P0, P1 解消 & Stage 3 完了判定)
-  - P0: PID-PGID 所属照合による誤停止の完全遮断（機能XX.1）
-  - P1: EvidenceBundler による独立実検証の適用 & 復旧状態の厳格化（機能XX.2）
-  - 受入実証: Stage 3 通しクラッシュ復旧受入実証、全体検証ゲート完全合格（184+ テスト）、および Evidence Bundle 生成・検証（機能XX.3 / Stage 3 完了判定）
+- Phase 39: Stage 3 Final Close — 未確認ワーカー存在時の統合・削除抑止 (Sol氏レビュー残課題 P1 解消 & Stage 3 最終クローズ)
+  - P1: 未確認ワーカー存在時の統合ゲート進行抑止 & `RECOVERY_REQUIRED` 状態遷移（機能YY.1）
+  - P1: 未確認ワーカーの Worktree クリーンアップ抑止 & 安全保全（機能YY.2）
+  - 受入実証: Stage 3 最終完了受入実証、全体検証ゲート完全合格（198+ テスト）、および Evidence Bundle 生成・検証（機能YY.3 / Stage 3 最終完了判定）
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - なし
 
 ## ステップ
-- [x] 1. PID-PGID 所属照合（`os.getpgid(w.pid) == w.pgid` の所属確認 & 照合不能時停止保留）の実装と単体テスト（Red-First）（XX.1）
-- [x] 2. EvidenceBundler による独立実検証の適用（マニフェストのない不正zip拒絶 & 復旧状態厳格化）の実装と単体テスト（Red-First）（XX.2）
-- [x] 3. Stage 3 通しクラッシュ復旧受入実証、全体検証ゲート合格確認（184+ テスト）、および Evidence Bundle 生成・検証（XX.3 / Stage 3 完了判定）
+- [ ] 1. 未確認ワーカー存在時の統合ゲート進行抑止 & `RECOVERY_REQUIRED` 状態遷移の実装と単体テスト（Red-First）（YY.1）
+- [ ] 2. 未確認ワーカーの Worktree クリーンアップ抑止 & 保全の実装と単体テスト（Red-First）（YY.2）
+- [ ] 3. Stage 3 最終完了受入実証（通しテスト）、全体検証ゲート合格確認（198+ テスト）、および Evidence Bundle 生成・検証（YY.3 / Stage 3 最終クローズ）
 
 ## 止まっていること・判断待ち
 - なし

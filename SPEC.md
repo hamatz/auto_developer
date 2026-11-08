@@ -391,7 +391,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `verify_script=None` や IntegrationGate 未実行時は `RECOVERED_EVIDENCE_FOUND`（復旧保留）中間状態とし、IntegrationGate 成功時のみ `SUCCESS` とする。
      - 全自動検証ゲート（182+ テスト、Ruff、Mypy）の合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
-- [ ] 機能XX (Stage 3 PID-PGID所属照合 & EvidenceBundler独立実検証 Stage 3 Process Group Membership & Strict Evidence Audit):
+- [x] 機能XX (Stage 3 PID-PGID所属照合 & EvidenceBundler独立実検証 Stage 3 Process Group Membership & Strict Evidence Audit):
   1. PID-PGID 所属照合による誤停止の完全遮断 (XX.1 / P0):
      - `recover_multi_team_job()` において、プロセスグループ停止を試みる前に、`w.pid` の OS 開始識別子照合（`curr_ident == w.process_start_time`）に加え、`os.getpgid(w.pid) == w.pgid` の所属確認を必須化。
      - 親ワーカー PID が既に終了している場合、あるいは `os.getpgid(w.pid) != w.pgid` の場合は、絶対に `os.killpg` を送らず、`UNVERIFIED_PROCESS` または `RECOVERY_REQUIRED` として安全に停止を保留（Fail-Closed）。
@@ -402,6 +402,16 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   3. Stage 3 通しクラッシュ復旧受入実証、全体検証ゲート合格確認（184+ テスト）、および Evidence Bundle 生成・検証 (XX.3 / Stage 3 完了判定):
      - 親プロセス SIGKILL クラッシュからの通し自律復旧受入テストの実証。
      - 全自動検証ゲート（184+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [ ] 機能YY (Stage 3 未確認ワーカー存在時の復旧抑止 & Worktree保全 Stage 3 Fail-Closed Unverified Worker Recovery & Worktree Preservation):
+  1. 未確認ワーカー存在時の統合ゲート進行抑止 & RECOVERY_REQUIRED 状態遷移 (YY.1 / P1):
+     - `recover_multi_team_job()` において、`result.unverified_processes` が空でない（同一性・所属関係の照合に失敗して停止を保留したワーカーが存在する）場合は、たとえ全チームの Evidence Bundle が揃っていても `all_preserved` を `False` と判定し、統合ゲート（IntegrationGate）への進行を物理遮断する。
+     - パイプラインステータスを `RECOVERY_REQUIRED` として安全に停止・保留する。
+  2. 未確認ワーカーの Worktree クリーンアップ抑止 & 保全 (YY.2 / P1):
+     - `cleanup=True` 指定時であっても、`unverified_processes` に含まれるチームの Worktree は削除せず、`result.unverified_worktrees` に記録して保全する。
+  3. 決定論的回帰テスト & Stage 3 最終完了実証 (YY.3 / Stage 3 完了判定):
+     - 「有効な Evidence が存在しても、未確認ワーカーが残っている場合は統合処理に進まず status が RECOVERY_REQUIRED となり、Worktree も削除されない」ことを実証する単体・受入テスト（Red-First）。
+     - 全自動検証ゲート（198+ テスト、Ruff、Mypy）の完全合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
