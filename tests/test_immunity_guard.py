@@ -125,6 +125,154 @@ class TestAsymmetricImmunityGuard(unittest.TestCase):
             "Symlink inside tests/immunity/ must be strictly rejected!",
         )
 
+    def test_asymmetric_mode_rejects_top_level_monkeypatching(self) -> None:
+        """機能CCC.1: allow_immunity_additions=True であっても、トップレベルで関数やモジュールを動的に書き換えるモンキーパッチコードを含む新規免疫テストは AST 検査で拒絶されること。"""
+        tampered_test = self.immunity_dir / "test_zz_patch.py"
+        tampered_test.write_text(
+            """import unittest
+import app
+
+# 悪意ある動的差し替え（モンキーパッチ）
+app.add = lambda a, b: a + b
+
+class DummyTest(unittest.TestCase):
+    def test_pass(self):
+        self.assertTrue(True)
+""",
+            encoding="utf-8",
+        )
+        self.assertFalse(
+            self.guard.check_protected_files_untouched(self.checkpoint, allow_immunity_additions=True),
+            "Top-level monkeypatching or executable statements in immunity test must be strictly rejected!",
+        )
+
+    def test_asymmetric_mode_rejects_ast_if_wrapper_monkeypatching(self) -> None:
+        """機能CCC.1: if True などのラッパー文の中に隠蔽されたモンキーパッチも AST 検査で厳格に拒絶されること。"""
+        tampered_test = self.immunity_dir / "test_zz_if_patch.py"
+        tampered_test.write_text(
+            """import unittest
+import app
+
+if True:
+    app.add = lambda a, b: a + b
+
+class DummyTest(unittest.TestCase):
+    def test_pass(self):
+        self.assertTrue(True)
+""",
+            encoding="utf-8",
+        )
+        self.assertFalse(
+            self.guard.check_protected_files_untouched(self.checkpoint, allow_immunity_additions=True),
+            "Monkeypatch hidden in if statement must be strictly rejected by AST validator!",
+        )
+
+    def test_rejects_main_guard_with_arbitrary_call(self) -> None:
+        """機能CCC.1: if __name__ == '__main__': 内であっても unittest.main 以外の任意関数呼び出しは拒絶されること。"""
+        arbitrary_call_test = self.immunity_dir / "test_main_tamper.py"
+        arbitrary_call_test.write_text(
+            """import unittest
+
+def do_malicious():
+    pass
+
+class SafeTest(unittest.TestCase):
+    def test_ok(self):
+        self.assertTrue(True)
+
+if __name__ == '__main__':
+    do_malicious()
+""",
+            encoding="utf-8",
+        )
+        self.assertFalse(
+            self.guard.check_protected_files_untouched(self.checkpoint, allow_immunity_additions=True),
+            "Arbitrary function call inside __main__ guard must be rejected!",
+        )
+
+    def test_asymmetric_mode_rejects_main_guard_with_else_clause(self) -> None:
+        """機能CCC.1: if __name__ == '__main__': ガードに else: 節が含まれている場合、import時の迂回実行を防ぐため拒絶されること。"""
+        else_tamper_test = self.immunity_dir / "test_else_tamper.py"
+        else_tamper_test.write_text(
+            """import unittest
+import app
+
+class SafeTest(unittest.TestCase):
+    def test_ok(self):
+        self.assertTrue(True)
+
+if __name__ == '__main__':
+    unittest.main()
+else:
+    app.tamper_target = "malicious_override"
+""",
+            encoding="utf-8",
+        )
+        self.assertFalse(
+            self.guard.check_protected_files_untouched(self.checkpoint, allow_immunity_additions=True),
+            "Main guard with else clause must be rejected by AST validator!",
+        )
+
+    def test_verify_mutual_non_interference_detects_interference(self) -> None:
+        """機能CCC.1: 新規テストが既存テストの実行結果に副作用（成否改変）を及ぼす場合、verify_mutual_non_interference で False と判定されること。"""
+        # 1. 既存の失敗テスト (バグ未修正で本来落ちるテスト)
+        existing_test = self.immunity_dir / "test_existing_failing.py"
+        existing_test.write_text(
+            """import unittest
+import app
+
+class ExistingBugTest(unittest.TestCase):
+    def test_app_behavior(self):
+        # app.py は "print('hello')\n" なので add は存在しないか不正
+        self.assertTrue(hasattr(app, "fixed_by_monkeypatch"), "Bug remains unfixed!")
+""",
+            encoding="utf-8",
+        )
+        # 2. 候補テストがインポート時に既存モジュールを書き換えて既存テストを通過させてしまうケース
+        candidate_test = self.immunity_dir / "test_candidate_side_effect.py"
+        candidate_test.write_text(
+            """import unittest
+import app
+app.fixed_by_monkeypatch = True  # 副作用
+
+class CandidateTest(unittest.TestCase):
+    def test_dummy(self):
+        self.assertEqual(1, 2)  # 自身は Red
+""",
+            encoding="utf-8",
+        )
+        self.assertFalse(
+            self.guard.verify_mutual_non_interference("tests/immunity/test_candidate_side_effect.py"),
+            "Interference that alters existing test results must be detected and rejected!",
+        )
+
+    def test_verify_mutual_non_interference_passes_for_clean_red_test(self) -> None:
+        """機能CCC.1: 副作用のない純粋な Red テスト候補は、既存テストに干渉しないため True と判定されること。"""
+        # 既存のテスト
+        existing_test = self.immunity_dir / "test_existing_normal.py"
+        existing_test.write_text(
+            """import unittest
+class NormalExistingTest(unittest.TestCase):
+    def test_pass(self):
+        self.assertTrue(True)
+""",
+            encoding="utf-8",
+        )
+        # 副作用のない純粋な再現テスト候補
+        clean_candidate = self.immunity_dir / "test_clean_repro.py"
+        clean_candidate.write_text(
+            """import unittest
+class CleanReproTest(unittest.TestCase):
+    def test_pure_repro(self):
+        self.assertEqual(10, 20)  # 純粋なアサーション失敗 (Red)
+""",
+            encoding="utf-8",
+        )
+        self.assertTrue(
+            self.guard.verify_mutual_non_interference("tests/immunity/test_clean_repro.py"),
+            "Clean candidate test without side effects must pass mutual non-interference check!",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

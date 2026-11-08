@@ -74,7 +74,7 @@ class BadImportTest(unittest.TestCase):
     def test_rejects_empty_or_no_test_methods(self) -> None:
         """テストメソッドが存在しないコードは False (NO_TESTS_FOUND) と判定すること。"""
         code = """# Just comments, no tests
-x = 10
+# No TestCase class or test_* functions
 """
         result = self.verifier.verify_candidate_test(code)
         self.assertFalse(result.is_reproduced)
@@ -234,6 +234,50 @@ class FileReproTest(unittest.TestCase):
         result = self.verifier.verify_candidate_test_file(test_file)
         self.assertTrue(result.is_reproduced)
         self.assertEqual(result.reason, "GENUINE_RED")
+
+    def test_rejects_root_execution_fail_closed(self) -> None:
+        """機能CCC.1: root権限 (UID 0) 環境ではOSパーミッションロックダウンが無効化されるため、候補テストの実行を ROOT_EXECUTION_FORBIDDEN で拒絶すること。"""
+        from unittest.mock import patch
+
+        with patch("os.geteuid", return_value=0):
+            code = """import unittest
+class ReproTest(unittest.TestCase):
+    def test_fail(self):
+        self.assertEqual(1, 2)
+"""
+            result = self.verifier.verify_candidate_test(code)
+            self.assertFalse(result.is_reproduced)
+            self.assertEqual(result.reason, "ROOT_EXECUTION_FORBIDDEN")
+
+    def test_rejects_top_level_executable_statements_ast(self) -> None:
+        """機能CCC.1: 候補テストコードのトップレベルにモンキーパッチ等の実行文が含まれている場合、実行前に False (TOP_LEVEL_EXEC_FORBIDDEN) で拒絶されること。"""
+        code = """import unittest
+calc_value = 100
+import sys
+
+class ReproTest(unittest.TestCase):
+    def test_fail(self):
+        self.assertEqual(1, 2)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "TOP_LEVEL_EXEC_FORBIDDEN")
+
+    def test_rejects_main_guard_with_else_clause_ast(self) -> None:
+        """機能CCC.1: 候補テストコードの if __name__ == '__main__': ガードに else: 節が含まれている場合、TOP_LEVEL_EXEC_FORBIDDEN で拒絶されること。"""
+        code = """import unittest
+class ReproTest(unittest.TestCase):
+    def test_fail(self):
+        self.assertEqual(1, 2)
+
+if __name__ == '__main__':
+    unittest.main()
+else:
+    malicious_override = True
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "TOP_LEVEL_EXEC_FORBIDDEN")
 
 
 if __name__ == "__main__":

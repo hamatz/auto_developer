@@ -14,10 +14,10 @@
   - 決定論的受入実証 & 全自動検証ゲート完全合格（227+ テスト）（機能CCC.4）
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- なし（既存テストの破壊的変更は行わず、新規テスト追加と既存合格の維持を徹底）
+- `tests/test_red_verifier.py`: `test_rejects_empty_or_no_test_methods` において `x = 10` のトップレベル代入文が含まれていたため、機能CCC.1のトップレベルAST検査導入に伴い `TOP_LEVEL_EXEC_FORBIDDEN` となっていた。純粋にテストが存在しないケースを検証するためコメントのみのコードへ更新。
 
 ## ステップ
-- [ ] 1. 防壁の穴封鎖（既存テスト不干渉検証、トップレベルAST検査、root実行Fail-Closed）の実装と単体テスト（Red-First）（CCC.1）
+- [x] 1. 防壁の穴封鎖（既存テスト不干渉検証、トップレベルAST検査、root実行Fail-Closed）の実装と単体テスト（Red-First）（CCC.1）
 - [ ] 2. 独立監査役ランナー `AuditRunner` と `AuditFinding` モデルの実装と単体テスト（Red-First）（CCC.2）
 - [ ] 3. 監査指摘からRed検証を経て `PLAN.md` への修正タスク自動登録（パイプライン接続）の実装と単体テスト（Red-First）（CCC.3）
 - [ ] 4. 決定論的受入実証（シードバグの監査指摘 → 隔離Red検証 → PLAN.md自動登録）と全体検証ゲート合格確認、Evidence Bundle 生成（CCC.4）
