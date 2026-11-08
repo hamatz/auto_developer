@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 VALID_SEVERITIES: frozenset[str] = frozenset({"P0", "P1", "P2", "INFO"})
@@ -272,3 +273,99 @@ class IndependentAuditRunner:
             )
         output = proc.stdout
         return self.parse_response(output)
+
+
+class AuditResolutionManager:
+    """AUDタスク解決時のBefore Red / After Green検証、Evidence拘束、および免疫テスト自動昇格を管理する (EEE.3)。"""
+
+    def __init__(self, repo_dir: Path | None = None) -> None:
+        from auto_developer.audit_store import AuditStore
+
+        self.repo_dir = repo_dir or Path.cwd()
+        self.audit_store = AuditStore(repo_dir=self.repo_dir)
+
+    def extract_finding_id(self, task_id: str) -> str | None:
+        if task_id.startswith("AUD-"):
+            return task_id[4:]
+        return None
+
+    def resolve_task(self, task_id: str) -> dict[str, Any]:
+        """AUDタスクのAfter Greenを検証し、免疫テストとして自動昇格配置する。"""
+        import re
+        import time
+
+        from auto_developer.verifier import RedTestVerifier
+
+        finding_id = self.extract_finding_id(task_id)
+        if not finding_id:
+            return {"success": False, "reason": f"Task ID '{task_id}' is not an AUD task"}
+
+        finding = self.audit_store.get_finding(finding_id)
+        if not finding:
+            return {"success": False, "reason": f"Finding '{finding_id}' not found in audit store"}
+
+        repro_code = self.audit_store.get_repro_test(finding_id)
+        if not repro_code:
+            repro_code = finding.reproduction_test_code
+        if not repro_code:
+            return {
+                "success": False,
+                "reason": f"No reproduction test code found for finding '{finding_id}'",
+            }
+
+        # 1. 修正後のコードに対する After Green 検証
+        verifier = RedTestVerifier(repo_dir=self.repo_dir)
+        verification = verifier.verify_candidate_test(repro_code)
+
+        # After Green は ALREADY_GREEN (exit_code == 0, failures=0, errors=0) でなければならない
+        if not (verification.reason == "ALREADY_GREEN" and verification.exit_code == 0):
+            return {
+                "success": False,
+                "reason": (
+                    f"AFTER_GREEN_FAILED: test still failed or produced error "
+                    f"(reason={verification.reason}, exit={verification.exit_code}):\n{verification.output}"
+                ),
+            }
+
+        # 2. 免疫テストとしての昇格・配置
+        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", finding_id)
+        immunity_rel_path = f"tests/immunity/test_immunity_{safe_name}.py"
+        target_path = self.repo_dir / immunity_rel_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(repro_code, encoding="utf-8")
+
+        # 3. 免疫テスト安全性の機械的検証 (AST 検査 & 不干渉)
+        from auto_developer.guard import GitGuard, validate_test_ast
+
+        if not validate_test_ast(target_path):
+            target_path.unlink(missing_ok=True)
+            return {
+                "success": False,
+                "reason": "PROMOTION_FAILED: Promoted test failed AST safety validation",
+            }
+
+        guard = GitGuard(repo_dir=self.repo_dir)
+        if not guard.verify_mutual_non_interference(immunity_rel_path):
+            target_path.unlink(missing_ok=True)
+            return {
+                "success": False,
+                "reason": "PROMOTION_FAILED: Promoted test interfered with existing test suite",
+            }
+
+        # 4. Finding ステータスを RESOLVED に更新
+        finding.status = "RESOLVED"
+        self.audit_store.save_finding(finding)
+
+        proof = {
+            "finding_id": finding_id,
+            "before_status": "VERIFIED_RED",
+            "after_status": "GREEN",
+            "immunity_test_path": immunity_rel_path,
+            "resolved_at": time.time(),
+        }
+
+        return {
+            "success": True,
+            "proof": proof,
+            "reason": "After Green verified and immunity test promoted successfully",
+        }

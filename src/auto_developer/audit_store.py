@@ -11,8 +11,18 @@ from auto_developer.audit import AuditFinding
 class AuditStore:
     """監査指摘 (AuditFinding) および再現テストコードの永続化管理を担当する。"""
 
-    def __init__(self, audit_dir: Path | str | None = None) -> None:
-        self.audit_dir = Path(audit_dir) if audit_dir else Path(".dev/audit")
+    def __init__(
+        self,
+        audit_dir: Path | str | None = None,
+        repo_dir: Path | str | None = None,
+    ) -> None:
+        if repo_dir is not None and audit_dir is None:
+            self.audit_dir = Path(repo_dir) / ".dev" / "audit"
+        elif audit_dir is not None:
+            self.audit_dir = Path(audit_dir)
+        else:
+            self.audit_dir = Path(".dev/audit")
+
         self.findings_dir = self.audit_dir / "findings"
         self.repro_tests_dir = self.audit_dir / "repro_tests"
 
@@ -59,3 +69,14 @@ class AuditStore:
             data["reproduction_test_code"] = py_path.read_text(encoding="utf-8")
 
         return AuditFinding.from_dict(data)
+
+    def get_finding(self, finding_id: str) -> AuditFinding | None:
+        """load_finding のエイリアス。"""
+        return self.load_finding(finding_id)
+
+    def get_repro_test(self, finding_id: str) -> str | None:
+        """保存された再現テストコードを読み込む。"""
+        py_path = self.repro_tests_dir / f"{finding_id}.py"
+        if py_path.exists():
+            return py_path.read_text(encoding="utf-8")
+        return None

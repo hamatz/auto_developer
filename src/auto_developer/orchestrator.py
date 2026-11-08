@@ -236,7 +236,10 @@ class NightlyOrchestrator:
                 )
 
             # Phase B: 不変条件検査 (Circuit Breaker)
-            if not self.git_guard.check_protected_files_untouched(checkpoint):
+            allow_immunity = str(task.task_id).startswith("AUD-")
+            if not self.git_guard.check_protected_files_untouched(
+                checkpoint, allow_immunity_additions=allow_immunity
+            ):
                 print(f"  CIRCUIT BREAKER: Protected file modified in task {task.task_id}!", file=sys.stderr)
                 return self._handle_failure(
                     task,
@@ -263,6 +266,27 @@ class NightlyOrchestrator:
                     f"Unauthorized modifications outside team owns: {violations}",
                     attempt_1_log=maker_out,
                 )
+
+            # Phase B-3: AUDタスクの解決と免疫テスト自動昇格 (EEE.3)
+            red_green_proof = None
+            if str(task.task_id).startswith("AUD-"):
+                from auto_developer.audit import AuditResolutionManager
+
+                res_mgr = AuditResolutionManager(repo_dir=self.repo_dir)
+                res = res_mgr.resolve_task(str(task.task_id))
+                if not res.get("success"):
+                    print(f"  AUDIT RESOLUTION ERROR: {res.get('reason')}", file=sys.stderr)
+                    return self._handle_failure(
+                        task,
+                        checkpoint,
+                        total_tasks,
+                        succeeded_tasks,
+                        job_state,
+                        "AUDIT_RESOLUTION_FAILED",
+                        str(res.get("reason")),
+                        attempt_1_log=maker_out,
+                    )
+                red_green_proof = res.get("proof")
 
             # 確定対象のツリーを検証前に反映（PLAN.md のタスク状態を completed に更新）
             self.dispatcher.mark_task_status(self.plan_path, task, status="completed")
@@ -431,10 +455,12 @@ class NightlyOrchestrator:
 
             # 2. 検証済みツリーに対する証跡を発行
             last_out_lines = [l.strip() for l in out.strip().splitlines() if l.strip()]
-            verification_meta = {
+            verification_meta: dict[str, Any] = {
                 "exit_code": code,
                 "output_summary": last_out_lines[-10:] if last_out_lines else [],
             }
+            if red_green_proof:
+                verification_meta["red_green_proof"] = red_green_proof
             self.evidence_store.issue_evidence(
                 task.task_id,
                 checkpoint,
