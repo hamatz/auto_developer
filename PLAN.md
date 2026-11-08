@@ -16,7 +16,7 @@
 - なし
 
 ## ステップ
-- [ ] 1. 既存 Evidence の非破壊照合 & 同一ハッシュ冪等再利用（PP.1）の実装と単体テスト（Red-First）
+- [x] 1. 既存 Evidence の非破壊照合 & 同一ハッシュ冪等再利用（PP.1）の実装と単体テスト（Red-First）
 - [ ] 2. 異ハッシュ衝突時の上書き拒否（PP.2: `BUNDLE_PRESERVATION_COLLISION` 記録 & 既存ファイル保護 & 新規Worktree原本保護）の実装と単体テスト（Red-First）
 - [ ] 3. 冪等保存・衝突拒否・原本保護の回帰テスト実証、全体検証ゲート合格確認、および Evidence Bundle 生成・検証（PP.3）
 

@@ -353,6 +353,16 @@ class MultiTeamOrchestrator:
                 orig_bytes = res.bundle_path.read_bytes()
                 orig_sha = hashlib.sha256(orig_bytes).hexdigest()
 
+                # PP.1: 既存の保存先 Evidence Bundle の非破壊検査 (同一ハッシュなら冪等に再利用)
+                if dest_path.exists():
+                    existing_bytes = dest_path.read_bytes()
+                    existing_sha = hashlib.sha256(existing_bytes).hexdigest()
+                    if existing_sha == orig_sha:
+                        logger.info("Identical evidence bundle already preserved for team '%s'", res.team_id)
+                        res.bundle_path = dest_path
+                        res.evidence_preserved = True
+                        continue
+
                 # NN.2: 保存先ファイルを直接上書きせず、同一ディレクトリの一時ファイルへコピー
                 shutil.copy2(res.bundle_path, tmp_path)
                 tmp_bytes = tmp_path.read_bytes()

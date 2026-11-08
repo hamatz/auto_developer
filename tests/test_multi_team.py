@@ -870,6 +870,49 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         # 手動クリーンアップ
         orchestrator.worktree_manager.remove_worktree("team-preserve-ng", force=True, delete_branch=True, purge_unmerged=True)
 
+    def test_preserve_team_bundles_idempotent_when_existing_bundle_identical(self) -> None:
+        """PP.1: 保存先に同一ハッシュのEvidence Bundleが既に存在する場合、上書きせず冪等に再利用することの実証。"""
+        job_id = "job-idempotent-preserve-test"
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id=job_id,
+            teams=[
+                TeamWorkerSpec(team_id="team-idempotent"),
+            ],
+            base_branch="main",
+        )
+
+        evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = evidence_dir / "team-idempotent.zip"
+        bundle_content = b"PK\x03\x04identical_evidence_content_bytes"
+        dest_path.write_bytes(bundle_content)
+
+        # ワーカー側の成果物 Bundle も同一内容
+        worker_bundle = self.repo_dir / "worker_bundle.zip"
+        worker_bundle.write_bytes(bundle_content)
+
+        team_res = {
+            "team-idempotent": TeamExecutionResult(
+                team_id="team-idempotent",
+                success=True,
+                status="SUCCESS",
+                bundle_path=worker_bundle,
+            )
+        }
+
+        with unittest.mock.patch("shutil.copy2") as mock_copy, unittest.mock.patch("os.replace") as mock_replace:
+            orchestrator.preserve_team_bundles(config, team_res)
+            # 同一ハッシュのため上書きコピーおよび置換が実行されないこと
+            mock_copy.assert_not_called()
+            mock_replace.assert_not_called()
+
+        res = team_res["team-idempotent"]
+        self.assertTrue(res.evidence_preserved)
+        self.assertEqual(res.status, "SUCCESS")
+        self.assertEqual(res.bundle_path.resolve(), dest_path.resolve())
+        self.assertEqual(dest_path.read_bytes(), bundle_content)
+
 
 if __name__ == "__main__":
     unittest.main()
