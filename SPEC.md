@@ -391,6 +391,18 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `verify_script=None` や IntegrationGate 未実行時は `RECOVERED_EVIDENCE_FOUND`（復旧保留）中間状態とし、IntegrationGate 成功時のみ `SUCCESS` とする。
      - 全自動検証ゲート（182+ テスト、Ruff、Mypy）の合格確認。
      - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [ ] 機能XX (Stage 3 PID-PGID所属照合 & EvidenceBundler独立実検証 Stage 3 Process Group Membership & Strict Evidence Audit):
+  1. PID-PGID 所属照合による誤停止の完全遮断 (XX.1 / P0):
+     - `recover_multi_team_job()` において、プロセスグループ停止を試みる前に、`w.pid` の OS 開始識別子照合（`curr_ident == w.process_start_time`）に加え、`os.getpgid(w.pid) == w.pgid` の所属確認を必須化。
+     - 親ワーカー PID が既に終了している場合、あるいは `os.getpgid(w.pid) != w.pgid` の場合は、絶対に `os.killpg` を送らず、`UNVERIFIED_PROCESS` または `RECOVERY_REQUIRED` として安全に停止を保留（Fail-Closed）。
+  2. EvidenceBundler による独立実検証の適用 & 復旧状態の厳格化 (XX.2 / P1):
+     - 復旧処理における Evidence Bundle 判定に `EvidenceBundler.verify_bundle()` を適用。`bundle_manifest.json`、全ファイルハッシュ、Git オブジェクト、Checker 承認がすべて有効（`verification.is_valid`）である場合のみ `evidence_preserved=True` として認定。
+     - マニフェストが存在しない zip や不正な証拠は `INVALID_EVIDENCE` として厳格に拒絶。
+     - `verify_script=None` や IntegrationGate 未実行時は `RECOVERED_EVIDENCE_FOUND`（復旧保留中間状態）とし、RC 発行が完了するまでジョブ全体を `SUCCESS` としない。
+  3. Stage 3 通しクラッシュ復旧受入実証、全体検証ゲート合格確認（184+ テスト）、および Evidence Bundle 生成・検証 (XX.3 / Stage 3 完了判定):
+     - 親プロセス SIGKILL クラッシュからの通し自律復旧受入テストの実証。
+     - 全自動検証ゲート（184+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
