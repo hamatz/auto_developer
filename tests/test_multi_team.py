@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
+from typing import Any
 
 from auto_developer.bundler import EvidenceBundler
 from auto_developer.evidence import EvidenceStore
@@ -55,8 +56,15 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         with self.assertRaises(ValueError):
             TeamWorkerSpec(team_id="../evil_team")
 
-        spec_a = TeamWorkerSpec(team_id="team-alpha", assigned_tasks=["task-1"])
+        spec_a = TeamWorkerSpec(
+            team_id="team-alpha",
+            assigned_tasks=["task-1"],
+            extra_args=["--mock"],
+            env={"WORKER_TEST": "1"},
+        )
         self.assertEqual(spec_a.team_id, "team-alpha")
+        self.assertEqual(spec_a.extra_args, ["--mock"])
+        self.assertEqual(spec_a.env, {"WORKER_TEST": "1"})
 
         config = MultiTeamConfig(
             job_id="job-multi-1",
@@ -65,6 +73,63 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         )
         self.assertEqual(config.job_id, "job-multi-1")
         self.assertEqual(len(config.teams), 1)
+
+    def test_run_workers_builds_correct_cli_command_order_and_arguments(self) -> None:
+        """KK.1, KK.2: 標準CLIワーカー起動コマンドの引数順序 (--work-dir <wt> run) とパラメータ拡張の検証。"""
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        config = MultiTeamConfig(
+            job_id="job-cli-cmd-order",
+            teams=[
+                TeamWorkerSpec(
+                    team_id="team-cli-test",
+                    extra_args=["--mock", "--iterations", "1"],
+                    env={"CUSTOM_KEY": "CUSTOM_VAL"},
+                ),
+            ],
+            base_branch="main",
+        )
+        orchestrator.prepare_workers(config)
+        wt_path = orchestrator.worktree_manager.worktree_base / "team-cli-test"
+
+        captured_calls: list[dict[str, Any]] = []
+
+        def mock_subprocess_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            captured_calls.append({"cmd": cmd, "kwargs": kwargs})
+            if cmd == ["git", "rev-parse", "HEAD"]:
+                return subprocess.CompletedProcess(cmd, returncode=0, stdout="mock_head_sha\n", stderr="")
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout="success\n", stderr="")
+
+        with unittest.mock.patch("subprocess.run", side_effect=mock_subprocess_run):
+            results = orchestrator.run_workers(config)
+
+        self.assertIn("team-cli-test", results)
+        self.assertTrue(results["team-cli-test"].success)
+
+        # 呼び出された CLI コマンドの検査
+        cli_run_calls = [c for c in captured_calls if "auto_developer.cli" in " ".join(c["cmd"])]
+        self.assertEqual(len(cli_run_calls), 1)
+        executed_cmd = cli_run_calls[0]["cmd"]
+        executed_kwargs = cli_run_calls[0]["kwargs"]
+
+        # 引数の順序が python3 -m auto_developer.cli --work-dir <wt> run であること (run --work-dir は Exit 2 となる)
+        expected_cmd_prefix = [
+            "python3",
+            "-m",
+            "auto_developer.cli",
+            "--work-dir",
+            str(wt_path),
+            "run",
+            "--mock",
+            "--iterations",
+            "1",
+        ]
+        self.assertEqual(executed_cmd, expected_cmd_prefix)
+
+        # 環境変数に team.env が反映されていること
+        env_passed = executed_kwargs.get("env", {})
+        self.assertEqual(env_passed.get("CUSTOM_KEY"), "CUSTOM_VAL")
+
+        orchestrator.cleanup_workers(config)
 
     def test_prepare_workers_allocates_isolated_worktrees(self) -> None:
         """GG.2: 複数ワーカー用の専用 Worktree を分離作成し管理できることの実証。"""

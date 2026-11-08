@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
 import re
 import subprocess
 from collections.abc import Callable
@@ -25,6 +26,8 @@ class TeamWorkerSpec:
     assigned_tasks: list[str] = field(default_factory=list)
     worktree_name: str | None = None
     base_branch: str = "main"
+    extra_args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not VALID_TEAM_ID_PATTERN.match(self.team_id):
@@ -180,8 +183,8 @@ class MultiTeamOrchestrator:
             cmd = None
             if worker_cmd_factory is not None:
                 cmd = worker_cmd_factory(team.team_id, wt_path)
-            elif team.assigned_tasks:
-                cmd = ["python3", "-m", "auto_developer.cli", "run", "--work-dir", str(wt_path)]
+            else:
+                cmd = ["python3", "-m", "auto_developer.cli", "--work-dir", str(wt_path), "run", *team.extra_args]
 
             if not cmd:
                 return TeamExecutionResult(
@@ -192,6 +195,9 @@ class MultiTeamOrchestrator:
                 )
 
             try:
+                merged_env = os.environ.copy()
+                if team.env:
+                    merged_env.update(team.env)
                 proc = subprocess.run(
                     cmd,
                     cwd=wt_path,
@@ -199,6 +205,7 @@ class MultiTeamOrchestrator:
                     text=True,
                     timeout=timeout_sec,
                     check=False,
+                    env=merged_env,
                 )
                 head_rev = subprocess.run(
                     ["git", "rev-parse", "HEAD"],
