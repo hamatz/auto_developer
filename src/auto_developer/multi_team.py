@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from auto_developer.bundler import EvidenceBundler
 from auto_developer.integration_gate import IntegrationGate, IntegrationResult, TeamIntegrationInput
 from auto_developer.worktree import WorktreeError, WorktreeManager
 
@@ -229,6 +230,19 @@ def _is_valid_bundle_archive(bundle_path: Path) -> bool:
                 return False
         return True
     except (zipfile.BadZipFile, OSError):
+        return False
+
+
+def _is_valid_evidence_bundle(bundle_path: Path, repo_dir: Path) -> bool:
+    """XX.2: Evidence Bundle が ZIP として破損しておらず、EvidenceBundler による独立監査 (VERIFIED) に合格するか検査する。"""
+    if not _is_valid_bundle_archive(bundle_path):
+        return False
+    try:
+        bundler = EvidenceBundler(repo_dir=repo_dir)
+        verification = bundler.verify_bundle(bundle_path)
+        return bool(verification.is_valid and verification.status == "VERIFIED")
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        logger.debug("Evidence verification error for %s: %s", bundle_path, exc)
         return False
 
 
@@ -473,11 +487,30 @@ class MultiTeamOrchestrator:
 
             # Case 1: 孤児ワーカーが生存しているか検査
             if w.pgid > 0 and has_active_processes_in_group(w.pgid):
-                # WW.1: プロセス同一性照合（PID再利用・無関係プロセス誤停止の防止）
+                # WW.1, XX.1: プロセス同一性および所属照合（PID再利用・PGID不一致による無関係プロセス誤停止の防止）
                 curr_ident = get_process_start_identifier(w.pid)
                 identity_verified = False
-                if w.process_start_time and curr_ident:
-                    identity_verified = (curr_ident == w.process_start_time)
+                if w.process_start_time and curr_ident and curr_ident == w.process_start_time:
+                    # XX.1: PID が Registry に記録された PGID に実際に所属しているか確認
+                    if hasattr(os, "getpgid"):
+                        try:
+                            actual_pgid = os.getpgid(w.pid)
+                            if actual_pgid == w.pgid:
+                                identity_verified = True
+                            else:
+                                logger.warning(
+                                    "PID %s belongs to PGID %s, but registry specified PGID %s; skipping signal for safety",
+                                    w.pid,
+                                    actual_pgid,
+                                    w.pgid,
+                                )
+                        except (ProcessLookupError, OSError):
+                            logger.warning(
+                                "Cannot determine PGID for PID %s (process terminated or inaccessible); skipping signal for safety",
+                                w.pid,
+                            )
+                    else:
+                        identity_verified = True
 
                 if identity_verified:
                     # 孤児プロセスグループを安全に停止・回収
@@ -511,7 +544,7 @@ class MultiTeamOrchestrator:
 
             # Case 3: 恒久保存先に確定済み Evidence が存在するか確認
             if dest_bundle.exists():
-                if _is_valid_bundle_archive(dest_bundle):
+                if _is_valid_evidence_bundle(dest_bundle, self.repo_dir):
                     result.reused_bundles.append(tid)
                     team_results[tid] = TeamExecutionResult(
                         team_id=tid,
@@ -521,7 +554,7 @@ class MultiTeamOrchestrator:
                         evidence_preserved=True,
                     )
                 else:
-                    logger.warning("Existing bundle for team '%s' is corrupted or invalid", tid)
+                    logger.warning("Existing bundle for team '%s' failed EvidenceBundler audit", tid)
                     team_results[tid] = TeamExecutionResult(
                         team_id=tid,
                         success=False,
@@ -538,14 +571,14 @@ class MultiTeamOrchestrator:
                     if candidates:
                         wt_bundle = candidates[0]
 
-                if wt_bundle and wt_bundle.exists() and _is_valid_bundle_archive(wt_bundle):
+                if wt_bundle and wt_bundle.exists() and _is_valid_evidence_bundle(wt_bundle, wt_path):
                     # 未退避 Bundle を恒久保存先へ救出
                     tmp_dest = evidence_dir / f"{tid}.zip.tmp_rec_{os.getpid()}_{time.time_ns()}"
                     try:
                         shutil.copy2(wt_bundle, tmp_dest)
                         src_sha = hashlib.sha256(wt_bundle.read_bytes()).hexdigest()
                         copied_sha = hashlib.sha256(tmp_dest.read_bytes()).hexdigest()
-                        if src_sha != copied_sha or not _is_valid_bundle_archive(tmp_dest):
+                        if src_sha != copied_sha or not _is_valid_evidence_bundle(tmp_dest, self.repo_dir):
                             raise OSError(f"Corrupted copy during rescue of team '{tid}'")
 
                         try:
@@ -561,7 +594,7 @@ class MultiTeamOrchestrator:
                             registry.update_status(tid, "EVIDENCE_PRESERVED")
                         except FileExistsError:
                             existing_sha = hashlib.sha256(dest_bundle.read_bytes()).hexdigest()
-                            if existing_sha == src_sha and _is_valid_bundle_archive(dest_bundle):
+                            if existing_sha == src_sha and _is_valid_evidence_bundle(dest_bundle, self.repo_dir):
                                 result.reused_bundles.append(tid)
                                 team_results[tid] = TeamExecutionResult(
                                     team_id=tid,
@@ -588,8 +621,8 @@ class MultiTeamOrchestrator:
                             status="RESCUE_FAILED",
                             details={"error": str(err)},
                         )
-                elif wt_bundle and wt_bundle.exists() and not _is_valid_bundle_archive(wt_bundle):
-                    logger.warning("Candidate bundle in worktree for team '%s' is invalid", tid)
+                elif wt_bundle and wt_bundle.exists() and not _is_valid_evidence_bundle(wt_bundle, wt_path):
+                    logger.warning("Candidate bundle in worktree for team '%s' failed EvidenceBundler audit", tid)
                     team_results[tid] = TeamExecutionResult(
                         team_id=tid,
                         success=False,
@@ -613,7 +646,6 @@ class MultiTeamOrchestrator:
 
         # 全チームの成果物が揃っている場合は統合ゲートへ進める
         all_preserved = all(tr.evidence_preserved for tr in team_results.values()) and len(team_results) == len(workers)
-        result.success = all_preserved
 
         if all_preserved:
             inputs: list[TeamIntegrationInput] = []
@@ -645,14 +677,16 @@ class MultiTeamOrchestrator:
                     rc_commit = int_res.release_candidate_commit
                     rc_tag = str(int_res.details.get("rc_tag")) if int_res.details.get("rc_tag") else f"refs/tags/rc/{job_id}"
 
+            is_pipeline_success = bool(int_res and int_res.success)
             pipeline_status = (
                 "SUCCESS"
-                if (int_res and int_res.success)
+                if is_pipeline_success
                 else ("RECOVERED_EVIDENCE_FOUND" if verify_script is None else "INTEGRATION_FAILED")
             )
+            result.success = is_pipeline_success
             result.pipeline_result = MultiTeamResult(
                 job_id=job_id,
-                success=int_res.success if int_res else True,
+                success=is_pipeline_success,
                 status=pipeline_status,
                 team_results=team_results,
                 integration_result=int_res,

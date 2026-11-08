@@ -39,6 +39,37 @@ def _make_dummy_zip_bytes(data: bytes = b"DUMMY_DATA") -> bytes:
     return buf.getvalue()
 
 
+def _create_valid_test_bundle(repo_dir: Path, dest_bundle: Path, team_id: str = "test", base_commit: str = "") -> Path:
+    """テスト用に正規の Evidence Manifest を含む有効な Evidence Bundle を生成する。"""
+    dest_bundle.parent.mkdir(parents=True, exist_ok=True)
+    ev_store = EvidenceStore(repo_dir=repo_dir)
+    tree_sha = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=repo_dir, capture_output=True, text=True, check=True).stdout.strip()
+    rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_dir, capture_output=True, text=True, check=True).stdout.strip()
+    spec_path = repo_dir / "SPEC.md"
+    spec_sha = hashlib.sha256(spec_path.read_bytes()).hexdigest() if spec_path.exists() else "dummy_spec"
+    ev_store.issue_evidence(
+        task_id=f"task-{team_id}",
+        checkpoint=base_commit or rev,
+        tree_sha=tree_sha,
+        spec_sha=spec_sha,
+    )
+    ev_store.verify_and_consume(
+        task_id=f"task-{team_id}",
+        checkpoint=base_commit or rev,
+        expected_tree_sha=tree_sha,
+        expected_spec_sha=spec_sha,
+    )
+    ev_store.archive_record(
+        task_id=f"task-{team_id}",
+        status="COMPLETED",
+        commit_info={"sha": rev, "tree_sha": tree_sha},
+        checker_info={"decision": "APPROVE", "reason": f"Approval {team_id}"},
+        verification_info={"exit_code": 0},
+    )
+    bundler = EvidenceBundler(repo_dir=repo_dir)
+    return bundler.create_bundle(dest_path=dest_bundle)
+
+
 def _is_process_running(pid: int) -> bool:
     """プロセスが実稼働中か確認する（ゾンビ状態 Z/X を除外）。"""
     if pid <= 0:
@@ -1728,8 +1759,8 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         wt2_bundles = wt2 / ".dev" / "bundles"
         wt2_bundles.mkdir(parents=True, exist_ok=True)
         bundle2 = wt2_bundles / "bundle_team-case2.zip"
-        case2_bytes = _make_dummy_zip_bytes(b"CASE2_RESCUE_TEST")
-        bundle2.write_bytes(case2_bytes)
+        _create_valid_test_bundle(self.repo_dir, bundle2, team_id="team-case2")
+        case2_sha = hashlib.sha256(bundle2.read_bytes()).hexdigest()
         reg2 = WorkerRegistration(
             team_id="team-case2",
             pid=99991,
@@ -1744,8 +1775,7 @@ class TestMultiTeamOrchestration(unittest.TestCase):
 
         # 3. Case 3: 成果物が既に恒久保存先（evidence/）に確定済み
         dest3 = evidence_dir / "team-case3.zip"
-        case3_bytes = _make_dummy_zip_bytes(b"CASE3_CONFIRMED_TEST")
-        dest3.write_bytes(case3_bytes)
+        _create_valid_test_bundle(self.repo_dir, dest3, team_id="team-case3")
         wt3 = self.repo_dir / ".dev" / "worktrees" / "team-case3"
         wt3.mkdir(parents=True, exist_ok=True)
         reg3 = WorkerRegistration(
@@ -1780,7 +1810,7 @@ class TestMultiTeamOrchestration(unittest.TestCase):
             self.assertIn("team-case2", rec_result.rescued_bundles)
             dest2 = evidence_dir / "team-case2.zip"
             self.assertTrue(dest2.exists())
-            self.assertEqual(dest2.read_bytes(), case2_bytes)
+            self.assertEqual(hashlib.sha256(dest2.read_bytes()).hexdigest(), case2_sha)
 
             # Case 3: 確定済み Bundle が再利用されたこと
             self.assertIn("team-case3", rec_result.reused_bundles)
@@ -1831,11 +1861,35 @@ p1 = subprocess.Popen(["sleep", "60"], start_new_session=True)
 wt2 = repo_dir / ".dev" / "worktrees" / "team-done"
 wt2_bundles = wt2 / ".dev" / "bundles"
 wt2_bundles.mkdir(parents=True, exist_ok=True)
-import zipfile, io
-buf = io.BytesIO()
-with zipfile.ZipFile(buf, "w") as zf:
-    zf.writestr("evidence.txt", b"SIMULATED_BUNDLE_DATA")
-(wt2_bundles / "bundle_team-done.zip").write_bytes(buf.getvalue())
+from auto_developer.bundler import EvidenceBundler
+from auto_developer.evidence import EvidenceStore
+import hashlib
+ev_store = EvidenceStore(repo_dir=repo_dir)
+tree_sha = subprocess.run(["git", "rev-parse", "HEAD^{{tree}}"], cwd=repo_dir, capture_output=True, text=True, check=True).stdout.strip()
+rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_dir, capture_output=True, text=True, check=True).stdout.strip()
+spec_path = repo_dir / "SPEC.md"
+spec_sha = hashlib.sha256(spec_path.read_bytes()).hexdigest() if spec_path.exists() else "dummy"
+ev_store.issue_evidence(
+    task_id="task-team-done",
+    checkpoint=rev,
+    tree_sha=tree_sha,
+    spec_sha=spec_sha,
+)
+ev_store.verify_and_consume(
+    task_id="task-team-done",
+    checkpoint=rev,
+    expected_tree_sha=tree_sha,
+    expected_spec_sha=spec_sha,
+)
+ev_store.archive_record(
+    task_id="task-team-done",
+    status="COMPLETED",
+    commit_info={{"sha": rev, "tree_sha": tree_sha}},
+    checker_info={{"decision": "APPROVE", "reason": "Approval team-done"}},
+    verification_info={{"exit_code": 0}},
+)
+bundler = EvidenceBundler(repo_dir=repo_dir)
+bundler.create_bundle(dest_path=wt2_bundles / "bundle_team-done.zip")
 
 now = time.time()
 registry.save({{
@@ -1897,8 +1951,10 @@ os.kill(os.getpid(), signal.SIGKILL)
             self.assertIn("team-done", rec_result.rescued_bundles)
             dest_bundle = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence" / "team-done.zip"
             self.assertTrue(dest_bundle.exists())
-            with zipfile.ZipFile(dest_bundle) as zf:
-                self.assertEqual(zf.read("evidence.txt"), b"SIMULATED_BUNDLE_DATA")
+            bundler = EvidenceBundler(repo_dir=self.repo_dir)
+            v_res = bundler.verify_bundle(dest_bundle)
+            self.assertTrue(v_res.is_valid)
+            self.assertEqual(v_res.status, "VERIFIED")
 
         finally:
             try:
@@ -1974,7 +2030,7 @@ os.kill(os.getpid(), signal.SIGKILL)
         evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
         evidence_dir.mkdir(parents=True, exist_ok=True)
         dest_bundle = evidence_dir / "team-outside.zip"
-        dest_bundle.write_bytes(_make_dummy_zip_bytes(b"CONFIRMED_DATA"))
+        _create_valid_test_bundle(self.repo_dir, dest_bundle, team_id="team-outside")
 
         now = time.time()
         reg = WorkerRegistration(
@@ -2045,6 +2101,107 @@ os.kill(os.getpid(), signal.SIGKILL)
         # 破損バンドルが拒絶され、復旧が成功扱いになっていないこと
         self.assertFalse(rec_result.success)
         team_res = rec_result.details.get("team_results", {}).get("team-corrupt")
+        if team_res:
+            self.assertFalse(team_res.get("success", False))
+            self.assertEqual(team_res.get("status"), "INVALID_EVIDENCE")
+
+
+    def test_recover_multi_team_job_skips_when_pid_does_not_belong_to_pgid(self) -> None:
+        """XX.1: PIDの開始識別子が正しくても、PIDが指定PGIDに所属していない場合は誤停止しないことを実証。"""
+        job_id = "job-pgid-mismatch-test"
+        registry = WorkerRegistry(repo_dir=self.repo_dir, job_id=job_id)
+
+        # 2つの無関係なプロセスAとプロセスBを別セッションで起動
+        p_a = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        p_b = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        pid_a = p_a.pid
+        pid_b = p_b.pid
+
+        # プロセスAの正しい開始識別子を取得
+        ident_a = get_process_start_identifier(pid_a)
+
+        now = time.time()
+        wt = self.repo_dir / ".dev" / "worktrees" / "team-probe"
+        wt.mkdir(parents=True, exist_ok=True)
+
+        # 不整合な組み合わせ: pid はプロセスA、pgid は無関係なプロセスB の PGID
+        reg = WorkerRegistration(
+            team_id="team-probe",
+            pid=pid_a,
+            pgid=pid_b,
+            worktree_path=str(wt),
+            base_branch="main",
+            branch_name="team/team-probe",
+            status="RUNNING",
+            start_time=now,
+            updated_at=now,
+            process_start_time=ident_a,
+        )
+        registry.save({"team-probe": reg})
+
+        try:
+            orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+            rec_result: MultiTeamRecoveryResult = orchestrator.recover_multi_team_job(job_id=job_id)
+
+            # 所属照合の不一致により、無関係なプロセスBが誤停止されず稼働を維持していること
+            self.assertTrue(
+                _is_process_running(pid_b),
+                "Unrelated process B must NOT be terminated when PID does not belong to PGID",
+            )
+            self.assertTrue(
+                _is_process_running(pid_a),
+                "Process A must also remain running",
+            )
+            self.assertNotIn("team-probe", rec_result.reclaimed_orphans)
+            self.assertIn("team-probe", rec_result.unverified_processes)
+        finally:
+            for p in (p_a, p_b):
+                try:
+                    if _is_process_running(p.pid):
+                        p.kill()
+                    p.wait(timeout=1.0)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+
+
+    def test_recover_multi_team_job_rejects_zip_without_bundle_manifest(self) -> None:
+        """XX.2: 有効なZIPであっても Evidence Bundle Manifest のない成果物は拒絶され、成功と誤判定されないことを実証。"""
+        job_id = "job-unmanifested-zip-test"
+        registry = WorkerRegistry(repo_dir=self.repo_dir, job_id=job_id)
+
+        evidence_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        unrelated_zip = evidence_dir / "team-unrelated.zip"
+
+        # bundle_manifest.json のない無関係な zip (unrelated.txt のみ) を作成
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("unrelated.txt", b"NO_MANIFEST_PRESENT")
+        unrelated_zip.write_bytes(buf.getvalue())
+
+        now = time.time()
+        wt = self.repo_dir / ".dev" / "worktrees" / "team-unrelated"
+        wt.mkdir(parents=True, exist_ok=True)
+        reg = WorkerRegistration(
+            team_id="team-unrelated",
+            pid=99998,
+            pgid=99998,
+            worktree_path=str(wt),
+            base_branch="main",
+            branch_name="team/team-unrelated",
+            status="RUNNING",
+            start_time=now,
+            updated_at=now,
+        )
+        registry.save({"team-unrelated": reg})
+
+        orchestrator = MultiTeamOrchestrator(repo_dir=self.repo_dir)
+        rec_result: MultiTeamRecoveryResult = orchestrator.recover_multi_team_job(job_id=job_id)
+
+        # マニフェストのない zip は INVALID_EVIDENCE として拒絶され、復旧成功扱いになっていないこと
+        self.assertFalse(rec_result.success)
+        team_res = rec_result.details.get("team_results", {}).get("team-unrelated")
+        self.assertIsNotNone(team_res)
         if team_res:
             self.assertFalse(team_res.get("success", False))
             self.assertEqual(team_res.get("status"), "INVALID_EVIDENCE")
