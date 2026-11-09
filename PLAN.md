@@ -19,7 +19,7 @@
 ## ステップ
 - [x] 1. CommandRunnerAdapter による教訓の安全な注入（stdin / context ファイル経由）の実装と実プロセス受入テスト（Red-First）（GGG.1）
 - [x] 2. AuditStore の初回登録確定とコードハッシュ再計算・改ざん上書き拒絶の実装と単体テスト（Red-First）（GGG.2）
-- [ ] 3. IndependentAuditRunner の設定モデルと実起動モデルの完全一致強制の実装と単体テスト（Red-First）（GGG.3）
+- [x] 3. IndependentAuditRunner の設定モデルと実起動モデルの完全一致強制の実装と単体テスト（Red-First）（GGG.3）
 - [ ] 4. シードバグを用いた本番経路 Level 7 E2E 全通し実証・全体検証ゲート合格・Evidence Bundle 生成（GGG.4）
 
 ## 止まっていること・判断待ち

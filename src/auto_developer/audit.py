@@ -270,9 +270,14 @@ class IndependentAuditRunner:
     def audit(self, spec_content: str, git_diff: str) -> list[AuditFinding]:
         import subprocess
 
-        # 独立性ポリシーの事前検証 (FFF.3)
+        # 独立性ポリシーの事前検証 (FFF.3, GGG.3)
         if self.config:
             self.config.validate()
+            if self.config.auditor_model != self.model_name:
+                raise ValueError(
+                    f"INDEPENDENT_AUDIT_VIOLATION: Runner model '{self.model_name}' "
+                    f"does not match config.auditor_model '{self.config.auditor_model}'"
+                )
         else:
             ok, reason = verify_model_independence(
                 maker_model="gemini-3.8-flash",
