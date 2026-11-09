@@ -105,6 +105,24 @@ class AuditDispatcher:
         else:
             self.audit_store = audit_store
 
+    def _get_head_commit_sha(self) -> str:
+        """Git リポジトリの最新 HEAD コミット SHA を取得する。"""
+        import subprocess
+
+        try:
+            res = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self.repo_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0:
+                return res.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return "unknown"
+        return "unknown"
+
     def dispatch_finding(
         self,
         finding: AuditFinding,
@@ -119,7 +137,15 @@ class AuditDispatcher:
             finding.status = "REJECTED"
             return finding
 
+        import hashlib
+
         finding.status = "VERIFIED_RED"
+        finding.red_verification_reason = verification.reason
+        finding.red_verification_output = verification.output
+        finding.before_commit_sha = self._get_head_commit_sha()
+        finding.code_hash = hashlib.sha256(
+            finding.reproduction_test_code.encode("utf-8")
+        ).hexdigest()
 
         if not target_plan.exists():
             target_plan.write_text("# PLAN.md\n\n## ステップ\n", encoding="utf-8")

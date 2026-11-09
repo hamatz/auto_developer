@@ -500,6 +500,25 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. LESSONS.md への自動教訓記録と全体検証ゲート合格確認 (EEE.4 / Phase 45 完了判定):
      - AUD タスク解決完了時に、Finding 情報（Context, Trap, Rule, Immunity Test）を抽出し、`LESSONS.md` の記録フォーマットに従って自動追記・永続化する。
      - 決定論的受入実証テスト（Red-First）を追加し、全体検証ゲート（252+ テスト、Ruff、Mypy）の完全合格確認。
+- [x] 機能FFF (Stage 5 免疫保護・厳格なBefore/After証明・教訓注入と自己改善ループの真の完成 Stage 5 Hardening Immunity, Strict Proof, and Next-Maker Lesson Injection):
+  1. 免疫テスト非破壊的確定と衝突拒絶 (FFF.1 / Sol氏 P0指摘):
+     - `AuditResolutionManager.resolve_task()` において、免疫テスト配置対象ファイル（`tests/immunity/test_immunity_<safe_name>.py`）の事前存在チェックを実装。
+     - 既存ファイルが存在する場合、既存ファイルの内容と候補再現テストコードの SHA-256 ハッシュを比較：
+       - ハッシュ一致：同一テストの再実行として判定し、冪等に成功（既存ファイルを上書きせず温存）。
+       - ハッシュ不一致：既存の免疫テストを破壊・緩和するリスクがあるため、`IMMUNITY_COLLISION` エラーを送出し即時拒絶（Exit 1）。既存テストの変更・削除を一切行わない。
+     - 書き込み前の認可判定・事前検査（Pre-check）を徹底し、失敗時に既存ファイルを削除（`unlink`）しない安全設計。
+  2. 厳格な Before Red 実証と改変不能な Proof 拘束 (FFF.2 / Sol氏 P1指摘):
+     - `AuditDispatcher.dispatch_finding()` 実行時、Red 検証が成功（`GENUINE_RED`）した事実の証跡（Before Commit SHA、再現テスト SHA-256、Red検証出力、理由）を `AuditStore` の Finding メタデータに永続化する。
+     - `AuditResolutionManager.resolve_task()` において、Finding のステータスが `VERIFIED_RED` または `DISPATCHED` であること、および永続化された `GENUINE_RED` 証跡が存在することを必須検証。未実証の Finding は `UNVERIFIED_BEFORE_RED` で即時拒絶。
+     - `red_green_proof` に `before_commit`, `after_commit`, `repro_test_sha256`, `before_status: VERIFIED_RED`, `after_status: GREEN`, `before_red_reason`, `immunity_test_path` を完全拘束。
+  3. LESSONSフェイルクローズ & モデル独立性検証の厳格化 (FFF.3 / Sol氏 P1 & P2指摘):
+     - `AuditResolutionManager.resolve_task()` において、`record_lesson()` の成否を厳格判定。書き込み失敗時（ファイル欠落・例外等）は Finding を `RESOLVED` に更新せず、`LEARNING_RECORD_FAILED` 中間状態に遷移させて処理を停止（Fail-Closed）。
+     - `verify_model_independence()` の厳格化：空文字列のモデル名、および大分類ファミリが `unknown` の場合は独立性を保証できないため、Strict モード（デフォルト）で `INDEPENDENT_AUDIT_VIOLATION` として拒絶。
+     - `IndependentAuditRunner.audit()` 実行時に `AuditConfig` の厳格なバリデーションを必須化。
+  4. 次回Makerへの教訓自動検索・注入機構 (`LessonInjector`) と完全閉ループE2E受入試験 (FFF.4 / Phase 46 完了判定):
+     - `LessonInjector` を実装：次期タスク（タイトル・説明・対象ファイル・キーワード等）に基づき `LESSONS.md` の教訓インデックスから関連する Trap / Rule を自動検索・抽出し、Maker のプロンプト／コンテキストへ自動注入。Level 7 ルール10（「着手前に LESSONS.md を検索」）を機械的強制。
+     - 外部監査 → Red実証 → PLAN登録 → Maker修正 → After Green → 免疫昇格（非破壊） → LESSONS記録 → 次回Makerへの教訓注入までが人間の介在ゼロで繋がる完全閉ループE2E受入実証テストを追加。
+     - 全自動検証ゲート（266+ テスト、Ruff、Mypy）の完全合格確認と Evidence Bundle 生成。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

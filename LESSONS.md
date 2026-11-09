@@ -21,6 +21,30 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-09] 既存免疫テストの無条件上書きによる免疫破壊 (Non-Destructive Immunity Test Promotion)
+- Context: `src/auto_developer/audit.py` (`AuditResolutionManager.resolve_task`)
+- Trap: AUDタスク解決時に After Green を確認した後、免疫テスト配置パス（`tests/immunity/test_immunity_<safe_name>.py`）に同名ファイルが既に存在していても無条件で上書きしていたため、既存の免疫テストが別の内容に書き換えられて弱体化・破壊される重大なリスクがあった。
+- Rule: 免疫テストの昇格配置前に、既存ファイルの有無を必ず事前検査する。既存ファイルが存在する場合、内容の SHA-256 ハッシュを比較し、完全一致していれば冪等成功として扱い、ハッシュが異なる場合は `IMMUNITY_COLLISION` エラーで即座に拒絶して既存テストの変更・削除を一切行わない。
+- Rung: 作り（非破壊的確定 & 衝突拒絶ガード） & 検査
+- Immunity Test: `tests/test_audit_resolution.py`
+- Proof: 既存の免疫テストが存在する状態で異なる内容の昇格を試みた際、`IMMUNITY_COLLISION` で確実に拒絶され元ファイルが無傷であることを実証。
+
+### [2026-11-09] Before Red 真正性検証の欠落と固定値 Proof の偽装 (Strict Before Red Cryptographic Binding)
+- Context: `src/auto_developer/audit.py` (`AuditResolutionManager.resolve_task`)
+- Trap: AUDタスク解決時に、Finding のステータスが `VERIFIED_RED` であるか、および実際の Red 検証証跡（コミットSHA、再現テストハッシュ、アサーション失敗出力）が存在するかを検証せず、固定値 `"before_status": "VERIFIED_RED"` を出力していたため、実証されていない指摘でも解決済みと誤認させる脆弱性があった。
+- Rule: Finding のステータスが Red 検証完了（`VERIFIED_RED` または `DISPATCHED`）かつ真正な Red 証跡（`GENUINE_RED`）を保持していることを必須照合し、未実証の場合は `UNVERIFIED_BEFORE_RED` で即時拒絶する。`red_green_proof` には Before Commit SHA、After Commit SHA、再現テスト SHA-256、Red検証出力などの暗号学的証跡を完全に拘束する。
+- Rung: 作り（暗号学的Proof拘束） & 検査
+- Immunity Test: `tests/test_audit_resolution.py`
+- Proof: `status="REPORTED"` や Red 証跡を欠く Finding に対して解決を試みた際、`UNVERIFIED_BEFORE_RED` で確実に拒絶されることを実証。
+
+### [2026-11-09] LESSONS.md 記録失敗時のサイレント成功とフェイルオープン (Fail-Closed Lesson Recording)
+- Context: `src/auto_developer/audit.py` (`AuditResolutionManager.resolve_task`)
+- Trap: `record_lesson()` が `False` を返した（`LESSONS.md` 不在や書き込み失敗）にもかかわらず、呼び出し元が戻り値を無視して `success: True` と `status = "RESOLVED"` を返していたため、学習に失敗したのに学習完了と誤認されるフェイルオープンが存在した。
+- Rule: 学習の記録（`record_lesson()`）の成功を解決完了の必須条件とし、失敗時は Finding を `RESOLVED` にせず `LEARNING_RECORD_FAILED` で処理を停止する（Fail-Closed）。中間状態からの再実行耐性（冪等性）を確保する。
+- Rung: 作り（Fail-Closed遷移） & 検査
+- Immunity Test: `tests/test_audit_resolution.py`
+- Proof: `LESSONS.md` が存在しない環境で解決を試みた際、`LEARNING_RECORD_FAILED` で安全に停止することを実証。
+
 ### [2026-11-08] 異系統LLMによる独立監査と確証バイアス・自己肯定の排除 (Cross-Model Independent Audit)
 - Context: `src/auto_developer/audit.py`, `src/auto_developer/orchestrator.py`, `AGENTS.md`
 - Trap: 同一のモデル系統（プロンプトや思考バイアスを共有するモデル）でMakerとChecker/監査役の双方を担わせると、Makerが犯した暗黙の前提や見落とし（盲点）をCheckerも同様に肯定・見逃してしまい、潜在的バグや仕様逸脱がすり抜ける。

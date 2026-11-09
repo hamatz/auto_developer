@@ -30,10 +30,13 @@ def verify_model_independence(
     maker_model: str,
     auditor_model: str,
     allow_same_model_override: bool = False,
+    strict: bool = True,
 ) -> tuple[bool, str]:
-    """MakerモデルとAuditor/Checkerモデルの独立性を検証する (AGENTS.md Rule 6 / EEE.1)。"""
-    if not maker_model or not auditor_model:
-        return True, "Models not fully specified; independent verification skipped"
+    """MakerモデルとAuditor/Checkerモデルの独立性を検証する (AGENTS.md Rule 6 / EEE.1 / FFF.3)。"""
+    if not maker_model or not maker_model.strip():
+        return False, "INDEPENDENT_AUDIT_VIOLATION: maker_model cannot be empty or whitespace"
+    if not auditor_model or not auditor_model.strip():
+        return False, "INDEPENDENT_AUDIT_VIOLATION: auditor_model cannot be empty or whitespace"
 
     m_norm = maker_model.strip()
     a_norm = auditor_model.strip()
@@ -50,6 +53,13 @@ def verify_model_independence(
 
     m_fam = detect_model_family(m_norm)
     a_fam = detect_model_family(a_norm)
+
+    if strict and (m_fam == "unknown" or a_fam == "unknown"):
+        msg = (
+            f"INDEPENDENT_AUDIT_VIOLATION: Unrecognized model family (Maker='{m_norm}' -> '{m_fam}', "
+            f"Auditor='{a_norm}' -> '{a_fam}'). Cannot guarantee cross-model independence."
+        )
+        return False, msg
 
     if m_fam != "mock" and m_fam != "unknown" and m_fam == a_fam:
         msg = (
@@ -95,6 +105,10 @@ class AuditFinding:
     description: str
     reproduction_test_code: str
     status: str = "REPORTED"
+    red_verification_reason: str | None = None
+    red_verification_output: str | None = None
+    before_commit_sha: str | None = None
+    code_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -109,6 +123,10 @@ class AuditFinding:
             description=data["description"],
             reproduction_test_code=data["reproduction_test_code"],
             status=data.get("status", "REPORTED"),
+            red_verification_reason=data.get("red_verification_reason"),
+            red_verification_output=data.get("red_verification_output"),
+            before_commit_sha=data.get("before_commit_sha"),
+            code_hash=data.get("code_hash"),
         )
 
 
@@ -252,6 +270,18 @@ class IndependentAuditRunner:
     def audit(self, spec_content: str, git_diff: str) -> list[AuditFinding]:
         import subprocess
 
+        # 独立性ポリシーの事前検証 (FFF.3)
+        if self.config:
+            self.config.validate()
+        else:
+            ok, reason = verify_model_independence(
+                maker_model="gemini-3.8-flash",
+                auditor_model=self.model_name,
+                strict=True,
+            )
+            if not ok:
+                raise ValueError(reason)
+
         if not self.auditor_cmd_template:
             raise RuntimeError(
                 "No auditor_cmd_template configured for IndependentAuditRunner (Fail-Closed)"
@@ -284,6 +314,24 @@ class AuditResolutionManager:
         self.repo_dir = repo_dir or Path.cwd()
         self.audit_store = AuditStore(repo_dir=self.repo_dir)
 
+    def _get_head_commit_sha(self) -> str:
+        """Git リポジトリの最新 HEAD コミット SHA を取得する。"""
+        import subprocess
+
+        try:
+            res = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self.repo_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0:
+                return res.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return "unknown"
+        return "unknown"
+
     def extract_finding_id(self, task_id: str) -> str | None:
         if task_id.startswith("AUD-"):
             return task_id[4:]
@@ -291,6 +339,7 @@ class AuditResolutionManager:
 
     def resolve_task(self, task_id: str) -> dict[str, Any]:
         """AUDタスクのAfter Greenを検証し、免疫テストとして自動昇格配置する。"""
+        import hashlib
         import re
         import time
 
@@ -304,6 +353,27 @@ class AuditResolutionManager:
         if not finding:
             return {"success": False, "reason": f"Finding '{finding_id}' not found in audit store"}
 
+        # 0. Before Red 真正性の検証 (FFF.2)
+        if finding.status not in ("VERIFIED_RED", "DISPATCHED"):
+            return {
+                "success": False,
+                "reason": (
+                    f"UNVERIFIED_BEFORE_RED: Finding '{finding_id}' has status '{finding.status}', "
+                    "expected 'VERIFIED_RED' or 'DISPATCHED'"
+                ),
+                "error": "UNVERIFIED_BEFORE_RED",
+            }
+
+        if finding.red_verification_reason != "GENUINE_RED":
+            return {
+                "success": False,
+                "reason": (
+                    f"UNVERIFIED_BEFORE_RED: Finding '{finding_id}' lacks verified genuine red proof "
+                    f"(red_verification_reason='{finding.red_verification_reason}')"
+                ),
+                "error": "UNVERIFIED_BEFORE_RED",
+            }
+
         repro_code = self.audit_store.get_repro_test(finding_id)
         if not repro_code:
             repro_code = finding.reproduction_test_code
@@ -312,6 +382,19 @@ class AuditResolutionManager:
                 "success": False,
                 "reason": f"No reproduction test code found for finding '{finding_id}'",
             }
+
+        # 再現テストコードの改ざん検知
+        if finding.code_hash:
+            actual_repro_hash = hashlib.sha256(repro_code.encode("utf-8")).hexdigest()
+            if actual_repro_hash != finding.code_hash:
+                return {
+                    "success": False,
+                    "reason": (
+                        f"TAMPERED_REPRO_TEST: reproduction test code hash mismatch "
+                        f"(expected={finding.code_hash[:8]}, actual={actual_repro_hash[:8]})"
+                    ),
+                    "error": "TAMPERED_REPRO_TEST",
+                }
 
         # 1. 修正後のコードに対する After Green 検証
         verifier = RedTestVerifier(repo_dir=self.repo_dir)
@@ -327,18 +410,38 @@ class AuditResolutionManager:
                 ),
             }
 
-        # 2. 免疫テストとしての昇格・配置
+        # 2. 免疫テストとしての昇格・配置 (非破壊的確定 FFF.1)
         safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", finding_id)
         immunity_rel_path = f"tests/immunity/test_immunity_{safe_name}.py"
         target_path = self.repo_dir / immunity_rel_path
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(repro_code, encoding="utf-8")
+
+        is_already_promoted = False
+        if target_path.exists():
+            existing_content = target_path.read_text(encoding="utf-8")
+            existing_hash = hashlib.sha256(existing_content.encode("utf-8")).hexdigest()
+            candidate_hash = hashlib.sha256(repro_code.encode("utf-8")).hexdigest()
+            if existing_hash != candidate_hash:
+                return {
+                    "success": False,
+                    "reason": (
+                        f"IMMUNITY_COLLISION: target immunity test '{immunity_rel_path}' already exists "
+                        f"with different content (hash={existing_hash[:8]} vs candidate={candidate_hash[:8]}). "
+                        "Refusing to overwrite existing immunity test."
+                    ),
+                    "error": "IMMUNITY_COLLISION",
+                }
+            is_already_promoted = True
+
+        if not is_already_promoted:
+            target_path.write_text(repro_code, encoding="utf-8")
 
         # 3. 免疫テスト安全性の機械的検証 (AST 検査 & 不干渉)
         from auto_developer.guard import GitGuard, validate_test_ast
 
         if not validate_test_ast(target_path):
-            target_path.unlink(missing_ok=True)
+            if not is_already_promoted:
+                target_path.unlink(missing_ok=True)
             return {
                 "success": False,
                 "reason": "PROMOTION_FAILED: Promoted test failed AST safety validation",
@@ -346,26 +449,41 @@ class AuditResolutionManager:
 
         guard = GitGuard(repo_dir=self.repo_dir)
         if not guard.verify_mutual_non_interference(immunity_rel_path):
-            target_path.unlink(missing_ok=True)
+            if not is_already_promoted:
+                target_path.unlink(missing_ok=True)
             return {
                 "success": False,
                 "reason": "PROMOTION_FAILED: Promoted test interfered with existing test suite",
             }
 
-        # 4. Finding ステータスを RESOLVED に更新
-        finding.status = "RESOLVED"
-        self.audit_store.save_finding(finding)
-
         proof = {
             "finding_id": finding_id,
+            "before_commit": finding.before_commit_sha or "unknown",
+            "after_commit": self._get_head_commit_sha(),
+            "repro_test_sha256": finding.code_hash or hashlib.sha256(repro_code.encode("utf-8")).hexdigest(),
             "before_status": "VERIFIED_RED",
             "after_status": "GREEN",
+            "before_red_reason": finding.red_verification_reason,
+            "after_green_reason": verification.reason,
             "immunity_test_path": immunity_rel_path,
             "resolved_at": time.time(),
         }
 
-        # 5. LESSONS.md への自動教訓記録 (EEE.4)
-        self.record_lesson(finding, proof)
+        # 4. LESSONS.md への自動教訓記録 (EEE.4 / FFF.3: Fail-Closed)
+        lesson_recorded = self.record_lesson(finding, proof)
+        if not lesson_recorded:
+            finding.status = "LEARNING_RECORD_FAILED"
+            self.audit_store.save_finding(finding)
+            return {
+                "success": False,
+                "reason": "LEARNING_RECORD_FAILED: Failed to record lesson in LESSONS.md",
+                "error": "LEARNING_RECORD_FAILED",
+                "proof": proof,
+            }
+
+        # 5. Finding ステータスを RESOLVED に更新 (LESSONS記録成功後のみ)
+        finding.status = "RESOLVED"
+        self.audit_store.save_finding(finding)
 
         return {
             "success": True,
@@ -411,3 +529,151 @@ class AuditResolutionManager:
 
         target_path.write_text(updated_content, encoding="utf-8")
         return True
+
+
+@dataclass
+class LessonEntry:
+    title: str
+    date: str
+    context: str = ""
+    trap: str = ""
+    rule: str = ""
+    rung: str = ""
+    immunity_test: str = ""
+    proof: str = ""
+    raw_markdown: str = ""
+
+
+class LessonInjector:
+    """LESSONS.md から関連する教訓を検索し、Makerプロンプト/コンテキストへ注入する (FFF.4 / Level 7 Rule 10)。"""
+
+    def __init__(
+        self,
+        repo_dir: Path | str | None = None,
+        lessons_path: Path | str | None = None,
+    ) -> None:
+        self.repo_dir = Path(repo_dir) if repo_dir else Path.cwd()
+        self.lessons_path = Path(lessons_path) if lessons_path else self.repo_dir / "LESSONS.md"
+
+    def parse_lessons(self) -> list[LessonEntry]:
+        """LESSONS.md の『## 恒久教訓インデックス』配下の教訓エントリを構造化パースする。"""
+        import re
+
+        if not self.lessons_path.exists():
+            return []
+
+        content = self.lessons_path.read_text(encoding="utf-8")
+        header = "## 恒久教訓インデックス"
+        if header in content:
+            _, body = content.split(header, 1)
+        else:
+            body = content
+
+        entries: list[LessonEntry] = []
+        raw_sections = body.split("\n### ")
+        for sec in raw_sections:
+            sec = sec.strip()
+            if not sec or sec.startswith("#"):
+                continue
+
+            lines = sec.splitlines()
+            title_line = lines[0].strip()
+            date_match = re.match(r"^\[(.*?)\]\s*(.*)$", title_line)
+            date_str = date_match.group(1) if date_match else ""
+            title_str = title_line
+
+            context = ""
+            trap = ""
+            rule = ""
+            rung = ""
+            immunity_test = ""
+            proof = ""
+
+            for line in lines[1:]:
+                line_s = line.strip()
+                if line_s.startswith("- Context:"):
+                    context = line_s[len("- Context:") :].strip()
+                elif line_s.startswith("- Trap:"):
+                    trap = line_s[len("- Trap:") :].strip()
+                elif line_s.startswith("- Rule:"):
+                    rule = line_s[len("- Rule:") :].strip()
+                elif line_s.startswith("- Rung:"):
+                    rung = line_s[len("- Rung:") :].strip()
+                elif line_s.startswith("- Immunity Test:"):
+                    immunity_test = line_s[len("- Immunity Test:") :].strip()
+                elif line_s.startswith("- Proof:"):
+                    proof = line_s[len("- Proof:") :].strip()
+
+            entries.append(
+                LessonEntry(
+                    title=title_str,
+                    date=date_str,
+                    context=context,
+                    trap=trap,
+                    rule=rule,
+                    rung=rung,
+                    immunity_test=immunity_test,
+                    proof=proof,
+                    raw_markdown=f"### {sec}",
+                )
+            )
+
+        return entries
+
+    def find_relevant_lessons(self, query: str, max_results: int = 5) -> list[LessonEntry]:
+        """クエリ（タスク名、ファイルパス、説明文等）から関連教訓をスコアリング検索する。"""
+        import re
+
+        entries = self.parse_lessons()
+        if not entries:
+            return []
+
+        if not query or not query.strip():
+            return entries[:max_results]
+
+        tokens = [t.lower() for t in re.findall(r"[a-zA-Z0-9_\-\.]+", query) if len(t) >= 2]
+        if not tokens:
+            return entries[:max_results]
+
+        scored: list[tuple[int, LessonEntry]] = []
+        for entry in entries:
+            score = 0
+            haystack_title = entry.title.lower()
+            haystack_ctx = entry.context.lower()
+            haystack_trap = entry.trap.lower()
+            haystack_rule = entry.rule.lower()
+
+            for tok in tokens:
+                if tok in haystack_title:
+                    score += 10
+                if tok in haystack_ctx:
+                    score += 6
+                if tok in haystack_trap:
+                    score += 4
+                if tok in haystack_rule:
+                    score += 4
+
+            if score > 0:
+                scored.append((score, entry))
+
+        if not scored:
+            return entries[:max_results]
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [e for _, e in scored[:max_results]]
+
+    def format_injection(self, entries: list[LessonEntry]) -> str:
+        """Maker プロンプトやコンテキストに注入するための Markdown ブロックを生成する。"""
+        if not entries:
+            return ""
+        lines = ["## 関連する教訓・Traps (from LESSONS.md / Rule 10)"]
+        for entry in entries:
+            lines.append(f"### {entry.title}")
+            if entry.trap:
+                lines.append(f"- Trap: {entry.trap}")
+            if entry.rule:
+                lines.append(f"- Rule: {entry.rule}")
+            if entry.immunity_test:
+                lines.append(f"- Immunity Test: {entry.immunity_test}")
+            lines.append("")
+        return "\n".join(lines).strip()

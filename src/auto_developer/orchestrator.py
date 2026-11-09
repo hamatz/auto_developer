@@ -206,7 +206,26 @@ class NightlyOrchestrator:
 
             # Phase A: Maker 実装呼び出し
             print(f"  [Phase A: Maker] Running Maker for task {task.task_id}...")
-            maker_code, maker_out = self.runner_adapter.run_maker(task, context={"attempt": 1})
+
+            # 教訓の自動検索・注入 (FFF.4 / Level 7 Rule 10)
+            from auto_developer.audit import LessonInjector
+
+            injector = LessonInjector(repo_dir=self.repo_dir)
+            matching_lessons = injector.find_relevant_lessons(task.title)
+            lessons_injection = injector.format_injection(matching_lessons)
+            if matching_lessons:
+                print(
+                    f"  [Level 7: Rule 10] Injected {len(matching_lessons)} relevant lessons from LESSONS.md into Maker context"
+                )
+
+            maker_code, maker_out = self.runner_adapter.run_maker(
+                task,
+                context={
+                    "attempt": 1,
+                    "lessons": lessons_injection,
+                    "lesson_entries": [e.title for e in matching_lessons],
+                },
+            )
             if maker_code != 0:
                 print(f"  Maker failed with exit {maker_code}:\n{maker_out}", file=sys.stderr)
                 return self._handle_failure(
@@ -311,7 +330,15 @@ class NightlyOrchestrator:
                 job_state.save(self.state_path)
 
                 # Attempt 2: Maker retry with verification failure output
-                maker_code2, maker_out2 = self.runner_adapter.run_maker(task, context={"attempt": 2, "prev_error": out})
+                maker_code2, maker_out2 = self.runner_adapter.run_maker(
+                    task,
+                    context={
+                        "attempt": 2,
+                        "prev_error": out,
+                        "lessons": lessons_injection,
+                        "lesson_entries": [e.title for e in matching_lessons],
+                    },
+                )
                 if maker_code2 != 0:
                     task_attempts.append({
                         "attempt": 2,
