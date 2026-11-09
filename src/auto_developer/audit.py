@@ -30,10 +30,13 @@ def verify_model_independence(
     maker_model: str,
     auditor_model: str,
     allow_same_model_override: bool = False,
+    strict: bool = True,
 ) -> tuple[bool, str]:
-    """MakerモデルとAuditor/Checkerモデルの独立性を検証する (AGENTS.md Rule 6 / EEE.1)。"""
-    if not maker_model or not auditor_model:
-        return True, "Models not fully specified; independent verification skipped"
+    """MakerモデルとAuditor/Checkerモデルの独立性を検証する (AGENTS.md Rule 6 / EEE.1 / FFF.3)。"""
+    if not maker_model or not maker_model.strip():
+        return False, "INDEPENDENT_AUDIT_VIOLATION: maker_model cannot be empty or whitespace"
+    if not auditor_model or not auditor_model.strip():
+        return False, "INDEPENDENT_AUDIT_VIOLATION: auditor_model cannot be empty or whitespace"
 
     m_norm = maker_model.strip()
     a_norm = auditor_model.strip()
@@ -50,6 +53,13 @@ def verify_model_independence(
 
     m_fam = detect_model_family(m_norm)
     a_fam = detect_model_family(a_norm)
+
+    if strict and (m_fam == "unknown" or a_fam == "unknown"):
+        msg = (
+            f"INDEPENDENT_AUDIT_VIOLATION: Unrecognized model family (Maker='{m_norm}' -> '{m_fam}', "
+            f"Auditor='{a_norm}' -> '{a_fam}'). Cannot guarantee cross-model independence."
+        )
+        return False, msg
 
     if m_fam != "mock" and m_fam != "unknown" and m_fam == a_fam:
         msg = (
@@ -260,6 +270,18 @@ class IndependentAuditRunner:
     def audit(self, spec_content: str, git_diff: str) -> list[AuditFinding]:
         import subprocess
 
+        # 独立性ポリシーの事前検証 (FFF.3)
+        if self.config:
+            self.config.validate()
+        else:
+            ok, reason = verify_model_independence(
+                maker_model="gemini-3.8-flash",
+                auditor_model=self.model_name,
+                strict=True,
+            )
+            if not ok:
+                raise ValueError(reason)
+
         if not self.auditor_cmd_template:
             raise RuntimeError(
                 "No auditor_cmd_template configured for IndependentAuditRunner (Fail-Closed)"
@@ -434,10 +456,6 @@ class AuditResolutionManager:
                 "reason": "PROMOTION_FAILED: Promoted test interfered with existing test suite",
             }
 
-        # 4. Finding ステータスを RESOLVED に更新
-        finding.status = "RESOLVED"
-        self.audit_store.save_finding(finding)
-
         proof = {
             "finding_id": finding_id,
             "before_commit": finding.before_commit_sha or "unknown",
@@ -451,8 +469,21 @@ class AuditResolutionManager:
             "resolved_at": time.time(),
         }
 
-        # 5. LESSONS.md への自動教訓記録 (EEE.4)
-        self.record_lesson(finding, proof)
+        # 4. LESSONS.md への自動教訓記録 (EEE.4 / FFF.3: Fail-Closed)
+        lesson_recorded = self.record_lesson(finding, proof)
+        if not lesson_recorded:
+            finding.status = "LEARNING_RECORD_FAILED"
+            self.audit_store.save_finding(finding)
+            return {
+                "success": False,
+                "reason": "LEARNING_RECORD_FAILED: Failed to record lesson in LESSONS.md",
+                "error": "LEARNING_RECORD_FAILED",
+                "proof": proof,
+            }
+
+        # 5. Finding ステータスを RESOLVED に更新 (LESSONS記録成功後のみ)
+        finding.status = "RESOLVED"
+        self.audit_store.save_finding(finding)
 
         return {
             "success": True,

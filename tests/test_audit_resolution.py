@@ -36,6 +36,13 @@ class TestAuditResolution(unittest.TestCase):
         self.audit_store = AuditStore(repo_dir=self.repo_dir)
         self.manager = AuditResolutionManager(repo_dir=self.repo_dir)
 
+        # 初期 LESSONS.md
+        self.lessons_md = self.repo_dir / "LESSONS.md"
+        self.lessons_md.write_text(
+            "# Repository Lessons Learned\n\n## 恒久教訓インデックス\n",
+            encoding="utf-8",
+        )
+
     def tearDown(self) -> None:
         self.tmp_dir.cleanup()
 
@@ -282,6 +289,46 @@ class TestAuditResolution(unittest.TestCase):
         self.assertEqual(proof["before_red_reason"], "GENUINE_RED")
         self.assertEqual(proof["before_status"], "VERIFIED_RED")
         self.assertEqual(proof["after_status"], "GREEN")
+
+    def test_resolve_task_fails_when_record_lesson_fails(self) -> None:
+        """機能FFF.3: LESSONS.md への記録に失敗した場合、RESOLVEDにせず LEARNING_RECORD_FAILED で停止すること。"""
+        self.app_py.write_text(
+            "def safe_div(a: int, b: int) -> int:\n"
+            "    return 0 if b == 0 else a // b\n",
+            encoding="utf-8",
+        )
+        repro_code = (
+            "import unittest\n"
+            "from app import safe_div\n\n"
+            "class TestLessonFail(unittest.TestCase):\n"
+            "    def test_l(self):\n"
+            "        self.assertEqual(safe_div(10, 0), 0)\n"
+        )
+        finding = AuditFinding(
+            finding_id="BUG-LESSON-FAIL",
+            severity="P0",
+            spec_reference="SPEC.md 2.1",
+            location="src/app.py:2",
+            description="Lesson fail test",
+            reproduction_test_code=repro_code,
+            status="VERIFIED_RED",
+            red_verification_reason="GENUINE_RED",
+        )
+        self.audit_store.save_finding(finding)
+
+        # LESSONS.md が存在しない状態（setUp で作成していない）
+        lessons_path = self.repo_dir / "LESSONS.md"
+        if lessons_path.exists():
+            lessons_path.unlink()
+
+        res = self.manager.resolve_task("AUD-BUG-LESSON-FAIL")
+        self.assertFalse(res["success"])
+        self.assertIn("LEARNING_RECORD_FAILED", res["reason"])
+
+        # Finding のステータスが LEARNING_RECORD_FAILED に更新され、RESOLVED になっていないこと
+        updated_finding = self.audit_store.get_finding("BUG-LESSON-FAIL")
+        self.assertIsNotNone(updated_finding)
+        self.assertEqual(updated_finding.status, "LEARNING_RECORD_FAILED")
 
 
 if __name__ == "__main__":

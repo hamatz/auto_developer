@@ -99,6 +99,30 @@ class TestAuditModelPolicy(unittest.TestCase):
             code = orch.run()
             self.assertEqual(code, 2)
 
+    def test_verify_model_independence_rejects_empty_models(self) -> None:
+        """機能FFF.3: モデル名が空文字列の場合、Fail-Closed として拒絶されること。"""
+        ok, reason = verify_model_independence("", "claude-opus-5.5")
+        self.assertFalse(ok)
+        self.assertIn("INDEPENDENT_AUDIT_VIOLATION", reason)
+        self.assertIn("empty", reason.lower())
+
+        ok, reason = verify_model_independence("gemini-3.8-flash", "   ")
+        self.assertFalse(ok)
+        self.assertIn("INDEPENDENT_AUDIT_VIOLATION", reason)
+        self.assertIn("empty", reason.lower())
+
+    def test_verify_model_independence_rejects_unknown_family_in_strict_mode(self) -> None:
+        """機能FFF.3: 未知ファミリモデルの場合、Strict モードで独立性不確実として拒絶されること。"""
+        ok, reason = verify_model_independence("totally-unknown", "another-unknown")
+        self.assertFalse(ok)
+        self.assertIn("INDEPENDENT_AUDIT_VIOLATION", reason)
+        self.assertIn("Unrecognized", reason)
+
+        ok, reason = verify_model_independence("gemini-3.8-flash", "totally-unknown")
+        self.assertFalse(ok)
+        self.assertIn("INDEPENDENT_AUDIT_VIOLATION", reason)
+        self.assertIn("Unrecognized", reason)
+
 
 if __name__ == "__main__":
     unittest.main()
