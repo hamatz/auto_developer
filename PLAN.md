@@ -7,20 +7,20 @@
 -->
 
 ## 現在の目標
-- Phase 46: Stage 5 — 免疫保護・厳格なBefore/After証明・教訓注入と自己改善ループの真の完成 (Stage 5 Hardening Immunity, Strict Proof, and Next-Maker Lesson Injection)
-  - 免疫テスト非破壊的確定と衝突拒絶: `AuditResolutionManager.resolve_task()` において、既存免疫テストの存在事前検査を行い、同一ハッシュなら冪等成功、異なるハッシュなら `IMMUNITY_COLLISION` で即座に拒絶して既存免疫テストの改変・破壊を完全防止（機能FFF.1）
-  - 厳格な Before Red 実証と改変不能な Proof 拘束: `AuditDispatcher` で Red 検証時の証跡（Before Commit SHA, 再現テスト SHA-256, GENUINE_RED 証跡）を `AuditStore` に永続化し、`resolve_task()` で厳格照合の上、`red_green_proof` に暗号学的に拘束（機能FFF.2）
-  - LESSONSフェイルクローズ & モデル独立性検証厳格化: `record_lesson()` 失敗時の `LEARNING_RECORD_FAILED` 停止、および `verify_model_independence()` における空モデル・unknownファミリの Fail-Closed 拒絶（機能FFF.3）
-  - 次回Makerへの教訓自動検索・注入機構と完全閉ループE2E受入試験: `LessonInjector` による関連 Trap / Rule の Maker コンテキスト自動注入、および監査から教訓注入まで繋がる完全閉ループE2E受入試験、全体検証ゲート（266+ テスト）合格確認、Evidence Bundle 生成（機能FFF.4）
+- Phase 47: Stage 6 — Level 7 実運用接続・証拠イミュータブル化・完全閉ループ受入 (Stage 6 Level 7 Production Wiring, Immutable Proofs, and Closed-Loop Acceptance)
+  - CommandRunnerAdapter による教訓の安全な注入と実プロセス受入検証: `CommandRunnerAdapter.run_maker()` において、標準入力（stdin）へのパイプ供給やコンテキストファイルを通じて教訓を Maker サブプロセスへ安全に渡し、シェル展開破壊を防止しつつ実プロセス受入テストで検証（機能GGG.1）
+  - AuditStore の初回登録確定とコードハッシュ再計算・改ざん上書き拒絶: `AuditStore.save_finding()` において、初回登録時に再現コードの SHA-256（`code_hash`）を不変値として確定し、再保存時に既存ハッシュと異なる場合は `CODE_HASH_TAMPERED` 例外で拒絶して Before Red 証跡の改変耐性を保証（機能GGG.2）
+  - 独立監査ランナーにおける設定モデルと実起動モデルの完全一致強制: `IndependentAuditRunner.audit()` において、設定上の `config.auditor_model` と実際に起動される `self.model_name` が完全一致することを機械的に検証し、偽装・不一致を即座に拒絶（機能GGG.3）
+  - シードバグを用いた本番経路 Level 7 E2E 全通し実証と全体検証ゲート合格: モックを排除した実 `CommandRunnerAdapter` による本番経路 E2E（独立監査 → 隔離Red実証 → PLAN登録 → Maker教訓実注入・修正 → After Green → 免疫非破壊昇格 → LESSONS追記 → 次回Maker教訓自動注入）の一気通貫実証、全体検証ゲート（278+ テスト）合格確認、Evidence Bundle 生成（機能GGG.4）
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - 現時点で既存テストの変更予定なし。
 
 ## ステップ
-- [x] 1. 免疫テスト非破壊的確定（ハッシュ一致で冪等、不一致で IMMUNITY_COLLISION 拒絶）の実装と単体テスト（Red-First）（FFF.1）
-- [x] 2. 厳格な Before Red 実証・検証記録の AuditStore 永続化と red_green_proof 暗号拘束の実装と単体テスト（Red-First）（FFF.2）
-- [x] 3. LESSONS記録のフェイルクローズ化 (LEARNING_RECORD_FAILED) と異系統モデル判定厳格化の実装と単体テスト（Red-First）（FFF.3）
-- [x] 4. 次回Makerへの教訓検索・注入機構 (LessonInjector) の実装と、自己改善ループ全通しE2E受入試験・全体検証ゲート合格（FFF.4）
+- [ ] 1. CommandRunnerAdapter による教訓の安全な注入（stdin / context ファイル経由）の実装と実プロセス受入テスト（Red-First）（GGG.1）
+- [ ] 2. AuditStore の初回登録確定とコードハッシュ再計算・改ざん上書き拒絶の実装と単体テスト（Red-First）（GGG.2）
+- [ ] 3. IndependentAuditRunner の設定モデルと実起動モデルの完全一致強制の実装と単体テスト（Red-First）（GGG.3）
+- [ ] 4. シードバグを用いた本番経路 Level 7 E2E 全通し実証・全体検証ゲート合格・Evidence Bundle 生成（GGG.4）
 
 ## 止まっていること・判断待ち
 - なし

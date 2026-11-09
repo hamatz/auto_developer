@@ -519,6 +519,22 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `LessonInjector` を実装：次期タスク（タイトル・説明・対象ファイル・キーワード等）に基づき `LESSONS.md` の教訓インデックスから関連する Trap / Rule を自動検索・抽出し、Maker のプロンプト／コンテキストへ自動注入。Level 7 ルール10（「着手前に LESSONS.md を検索」）を機械的強制。
      - 外部監査 → Red実証 → PLAN登録 → Maker修正 → After Green → 免疫昇格（非破壊） → LESSONS記録 → 次回Makerへの教訓注入までが人間の介在ゼロで繋がる完全閉ループE2E受入実証テストを追加。
      - 全自動検証ゲート（266+ テスト、Ruff、Mypy）の完全合格確認と Evidence Bundle 生成。
+- [ ] 機能GGG (Stage 6 Level 7 実運用接続・証拠イミュータブル化・完全閉ループ受入 Stage 6 Level 7 Production Wiring, Immutable Proofs, and Closed-Loop Acceptance):
+  1. CommandRunnerAdapter による教訓の安全な注入と実プロセス受入検証 (GGG.1 / Sol氏 P1指摘):
+     - `CommandRunnerAdapter.run_maker()` において、`context` 内の `lessons`（教訓テキスト）およびコンテキストメタデータを安全に Maker サブプロセスへ渡す経路を実装。
+     - 改行や引用符によるシェル展開破壊を防止するため、標準入力（stdin）への教訓テキストのパイプ供給、および環境変数 `AUTO_DEV_LESSONS` / 専用コンテキストファイル（`.dev/context_task_<id>.json`）の配置をサポート。
+     - モックではなく実際の `CommandRunnerAdapter` を起動し、Maker 実プロセスが教訓を受信して動作することを確認する受入テストを追加。
+  2. AuditStore の初回登録確定とコードハッシュ再計算・改ざん上書きの拒絶 (GGG.2 / Sol氏 P1指摘):
+     - `AuditStore.save_finding()` において、初回保存時に再現コードの SHA-256（`code_hash`）を不変値として確定。
+     - 既存の Finding に対する再保存時、渡された再現コードが既存の `code_hash` と一致するか検証。不一致時はハッシュを更新せず、`CODE_HASH_TAMPERED` 例外を送出して上書きを遮断。
+     - 状態更新（ステータス変更等）において再現コードの改変・再計算を禁止し、Before Red 証跡の改変耐性を保証。
+  3. 独立監査ランナーにおける設定モデルと実起動モデルの完全一致強制 (GGG.3 / Sol氏 P1指摘):
+     - `IndependentAuditRunner.audit()` において、`self.config` が設定されている場合、設定上の `config.auditor_model` と実際に起動される `self.model_name` が完全一致することを機械的に検証。
+     - 不一致時（例: 設定は Claude だが実動は Gemini）は `INDEPENDENT_AUDIT_VIOLATION` で即座に起動拒絶（Fail-Closed）。
+     - 実際に起動されたモデル名を監査証跡（Finding メタデータ等）に明記。
+  4. シードバグを用いた本番経路 Level 7 E2E 全通し実証と全体検証ゲート合格 (GGG.4 / Phase 47 完了判定):
+     - モックを排除した実 `CommandRunnerAdapter` による本番経路 E2E：独立監査（異系統モデル検証済） → 隔離Red実証 → PLAN登録（AUDタスク） → Makerへの教訓実注入（stdin / context_file） → Maker修正 → After Green検証 → 免疫テスト自動昇格（非破壊） → LESSONS.md自動追記 → 次回Makerへの教訓自動注入までが一気通貫で完結することを実証。
+     - 全自動検証ゲート（278+ テスト、Ruff、Mypy）の完全合格確認と Evidence Bundle 生成。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
