@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any
 
 from auto_developer.models import Task
@@ -61,26 +62,59 @@ class CommandRunnerAdapter(RunnerAdapter):
     def run_maker(self, task: Task, context: dict[str, Any]) -> tuple[int, str]:
         if not self.maker_cmd_template:
             return 1, "ERROR: No maker_cmd_template configured (Fail-Closed)"
-        cmd_str = (
-            self.maker_cmd_template
-            .replace("{task_id}", str(task.task_id))
-            .replace("{task_title}", task.title)
-            .replace("{attempt}", str(context.get("attempt", 1)))
-            .replace("{prev_error}", str(context.get("prev_error", "")))
-        )
-        try:
-            proc = subprocess.run(
-                ["bash", "-c", cmd_str],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=self.timeout_sec,
+
+        import json
+        import os
+        import tempfile
+
+        lessons_text = str(context.get("lessons", "") or "")
+
+        # 一時コンテキストファイルと教訓ファイルを作成
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            context_file = tmp_path / f"context_task_{task.task_id}.json"
+            lessons_file = tmp_path / f"lessons_task_{task.task_id}.txt"
+
+            context_data = dict(context)
+            context_data["task_id"] = str(task.task_id)
+            context_data["task_title"] = task.title
+            context_file.write_text(
+                json.dumps(context_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
             )
-            return proc.returncode, proc.stdout + "\n" + proc.stderr
-        except subprocess.TimeoutExpired:
-            return 124, f"Maker execution timed out after {self.timeout_sec}s"
-        except Exception as e:  # noqa: BLE001
-            return 1, f"Failed to execute Maker: {e}"
+            lessons_file.write_text(lessons_text, encoding="utf-8")
+
+            cmd_str = (
+                self.maker_cmd_template
+                .replace("{task_id}", str(task.task_id))
+                .replace("{task_title}", task.title)
+                .replace("{attempt}", str(context.get("attempt", 1)))
+                .replace("{prev_error}", str(context.get("prev_error", "")))
+                .replace("{context_file}", str(context_file))
+                .replace("{lessons_file}", str(lessons_file))
+            )
+
+            env = os.environ.copy()
+            env["AUTO_DEV_LESSONS"] = lessons_text
+            env["AUTO_DEV_TASK_ID"] = str(task.task_id)
+            env["AUTO_DEV_TASK_TITLE"] = task.title
+            env["AUTO_DEV_ATTEMPT"] = str(context.get("attempt", 1))
+
+            try:
+                proc = subprocess.run(
+                    ["bash", "-c", cmd_str],
+                    input=lessons_text,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=self.timeout_sec,
+                )
+                return proc.returncode, proc.stdout + "\n" + proc.stderr
+            except subprocess.TimeoutExpired:
+                return 124, f"Maker execution timed out after {self.timeout_sec}s"
+            except Exception as e:  # noqa: BLE001
+                return 1, f"Failed to execute Maker: {e}"
 
     def run_checker(self, task: Task, diff: str, spec_content: str) -> tuple[bool, str]:
         if not self.checker_cmd_template:
