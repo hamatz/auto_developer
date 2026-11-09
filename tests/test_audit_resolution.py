@@ -124,6 +124,77 @@ class TestAuditResolution(unittest.TestCase):
         self.assertIsNotNone(archived)
         self.assertEqual(archived["verification"]["red_green_proof"]["finding_id"], "BUG-ZERO-DIV")
 
+    def test_resolve_task_rejects_overwriting_different_existing_immunity_test(self) -> None:
+        """機能FFF.1: 異なる内容の既存免疫テストが存在する場合、IMMUNITY_COLLISION で拒絶され元ファイルが保護されること。"""
+        # アプリ修正（Green状態）
+        self.app_py.write_text(
+            "def safe_div(a: int, b: int) -> int:\n"
+            "    return 0 if b == 0 else a // b\n",
+            encoding="utf-8",
+        )
+        repro_code = (
+            "import unittest\n"
+            "from app import safe_div\n\n"
+            "class TestNew(unittest.TestCase):\n"
+            "    def test_new(self):\n"
+            "        self.assertEqual(safe_div(10, 0), 0)\n"
+        )
+        finding = AuditFinding(
+            finding_id="BUG-COLLIDE",
+            severity="P0",
+            spec_reference="SPEC.md 2.1",
+            location="src/app.py:2",
+            description="Collide test",
+            reproduction_test_code=repro_code,
+            status="VERIFIED_RED",
+        )
+        self.audit_store.save_finding(finding)
+
+        # 既存の免疫テスト（異なる内容）を事前配置
+        target_immunity_file = self.repo_dir / "tests" / "immunity" / "test_immunity_BUG_COLLIDE.py"
+        original_content = "# ORIGINAL IMMUNITY TEST CONTENT\n"
+        target_immunity_file.write_text(original_content, encoding="utf-8")
+
+        res = self.manager.resolve_task("AUD-BUG-COLLIDE")
+        self.assertFalse(res["success"])
+        self.assertIn("IMMUNITY_COLLISION", res["reason"])
+
+        # 元ファイルが一切上書き・削除されていないこと
+        self.assertEqual(target_immunity_file.read_text(encoding="utf-8"), original_content)
+
+    def test_resolve_task_idempotent_when_existing_immunity_test_has_same_hash(self) -> None:
+        """機能FFF.1: 同一ハッシュの既存免疫テストが存在する場合、上書きせず冪等に成功すること。"""
+        self.app_py.write_text(
+            "def safe_div(a: int, b: int) -> int:\n"
+            "    return 0 if b == 0 else a // b\n",
+            encoding="utf-8",
+        )
+        repro_code = (
+            "import unittest\n"
+            "from app import safe_div\n\n"
+            "class TestSame(unittest.TestCase):\n"
+            "    def test_same(self):\n"
+            "        self.assertEqual(safe_div(10, 0), 0)\n"
+        )
+        finding = AuditFinding(
+            finding_id="BUG-IDEMPOTENT",
+            severity="P1",
+            spec_reference="SPEC.md 2.1",
+            location="src/app.py:2",
+            description="Idempotent test",
+            reproduction_test_code=repro_code,
+            status="VERIFIED_RED",
+        )
+        self.audit_store.save_finding(finding)
+
+        # 同一内容のファイルを事前に配置
+        target_immunity_file = self.repo_dir / "tests" / "immunity" / "test_immunity_BUG_IDEMPOTENT.py"
+        target_immunity_file.write_text(repro_code, encoding="utf-8")
+
+        res = self.manager.resolve_task("AUD-BUG-IDEMPOTENT")
+        self.assertTrue(res["success"])
+        self.assertEqual(target_immunity_file.read_text(encoding="utf-8"), repro_code)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -327,18 +327,40 @@ class AuditResolutionManager:
                 ),
             }
 
-        # 2. 免疫テストとしての昇格・配置
+        # 2. 免疫テストとしての昇格・配置 (非破壊的確定 FFF.1)
+        import hashlib
+
         safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", finding_id)
         immunity_rel_path = f"tests/immunity/test_immunity_{safe_name}.py"
         target_path = self.repo_dir / immunity_rel_path
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(repro_code, encoding="utf-8")
+
+        is_already_promoted = False
+        if target_path.exists():
+            existing_content = target_path.read_text(encoding="utf-8")
+            existing_hash = hashlib.sha256(existing_content.encode("utf-8")).hexdigest()
+            candidate_hash = hashlib.sha256(repro_code.encode("utf-8")).hexdigest()
+            if existing_hash != candidate_hash:
+                return {
+                    "success": False,
+                    "reason": (
+                        f"IMMUNITY_COLLISION: target immunity test '{immunity_rel_path}' already exists "
+                        f"with different content (hash={existing_hash[:8]} vs candidate={candidate_hash[:8]}). "
+                        "Refusing to overwrite existing immunity test."
+                    ),
+                    "error": "IMMUNITY_COLLISION",
+                }
+            is_already_promoted = True
+
+        if not is_already_promoted:
+            target_path.write_text(repro_code, encoding="utf-8")
 
         # 3. 免疫テスト安全性の機械的検証 (AST 検査 & 不干渉)
         from auto_developer.guard import GitGuard, validate_test_ast
 
         if not validate_test_ast(target_path):
-            target_path.unlink(missing_ok=True)
+            if not is_already_promoted:
+                target_path.unlink(missing_ok=True)
             return {
                 "success": False,
                 "reason": "PROMOTION_FAILED: Promoted test failed AST safety validation",
@@ -346,7 +368,8 @@ class AuditResolutionManager:
 
         guard = GitGuard(repo_dir=self.repo_dir)
         if not guard.verify_mutual_non_interference(immunity_rel_path):
-            target_path.unlink(missing_ok=True)
+            if not is_already_promoted:
+                target_path.unlink(missing_ok=True)
             return {
                 "success": False,
                 "reason": "PROMOTION_FAILED: Promoted test interfered with existing test suite",
