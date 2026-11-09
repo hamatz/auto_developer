@@ -18,7 +18,7 @@
 
 ## ステップ
 - [x] 1. 免疫テスト非破壊的確定（ハッシュ一致で冪等、不一致で IMMUNITY_COLLISION 拒絶）の実装と単体テスト（Red-First）（FFF.1）
-- [ ] 2. 厳格な Before Red 実証・検証記録の AuditStore 永続化と red_green_proof 暗号拘束の実装と単体テスト（Red-First）（FFF.2）
+- [x] 2. 厳格な Before Red 実証・検証記録の AuditStore 永続化と red_green_proof 暗号拘束の実装と単体テスト（Red-First）（FFF.2）
 - [ ] 3. LESSONS記録のフェイルクローズ化 (LEARNING_RECORD_FAILED) と異系統モデル判定厳格化の実装と単体テスト（Red-First）（FFF.3）
 - [ ] 4. 次回Makerへの教訓検索・注入機構 (LessonInjector) の実装と、自己改善ループ全通しE2E受入試験・全体検証ゲート合格（FFF.4）
 

@@ -56,6 +56,7 @@ class TestAuditResolution(unittest.TestCase):
             description="Divide by zero in safe_div",
             reproduction_test_code=repro_code,
             status="VERIFIED_RED",
+            red_verification_reason="GENUINE_RED",
         )
         self.audit_store.save_finding(finding)
 
@@ -147,6 +148,7 @@ class TestAuditResolution(unittest.TestCase):
             description="Collide test",
             reproduction_test_code=repro_code,
             status="VERIFIED_RED",
+            red_verification_reason="GENUINE_RED",
         )
         self.audit_store.save_finding(finding)
 
@@ -184,6 +186,7 @@ class TestAuditResolution(unittest.TestCase):
             description="Idempotent test",
             reproduction_test_code=repro_code,
             status="VERIFIED_RED",
+            red_verification_reason="GENUINE_RED",
         )
         self.audit_store.save_finding(finding)
 
@@ -194,6 +197,91 @@ class TestAuditResolution(unittest.TestCase):
         res = self.manager.resolve_task("AUD-BUG-IDEMPOTENT")
         self.assertTrue(res["success"])
         self.assertEqual(target_immunity_file.read_text(encoding="utf-8"), repro_code)
+
+    def test_resolve_task_rejects_unverified_before_red_status_reported(self) -> None:
+        """機能FFF.2: status='REPORTED' のまま実証されていないFindingは UNVERIFIED_BEFORE_RED で拒絶されること。"""
+        self.app_py.write_text(
+            "def safe_div(a: int, b: int) -> int:\n"
+            "    return 0 if b == 0 else a // b\n",
+            encoding="utf-8",
+        )
+        finding = AuditFinding(
+            finding_id="BUG-UNVERIFIED",
+            severity="P1",
+            spec_reference="SPEC.md 2.1",
+            location="src/app.py:2",
+            description="Unverified red finding",
+            reproduction_test_code="import unittest\nclass T(unittest.TestCase):\n    def test(self): pass\n",
+            status="REPORTED",
+        )
+        self.audit_store.save_finding(finding)
+
+        res = self.manager.resolve_task("AUD-BUG-UNVERIFIED")
+        self.assertFalse(res["success"])
+        self.assertIn("UNVERIFIED_BEFORE_RED", res["reason"])
+
+    def test_resolve_task_rejects_missing_genuine_red_proof(self) -> None:
+        """機能FFF.2: statusがVERIFIED_REDでも GENUINE_RED 証跡を持たないFindingは拒絶されること。"""
+        self.app_py.write_text(
+            "def safe_div(a: int, b: int) -> int:\n"
+            "    return 0 if b == 0 else a // b\n",
+            encoding="utf-8",
+        )
+        finding = AuditFinding(
+            finding_id="BUG-NO-PROOF",
+            severity="P1",
+            spec_reference="SPEC.md 2.1",
+            location="src/app.py:2",
+            description="Finding lacking GENUINE_RED proof",
+            reproduction_test_code="import unittest\nclass T(unittest.TestCase):\n    def test(self): pass\n",
+            status="VERIFIED_RED",
+            red_verification_reason=None,
+        )
+        self.audit_store.save_finding(finding)
+
+        res = self.manager.resolve_task("AUD-BUG-NO-PROOF")
+        self.assertFalse(res["success"])
+        self.assertIn("UNVERIFIED_BEFORE_RED", res["reason"])
+
+    def test_resolve_task_binds_full_cryptographic_proof(self) -> None:
+        """機能FFF.2: 解決時に before_commit, after_commit, repro_test_sha256 が完全拘束されること。"""
+        import hashlib
+
+        self.app_py.write_text(
+            "def safe_div(a: int, b: int) -> int:\n"
+            "    return 0 if b == 0 else a // b\n",
+            encoding="utf-8",
+        )
+        repro_code = (
+            "import unittest\n"
+            "from app import safe_div\n\n"
+            "class TestFull(unittest.TestCase):\n"
+            "    def test_full(self):\n"
+            "        self.assertEqual(safe_div(10, 0), 0)\n"
+        )
+        code_hash = hashlib.sha256(repro_code.encode("utf-8")).hexdigest()
+        finding = AuditFinding(
+            finding_id="BUG-CRYPTO-PROOF",
+            severity="P0",
+            spec_reference="SPEC.md 2.1",
+            location="src/app.py:2",
+            description="Full cryptographic proof test",
+            reproduction_test_code=repro_code,
+            status="VERIFIED_RED",
+            red_verification_reason="GENUINE_RED",
+            before_commit_sha="1111222233334444555566667777888899990000",
+            code_hash=code_hash,
+        )
+        self.audit_store.save_finding(finding)
+
+        res = self.manager.resolve_task("AUD-BUG-CRYPTO-PROOF")
+        self.assertTrue(res["success"])
+        proof = res["proof"]
+        self.assertEqual(proof["before_commit"], "1111222233334444555566667777888899990000")
+        self.assertEqual(proof["repro_test_sha256"], code_hash)
+        self.assertEqual(proof["before_red_reason"], "GENUINE_RED")
+        self.assertEqual(proof["before_status"], "VERIFIED_RED")
+        self.assertEqual(proof["after_status"], "GREEN")
 
 
 if __name__ == "__main__":

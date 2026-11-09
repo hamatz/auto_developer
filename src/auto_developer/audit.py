@@ -95,6 +95,10 @@ class AuditFinding:
     description: str
     reproduction_test_code: str
     status: str = "REPORTED"
+    red_verification_reason: str | None = None
+    red_verification_output: str | None = None
+    before_commit_sha: str | None = None
+    code_hash: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -109,6 +113,10 @@ class AuditFinding:
             description=data["description"],
             reproduction_test_code=data["reproduction_test_code"],
             status=data.get("status", "REPORTED"),
+            red_verification_reason=data.get("red_verification_reason"),
+            red_verification_output=data.get("red_verification_output"),
+            before_commit_sha=data.get("before_commit_sha"),
+            code_hash=data.get("code_hash"),
         )
 
 
@@ -284,6 +292,24 @@ class AuditResolutionManager:
         self.repo_dir = repo_dir or Path.cwd()
         self.audit_store = AuditStore(repo_dir=self.repo_dir)
 
+    def _get_head_commit_sha(self) -> str:
+        """Git リポジトリの最新 HEAD コミット SHA を取得する。"""
+        import subprocess
+
+        try:
+            res = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self.repo_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0:
+                return res.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return "unknown"
+        return "unknown"
+
     def extract_finding_id(self, task_id: str) -> str | None:
         if task_id.startswith("AUD-"):
             return task_id[4:]
@@ -291,6 +317,7 @@ class AuditResolutionManager:
 
     def resolve_task(self, task_id: str) -> dict[str, Any]:
         """AUDタスクのAfter Greenを検証し、免疫テストとして自動昇格配置する。"""
+        import hashlib
         import re
         import time
 
@@ -304,6 +331,27 @@ class AuditResolutionManager:
         if not finding:
             return {"success": False, "reason": f"Finding '{finding_id}' not found in audit store"}
 
+        # 0. Before Red 真正性の検証 (FFF.2)
+        if finding.status not in ("VERIFIED_RED", "DISPATCHED"):
+            return {
+                "success": False,
+                "reason": (
+                    f"UNVERIFIED_BEFORE_RED: Finding '{finding_id}' has status '{finding.status}', "
+                    "expected 'VERIFIED_RED' or 'DISPATCHED'"
+                ),
+                "error": "UNVERIFIED_BEFORE_RED",
+            }
+
+        if finding.red_verification_reason != "GENUINE_RED":
+            return {
+                "success": False,
+                "reason": (
+                    f"UNVERIFIED_BEFORE_RED: Finding '{finding_id}' lacks verified genuine red proof "
+                    f"(red_verification_reason='{finding.red_verification_reason}')"
+                ),
+                "error": "UNVERIFIED_BEFORE_RED",
+            }
+
         repro_code = self.audit_store.get_repro_test(finding_id)
         if not repro_code:
             repro_code = finding.reproduction_test_code
@@ -312,6 +360,19 @@ class AuditResolutionManager:
                 "success": False,
                 "reason": f"No reproduction test code found for finding '{finding_id}'",
             }
+
+        # 再現テストコードの改ざん検知
+        if finding.code_hash:
+            actual_repro_hash = hashlib.sha256(repro_code.encode("utf-8")).hexdigest()
+            if actual_repro_hash != finding.code_hash:
+                return {
+                    "success": False,
+                    "reason": (
+                        f"TAMPERED_REPRO_TEST: reproduction test code hash mismatch "
+                        f"(expected={finding.code_hash[:8]}, actual={actual_repro_hash[:8]})"
+                    ),
+                    "error": "TAMPERED_REPRO_TEST",
+                }
 
         # 1. 修正後のコードに対する After Green 検証
         verifier = RedTestVerifier(repo_dir=self.repo_dir)
@@ -328,8 +389,6 @@ class AuditResolutionManager:
             }
 
         # 2. 免疫テストとしての昇格・配置 (非破壊的確定 FFF.1)
-        import hashlib
-
         safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", finding_id)
         immunity_rel_path = f"tests/immunity/test_immunity_{safe_name}.py"
         target_path = self.repo_dir / immunity_rel_path
@@ -381,8 +440,13 @@ class AuditResolutionManager:
 
         proof = {
             "finding_id": finding_id,
+            "before_commit": finding.before_commit_sha or "unknown",
+            "after_commit": self._get_head_commit_sha(),
+            "repro_test_sha256": finding.code_hash or hashlib.sha256(repro_code.encode("utf-8")).hexdigest(),
             "before_status": "VERIFIED_RED",
             "after_status": "GREEN",
+            "before_red_reason": finding.red_verification_reason,
+            "after_green_reason": verification.reason,
             "immunity_test_path": immunity_rel_path,
             "resolved_at": time.time(),
         }
