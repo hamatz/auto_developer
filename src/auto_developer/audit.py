@@ -529,3 +529,151 @@ class AuditResolutionManager:
 
         target_path.write_text(updated_content, encoding="utf-8")
         return True
+
+
+@dataclass
+class LessonEntry:
+    title: str
+    date: str
+    context: str = ""
+    trap: str = ""
+    rule: str = ""
+    rung: str = ""
+    immunity_test: str = ""
+    proof: str = ""
+    raw_markdown: str = ""
+
+
+class LessonInjector:
+    """LESSONS.md から関連する教訓を検索し、Makerプロンプト/コンテキストへ注入する (FFF.4 / Level 7 Rule 10)。"""
+
+    def __init__(
+        self,
+        repo_dir: Path | str | None = None,
+        lessons_path: Path | str | None = None,
+    ) -> None:
+        self.repo_dir = Path(repo_dir) if repo_dir else Path.cwd()
+        self.lessons_path = Path(lessons_path) if lessons_path else self.repo_dir / "LESSONS.md"
+
+    def parse_lessons(self) -> list[LessonEntry]:
+        """LESSONS.md の『## 恒久教訓インデックス』配下の教訓エントリを構造化パースする。"""
+        import re
+
+        if not self.lessons_path.exists():
+            return []
+
+        content = self.lessons_path.read_text(encoding="utf-8")
+        header = "## 恒久教訓インデックス"
+        if header in content:
+            _, body = content.split(header, 1)
+        else:
+            body = content
+
+        entries: list[LessonEntry] = []
+        raw_sections = body.split("\n### ")
+        for sec in raw_sections:
+            sec = sec.strip()
+            if not sec or sec.startswith("#"):
+                continue
+
+            lines = sec.splitlines()
+            title_line = lines[0].strip()
+            date_match = re.match(r"^\[(.*?)\]\s*(.*)$", title_line)
+            date_str = date_match.group(1) if date_match else ""
+            title_str = title_line
+
+            context = ""
+            trap = ""
+            rule = ""
+            rung = ""
+            immunity_test = ""
+            proof = ""
+
+            for line in lines[1:]:
+                line_s = line.strip()
+                if line_s.startswith("- Context:"):
+                    context = line_s[len("- Context:") :].strip()
+                elif line_s.startswith("- Trap:"):
+                    trap = line_s[len("- Trap:") :].strip()
+                elif line_s.startswith("- Rule:"):
+                    rule = line_s[len("- Rule:") :].strip()
+                elif line_s.startswith("- Rung:"):
+                    rung = line_s[len("- Rung:") :].strip()
+                elif line_s.startswith("- Immunity Test:"):
+                    immunity_test = line_s[len("- Immunity Test:") :].strip()
+                elif line_s.startswith("- Proof:"):
+                    proof = line_s[len("- Proof:") :].strip()
+
+            entries.append(
+                LessonEntry(
+                    title=title_str,
+                    date=date_str,
+                    context=context,
+                    trap=trap,
+                    rule=rule,
+                    rung=rung,
+                    immunity_test=immunity_test,
+                    proof=proof,
+                    raw_markdown=f"### {sec}",
+                )
+            )
+
+        return entries
+
+    def find_relevant_lessons(self, query: str, max_results: int = 5) -> list[LessonEntry]:
+        """クエリ（タスク名、ファイルパス、説明文等）から関連教訓をスコアリング検索する。"""
+        import re
+
+        entries = self.parse_lessons()
+        if not entries:
+            return []
+
+        if not query or not query.strip():
+            return entries[:max_results]
+
+        tokens = [t.lower() for t in re.findall(r"[a-zA-Z0-9_\-\.]+", query) if len(t) >= 2]
+        if not tokens:
+            return entries[:max_results]
+
+        scored: list[tuple[int, LessonEntry]] = []
+        for entry in entries:
+            score = 0
+            haystack_title = entry.title.lower()
+            haystack_ctx = entry.context.lower()
+            haystack_trap = entry.trap.lower()
+            haystack_rule = entry.rule.lower()
+
+            for tok in tokens:
+                if tok in haystack_title:
+                    score += 10
+                if tok in haystack_ctx:
+                    score += 6
+                if tok in haystack_trap:
+                    score += 4
+                if tok in haystack_rule:
+                    score += 4
+
+            if score > 0:
+                scored.append((score, entry))
+
+        if not scored:
+            return entries[:max_results]
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [e for _, e in scored[:max_results]]
+
+    def format_injection(self, entries: list[LessonEntry]) -> str:
+        """Maker プロンプトやコンテキストに注入するための Markdown ブロックを生成する。"""
+        if not entries:
+            return ""
+        lines = ["## 関連する教訓・Traps (from LESSONS.md / Rule 10)"]
+        for entry in entries:
+            lines.append(f"### {entry.title}")
+            if entry.trap:
+                lines.append(f"- Trap: {entry.trap}")
+            if entry.rule:
+                lines.append(f"- Rule: {entry.rule}")
+            if entry.immunity_test:
+                lines.append(f"- Immunity Test: {entry.immunity_test}")
+            lines.append("")
+        return "\n".join(lines).strip()

@@ -500,7 +500,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. LESSONS.md への自動教訓記録と全体検証ゲート合格確認 (EEE.4 / Phase 45 完了判定):
      - AUD タスク解決完了時に、Finding 情報（Context, Trap, Rule, Immunity Test）を抽出し、`LESSONS.md` の記録フォーマットに従って自動追記・永続化する。
      - 決定論的受入実証テスト（Red-First）を追加し、全体検証ゲート（252+ テスト、Ruff、Mypy）の完全合格確認。
-- [ ] 機能FFF (Stage 5 免疫保護・厳格なBefore/After証明・教訓注入と自己改善ループの真の完成 Stage 5 Hardening Immunity, Strict Proof, and Next-Maker Lesson Injection):
+- [x] 機能FFF (Stage 5 免疫保護・厳格なBefore/After証明・教訓注入と自己改善ループの真の完成 Stage 5 Hardening Immunity, Strict Proof, and Next-Maker Lesson Injection):
   1. 免疫テスト非破壊的確定と衝突拒絶 (FFF.1 / Sol氏 P0指摘):
      - `AuditResolutionManager.resolve_task()` において、免疫テスト配置対象ファイル（`tests/immunity/test_immunity_<safe_name>.py`）の事前存在チェックを実装。
      - 既存ファイルが存在する場合、既存ファイルの内容と候補再現テストコードの SHA-256 ハッシュを比較：
