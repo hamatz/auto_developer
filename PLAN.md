@@ -7,20 +7,20 @@
 -->
 
 ## 現在の目標
-- Phase 44: Stage 4 — 物理クローン隔離 & パイプライン接続修正 (Stage 4 Physical Clone Isolation & Pipeline Interoperability)
-  - 候補テストの物理的クローン隔離実行: 元リポジトリへの直接実行およびパーミッション剥奪を廃止し、独立した検証用一時クローン（clean temporary clone）上で実行して元リポジトリの物理的不変性を 100% 保証（機能DDD.1）
-  - タスク書式統一と TaskDispatcher 連携: `AuditDispatcher` が追記するタスクに `AUD-<finding_id>.` プレフィックスを付与し、`TaskDispatcher.parse_plan()` / `get_next_pending_task()` との連携を保証（機能DDD.2）
-  - 監査Findingと再現テストの永続化管理: `.dev/audit/findings/` および `.dev/audit/repro_tests/` への構造化保存と参照性確保（機能DDD.3）
-  - Level 7 E2E受入テストの強化 & 検証ゲート完全合格: `TaskDispatcher.get_next_pending_task()` 経由で Maker へタスクが届く実運用E2E、`os.chmod` 改変阻止テスト、全体検証ゲート（246+ テスト）合格確認、Evidence Bundle 生成（機能DDD.4）
+- Phase 45: Stage 4 — 異系統LLM独立監査ランナー & Before/After確定 (Stage 4 Cross-Model Independent Audit Runner & Evidence Confirmation)
+  - 異系統LLM独立監査ポリシーとモデル強制: `AuditConfig` / `OrchestratorConfig` において `maker_model` と `checker_model` / `auditor_model` のモデルファミリを検証し、同一モデルの自己承認を Fail-Closed で拒絶して異系統LLM（Maker=Gemini 3.8 Flash, Reviewer=Claude Opus 5.5 等）を機械的強制（機能EEE.1）
+  - 構造化監査プロンプトと独立監査役アダプタ: SPEC.md と git diff のみを厳格に入力とし、独立プロンプトから `list[AuditFinding]` を構造化抽出・パースする `IndependentAuditRunner` の実装（機能EEE.2）
+  - Before Red / After Green 証跡バインディングと免疫テスト自動昇格: AUD タスク修正時に修正前の Red 実証および修正後の Green 実証を Evidence Record に拘束し、合格テストを `tests/immunity/` へ安全自動昇格（機能EEE.3）
+  - LESSONS.md への自動教訓記録と全体検証ゲート合格確認: 修正完了タスクから Finding 情報を抽出し `LESSONS.md` に自動永続化、受入実証テスト追加、全体検証ゲート（252+ テスト）合格確認、Evidence Bundle 生成（機能EEE.4）
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- `tests/test_audit_dispatch.py`, `tests/test_immunity_and_red_acceptance.py`: 機能DDD.2（タスク書式統一）に伴い、`AuditDispatcher` が出力するタスク書式が `- [ ] AUD-<id>. Fix: [<id>] ...` に更新されたため、該当アサーションの文字列照合を更新。
+- 現時点で既存テストの変更予定なし。
 
 ## ステップ
-- [x] 1. 候補テストの物理的クローン隔離実行（元リポジトリ汚染の完全遮断）の実装と単体テスト（Red-First）（DDD.1）
-- [x] 2. タスク書式統一（AUD-<finding_id>. プレフィックス）と TaskDispatcher 連携の実装と単体テスト（Red-First）（DDD.2）
-- [x] 3. 監査Findingと再現テストの永続化管理（.dev/audit/）の実装と単体テスト（Red-First）（DDD.3）
-- [x] 4. Level 7 E2E受入テストの強化（Makerタスク取得・修正実証 & chmod改変阻止）と全体検証ゲート合格確認、Evidence Bundle 生成（DDD.4）
+- [x] 1. 異系統LLM独立監査ポリシーとモデル強制（同一モデル自己承認拒絶）の実装と単体テスト（Red-First）（EEE.1）
+- [x] 2. 構造化監査プロンプトと独立監査役アダプタ（IndependentAuditRunner）の実装と単体テスト（Red-First）（EEE.2）
+- [x] 3. Before Red / After Green 証跡バインディングと免疫テスト自動昇格の実装と単体テスト（Red-First）（EEE.3）
+- [x] 4. LESSONS.md への自動教訓記録と全体検証ゲート合格確認、Evidence Bundle 生成（EEE.4）
 
 ## 止まっていること・判断待ち
 - なし

@@ -21,6 +21,22 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-08] 異系統LLMによる独立監査と確証バイアス・自己肯定の排除 (Cross-Model Independent Audit)
+- Context: `src/auto_developer/audit.py`, `src/auto_developer/orchestrator.py`, `AGENTS.md`
+- Trap: 同一のモデル系統（プロンプトや思考バイアスを共有するモデル）でMakerとChecker/監査役の双方を担わせると、Makerが犯した暗黙の前提や見落とし（盲点）をCheckerも同様に肯定・見逃してしまい、潜在的バグや仕様逸脱がすり抜ける。
+- Rule: 自律パイプラインにおける監査役・Checkerには、Makerと独立した異系統のフロンティアモデル（例: Maker=Gemini 3.8 Flash, Reviewer/Auditor=Claude Opus 5.5）を割り当て、SPEC.md と git diff のみを厳格に渡して批判的検証を行う。同一モデルによる自己承認は機械的に拒絶する。
+- Rung: AGENTS.md & 作り（異系統モデル検証・強制）
+- Immunity Test: `tests/test_audit_dispatch.py`, `tests/test_audit_model_policy.py`
+- Proof: 同一モデル指定時にパイプラインが拒絶し、異系統モデル割り当て時にのみ独立監査が成立することを実証。
+
+### [2026-11-08] Linux CI環境における chflags 不在と PEP 578 Runtime Audit Hook による物理防御 (Runtime Audit Hook Sandbox)
+- Context: `src/auto_developer/verifier.py` (`RedTestVerifier.RUNNER_CODE`)
+- Trap: macOS では `chflags uchg` により同一UIDでもファイル変更をOSカーネルレベルで遮断できたが、Ubuntu (Linux CI) では `chflags` コマンドが存在せず、同一UIDの別プロセスから `os.chmod()` を呼ばれると読み取り専用パーミッションが復元されて元リポジトリが書き換え可能になってしまう差異があった。
+- Rule: OS固有のコマンド（`chflags`）に依存せず、Python 3.8+ 標準の PEP 578 `sys.addaudithook` をテスト実行プロセス初期化時に導入する。保護対象ルートパスに対する `open`（書き込みモード）、`os.chmod`、`os.remove`、`os.unlink`、`os.rename`、`os.mkdir`、`os.rmdir` イベントを検知した瞬間に `RuntimeError` を送出してインターセプトし、全OS共通で元リポジトリの改変を確実に遮断する。
+- Rung: 作り（PEP 578 Runtime Audit Hook） & 検査
+- Immunity Test: `tests/test_red_verifier.py`, `tests/test_immunity_and_red_acceptance.py`
+- Proof: Linux/macOS双方で `os.chmod` による元リポジトリ改変試行が `RuntimeError` で即時遮断されることを実証。
+
 ### [2026-11-08] 同一OSユーザー環境でのファイル権限ロックダウンの限界と一時クローン隔離 (Physical Clone Isolation)
 - Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`)
 - Trap: `0o555`/`0o444` によるOSパーミッション剥奪を行っても、テストプロセスが元リポジトリと同じOSユーザーで実行されている限り、テストメソッド内で `os.chmod()` を呼べば書き込み権限を復活させて元リポジトリを改変できてしまい、AST制限やchmodの多重化では根本解決にならなかった。
