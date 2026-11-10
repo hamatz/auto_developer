@@ -75,6 +75,36 @@ Please fix this immediately.
         findings = runner.audit(spec_content="# SPEC", git_diff="diff --git a/main.py")
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].finding_id, "CMD-001")
+        self.assertEqual(findings[0].auditor_model, "claude-opus-5.5")
+
+    def test_audit_finding_auditor_model_persisted_in_audit_store(self) -> None:
+        """機能HHH.2: IndependentAuditRunner が設定した auditor_model が AuditStore で保存・復元されること。"""
+        import tempfile
+
+        from auto_developer.audit_store import AuditStore
+
+        cmd_template = (
+            'echo \'[{"finding_id": "CMD-002", "severity": "P0", '
+            '"spec_reference": "SPEC.md", "location": "calc.py:1", '
+            '"description": "Test finding", "reproduction_test_code": "import unittest\\nclass T(unittest.TestCase):\\n    def test_fail(self): self.fail()", '
+            '"status": "REPORTED"}]\''
+        )
+        runner = IndependentAuditRunner(
+            auditor_cmd_template=cmd_template,
+            model_name="claude-opus-5.5",
+        )
+        findings = runner.audit(spec_content="# SPEC", git_diff="diff --git a/calc.py")
+        self.assertEqual(len(findings), 1)
+        finding = findings[0]
+        self.assertEqual(finding.auditor_model, "claude-opus-5.5")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = AuditStore(repo_dir=Path(tmpdir))
+            store.save_finding(finding)
+            loaded = store.get_finding("CMD-002")
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.auditor_model, "claude-opus-5.5")
 
 
 if __name__ == "__main__":

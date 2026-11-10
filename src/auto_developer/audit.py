@@ -109,6 +109,9 @@ class AuditFinding:
     red_verification_output: str | None = None
     before_commit_sha: str | None = None
     code_hash: str | None = None
+    auditor_model: str | None = None
+    # NOTE: auditor_model は監査ランナー設定で渡されたモデル識別子の記録値であり、
+    # 外部プロバイダーの実行時同一性を暗号学的に証明するものではない (HHH.2)。
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -127,6 +130,7 @@ class AuditFinding:
             red_verification_output=data.get("red_verification_output"),
             before_commit_sha=data.get("before_commit_sha"),
             code_hash=data.get("code_hash"),
+            auditor_model=data.get("auditor_model"),
         )
 
 
@@ -307,7 +311,10 @@ class IndependentAuditRunner:
                 f"Auditor execution failed with exit {proc.returncode}:\n{proc.stdout}\n{proc.stderr}"
             )
         output = proc.stdout
-        return self.parse_response(output)
+        findings = self.parse_response(output)
+        for finding in findings:
+            finding.auditor_model = self.model_name
+        return findings
 
 
 class AuditResolutionManager:
