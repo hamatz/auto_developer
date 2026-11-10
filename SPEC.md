@@ -519,7 +519,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `LessonInjector` を実装：次期タスク（タイトル・説明・対象ファイル・キーワード等）に基づき `LESSONS.md` の教訓インデックスから関連する Trap / Rule を自動検索・抽出し、Maker のプロンプト／コンテキストへ自動注入。Level 7 ルール10（「着手前に LESSONS.md を検索」）を機械的強制。
      - 外部監査 → Red実証 → PLAN登録 → Maker修正 → After Green → 免疫昇格（非破壊） → LESSONS記録 → 次回Makerへの教訓注入までが人間の介在ゼロで繋がる完全閉ループE2E受入実証テストを追加。
      - 全自動検証ゲート（266+ テスト、Ruff、Mypy）の完全合格確認と Evidence Bundle 生成。
-- [ ] 機能GGG (Stage 6 Level 7 実運用接続・証拠イミュータブル化・完全閉ループ受入 Stage 6 Level 7 Production Wiring, Immutable Proofs, and Closed-Loop Acceptance):
+- [x] 機能GGG (Stage 6 Level 7 実運用接続・証拠イミュータブル化・完全閉ループ受入 Stage 6 Level 7 Production Wiring, Immutable Proofs, and Closed-Loop Acceptance):
   1. CommandRunnerAdapter による教訓の安全な注入と実プロセス受入検証 (GGG.1 / Sol氏 P1指摘):
      - `CommandRunnerAdapter.run_maker()` において、`context` 内の `lessons`（教訓テキスト）およびコンテキストメタデータを安全に Maker サブプロセスへ渡す経路を実装。
      - 改行や引用符によるシェル展開破壊を防止するため、標準入力（stdin）への教訓テキストのパイプ供給、および環境変数 `AUTO_DEV_LESSONS` / 専用コンテキストファイル（`.dev/context_task_<id>.json`）の配置をサポート。
@@ -535,6 +535,22 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. シードバグを用いた本番経路 Level 7 E2E 全通し実証と全体検証ゲート合格 (GGG.4 / Phase 47 完了判定):
      - モックを排除した実 `CommandRunnerAdapter` による本番経路 E2E：独立監査（異系統モデル検証済） → 隔離Red実証 → PLAN登録（AUDタスク） → Makerへの教訓実注入（stdin / context_file） → Maker修正 → After Green検証 → 免疫テスト自動昇格（非破壊） → LESSONS.md自動追記 → 次回Makerへの教訓自動注入までが一気通貫で完結することを実証。
      - 全自動検証ゲート（278+ テスト、Ruff、Mypy）の完全合格確認と Evidence Bundle 生成。
+- [ ] 機能HHH (Stage 7 Learning Proof のGitコミット拘束とMakerインターフェース正式化 Stage 7 Commit-Bound Learning Proof and Formal Maker Interface):
+  1. 修正前後コミットへの Red/Green 証明拘束 (HHH.1 / Sol氏 Phase 47 P1指摘):
+     - `AuditResolutionManager.resolve_task()` は、Git リポジトリでない場合、または作業ツリーに未コミット変更（`git status --porcelain` の結果から `.dev/` 配下を除いたもの）が存在する場合、`UNCOMMITTED_AFTER_STATE` で拒絶し、Finding・免疫テスト・LESSONS.md を一切変更しない。
+     - `finding.before_commit_sha` が実在するコミットでない場合（`unknown`・空・不正値を含む）は `INVALID_BEFORE_COMMIT` で拒絶する。
+     - After Commit（解決時点の HEAD）が Before Commit と同一の場合は `NO_COMMIT_ADVANCE` で拒絶する。After Commit が Before Commit の子孫でない場合も `NO_COMMIT_ADVANCE` で拒絶する。
+     - 同一の再現テスト（`code_hash` 照合済み）を、Before Commit と After Commit をそれぞれ展開した隔離環境で実行する。Before で `GENUINE_RED` でなければ `BEFORE_RED_NOT_REPRODUCED`、After で `ALREADY_GREEN`（exit 0）でなければ `AFTER_GREEN_FAILED` で拒絶する。隔離環境には未コミットファイルを持ち込まない。
+     - `red_green_proof` には少なくとも `before_commit`, `after_commit`, `repro_test_sha256`, `before_result`（`reason`, `exit_code`）, `after_result`（`reason`, `exit_code`）を記録し、`before_commit` / `after_commit` には実在するコミットの完全な SHA のみを記録する（`unknown` を記録して成功扱いにしない）。
+     - 免疫テストの昇格（非破壊・衝突拒絶を維持）と LESSONS.md 記録は、上記の証明がすべて成立した場合にのみ行う。
+  2. Maker インターフェースの正式化と監査モデル名の記録 (HHH.2 / Sol氏 Phase 47 注意事項):
+     - `CommandRunnerAdapter.run_maker()` は、既存の `AUTO_DEV_LESSONS` 等に加え、環境変数 `AUTO_DEV_CONTEXT_FILE`（コンテキストJSONの絶対パス）と `AUTO_DEV_LESSONS_FILE`（教訓テキストの絶対パス）を設定する。両ファイルは Maker プロセスの実行中に存在し、それぞれ `{context_file}` / `{lessons_file}` テンプレートと同一のパスを指す。
+     - `IndependentAuditRunner.audit()` が返す各 `AuditFinding` に、実際にコマンドへ渡したモデル名を `auditor_model` として記録し、`AuditStore` の保存・読み込みで保持する（GGG.3 第3項の未実装分を引き継ぐ）。これは設定値の記録であり、プロバイダー応答によるモデル同一性の証明ではないことをコード上のドキュメントに明記する。
+  3. コミット拘束付き Level 7 E2E 受入 (HHH.3):
+     - `tests/test_level7_real_loop_e2e.py` を更新し、Maker 実サブプロセスが修正をGitコミットした後に `resolve_task()` を呼ぶ。`proof.before_commit` が Red 検証時の HEAD、`proof.after_commit` が Maker 修正コミットの SHA と一致し、両者が異なること、`before_result.reason == "GENUINE_RED"`、`after_result.reason == "ALREADY_GREEN"` であることを検証する。
+     - Maker が `AUTO_DEV_CONTEXT_FILE` と `AUTO_DEV_LESSONS_FILE` を受信し、両ファイルが実在したことをアサートする。
+     - 修正をコミットせずに `resolve_task()` を呼んだ場合に `UNCOMMITTED_AFTER_STATE` で拒絶され、免疫テストが作成されないことを検証する。
+     - 全自動検証ゲート（286+ テスト、Ruff、Mypy）に合格し、`verify-step` / `commit-step` で正規に発行された Evidence Record を含む Evidence Bundle が `VERIFIED` となること。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

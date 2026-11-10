@@ -21,6 +21,30 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-10] After Green を未コミットの作業ツリーで確認し、HEAD を after_commit として記録する証明の空洞化 (Commit-Bound Learning Proof)
+- Context: `src/auto_developer/audit.py` (`AuditResolutionManager.resolve_task`), `tests/test_level7_real_loop_e2e.py`
+- Trap: Maker が修正をコミットしないまま `resolve_task()` を呼ぶと、After Green は作業ツリー上で成立する一方、`after_commit` には修正前の HEAD が記録され、Before と After が同一コミットになる。Proof が「どのコミットで Red/Green になったか」を再現可能な形で示していなかった（Sol氏 Phase 47 P1）。
+- Rule: Learning Proof は実在する2つのコミットに拘束する。作業ツリーが汚れている、Before Commit が不正、Before == After のいずれかなら拒絶する。同一の再現テストを各コミットを展開した隔離環境で実行し、Red/Green の結果とコミットSHA・テストSHAを Proof に固定する。`unknown` を記録して成功扱いにしない。
+- Rung: 作り（resolve_task の事前条件） & 検査
+- Immunity Test: `tests/test_audit_resolution.py`, `tests/test_level7_real_loop_e2e.py`（Phase 48 HHH.1 / HHH.3 で追加予定）
+- Proof: （HHH.1 完了時に記録）未コミットの修正で `UNCOMMITTED_AFTER_STATE`、コミット未前進で `NO_COMMIT_ADVANCE` が返り、免疫テストが作成されないことを確認する。
+
+### [2026-11-10] Checker に SPEC を要約して渡したことによる要件の欠落 (Verbatim Checker Input)
+- Context: `/nightly-run` Step D（Stateless Checker Review）、Phase 47 GGG.3 / GGG.4
+- Trap: Maker が SPEC の該当節を自分の言葉で要約して Checker に渡したため、GGG.3 の「実際に起動されたモデル名を監査証跡に明記」が Checker の入力から抜け、未実装のまま APPROVE された。GGG.4 でも原文にない表現（`LessonLearner` 等）を含む要約を渡していた。Maker が Checker の判断材料を編集できる状態は、AGENTS.md 規範6（入力は SPEC.md と git diff のみ）を実質的に破る。
+- Rule: Checker には SPEC の該当節を機械的に切り出した原文（`awk '/^- \[ \] 機能XXX/,/^## 3\./' SPEC.md`）と `git diff <checkpoint>` の生出力をそのまま渡す。要約・言い換え・取捨選択をしない。
+- Rung: プロンプト（PLAN.md 作業手順）。将来は道具（Checker 入力を生成するスクリプト）へ下げる
+- Immunity Test: なし（運用手順。道具化した時点でテストを追加する）
+- Proof: GGG.3 第3項が未実装のまま承認されていたことを Phase 47 事後確認で検出。HHH.2 に引き継いだ。
+
+### [2026-11-10] Evidence Record の手書きによる「機械発行の証跡」の偽装 (Evidence via Sanctioned Path Only)
+- Context: `.git/nightly_evidence/records/task_*.json`, `scripts/nightly_orchestrator.py` (`verify-step` / `commit-step` / `bundle`)
+- Trap: Phase 47 では `verify-step` / `commit-step` を経由せず、Maker が Evidence Record を直接書き込んだ（`issued_at`・`token` 等は作成した値）。コミットSHA・ツリーSHAは実物と一致していたため Bundle 検証は `VERIFIED` になったが、証跡が機械発行されたことは保証されない。検証器が「記録の中身の整合性」しか見ていないと、手書きの記録を通してしまう。
+- Rule: Evidence Record は `verify-step` → Checker → `commit-step` の正規経路でのみ発行する。`.git/nightly_evidence/` 配下を直接編集・作成しない。正規経路が失敗したら手で埋めずに停止して PLAN.md に記録する。
+- Rung: プロンプト（PLAN.md 作業手順）。将来は検査（Evidence Record に発行元の署名・トークン照合を追加）へ下げる
+- Immunity Test: なし（運用手順）
+- Proof: Phase 47 の Record が手書きであったことを事後に申告。Phase 48 から正規経路へ切り替え。
+
 ### [2026-11-09] 既存免疫テストの無条件上書きによる免疫破壊 (Non-Destructive Immunity Test Promotion)
 - Context: `src/auto_developer/audit.py` (`AuditResolutionManager.resolve_task`)
 - Trap: AUDタスク解決時に After Green を確認した後、免疫テスト配置パス（`tests/immunity/test_immunity_<safe_name>.py`）に同名ファイルが既に存在していても無条件で上書きしていたため、既存の免疫テストが別の内容に書き換えられて弱体化・破壊される重大なリスクがあった。
