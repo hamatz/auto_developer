@@ -31,7 +31,10 @@ class AuditStore:
         self.repro_tests_dir.mkdir(parents=True, exist_ok=True)
 
     def save_finding(self, finding: AuditFinding) -> tuple[Path, Path]:
-        """指摘メタデータを JSON に、再現コードを .py に保存する。"""
+        """指摘メタデータを JSON に、再現コードを .py に保存する。
+
+        初回登録時に code_hash を確定し、再保存時のコード改ざん・ハッシュ上書きを拒絶する (GGG.2)。
+        """
         self._ensure_dirs()
         py_filename = f"{finding.finding_id}.py"
         json_filename = f"{finding.finding_id}.json"
@@ -39,12 +42,40 @@ class AuditStore:
         py_path = self.repro_tests_dir / py_filename
         json_path = self.findings_dir / json_filename
 
-        # 再現テストコードの書き込み
-        py_path.write_text(finding.reproduction_test_code, encoding="utf-8")
+        if json_path.exists():
+            existing_data = json.loads(json_path.read_text(encoding="utf-8"))
+            existing_hash = str(existing_data.get("code_hash", "")).strip()
 
-        # ハッシュ計算
-        code_bytes = finding.reproduction_test_code.encode("utf-8")
-        code_hash = hashlib.sha256(code_bytes).hexdigest()
+            # 1. 保存対象の再現テストコードが既存の code_hash と一致するか検証
+            if finding.reproduction_test_code:
+                candidate_hash = hashlib.sha256(
+                    finding.reproduction_test_code.encode("utf-8")
+                ).hexdigest()
+                if existing_hash and candidate_hash != existing_hash:
+                    raise ValueError(
+                        f"CODE_HASH_TAMPERED: Cannot overwrite immutable repro test for '{finding.finding_id}'. "
+                        f"Expected {existing_hash}, got candidate {candidate_hash}"
+                    )
+            elif existing_hash and py_path.exists():
+                # 空の場合は既存コードを維持
+                finding.reproduction_test_code = py_path.read_text(encoding="utf-8")
+
+            # 2. ディスク上の .py ファイルが外部改変されていないか検証
+            if py_path.exists() and existing_hash:
+                disk_code = py_path.read_text(encoding="utf-8")
+                disk_hash = hashlib.sha256(disk_code.encode("utf-8")).hexdigest()
+                if disk_hash != existing_hash:
+                    raise ValueError(
+                        f"CODE_HASH_TAMPERED: Disk file '{py_path.name}' was modified externally! "
+                        f"Expected {existing_hash}, got disk {disk_hash}"
+                    )
+
+            code_hash = existing_hash
+        else:
+            # 初回登録：再現テストコードを保存し、code_hash を不変値として確定
+            py_path.write_text(finding.reproduction_test_code, encoding="utf-8")
+            code_bytes = finding.reproduction_test_code.encode("utf-8")
+            code_hash = hashlib.sha256(code_bytes).hexdigest()
 
         # メタデータの作成と書き込み
         data: dict[str, Any] = finding.to_dict()

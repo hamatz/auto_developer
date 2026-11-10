@@ -153,6 +153,30 @@
 - Immunity Test: `tests/test_multi_team.py` (`test_recover_multi_team_job_rejects_zip_without_bundle_manifest`)
 - Proof: マニフェストを持たないダミー ZIP が `INVALID_EVIDENCE` として厳格に拒絶されることを実証済み。
 
+### [2026-11-10] 独立監査ランナーにおける設定モデル名と実起動モデル名の不一致偽装 (Auditor Model Discrepancy)
+- Context: `src/auto_developer/audit.py` (`IndependentAuditRunner.audit`)
+- Trap: `AuditConfig.validate()` で設定値（`maker_model` vs `auditor_model`）のファミリー検証を行っても、Runner が実際に起動するモデル名（`self.model_name`）との一致を確認しなかったため、設定上「Claude」と宣言して検証を通過させつつ実際には Maker と同系統の「Gemini」を実行して自己承認させる偽装バイパスが生じた。
+- Rule: 独立監査の実行時には、設定値の独立性だけでなく、実際に起動されるモデル（`self.model_name`）が `config.auditor_model` と完全一致することを機械的に検証し、不一致時は `INDEPENDENT_AUDIT_VIOLATION` で即時起動拒絶する。
+- Rung: 作り & 検査
+- Immunity Test: `tests/test_audit_model_policy.py` (`test_audit_runner_rejects_model_name_mismatch_with_config`)
+- Proof: `config.auditor_model="claude-opus-5.5"` に対し `model_name="gemini-3.8-flash"` を渡した際に `audit()` が Fail-Closed で例外停止することを実証。
+
+### [2026-11-10] AuditStore における再現テストハッシュの再計算・上書きによる改変検知無効化 (Immutable Finding Proofs)
+- Context: `src/auto_developer/audit_store.py` (`AuditStore.save_finding`)
+- Trap: Finding の状態更新のたびに再現コードをファイルへ書き戻し、そのコードの SHA-256 を新しく再計算して JSON に保存したため、外部改変された再現テストを読み込んで `save_finding()` を呼ぶと改変後のハッシュが正規ハッシュとして再登録されてしまい、改ざん検知が無力化される脆弱性があった。
+- Rule: 監査の初回登録（テストコード確定）と状態更新を分離する。初回登録時に再現コードとその SHA-256 を不変（イミュータブル）に確定し、以降の状態更新処理ではコードハッシュの変更を禁止する。既存コードと異なる内容での再保存は衝突・改変（`CODE_HASH_TAMPERED`）として即時拒絶する。
+- Rung: 作り（不変性ガード） & 検査
+- Immunity Test: `tests/test_audit_store_immutability.py` (`test_save_finding_rejects_tampered_repro_code`)
+- Proof: 既存の再現コードを改変した状態で再保存を試行した際に、ハッシュが更新されず安全に例外拒絶されることを実証。
+
+### [2026-11-10] CommandRunnerAdapter におけるコンテキスト・教訓注入の脱落 (Maker Context Delivery)
+- Context: `src/auto_developer/runner.py` (`CommandRunnerAdapter.run_maker`)
+- Trap: `NightlyOrchestrator` が `context={"lessons": ...}` を渡しても、`CommandRunnerAdapter.run_maker()` がコマンド文字列置換時に `task_id, task_title, attempt, prev_error` のみを参照し、`lessons` を Maker のプロセスに一切渡していなかった。モックテストでは `context` 辞書を直接受け取っていたため見落とされた。また、教訓テキストをシェルコマンド文字列（`{lessons}`）に直接埋め込むと改行や引用符で展開エラーを起こす。
+- Rule: 教訓やコンテキスト情報はシェル文字列への直接展開を避け、標準入力（stdin）や専用のコンテキストファイル（`.dev/context_task_<id>.json`）を通じて安全に Maker プロセスへ渡す。受入テストには Mock ではなく実際の `CommandRunnerAdapter` を用い、Maker が教訓を受信したことを実プロセスレベルで検証する。
+- Rung: 作り & 検査（受入テスト）
+- Immunity Test: `tests/test_runner_lesson_wiring.py` (`test_command_runner_delivers_lessons_to_maker_process`)
+- Proof: 実サブプロセスで起動された Maker が標準入力またはコンテキストファイル経由で教訓文字列を完全に取得できることを実証。
+
 ### [記入例] 非同期処理とトランザクションのスコープ
 - Context: IndexedDB 操作全般
 - Trap: transaction のスコープ内で外部の fetch を await したため、トランザクションが自動コミットされ例外が発生した

@@ -10,6 +10,7 @@ if src_dir not in sys.path:
 
 from auto_developer.audit import (
     AuditConfig,
+    IndependentAuditRunner,
     detect_model_family,
     verify_model_independence,
 )
@@ -122,6 +123,30 @@ class TestAuditModelPolicy(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("INDEPENDENT_AUDIT_VIOLATION", reason)
         self.assertIn("Unrecognized", reason)
+
+    def test_independent_audit_runner_rejects_divergent_model_from_config(self) -> None:
+        """機能GGG.3: runner.model_name が config.auditor_model と一致しない場合、INDEPENDENT_AUDIT_VIOLATION で拒絶されること。"""
+        cfg = AuditConfig(maker_model="gemini-3.8-flash", auditor_model="claude-opus-5.5")
+        runner = IndependentAuditRunner(
+            auditor_cmd_template="echo '[]'",
+            model_name="gemini-3.8-flash",  # config.auditor_model と不一致
+            config=cfg,
+        )
+        with self.assertRaises(ValueError) as ctx:
+            runner.audit(spec_content="# SPEC", git_diff="diff --git a/b")
+        self.assertIn("INDEPENDENT_AUDIT_VIOLATION", str(ctx.exception))
+        self.assertIn("does not match", str(ctx.exception))
+
+    def test_independent_audit_runner_accepts_matching_model_from_config(self) -> None:
+        """機能GGG.3: runner.model_name が config.auditor_model と完全に一致する場合に監査が実行されること。"""
+        cfg = AuditConfig(maker_model="gemini-3.8-flash", auditor_model="claude-opus-5.5")
+        runner = IndependentAuditRunner(
+            auditor_cmd_template="echo '[]'",
+            model_name="claude-opus-5.5",  # config.auditor_model と一致
+            config=cfg,
+        )
+        findings = runner.audit(spec_content="# SPEC", git_diff="diff --git a/b")
+        self.assertEqual(findings, [])
 
 
 if __name__ == "__main__":
