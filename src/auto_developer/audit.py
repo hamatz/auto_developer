@@ -343,9 +343,10 @@ class AuditResolutionManager:
         return None
 
     def resolve_task(self, task_id: str) -> dict[str, Any]:
-        """AUDタスクのAfter Greenを検証し、免疫テストとして自動昇格配置する。"""
+        """AUDタスクのBefore Red / After Greenを実コミット上で検証し、免疫テストとして自動昇格配置する (HHH.1)。"""
         import hashlib
         import re
+        import subprocess
         import time
 
         from auto_developer.verifier import RedTestVerifier
@@ -358,7 +359,101 @@ class AuditResolutionManager:
         if not finding:
             return {"success": False, "reason": f"Finding '{finding_id}' not found in audit store"}
 
-        # 0. Before Red 真正性の検証 (FFF.2)
+        # 0. Git リポジトリおよび作業ツリーのクリーン性検証 (HHH.1)
+        is_git_repo = (self.repo_dir / ".git").is_dir()
+        if not is_git_repo:
+            return {
+                "success": False,
+                "reason": "UNCOMMITTED_AFTER_STATE: Repository is not a git repository",
+                "error": "UNCOMMITTED_AFTER_STATE",
+            }
+
+        status_proc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=self.repo_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if status_proc.returncode != 0:
+            return {
+                "success": False,
+                "reason": "UNCOMMITTED_AFTER_STATE: Failed to inspect git status",
+                "error": "UNCOMMITTED_AFTER_STATE",
+            }
+
+        uncommitted_files: list[str] = []
+        for line in status_proc.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(maxsplit=1)
+            if len(parts) >= 2:
+                file_path = parts[1].strip()
+                if " -> " in file_path:
+                    file_path = file_path.split(" -> ")[1].strip()
+                if not file_path.startswith(".dev/") and file_path != ".dev":
+                    uncommitted_files.append(file_path)
+
+        if uncommitted_files:
+            return {
+                "success": False,
+                "reason": f"UNCOMMITTED_AFTER_STATE: Working tree contains uncommitted changes: {uncommitted_files}",
+                "error": "UNCOMMITTED_AFTER_STATE",
+            }
+
+        # 1. Before Commit の実在性検証 (HHH.1)
+        before_commit = (finding.before_commit_sha or "").strip()
+        if not before_commit or before_commit == "unknown":
+            return {
+                "success": False,
+                "reason": f"INVALID_BEFORE_COMMIT: finding.before_commit_sha is invalid or missing ('{before_commit}')",
+                "error": "INVALID_BEFORE_COMMIT",
+            }
+
+        cat_proc = subprocess.run(
+            ["git", "cat-file", "-e", f"{before_commit}^{{commit}}"],
+            cwd=self.repo_dir,
+            capture_output=True,
+            check=False,
+        )
+        if cat_proc.returncode != 0:
+            return {
+                "success": False,
+                "reason": f"INVALID_BEFORE_COMMIT: before_commit_sha '{before_commit}' is not a valid commit in git",
+                "error": "INVALID_BEFORE_COMMIT",
+            }
+
+        # 2. After Commit の前進および子孫関係の検証 (HHH.1)
+        after_commit = self._get_head_commit_sha()
+        if not after_commit or after_commit == "unknown":
+            return {
+                "success": False,
+                "reason": "INVALID_AFTER_COMMIT: Failed to obtain valid HEAD commit",
+                "error": "INVALID_AFTER_COMMIT",
+            }
+
+        if after_commit == before_commit:
+            return {
+                "success": False,
+                "reason": f"NO_COMMIT_ADVANCE: after_commit '{after_commit}' is identical to before_commit",
+                "error": "NO_COMMIT_ADVANCE",
+            }
+
+        ancestor_proc = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", before_commit, after_commit],
+            cwd=self.repo_dir,
+            capture_output=True,
+            check=False,
+        )
+        if ancestor_proc.returncode != 0:
+            return {
+                "success": False,
+                "reason": f"NO_COMMIT_ADVANCE: after_commit '{after_commit}' is not a descendant of before_commit '{before_commit}'",
+                "error": "NO_COMMIT_ADVANCE",
+            }
+
+        # 3. Before Red 真正性の検証 (FFF.2)
         if finding.status not in ("VERIFIED_RED", "DISPATCHED"):
             return {
                 "success": False,
@@ -401,21 +496,32 @@ class AuditResolutionManager:
                     "error": "TAMPERED_REPRO_TEST",
                 }
 
-        # 1. 修正後のコードに対する After Green 検証
+        # 4. 修正前コミット (Before Red) および修正後コミット (After Green) の隔離環境での再実証 (HHH.1)
         verifier = RedTestVerifier(repo_dir=self.repo_dir)
-        verification = verifier.verify_candidate_test(repro_code)
 
-        # After Green は ALREADY_GREEN (exit_code == 0, failures=0, errors=0) でなければならない
-        if not (verification.reason == "ALREADY_GREEN" and verification.exit_code == 0):
+        before_verification = verifier.verify_candidate_test(repro_code, commit=before_commit)
+        if not (before_verification.is_reproduced and before_verification.reason == "GENUINE_RED"):
             return {
                 "success": False,
                 "reason": (
-                    f"AFTER_GREEN_FAILED: test still failed or produced error "
-                    f"(reason={verification.reason}, exit={verification.exit_code}):\n{verification.output}"
+                    f"BEFORE_RED_NOT_REPRODUCED: test did not genuinely reproduce red on before_commit '{before_commit[:8]}' "
+                    f"(reason={before_verification.reason}, exit={before_verification.exit_code}):\n{before_verification.output}"
                 ),
+                "error": "BEFORE_RED_NOT_REPRODUCED",
             }
 
-        # 2. 免疫テストとしての昇格・配置 (非破壊的確定 FFF.1)
+        after_verification = verifier.verify_candidate_test(repro_code, commit=after_commit)
+        if not (after_verification.reason == "ALREADY_GREEN" and after_verification.exit_code == 0):
+            return {
+                "success": False,
+                "reason": (
+                    f"AFTER_GREEN_FAILED: test still failed or produced error on after_commit '{after_commit[:8]}' "
+                    f"(reason={after_verification.reason}, exit={after_verification.exit_code}):\n{after_verification.output}"
+                ),
+                "error": "AFTER_GREEN_FAILED",
+            }
+
+        # 5. 免疫テストとしての昇格・配置 (非破壊的確定 FFF.1)
         safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", finding_id)
         immunity_rel_path = f"tests/immunity/test_immunity_{safe_name}.py"
         target_path = self.repo_dir / immunity_rel_path
@@ -441,7 +547,7 @@ class AuditResolutionManager:
         if not is_already_promoted:
             target_path.write_text(repro_code, encoding="utf-8")
 
-        # 3. 免疫テスト安全性の機械的検証 (AST 検査 & 不干渉)
+        # 6. 免疫テスト安全性の機械的検証 (AST 検査 & 不干渉)
         from auto_developer.guard import GitGuard, validate_test_ast
 
         if not validate_test_ast(target_path):
@@ -463,18 +569,26 @@ class AuditResolutionManager:
 
         proof = {
             "finding_id": finding_id,
-            "before_commit": finding.before_commit_sha or "unknown",
-            "after_commit": self._get_head_commit_sha(),
+            "before_commit": before_commit,
+            "after_commit": after_commit,
             "repro_test_sha256": finding.code_hash or hashlib.sha256(repro_code.encode("utf-8")).hexdigest(),
             "before_status": "VERIFIED_RED",
             "after_status": "GREEN",
-            "before_red_reason": finding.red_verification_reason,
-            "after_green_reason": verification.reason,
+            "before_result": {
+                "reason": before_verification.reason,
+                "exit_code": before_verification.exit_code,
+            },
+            "after_result": {
+                "reason": after_verification.reason,
+                "exit_code": after_verification.exit_code,
+            },
+            "before_red_reason": before_verification.reason,
+            "after_green_reason": after_verification.reason,
             "immunity_test_path": immunity_rel_path,
             "resolved_at": time.time(),
         }
 
-        # 4. LESSONS.md への自動教訓記録 (EEE.4 / FFF.3: Fail-Closed)
+        # 7. LESSONS.md への自動教訓記録 (EEE.4 / FFF.3: Fail-Closed)
         lesson_recorded = self.record_lesson(finding, proof)
         if not lesson_recorded:
             finding.status = "LEARNING_RECORD_FAILED"
@@ -486,14 +600,14 @@ class AuditResolutionManager:
                 "proof": proof,
             }
 
-        # 5. Finding ステータスを RESOLVED に更新 (LESSONS記録成功後のみ)
         finding.status = "RESOLVED"
         self.audit_store.save_finding(finding)
 
         return {
             "success": True,
             "proof": proof,
-            "reason": "After Green verified and immunity test promoted successfully",
+            "finding": finding.to_dict(),
+            "immunity_test_path": immunity_rel_path,
         }
 
     def record_lesson(

@@ -145,15 +145,17 @@ class TestLevel7RealLoopE2E(unittest.TestCase):
         formatted_lessons = injector.format_injection(relevant_lessons)
 
         # --- e. CommandRunnerAdapter による実 Maker プロセスへの教訓注入とバグ修正 (GGG.1) ---
-        # 実 Maker スクリプト: 標準入力を受領・検証し、src/calc.py を修正する
-        maker_script = self.repo_dir / "maker_fix.py"
+        # 実 Maker スクリプト: 標準入力を受領・検証し、src/calc.py を修正してコミットする
+        dev_dir = self.repo_dir / ".dev"
+        dev_dir.mkdir(parents=True, exist_ok=True)
+        maker_script = dev_dir / "maker_fix.py"
         maker_script.write_text(
-            "import os, sys, json\n"
+            "import os, sys, json, subprocess\n"
             "stdin_text = sys.stdin.read()\n"
             "env_lessons = os.environ.get('AUTO_DEV_LESSONS', '')\n"
             "ctx_file = os.environ.get('AUTO_DEV_CONTEXT_FILE', '')\n"
             "# 証跡を記録\n"
-            "with open('maker_proof.json', 'w') as f:\n"
+            "with open('.dev/maker_proof.json', 'w') as f:\n"
             "    json.dump({\n"
             "        'stdin_len': len(stdin_text),\n"
             "        'has_env': bool(env_lessons),\n"
@@ -162,12 +164,14 @@ class TestLevel7RealLoopE2E(unittest.TestCase):
             "# src/calc.py のバグ修正\n"
             "with open('src/calc.py', 'w') as f:\n"
             "    f.write('def calc_div(a: int, b: int) -> int:\\n    if b == 0:\\n        return 0\\n    return a // b\\n')\n"
+            "subprocess.run(['git', 'add', 'src/calc.py', 'PLAN.md'], check=True)\n"
+            "subprocess.run(['git', 'commit', '-m', 'fix: resolve zero division bug'], check=True)\n"
             "sys.exit(0)\n",
             encoding="utf-8",
         )
 
         runner = CommandRunnerAdapter(
-            maker_cmd_template=f"cd {self.repo_dir} && {sys.executable} maker_fix.py",
+            maker_cmd_template=f"cd {self.repo_dir} && {sys.executable} .dev/maker_fix.py",
         )
         code, _out = runner.run_maker(
             task,
@@ -180,7 +184,7 @@ class TestLevel7RealLoopE2E(unittest.TestCase):
         self.assertEqual(code, 0)
 
         # 実プロセスが教訓入力を受け取っていたことの検証
-        proof_file = self.repo_dir / "maker_proof.json"
+        proof_file = self.repo_dir / ".dev" / "maker_proof.json"
         self.assertTrue(proof_file.exists())
         proof_data = json.loads(proof_file.read_text(encoding="utf-8"))
         self.assertTrue(proof_data["has_env"])

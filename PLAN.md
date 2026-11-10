@@ -31,7 +31,7 @@
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [ ] 1. 修正前後コミットへの Red/Green 証明拘束（未コミット拒絶・コミット未前進拒絶・両コミットでの隔離再実行・Proof 固定）の実装と単体テスト、既存テストのGit化（Red-First）（HHH.1）
+- [x] 1. 修正前後コミットへの Red/Green 証明拘束（未コミット拒絶・コミット未前進拒絶・両コミットでの隔離再実行・Proof 固定）の実装と単体テスト、既存テストのGit化（Red-First）（HHH.1）
 - [ ] 2. `AUTO_DEV_CONTEXT_FILE` / `AUTO_DEV_LESSONS_FILE` 環境変数の正式公開と、監査モデル名 `auditor_model` の Finding 記録の実装と単体テスト（Red-First）（HHH.2）
 - [ ] 3. コミット拘束付き Level 7 E2E 受入への更新・全体検証ゲート合格・正規 Evidence による Bundle 生成（HHH.3）
 

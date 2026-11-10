@@ -68,7 +68,7 @@ class RedTestVerifier:
         self.repo_dir = repo_dir or Path.cwd()
 
     def verify_candidate_test(
-        self, test_code: str, timeout_sec: int = 30
+        self, test_code: str, timeout_sec: int = 30, commit: str | None = None
     ) -> RedVerificationResult:
         """テストコード文字列を検証する。"""
         # 1. 構文チェック (SyntaxError の即時検出)
@@ -119,17 +119,18 @@ class RedTestVerifier:
         # 3. 独立した一時クローン環境を作成して実行 (Physical Clone Isolation)
         with tempfile.TemporaryDirectory() as tmpdir:
             clone_path = Path(tmpdir) / "isolated_repo"
-            self._create_isolated_clone(clone_path)
+            self._create_isolated_clone(clone_path, commit=commit)
             test_file = clone_path / "test_candidate.py"
             test_file.write_text(test_code, encoding="utf-8")
             return self._execute_test(
                 test_file, str(clone_path), timeout_sec, sandbox_dir=clone_path
             )
 
-    def _create_isolated_clone(self, target_dir: Path) -> Path:
+    def _create_isolated_clone(self, target_dir: Path, commit: str | None = None) -> Path:
         """元リポジトリから隔離されたクリーンな一時クローン（作業コピー）を作成する。
         Git リポジトリの場合は git clone --local --no-hardlinks で物理コピーを作成し、
         非Gitリポジトリの場合は shutil.copytree で複製する。
+        commit が指定された場合はそのコミットにチェックアウト（デタッチドHEAD）し、未コミット変更は同期しない (HHH.1)。
         """
         resolved_repo = self.repo_dir.resolve()
         target_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -152,8 +153,18 @@ class RedTestVerifier:
                 )
                 if res.returncode == 0:
                     cloned_ok = True
-                    # 未コミットのファイル（ステージ済み・未追跡）も一時クローンへコピー
-                    self._sync_uncommitted_files(resolved_repo, target_dir)
+                    if commit:
+                        chk = subprocess.run(
+                            ["git", "checkout", "--detach", commit],
+                            cwd=target_dir,
+                            capture_output=True,
+                            check=False,
+                        )
+                        if chk.returncode != 0:
+                            cloned_ok = False
+                    else:
+                        # 未コミットのファイル（ステージ済み・未追跡）も一時クローンへコピー
+                        self._sync_uncommitted_files(resolved_repo, target_dir)
             except (OSError, subprocess.SubprocessError):
                 cloned_ok = False
 
