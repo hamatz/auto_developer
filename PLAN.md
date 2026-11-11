@@ -29,7 +29,7 @@
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [ ] 1. コミット指定検証の Fail-Closed 徹底（checkout 失敗時のフォールバック遮断と `COMMIT_CHECKOUT_FAILED` 返却）の実装と単体テスト（Red-First）（III.1）
+- [x] 1. コミット指定検証の Fail-Closed 徹底（checkout 失敗時のフォールバック遮断と `COMMIT_CHECKOUT_FAILED` 返却）の実装と単体テスト（Red-First）（III.1）
 - [ ] 2. Learning Proof 監査詳細化（テスト数・出力ハッシュ記録）と LESSONS.md コミット拘束参照の実装と単体テスト（Red-First）（III.2）
 - [ ] 3. 候補テストのOSレベル実行隔離・リソース境界強化と Level 7 E2E 通し試験・全体検証ゲート合格・正規 Evidence による Bundle 生成（III.3）
 

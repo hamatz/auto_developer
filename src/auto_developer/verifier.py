@@ -57,6 +57,10 @@ class RedVerificationResult:
     reason_detail: str = ""
 
 
+class CommitCheckoutError(RuntimeError):
+    """指定されたコミットのチェックアウトに失敗した際のエラー (Fail-Closed) (III.1)。"""
+
+
 class RedTestVerifier:
     """監査役や外部から提示されたテスト候補が、現在のコードベースで確実に Red になるかを判定するハーネス。"""
 
@@ -119,7 +123,16 @@ class RedTestVerifier:
         # 3. 独立した一時クローン環境を作成して実行 (Physical Clone Isolation)
         with tempfile.TemporaryDirectory() as tmpdir:
             clone_path = Path(tmpdir) / "isolated_repo"
-            self._create_isolated_clone(clone_path, commit=commit)
+            try:
+                self._create_isolated_clone(clone_path, commit=commit)
+            except CommitCheckoutError as e:
+                return RedVerificationResult(
+                    is_reproduced=False,
+                    exit_code=1,
+                    reason="COMMIT_CHECKOUT_FAILED",
+                    output=f"COMMIT_CHECKOUT_FAILED: {e}",
+                    reason_detail=str(e),
+                )
             test_file = clone_path / "test_candidate.py"
             test_file.write_text(test_code, encoding="utf-8")
             return self._execute_test(
@@ -131,6 +144,7 @@ class RedTestVerifier:
         Git リポジトリの場合は git clone --local --no-hardlinks で物理コピーを作成し、
         非Gitリポジトリの場合は shutil.copytree で複製する。
         commit が指定された場合はそのコミットにチェックアウト（デタッチドHEAD）し、未コミット変更は同期しない (HHH.1)。
+        commit 指定時のクローン・チェックアウト失敗時は、現行ツリーへのフォールバックを禁止して CommitCheckoutError を送出する (III.1)。
         """
         resolved_repo = self.repo_dir.resolve()
         target_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -167,8 +181,16 @@ class RedTestVerifier:
                         self._sync_uncommitted_files(resolved_repo, target_dir)
             except (OSError, subprocess.SubprocessError):
                 cloned_ok = False
+        elif commit is not None:
+            raise CommitCheckoutError(
+                f"Cannot check out commit '{commit}': Repository is not a git repository"
+            )
 
         if not cloned_ok:
+            if commit is not None:
+                raise CommitCheckoutError(
+                    f"Failed to check out requested commit '{commit}' into isolated clone"
+                )
             if target_dir.exists():
                 shutil.rmtree(target_dir, ignore_errors=True)
             shutil.copytree(

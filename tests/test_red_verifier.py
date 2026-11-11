@@ -337,6 +337,35 @@ class HostileChmodTest(unittest.TestCase):
             "Parent repository's canary.txt must remain pristine!",
         )
 
+    def test_commit_verification_fails_closed_on_invalid_commit(self) -> None:
+        """機能III.1: 存在しないコミットを指定した場合、現行ツリーへフォールバックせず COMMIT_CHECKOUT_FAILED で拒絶すること。"""
+        import subprocess
+
+        # Git リポジトリ初期化
+        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True)
+        dummy_file = self.repo_dir / "app.py"
+        dummy_file.write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.repo_dir, check=True)
+
+        # 現行コードに対して通過する（ALREADY_GREEN になるはずの）テストコード
+        green_test = """import unittest
+class PassingTest(unittest.TestCase):
+    def test_ok(self):
+        self.assertEqual(1, 1)
+"""
+        # 存在しないコミットを指定して検証を実行
+        bad_commit = "0" * 40
+        result = self.verifier.verify_candidate_test(green_test, commit=bad_commit)
+
+        # 現行コードへフォールバックして ALREADY_GREEN (exit 0) になってはならない (Fail-Closed)
+        self.assertFalse(result.is_reproduced)
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertEqual(result.reason, "COMMIT_CHECKOUT_FAILED")
+        self.assertIn("COMMIT_CHECKOUT_FAILED", result.output)
+
 
 if __name__ == "__main__":
     unittest.main()
