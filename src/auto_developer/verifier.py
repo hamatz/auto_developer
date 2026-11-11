@@ -55,6 +55,9 @@ class RedVerificationResult:
     reason: str  # GENUINE_RED, ALREADY_GREEN, SYNTAX_ERROR, IMPORT_ERROR, NO_TESTS_FOUND, TIMEOUT, EXECUTION_ERROR
     output: str = ""
     reason_detail: str = ""
+    tests_run: int = 0
+    failures: int = 0
+    errors: int = 0
 
 
 class CommitCheckoutError(RuntimeError):
@@ -521,6 +524,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                     reason="NO_TESTS_RAN",
                     output=output,
                     reason_detail="No test methods were executed during unittest run (ran_count=0).",
+                    tests_run=0,
+                    failures=len(failures),
+                    errors=len(errors),
                 )
 
             # 判定 B: すでに Green (エラーも失敗もなし)
@@ -531,6 +537,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                     reason="ALREADY_GREEN",
                     output=output,
                     reason_detail="Candidate test passed against current codebase without failures.",
+                    tests_run=tests_run,
+                    failures=0,
+                    errors=0,
                 )
 
             # 判定 C / D / F: エラー (errors) が存在する場合
@@ -548,6 +557,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                         reason="IMPORT_ERROR",
                         output=output,
                         reason_detail="Test failed due to ImportError / ModuleNotFoundError.",
+                        tests_run=tests_run,
+                        failures=len(failures),
+                        errors=len(errors),
                     )
                 # setUp() / tearDown() での環境例外
                 if "in setUp" in err_text or "in tearDown" in err_text:
@@ -557,6 +569,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                         reason="SETUP_ERROR",
                         output=output,
                         reason_detail="Test failure occurred during setUp/tearDown rather than test body assertion.",
+                        tests_run=tests_run,
+                        failures=len(failures),
+                        errors=len(errors),
                     )
                 # テスト本体内での予期せぬ例外 (アサーション失敗ではない)
                 return RedVerificationResult(
@@ -565,6 +580,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                     reason="UNHANDLED_EXCEPTION",
                     output=output,
                     reason_detail="Test exited with error/exception without an assertion failure (failures=0, errors>0).",
+                    tests_run=tests_run,
+                    failures=len(failures),
+                    errors=len(errors),
                 )
 
             # 判定 E: アサーション失敗 (failures > 0, errors == 0) による真正な Red
@@ -575,11 +593,19 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                     reason="GENUINE_RED",
                     output=output,
                     reason_detail="Candidate test failed as expected with assertion failure (Genuine Red).",
+                    tests_run=tests_run,
+                    failures=len(failures),
+                    errors=len(errors),
                 )
 
         # フォールバック (構造化 JSON が取得できなかった場合)
         m_ran = re.search(r"Ran (\d+) tests?", output)
         ran_count = int(m_ran.group(1)) if m_ran else 0
+        m_fail = re.search(r"failures=(\d+)", output)
+        fail_count = int(m_fail.group(1)) if m_fail else (1 if "FAIL:" in output else 0)
+        m_err = re.search(r"errors=(\d+)", output)
+        err_count = int(m_err.group(1)) if m_err else (1 if "ERROR:" in output else 0)
+
         if ran_count == 0 or "NO TESTS RAN" in output or proc.returncode == 5:
             return RedVerificationResult(
                 is_reproduced=False,
@@ -587,6 +613,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 reason="NO_TESTS_RAN",
                 output=output,
                 reason_detail="No test methods were executed during unittest run (ran_count=0).",
+                tests_run=ran_count,
+                failures=fail_count,
+                errors=err_count,
             )
 
         if proc.returncode == 0:
@@ -596,6 +625,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 reason="ALREADY_GREEN",
                 output=output,
                 reason_detail="Candidate test passed against current codebase without failures.",
+                tests_run=ran_count,
+                failures=0,
+                errors=0,
             )
 
         if (
@@ -609,6 +641,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 reason="IMPORT_ERROR",
                 output=output,
                 reason_detail="Test failed due to ImportError / ModuleNotFoundError.",
+                tests_run=ran_count,
+                failures=fail_count,
+                errors=err_count,
             )
 
         if "in setUp" in output or "in tearDown" in output:
@@ -618,6 +653,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 reason="SETUP_ERROR",
                 output=output,
                 reason_detail="Test failure occurred during setUp/tearDown rather than test body assertion.",
+                tests_run=ran_count,
+                failures=fail_count,
+                errors=err_count,
             )
 
         return RedVerificationResult(
@@ -626,4 +664,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             reason="UNHANDLED_EXCEPTION",
             output=output,
             reason_detail="Test exited with error/exception without structured test result.",
+            tests_run=ran_count,
+            failures=fail_count,
+            errors=err_count,
         )

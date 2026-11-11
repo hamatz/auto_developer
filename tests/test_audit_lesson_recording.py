@@ -60,6 +60,9 @@ class TestAuditLessonRecording(unittest.TestCase):
         )
         proof = {
             "finding_id": "BUG-REC-001",
+            "before_commit": "1111111111111111111111111111111111111111",
+            "after_commit": "2222222222222222222222222222222222222222",
+            "repro_test_sha256": "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdef",
             "before_status": "VERIFIED_RED",
             "after_status": "GREEN",
             "immunity_test_path": "tests/immunity/test_immunity_BUG_REC_001.py",
@@ -72,7 +75,8 @@ class TestAuditLessonRecording(unittest.TestCase):
         self.assertIn("[BUG-REC-001]", content)
         self.assertIn("Buffer overflow edge case", content)
         self.assertIn("tests/immunity/test_immunity_BUG_REC_001.py", content)
-        self.assertIn("Verified Before Red (VERIFIED_RED) and After Green (GREEN)", content)
+        self.assertIn("Verified Before Red (VERIFIED_RED) on commit 1111111111111111111111111111111111111111 and After Green (GREEN) on commit 2222222222222222222222222222222222222222", content)
+        self.assertIn("test_sha256: abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdef", content)
 
         # 二重追記防止 (Idempotency)
         ok_again = self.manager.record_lesson(finding, proof, lessons_path=self.lessons_path)

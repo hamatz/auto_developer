@@ -124,6 +124,24 @@ class TestAuditResolution(unittest.TestCase):
         self.assertEqual(proof["before_result"]["reason"], "GENUINE_RED")
         self.assertEqual(proof["after_result"]["reason"], "ALREADY_GREEN")
 
+        # 機能III.2: proof の詳細フィールド検証
+        self.assertIn("tests_run", proof["before_result"])
+        self.assertIn("failures", proof["before_result"])
+        self.assertIn("errors", proof["before_result"])
+        self.assertIn("output_hash", proof["before_result"])
+        self.assertGreaterEqual(proof["before_result"]["tests_run"], 1)
+        self.assertIn("tests_run", proof["after_result"])
+        self.assertIn("failures", proof["after_result"])
+        self.assertIn("errors", proof["after_result"])
+        self.assertIn("output_hash", proof["after_result"])
+        self.assertGreaterEqual(proof["after_result"]["tests_run"], 1)
+
+        # 機能III.2: LESSONS.md にコミット拘束参照が記録されていること
+        lessons_text = self.lessons_md.read_text(encoding="utf-8")
+        self.assertIn(f"commit {self.before_commit_sha}", lessons_text)
+        self.assertIn(f"commit {after_commit}", lessons_text)
+        self.assertIn(f"test_sha256: {code_hash}", lessons_text)
+
         # 4. 免疫テストとして昇格配置されたことを検証
         promoted_path = self.repo_dir / proof["immunity_test_path"]
         self.assertTrue(promoted_path.exists())
@@ -424,6 +442,24 @@ class TestAuditResolution(unittest.TestCase):
         self.assertEqual(proof["after_status"], "GREEN")
         self.assertEqual(proof["before_result"]["reason"], "GENUINE_RED")
         self.assertEqual(proof["after_result"]["reason"], "ALREADY_GREEN")
+
+        # 機能III.2: proof の詳細フィールド検証
+        self.assertIn("tests_run", proof["before_result"])
+        self.assertIn("failures", proof["before_result"])
+        self.assertIn("errors", proof["before_result"])
+        self.assertIn("output_hash", proof["before_result"])
+        self.assertGreaterEqual(proof["before_result"]["tests_run"], 1)
+        self.assertIn("tests_run", proof["after_result"])
+        self.assertIn("failures", proof["after_result"])
+        self.assertIn("errors", proof["after_result"])
+        self.assertIn("output_hash", proof["after_result"])
+        self.assertGreaterEqual(proof["after_result"]["tests_run"], 1)
+
+        # 機能III.2: LESSONS.md にコミット拘束参照が記録されていること
+        lessons_text = self.lessons_md.read_text(encoding="utf-8")
+        self.assertIn(f"commit {self.before_commit_sha}", lessons_text)
+        self.assertIn(f"commit {after_commit}", lessons_text)
+        self.assertIn(f"test_sha256: {code_hash}", lessons_text)
 
     def test_resolve_task_fails_when_record_lesson_fails(self) -> None:
         """機能FFF.3 / HHH.1: LESSONS.md への記録に失敗した場合、RESOLVEDにせず LEARNING_RECORD_FAILED で停止すること。"""

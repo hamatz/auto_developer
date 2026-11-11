@@ -584,10 +584,18 @@ class AuditResolutionManager:
             "before_result": {
                 "reason": before_verification.reason,
                 "exit_code": before_verification.exit_code,
+                "tests_run": before_verification.tests_run,
+                "failures": before_verification.failures,
+                "errors": before_verification.errors,
+                "output_hash": hashlib.sha256(before_verification.output.encode("utf-8")).hexdigest(),
             },
             "after_result": {
                 "reason": after_verification.reason,
                 "exit_code": after_verification.exit_code,
+                "tests_run": after_verification.tests_run,
+                "failures": after_verification.failures,
+                "errors": after_verification.errors,
+                "output_hash": hashlib.sha256(after_verification.output.encode("utf-8")).hexdigest(),
             },
             "before_red_reason": before_verification.reason,
             "after_green_reason": after_verification.reason,
@@ -636,6 +644,9 @@ class AuditResolutionManager:
             return True  # 既に記録済み (二重追記防止)
 
         today_str = datetime.now().strftime("%Y-%m-%d")
+        before_commit = proof.get("before_commit", "unknown")
+        after_commit = proof.get("after_commit", "unknown")
+        test_sha = proof.get("repro_test_sha256", "unknown")
         new_lesson = (
             f"### [{today_str}] [{finding.finding_id}] {finding.description}\n"
             f"- Context: {finding.location} (Severity: {finding.severity}, Spec: {finding.spec_reference})\n"
@@ -643,7 +654,9 @@ class AuditResolutionManager:
             f"- Rule: Ensure compliance with {finding.spec_reference} to prevent regression of {finding.finding_id}.\n"
             f"- Rung: 検査 & 作り（自動昇格免疫テスト）\n"
             f"- Immunity Test: {proof.get('immunity_test_path', 'unknown')}\n"
-            f"- Proof: Verified Before Red ({proof.get('before_status', 'VERIFIED_RED')}) and After Green ({proof.get('after_status', 'GREEN')})\n\n"
+            f"- Proof: Verified Before Red ({proof.get('before_status', 'VERIFIED_RED')}) on commit {before_commit} "
+            f"and After Green ({proof.get('after_status', 'GREEN')}) on commit {after_commit} "
+            f"[test_sha256: {test_sha}]\n\n"
         )
 
         header = "## 恒久教訓インデックス\n"
