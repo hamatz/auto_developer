@@ -70,6 +70,11 @@ class RedTestVerifier:
     SECRET_ENV_PATTERN = re.compile(
         r"(TOKEN|SECRET|KEY|AUTH|CREDENTIAL|PASSWORD|PASS|API|PRIVATE)", re.IGNORECASE
     )
+    DANGEROUS_ENV_PREFIXES = (
+        "LD_",
+        "DYLD_",
+        "PYTHON",
+    )
 
     def __init__(self, repo_dir: Path | None = None) -> None:
         self.repo_dir = repo_dir or Path.cwd()
@@ -424,6 +429,29 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 except OSError:
                     pass
 
+    @staticmethod
+    def _apply_resource_limits(timeout_sec: int) -> None:
+        """Apply OS-level execution resource boundaries to child process (POSIX)."""
+        with contextlib.suppress(Exception):
+            import resource
+
+            # 1. ファイル出力上限 (巨大ファイル作成によるディスク浪費・DoS防止: 10MB)
+            if hasattr(resource, "RLIMIT_FSIZE"):
+                max_fsize = 10 * 1024 * 1024
+                resource.setrlimit(resource.RLIMIT_FSIZE, (max_fsize, max_fsize))
+
+            # 2. 仮想メモリ上限 (過剰メモリ消費・OOM爆弾の防止: 1GB)
+            if hasattr(resource, "RLIMIT_AS"):
+                max_as = 1024 * 1024 * 1024
+                with contextlib.suppress(ValueError, OSError):
+                    resource.setrlimit(resource.RLIMIT_AS, (max_as, max_as))
+
+            # 3. CPU 時間上限 (タイムアウト + マージン)
+            if hasattr(resource, "RLIMIT_CPU"):
+                cpu_limit = max(1, timeout_sec + 5)
+                with contextlib.suppress(ValueError, OSError):
+                    resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit))
+
     def _execute_test(
         self,
         test_file: Path,
@@ -446,10 +474,12 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 reason_detail="Running candidate tests as root (UID 0) bypasses OS permission lockdown and is forbidden.",
             )
 
-        # 1. 環境変数のサニタイズ（シークレット・APIキーの除外）
+        # 1. 環境変数のサニタイズ（シークレット・APIキー・危険動的変数の除外）
         sanitized_env: dict[str, str] = {}
         for k, v in os.environ.items():
             if self.SECRET_ENV_PATTERN.search(k):
+                continue
+            if any(k.startswith(pfx) for pfx in self.DANGEROUS_ENV_PREFIXES):
                 continue
             sanitized_env[k] = v
 
@@ -459,8 +489,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         # PYTHONPATH は元リポジトリではなく、一時クローンのパスを設定
         src_path = str((exec_cwd / "src").resolve())
         repo_path = str(exec_cwd.resolve())
-        existing_pythonpath = sanitized_env.get("PYTHONPATH", "")
-        sanitized_env["PYTHONPATH"] = f"{src_path}:{repo_path}:{existing_pythonpath}".strip(":")
+        sanitized_env["PYTHONPATH"] = f"{src_path}:{repo_path}"
 
         cmd = [
             sys.executable,
@@ -471,6 +500,8 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             str(self.repo_dir.resolve()),
         ]
 
+        preexec = (lambda: self._apply_resource_limits(timeout_sec)) if os.name == "posix" else None
+
         try:
             with self._lockdown_repo(self.repo_dir):
                 proc = subprocess.run(
@@ -480,6 +511,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                     capture_output=True,
                     text=True,
                     timeout=timeout_sec,
+                    preexec_fn=preexec,
                     check=False,
                 )
         except subprocess.TimeoutExpired as e:

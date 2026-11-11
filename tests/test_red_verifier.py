@@ -366,6 +366,49 @@ class PassingTest(unittest.TestCase):
         self.assertEqual(result.reason, "COMMIT_CHECKOUT_FAILED")
         self.assertIn("COMMIT_CHECKOUT_FAILED", result.output)
 
+    def test_resource_limits_prevent_excessive_file_write(self) -> None:
+        """機能III.3: 候補テストが巨大ファイル（10MB超）を作成しようとした場合、OSリソース制限（RLIMIT_FSIZE）により遮断されること。"""
+        code = """import unittest
+class MassiveFileTest(unittest.TestCase):
+    def test_write_massive_file(self):
+        # 15MB のファイル書き込みを試みる
+        with open("massive_file.bin", "wb") as f:
+            f.write(b"0" * (15 * 1024 * 1024))
+        self.assertEqual(1, 2)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        # 巨大ファイル書き込み例外等により GENUINE_RED ではなく UNHANDLED_EXCEPTION / EXECUTION_ERROR (is_reproduced=False) となること
+        self.assertFalse(result.is_reproduced)
+        self.assertIn(result.reason, ("UNHANDLED_EXCEPTION", "EXECUTION_ERROR"))
+        self.assertIn("File too large", result.output)
+
+    def test_sanitizes_dangerous_and_secret_env_variables(self) -> None:
+        """機能III.3: 動的ローダー・Python設定・シークレット等の危険環境変数が候補テスト実行時に遮断されること。"""
+        import os
+        code = """import os
+import unittest
+class EnvCheckTest(unittest.TestCase):
+    def test_check_env(self):
+        self.assertNotIn("DYLD_TEST_INJECTION", os.environ)
+        self.assertNotIn("LD_TEST_PRELOAD", os.environ)
+        self.assertNotIn("PYTHONSTARTUP", os.environ)
+        self.assertNotIn("MY_SECRET_TOKEN", os.environ)
+"""
+        os.environ["DYLD_TEST_INJECTION"] = "1"
+        os.environ["LD_TEST_PRELOAD"] = "1"
+        os.environ["PYTHONSTARTUP"] = "/evil.py"
+        os.environ["MY_SECRET_TOKEN"] = "secret123"
+        try:
+            result = self.verifier.verify_candidate_test(code)
+            # ALREADY_GREEN (すべての危険環境変数が除外され、アサーション通過)
+            self.assertEqual(result.reason, "ALREADY_GREEN")
+            self.assertEqual(result.exit_code, 0)
+        finally:
+            os.environ.pop("DYLD_TEST_INJECTION", None)
+            os.environ.pop("LD_TEST_PRELOAD", None)
+            os.environ.pop("PYTHONSTARTUP", None)
+            os.environ.pop("MY_SECRET_TOKEN", None)
+
 
 if __name__ == "__main__":
     unittest.main()
