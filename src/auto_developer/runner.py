@@ -99,6 +99,8 @@ class CommandRunnerAdapter(RunnerAdapter):
             env["AUTO_DEV_TASK_ID"] = str(task.task_id)
             env["AUTO_DEV_TASK_TITLE"] = task.title
             env["AUTO_DEV_ATTEMPT"] = str(context.get("attempt", 1))
+            env["AUTO_DEV_CONTEXT_FILE"] = str(context_file.resolve())
+            env["AUTO_DEV_LESSONS_FILE"] = str(lessons_file.resolve())
 
             try:
                 proc = subprocess.run(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -90,6 +91,11 @@ class TestLessonInjection(unittest.TestCase):
 
     def test_e2e_closed_self_improvement_loop(self) -> None:
         """機能FFF.4: 外部監査 → Red実証 → PLAN登録 → Maker修正 → After Green → 免疫昇格 → LESSONS追記 → 次回Maker教訓注入の完全閉ループ。"""
+        # Git リポジトリ初期化 (HHH.1)
+        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "AutoDev Test"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "autodev@example.com"], cwd=self.repo_dir, check=True, capture_output=True)
+
         app_file = self.src_dir / "calculator.py"
         app_file.write_text(
             "def calculate_ratio(a: int, b: int) -> float:\n"
@@ -99,6 +105,10 @@ class TestLessonInjection(unittest.TestCase):
 
         plan_file = self.repo_dir / "PLAN.md"
         plan_file.write_text("# PLAN.md\n\n## ステップ\n", encoding="utf-8")
+
+        # Initial commit with seed bug
+        subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "chore: initial commit with seed bug"], cwd=self.repo_dir, check=True, capture_output=True)
 
         audit_store = AuditStore(repo_dir=self.repo_dir)
         verifier = RedTestVerifier(repo_dir=self.repo_dir)
@@ -152,6 +162,9 @@ class TestLessonInjection(unittest.TestCase):
             "    return 0.0 if b == 0 else a / b\n",
             encoding="utf-8",
         )
+        # Maker commit
+        subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "fix: handle zero denominator"], cwd=self.repo_dir, check=True, capture_output=True)
 
         # 6. AuditResolutionManager による解決確定（After Green、免疫テスト自動昇格、LESSONS.md自動追記）
         resolution_manager = AuditResolutionManager(repo_dir=self.repo_dir)

@@ -83,7 +83,12 @@ class TestLevel7RealLoopE2E(unittest.TestCase):
         self.tmp_dir.cleanup()
 
     def test_complete_level7_closed_loop_e2e(self) -> None:
-        """機能GGG.4: シードバグに対する Level 7 クローズドループ本番通し試験。"""
+        """機能GGG.4 / HHH.3: シードバグに対する Level 7 クローズドループ本番通し試験。"""
+        # Red検証前の HEAD コミットを保持 (HHH.3)
+        initial_commit_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo_dir, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
         # --- a. 独立監査ランナーによる Finding 検出 ---
         repro_code = (
             "import unittest\n"
@@ -118,6 +123,7 @@ class TestLevel7RealLoopE2E(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         finding = findings[0]
         self.assertEqual(finding.finding_id, "BUG-REAL-001")
+        self.assertEqual(finding.auditor_model, "claude-opus-5.5")
 
         # --- b. 隔離環境での Before Red 実証 & AuditStore 不変登録 & PLAN登録 ---
         audit_store = AuditStore(repo_dir=self.repo_dir)
@@ -131,6 +137,7 @@ class TestLevel7RealLoopE2E(unittest.TestCase):
         assert stored_finding is not None
         self.assertIsNotNone(stored_finding.code_hash)
         self.assertEqual(stored_finding.red_verification_reason, "GENUINE_RED")
+        self.assertEqual(stored_finding.before_commit_sha, initial_commit_sha)
 
         # --- c. TaskDispatcher による PLAN.md からの AUD タスク取得 ---
         task_disp = TaskDispatcher()
@@ -144,20 +151,26 @@ class TestLevel7RealLoopE2E(unittest.TestCase):
         relevant_lessons = injector.find_relevant_lessons(task.title)
         formatted_lessons = injector.format_injection(relevant_lessons)
 
-        # --- e. CommandRunnerAdapter による実 Maker プロセスへの教訓注入とバグ修正 (GGG.1) ---
-        # 実 Maker スクリプト: 標準入力を受領・検証し、src/calc.py を修正する
-        maker_script = self.repo_dir / "maker_fix.py"
+        # --- e. CommandRunnerAdapter による実 Maker プロセスへの教訓注入とバグ修正 (GGG.1 / HHH.2) ---
+        # 実 Maker スクリプト: 標準入力を受領・検証し、src/calc.py を修正する (未コミット状態)
+        dev_dir = self.repo_dir / ".dev"
+        dev_dir.mkdir(parents=True, exist_ok=True)
+        maker_script = dev_dir / "maker_fix.py"
         maker_script.write_text(
             "import os, sys, json\n"
             "stdin_text = sys.stdin.read()\n"
             "env_lessons = os.environ.get('AUTO_DEV_LESSONS', '')\n"
             "ctx_file = os.environ.get('AUTO_DEV_CONTEXT_FILE', '')\n"
+            "lessons_file = os.environ.get('AUTO_DEV_LESSONS_FILE', '')\n"
             "# 証跡を記録\n"
-            "with open('maker_proof.json', 'w') as f:\n"
+            "with open('.dev/maker_proof.json', 'w') as f:\n"
             "    json.dump({\n"
             "        'stdin_len': len(stdin_text),\n"
             "        'has_env': bool(env_lessons),\n"
+            "        'ctx_file': ctx_file,\n"
             "        'ctx_file_exists': os.path.exists(ctx_file) if ctx_file else False,\n"
+            "        'lessons_file': lessons_file,\n"
+            "        'lessons_file_exists': os.path.exists(lessons_file) if lessons_file else False,\n"
             "    }, f)\n"
             "# src/calc.py のバグ修正\n"
             "with open('src/calc.py', 'w') as f:\n"
@@ -167,7 +180,7 @@ class TestLevel7RealLoopE2E(unittest.TestCase):
         )
 
         runner = CommandRunnerAdapter(
-            maker_cmd_template=f"cd {self.repo_dir} && {sys.executable} maker_fix.py",
+            maker_cmd_template=f"cd {self.repo_dir} && {sys.executable} .dev/maker_fix.py",
         )
         code, _out = runner.run_maker(
             task,
@@ -179,16 +192,39 @@ class TestLevel7RealLoopE2E(unittest.TestCase):
         )
         self.assertEqual(code, 0)
 
-        # 実プロセスが教訓入力を受け取っていたことの検証
-        proof_file = self.repo_dir / "maker_proof.json"
+        # 実プロセスが環境変数と教訓ファイルを受領していたことの検証 (HHH.2 / HHH.3)
+        proof_file = self.repo_dir / ".dev" / "maker_proof.json"
         self.assertTrue(proof_file.exists())
         proof_data = json.loads(proof_file.read_text(encoding="utf-8"))
         self.assertTrue(proof_data["has_env"])
+        self.assertTrue(proof_data["ctx_file_exists"])
+        self.assertTrue(proof_data["lessons_file_exists"])
+
+        # --- e2. 未コミット状態での resolve_task 拒絶検証 (HHH.3) ---
+        res_manager = AuditResolutionManager(repo_dir=self.repo_dir)
+        uncommitted_res = res_manager.resolve_task(task.task_id)
+        self.assertFalse(uncommitted_res["success"])
+        self.assertEqual(uncommitted_res.get("error"), "UNCOMMITTED_AFTER_STATE")
+        immunity_candidate = self.repo_dir / "tests" / "immunity" / "test_immunity_BUG_REAL_001.py"
+        self.assertFalse(immunity_candidate.exists())
+
+        # --- e3. Maker による Git コミット確定 ---
+        subprocess.run(["git", "add", "src/calc.py", "PLAN.md"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "fix: resolve zero division bug"], cwd=self.repo_dir, check=True)
+        after_commit_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo_dir, capture_output=True, text=True, check=True
+        ).stdout.strip()
 
         # --- f. AuditResolutionManager による After Green 検証と免疫テスト自動昇格 ---
-        res_manager = AuditResolutionManager(repo_dir=self.repo_dir)
         resolve_res = res_manager.resolve_task(task.task_id)
         self.assertTrue(resolve_res["success"], f"Resolve failed: {resolve_res.get('reason')}")
+
+        proof = resolve_res["proof"]
+        self.assertEqual(proof["before_commit"], initial_commit_sha)
+        self.assertEqual(proof["after_commit"], after_commit_sha)
+        self.assertNotEqual(proof["before_commit"], proof["after_commit"])
+        self.assertEqual(proof["before_result"]["reason"], "GENUINE_RED")
+        self.assertEqual(proof["after_result"]["reason"], "ALREADY_GREEN")
 
         # 免疫テストが非破壊的に昇格配置されたこと
         promoted_immunity_file = self.repo_dir / "tests" / "immunity" / "test_immunity_BUG_REAL_001.py"

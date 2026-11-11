@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -20,6 +21,12 @@ class TestAuditLessonRecording(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.repo_dir = Path(self.tmp_dir.name)
+
+        # Git リポジトリ初期化 (HHH.1)
+        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "AutoDev Test"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "autodev@example.com"], cwd=self.repo_dir, check=True, capture_output=True)
+
         self.src_dir = self.repo_dir / "src"
         self.src_dir.mkdir(parents=True, exist_ok=True)
         self.immunity_dir = self.repo_dir / "tests" / "immunity"
@@ -107,6 +114,10 @@ class TestAuditLessonRecording(unittest.TestCase):
         plan_path = self.repo_dir / "PLAN.md"
         plan_path.write_text("# PLAN.md\n\n## ステップ\n", encoding="utf-8")
 
+        # Initial commit with bug
+        subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "chore: initial commit with seed bug"], cwd=self.repo_dir, check=True, capture_output=True)
+
         dispatcher = AuditDispatcher(repo_dir=self.repo_dir, audit_store=self.audit_store)
         dispatched = dispatcher.dispatch_finding(finding, plan_path=plan_path)
         self.assertEqual(dispatched.status, "DISPATCHED")
@@ -125,6 +136,9 @@ class TestAuditLessonRecording(unittest.TestCase):
             "    return a // b\n",
             encoding="utf-8",
         )
+        # Maker commit
+        subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "fix: fix zero division in calc"], cwd=self.repo_dir, check=True, capture_output=True)
 
         # 6. AuditResolutionManager による解決（After Green検証 + 免疫テスト昇格 + 教訓記録）
         res = self.manager.resolve_task(tasks[0].task_id)
