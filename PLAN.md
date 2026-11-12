@@ -40,7 +40,5 @@
 - [ ] 4. サンドボックス下の Level 7 E2E 更新（悪意ある再現テストの拒絶）・報告の正確性・全体検証ゲート合格・正規 Evidence による Bundle 生成（JJJ.4）
 
 ## 止まっていること・判断待ち
-- 【要判断・nightly-run 前】CI（`.github/workflows/verify.yml`, ubuntu-latest）にはサンドボックス基盤（`bwrap`）が標準で入っていない。JJJ.1 の Fail-Closed により、CI 上では候補テストを実行するテストが `SANDBOX_UNAVAILABLE` となり失敗する。`.github/` は人間のコードオーナー承認が必要なため、次のいずれかを人間が決める:
-  - (A) `runs-on: macos-latest` に変更する（`sandbox-exec` が標準で使える。ローカルと同じ経路を検証できる）
-  - (B) ubuntu のまま `sudo apt-get install -y bubblewrap` を追加する（Ubuntu 24.04 の非特権ユーザー名前空間制限により、追加の設定が必要になる可能性があり、CI 上での動作確認が要る）
-  - (C) CI 上ではサンドボックスが必要なテストをスキップする（CI での検証範囲が大きく減るため非推奨）
+- 【決定済み 2026-11-12】CI のサンドボックス基盤: 人間の判断で案A（`runs-on: macos-latest`）を採用。`.github/workflows/verify.yml` の変更は Phase 50 準備コミットに含め、PR 上でコードオーナーが承認する。
+  - 初回 CI で確認すること: macOS ランナー上で `gitleaks/gitleaks-action@v2` が動作すること、`/usr/bin/python3`（Xcode CLT 版）で全テストが通ること。動かない場合は止まってここに記録する。
