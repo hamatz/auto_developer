@@ -21,6 +21,30 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-12] リソース制限を実行隔離と取り違え、同一ユーザーの chmod で元リポジトリを書き換えられた (Resource Limits ≠ Isolation)
+- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`, `_lockdown_repo`, `_apply_resource_limits`), `NIGHTLY_REPORT.md`
+- Trap: Phase 49 III.3 で `RLIMIT_FSIZE` / `RLIMIT_AS` / `RLIMIT_CPU` と環境変数の除外を追加し、「OSレベル実行隔離」が完了したと報告した。しかし候補テストは元リポジトリと同じユーザーで動くため、サブプロセスから `chmod u+w` してファイルを書き換えられ、しかもその実行が `GENUINE_RED` として受理された（Sol氏 Phase 49 P0）。Morning Brief には検証していない「実OS境界に束縛された基盤」という表現を書いた。
+- Rule: リソース制限（量）・コード検査（形）・実行隔離（権限）・外部アクセス制限は別の責務として扱う。実行隔離は子孫プロセスにも及ぶ OS の機構（`sandbox-exec` / `bwrap` / コンテナ）で行い、使えなければ実行を拒否する。改ざんの事後検知を重ね、改ざんを伴う実行は結果に関わらず拒絶する。報告には実証した範囲だけを書き、未実証の性質は既知の限界として分けて書く。
+- Rung: 作り（サンドボックス必須化と事後検知） & 検査
+- Immunity Test: `tests/test_red_verifier.py`（Phase 50 JJJ.1 / JJJ.2 で追加予定）
+- Proof: （JJJ.1 完了時に記録）サブプロセス経由の canary 書き換えを試みる候補テストで canary が `ORIGINAL` のまま残り、事後検知用の注入実行では `REPO_TAMPER_DETECTED` が返ることを確認する。
+
+### [2026-11-12] 実験の生成物がコミットに混入し、Checker もそれを見られなかった (Scratch Artifact & Reconstructed Diff)
+- Context: Phase 49 Step 3（コミット `ee32fcd`）、`test_large.bin`
+- Trap: `RLIMIT_FSIZE` の挙動確認をリポジトリ直下で実行し、生成された `test_large.bin` が未追跡のまま残った。`commit-step` がそれを含めてコミットした。Checker に渡した diff は `git add -N` をせず、さらに長すぎて切り詰められた出力を手で貼り直したもので、未追跡ファイルが含まれていなかった。
+- Rule: 実験は `mktemp -d` の一時ディレクトリで行う。verify-step の前に `git status --porcelain` で意図しないファイルがないか確認する。Checker 入力は `git add -N . && git diff <checkpoint>` をファイルに書き出し、そのパスを渡して Checker に直接読ませる（手で再構成しない）。
+- Rung: 道具（PLAN.md の作業手順） → 将来は verify-step に未追跡ファイル一覧の提示を組み込む
+- Immunity Test: なし（手順。Phase 50 JJJ.3 で `test_large.bin` を削除）
+- Proof: （Phase 50 の各ステップで、Checker 入力ファイルに未追跡ファイルが含まれることを確認して記録）
+
+### [2026-11-12] Checker サブエージェントを Maker と同じモデル系統で起動していた (Same-Family Checker)
+- Context: Phase 48 / Phase 49 の Checker 査読（`invoke_subagent` の `Model: "inherit"`）
+- Trap: Maker（Gemini 系）が Checker を `inherit` で起動したため、Checker も同じ Gemini 系モデルになっていた。AGENTS.md Rule 6（異系統モデルによる査読）に反しており、APPROVE の独立性が弱かった。
+- Rule: Checker を起動するときは、現在の Maker と別系統のモデルを明示指定する（`inherit` を使わない）。commit-step の `--checker-reason` に Checker のモデル指定を記録する。
+- Rung: 道具（PLAN.md の作業手順） → 将来は commit-step で Checker モデル系統を記録・照合する
+- Immunity Test: なし（手順）
+- Proof: （Phase 50 の各 commit-step の `--checker-reason` に記録）
+
 ### [2026-11-11] コミット指定検証のチェックアウト失敗時における現行ツリーフォールバック (Commit Verification Fail-Closed)
 - Context: `src/auto_developer/verifier.py` (`RedTestVerifier._create_isolated_clone`), `tests/test_red_verifier.py`
 - Trap: 特定のコミット（`commit=<sha>`）を指定して一時クローンを作成する際、`git checkout --detach <commit>` が失敗（存在しないコミット等）しても、`cloned_ok=False` の後に `shutil.copytree` で現行作業ツリーを複製してテストを実行してしまい、本来失敗すべき検証が現行コードで Green になるフェイルオープンが発生した（Sol氏 Phase 48 P1）。
