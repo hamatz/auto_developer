@@ -409,6 +409,54 @@ class EnvCheckTest(unittest.TestCase):
             os.environ.pop("PYTHONSTARTUP", None)
             os.environ.pop("MY_SECRET_TOKEN", None)
 
+    def test_sandbox_prevents_subprocess_tampering_of_parent_repo(self) -> None:
+        """機能JJJ.1: 候補テストがサブプロセス経由で元リポジトリの canary を書き換えようとしても、OSサンドボックスにより物理遮断され ORIGINAL が保たれること。"""
+        canary = self.repo_dir / "canary_jjj1.txt"
+        canary.write_text("ORIGINAL", encoding="utf-8")
+        canary_abs = str(canary.resolve())
+
+        code = f"""import subprocess
+import unittest
+
+class HostileSubprocessTest(unittest.TestCase):
+    def test_tamper(self):
+        # サブプロセスを起動して chmod +w し、canary の書き換えを試みる (Sol氏 Phase 49 再現手順)
+        subprocess.run(["sh", "-c", "chmod 777 '{canary_abs}' && echo TAMPERED > '{canary_abs}'"], capture_output=True)
+        self.assertEqual(1, 2)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        # canary は絶対に改変されていないこと (物理的不変性)
+        self.assertEqual(canary.read_text(encoding="utf-8"), "ORIGINAL")
+        self.assertTrue(result.is_reproduced)
+
+    def test_sandbox_blocks_network_access(self) -> None:
+        """機能JJJ.1: 候補テストからの外部ネットワーク接続が OS サンドボックスにより拒絶されること。"""
+        code = """import unittest
+import urllib.request
+
+class NetAccessTest(unittest.TestCase):
+    def test_connect(self):
+        urllib.request.urlopen("https://example.com", timeout=2)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        # ネットワーク接続失敗（URLError / OSError）により ALREADY_GREEN にならず失敗すること
+        self.assertFalse(result.is_reproduced)
+        self.assertIn("URLError", result.output)
+
+    def test_fails_closed_when_sandbox_unavailable(self) -> None:
+        """機能JJJ.1: 利用可能なOSサンドボックス機構がない場合、非サンドボックスへフォールバックせず SANDBOX_UNAVAILABLE で拒絶すること。"""
+        from unittest.mock import patch
+        code = """import unittest
+class SimpleTest(unittest.TestCase):
+    def test_repro(self):
+        self.assertEqual(1, 2)
+"""
+        with patch.object(self.verifier, "_get_sandbox_backend", return_value=None):
+            result = self.verifier.verify_candidate_test(code)
+            self.assertFalse(result.is_reproduced)
+            self.assertEqual(result.reason, "SANDBOX_UNAVAILABLE")
+            self.assertNotEqual(result.exit_code, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

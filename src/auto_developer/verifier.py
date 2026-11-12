@@ -452,6 +452,14 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 with contextlib.suppress(ValueError, OSError):
                     resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit))
 
+    def _get_sandbox_backend(self) -> str | None:
+        """利用可能な OS サンドボックス機構を検出する (macOS: sandbox-exec, Linux: bwrap)。"""
+        if sys.platform == "darwin" and shutil.which("sandbox-exec"):
+            return "sandbox-exec"
+        if shutil.which("bwrap"):
+            return "bwrap"
+        return None
+
     def _execute_test(
         self,
         test_file: Path,
@@ -463,6 +471,8 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         本体リポジトリ汚染を防ぐため、実行作業ディレクトリは使い捨ての一時クローン sandbox_dir に隔離し、
         シークレット等の機密環境変数を除外サニタイズした上で、本体作業ツリーを OS 権限レベルおよび
         カーネルファイルフラグで読取専用にロックダウンして実行する。
+        さらに、OS レベルのサンドボックス (macOS sandbox-exec / Linux bwrap) の内側でのみ実行し、
+        外部ネットワーク接続および元リポジトリへのファイル書き込みをカーネルレベルで遮断する (JJJ.1)。
         """
         # 0. root (UID 0) 実行検知と安全遮断 (OSパーミッション迂回の防止)
         if hasattr(os, "geteuid") and os.geteuid() == 0:
@@ -472,6 +482,17 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 reason="ROOT_EXECUTION_FORBIDDEN",
                 output="Running candidate tests as root (UID 0) bypasses OS permission lockdown and is forbidden.",
                 reason_detail="Running candidate tests as root (UID 0) bypasses OS permission lockdown and is forbidden.",
+            )
+
+        # 0.1 OS サンドボックス基盤の確認 (Fail-Closed: サンドボックス不可時は即座に拒絶)
+        backend = self._get_sandbox_backend()
+        if not backend:
+            return RedVerificationResult(
+                is_reproduced=False,
+                exit_code=1,
+                reason="SANDBOX_UNAVAILABLE",
+                output="OS sandbox mechanism (sandbox-exec on macOS or bwrap on Linux) is not available or failed to initialize.",
+                reason_detail="OS sandbox execution environment is unavailable (Fail-Closed).",
             )
 
         # 1. 環境変数のサニタイズ（シークレット・APIキー・危険動的変数の除外）
@@ -485,20 +506,59 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
         # 2. 実行作業ディレクトリの隔離 (本体 repo_dir への書き込み防止)
         exec_cwd = sandbox_dir or Path(search_dir)
+        exec_resolved = exec_cwd.resolve()
+        repo_resolved = self.repo_dir.resolve()
 
         # PYTHONPATH は元リポジトリではなく、一時クローンのパスを設定
-        src_path = str((exec_cwd / "src").resolve())
-        repo_path = str(exec_cwd.resolve())
+        src_path = str(exec_resolved / "src")
+        repo_path = str(exec_resolved)
         sanitized_env["PYTHONPATH"] = f"{src_path}:{repo_path}"
+        sanitized_env["TMPDIR"] = str(exec_resolved)
 
-        cmd = [
+        runner_args = [
             sys.executable,
             "-c",
             self.RUNNER_CODE,
             search_dir,
             test_file.name,
-            str(self.repo_dir.resolve()),
+            str(repo_resolved),
         ]
+
+        profile_file: Path | None = None
+        if backend == "sandbox-exec":
+            profile_content = f"""(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write* (subpath "{exec_resolved}"))
+(allow file-write* (literal "/dev/null"))
+(allow file-write* (literal "/dev/zero"))
+(allow file-write* (literal "/dev/dtracehelper"))
+(deny file-write* (subpath "{repo_resolved}"))
+(deny network*)
+"""
+            with tempfile.NamedTemporaryFile("w", suffix=".sb", delete=False, dir=str(exec_resolved)) as tf:
+                tf.write(profile_content)
+                tf.flush()
+                profile_file = Path(tf.name)
+            cmd = ["sandbox-exec", "-f", str(profile_file)] + runner_args
+        elif backend == "bwrap":
+            cmd = [
+                "bwrap",
+                "--ro-bind", "/", "/",
+                "--bind", str(exec_resolved), str(exec_resolved),
+                "--dev", "/dev",
+                "--proc", "/proc",
+                "--unshare-net",
+                "--die-with-parent",
+            ] + runner_args
+        else:
+            return RedVerificationResult(
+                is_reproduced=False,
+                exit_code=1,
+                reason="SANDBOX_UNAVAILABLE",
+                output=f"Unknown sandbox backend: {backend}",
+                reason_detail="Unknown sandbox backend.",
+            )
 
         preexec = (lambda: self._apply_resource_limits(timeout_sec)) if os.name == "posix" else None
 
@@ -529,6 +589,19 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 reason="EXECUTION_ERROR",
                 output=str(e),
                 reason_detail=str(e),
+            )
+        finally:
+            if profile_file and profile_file.exists():
+                with contextlib.suppress(OSError):
+                    profile_file.unlink()
+
+        if proc.returncode != 0 and ("sandbox-exec:" in proc.stderr or "sandbox_apply:" in proc.stderr):
+            return RedVerificationResult(
+                is_reproduced=False,
+                exit_code=proc.returncode,
+                reason="SANDBOX_UNAVAILABLE",
+                output=proc.stderr,
+                reason_detail="OS sandbox failed to execute candidate test.",
             )
 
         output = (proc.stdout + "\n" + proc.stderr).strip()
