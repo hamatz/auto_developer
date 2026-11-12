@@ -21,6 +21,14 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-11] コミット指定検証のチェックアウト失敗時における現行ツリーフォールバック (Commit Verification Fail-Closed)
+- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._create_isolated_clone`), `tests/test_red_verifier.py`
+- Trap: 特定のコミット（`commit=<sha>`）を指定して一時クローンを作成する際、`git checkout --detach <commit>` が失敗（存在しないコミット等）しても、`cloned_ok=False` の後に `shutil.copytree` で現行作業ツリーを複製してテストを実行してしまい、本来失敗すべき検証が現行コードで Green になるフェイルオープンが発生した（Sol氏 Phase 48 P1）。
+- Rule: コミットが指定されている場合、Git クローンおよびチェックアウトの失敗時に現行作業ツリーへのフォールバック（`copytree`）を物理遮断する。チェックアウト失敗時は `COMMIT_CHECKOUT_FAILED` で即座に検証を拒絶（Fail-Closed）し、代替コードでの誤判定を絶対に防ぐ。
+- Rung: 作り（_create_isolated_clone のFail-Closed化） & 検査
+- Immunity Test: `tests/test_red_verifier.py`（Phase 49 III.1 で追加予定）
+- Proof: 存在しないコミット（例: "0"*40）を指定した `verify_candidate_test` が、現行HEADのコードを実行せず `COMMIT_CHECKOUT_FAILED` で確実に拒絶されることを実証。
+
 ### [2026-11-10] After Green を未コミットの作業ツリーで確認し、HEAD を after_commit として記録する証明の空洞化 (Commit-Bound Learning Proof)
 - Context: `src/auto_developer/audit.py` (`AuditResolutionManager.resolve_task`), `tests/test_level7_real_loop_e2e.py`
 - Trap: Maker が修正をコミットしないまま `resolve_task()` を呼ぶと、After Green は作業ツリー上で成立する一方、`after_commit` には修正前の HEAD が記録され、Before と After が同一コミットになる。Proof が「どのコミットで Red/Green になったか」を再現可能な形で示していなかった（Sol氏 Phase 47 P1）。

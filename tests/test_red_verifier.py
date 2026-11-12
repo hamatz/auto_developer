@@ -337,6 +337,78 @@ class HostileChmodTest(unittest.TestCase):
             "Parent repository's canary.txt must remain pristine!",
         )
 
+    def test_commit_verification_fails_closed_on_invalid_commit(self) -> None:
+        """機能III.1: 存在しないコミットを指定した場合、現行ツリーへフォールバックせず COMMIT_CHECKOUT_FAILED で拒絶すること。"""
+        import subprocess
+
+        # Git リポジトリ初期化
+        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True)
+        dummy_file = self.repo_dir / "app.py"
+        dummy_file.write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.repo_dir, check=True)
+
+        # 現行コードに対して通過する（ALREADY_GREEN になるはずの）テストコード
+        green_test = """import unittest
+class PassingTest(unittest.TestCase):
+    def test_ok(self):
+        self.assertEqual(1, 1)
+"""
+        # 存在しないコミットを指定して検証を実行
+        bad_commit = "0" * 40
+        result = self.verifier.verify_candidate_test(green_test, commit=bad_commit)
+
+        # 現行コードへフォールバックして ALREADY_GREEN (exit 0) になってはならない (Fail-Closed)
+        self.assertFalse(result.is_reproduced)
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertEqual(result.reason, "COMMIT_CHECKOUT_FAILED")
+        self.assertIn("COMMIT_CHECKOUT_FAILED", result.output)
+
+    def test_resource_limits_prevent_excessive_file_write(self) -> None:
+        """機能III.3: 候補テストが巨大ファイル（10MB超）を作成しようとした場合、OSリソース制限（RLIMIT_FSIZE）により遮断されること。"""
+        code = """import unittest
+class MassiveFileTest(unittest.TestCase):
+    def test_write_massive_file(self):
+        # 15MB のファイル書き込みを試みる
+        with open("massive_file.bin", "wb") as f:
+            f.write(b"0" * (15 * 1024 * 1024))
+        self.assertEqual(1, 2)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        # 巨大ファイル書き込み例外等により GENUINE_RED ではなく UNHANDLED_EXCEPTION / EXECUTION_ERROR (is_reproduced=False) となること
+        self.assertFalse(result.is_reproduced)
+        self.assertIn(result.reason, ("UNHANDLED_EXCEPTION", "EXECUTION_ERROR"))
+        self.assertIn("File too large", result.output)
+
+    def test_sanitizes_dangerous_and_secret_env_variables(self) -> None:
+        """機能III.3: 動的ローダー・Python設定・シークレット等の危険環境変数が候補テスト実行時に遮断されること。"""
+        import os
+        code = """import os
+import unittest
+class EnvCheckTest(unittest.TestCase):
+    def test_check_env(self):
+        self.assertNotIn("DYLD_TEST_INJECTION", os.environ)
+        self.assertNotIn("LD_TEST_PRELOAD", os.environ)
+        self.assertNotIn("PYTHONSTARTUP", os.environ)
+        self.assertNotIn("MY_SECRET_TOKEN", os.environ)
+"""
+        os.environ["DYLD_TEST_INJECTION"] = "1"
+        os.environ["LD_TEST_PRELOAD"] = "1"
+        os.environ["PYTHONSTARTUP"] = "/evil.py"
+        os.environ["MY_SECRET_TOKEN"] = "secret123"
+        try:
+            result = self.verifier.verify_candidate_test(code)
+            # ALREADY_GREEN (すべての危険環境変数が除外され、アサーション通過)
+            self.assertEqual(result.reason, "ALREADY_GREEN")
+            self.assertEqual(result.exit_code, 0)
+        finally:
+            os.environ.pop("DYLD_TEST_INJECTION", None)
+            os.environ.pop("LD_TEST_PRELOAD", None)
+            os.environ.pop("PYTHONSTARTUP", None)
+            os.environ.pop("MY_SECRET_TOKEN", None)
+
 
 if __name__ == "__main__":
     unittest.main()

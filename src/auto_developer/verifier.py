@@ -55,6 +55,13 @@ class RedVerificationResult:
     reason: str  # GENUINE_RED, ALREADY_GREEN, SYNTAX_ERROR, IMPORT_ERROR, NO_TESTS_FOUND, TIMEOUT, EXECUTION_ERROR
     output: str = ""
     reason_detail: str = ""
+    tests_run: int = 0
+    failures: int = 0
+    errors: int = 0
+
+
+class CommitCheckoutError(RuntimeError):
+    """指定されたコミットのチェックアウトに失敗した際のエラー (Fail-Closed) (III.1)。"""
 
 
 class RedTestVerifier:
@@ -62,6 +69,11 @@ class RedTestVerifier:
 
     SECRET_ENV_PATTERN = re.compile(
         r"(TOKEN|SECRET|KEY|AUTH|CREDENTIAL|PASSWORD|PASS|API|PRIVATE)", re.IGNORECASE
+    )
+    DANGEROUS_ENV_PREFIXES = (
+        "LD_",
+        "DYLD_",
+        "PYTHON",
     )
 
     def __init__(self, repo_dir: Path | None = None) -> None:
@@ -119,7 +131,16 @@ class RedTestVerifier:
         # 3. 独立した一時クローン環境を作成して実行 (Physical Clone Isolation)
         with tempfile.TemporaryDirectory() as tmpdir:
             clone_path = Path(tmpdir) / "isolated_repo"
-            self._create_isolated_clone(clone_path, commit=commit)
+            try:
+                self._create_isolated_clone(clone_path, commit=commit)
+            except CommitCheckoutError as e:
+                return RedVerificationResult(
+                    is_reproduced=False,
+                    exit_code=1,
+                    reason="COMMIT_CHECKOUT_FAILED",
+                    output=f"COMMIT_CHECKOUT_FAILED: {e}",
+                    reason_detail=str(e),
+                )
             test_file = clone_path / "test_candidate.py"
             test_file.write_text(test_code, encoding="utf-8")
             return self._execute_test(
@@ -131,6 +152,7 @@ class RedTestVerifier:
         Git リポジトリの場合は git clone --local --no-hardlinks で物理コピーを作成し、
         非Gitリポジトリの場合は shutil.copytree で複製する。
         commit が指定された場合はそのコミットにチェックアウト（デタッチドHEAD）し、未コミット変更は同期しない (HHH.1)。
+        commit 指定時のクローン・チェックアウト失敗時は、現行ツリーへのフォールバックを禁止して CommitCheckoutError を送出する (III.1)。
         """
         resolved_repo = self.repo_dir.resolve()
         target_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -167,8 +189,16 @@ class RedTestVerifier:
                         self._sync_uncommitted_files(resolved_repo, target_dir)
             except (OSError, subprocess.SubprocessError):
                 cloned_ok = False
+        elif commit is not None:
+            raise CommitCheckoutError(
+                f"Cannot check out commit '{commit}': Repository is not a git repository"
+            )
 
         if not cloned_ok:
+            if commit is not None:
+                raise CommitCheckoutError(
+                    f"Failed to check out requested commit '{commit}' into isolated clone"
+                )
             if target_dir.exists():
                 shutil.rmtree(target_dir, ignore_errors=True)
             shutil.copytree(
@@ -399,6 +429,29 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 except OSError:
                     pass
 
+    @staticmethod
+    def _apply_resource_limits(timeout_sec: int) -> None:
+        """Apply OS-level execution resource boundaries to child process (POSIX)."""
+        with contextlib.suppress(Exception):
+            import resource
+
+            # 1. ファイル出力上限 (巨大ファイル作成によるディスク浪費・DoS防止: 10MB)
+            if hasattr(resource, "RLIMIT_FSIZE"):
+                max_fsize = 10 * 1024 * 1024
+                resource.setrlimit(resource.RLIMIT_FSIZE, (max_fsize, max_fsize))
+
+            # 2. 仮想メモリ上限 (過剰メモリ消費・OOM爆弾の防止: 1GB)
+            if hasattr(resource, "RLIMIT_AS"):
+                max_as = 1024 * 1024 * 1024
+                with contextlib.suppress(ValueError, OSError):
+                    resource.setrlimit(resource.RLIMIT_AS, (max_as, max_as))
+
+            # 3. CPU 時間上限 (タイムアウト + マージン)
+            if hasattr(resource, "RLIMIT_CPU"):
+                cpu_limit = max(1, timeout_sec + 5)
+                with contextlib.suppress(ValueError, OSError):
+                    resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit))
+
     def _execute_test(
         self,
         test_file: Path,
@@ -421,10 +474,12 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 reason_detail="Running candidate tests as root (UID 0) bypasses OS permission lockdown and is forbidden.",
             )
 
-        # 1. 環境変数のサニタイズ（シークレット・APIキーの除外）
+        # 1. 環境変数のサニタイズ（シークレット・APIキー・危険動的変数の除外）
         sanitized_env: dict[str, str] = {}
         for k, v in os.environ.items():
             if self.SECRET_ENV_PATTERN.search(k):
+                continue
+            if any(k.startswith(pfx) for pfx in self.DANGEROUS_ENV_PREFIXES):
                 continue
             sanitized_env[k] = v
 
@@ -434,8 +489,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         # PYTHONPATH は元リポジトリではなく、一時クローンのパスを設定
         src_path = str((exec_cwd / "src").resolve())
         repo_path = str(exec_cwd.resolve())
-        existing_pythonpath = sanitized_env.get("PYTHONPATH", "")
-        sanitized_env["PYTHONPATH"] = f"{src_path}:{repo_path}:{existing_pythonpath}".strip(":")
+        sanitized_env["PYTHONPATH"] = f"{src_path}:{repo_path}"
 
         cmd = [
             sys.executable,
@@ -446,6 +500,8 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             str(self.repo_dir.resolve()),
         ]
 
+        preexec = (lambda: self._apply_resource_limits(timeout_sec)) if os.name == "posix" else None
+
         try:
             with self._lockdown_repo(self.repo_dir):
                 proc = subprocess.run(
@@ -455,6 +511,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                     capture_output=True,
                     text=True,
                     timeout=timeout_sec,
+                    preexec_fn=preexec,
                     check=False,
                 )
         except subprocess.TimeoutExpired as e:
@@ -499,6 +556,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                     reason="NO_TESTS_RAN",
                     output=output,
                     reason_detail="No test methods were executed during unittest run (ran_count=0).",
+                    tests_run=0,
+                    failures=len(failures),
+                    errors=len(errors),
                 )
 
             # 判定 B: すでに Green (エラーも失敗もなし)
@@ -509,6 +569,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                     reason="ALREADY_GREEN",
                     output=output,
                     reason_detail="Candidate test passed against current codebase without failures.",
+                    tests_run=tests_run,
+                    failures=0,
+                    errors=0,
                 )
 
             # 判定 C / D / F: エラー (errors) が存在する場合
@@ -526,6 +589,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                         reason="IMPORT_ERROR",
                         output=output,
                         reason_detail="Test failed due to ImportError / ModuleNotFoundError.",
+                        tests_run=tests_run,
+                        failures=len(failures),
+                        errors=len(errors),
                     )
                 # setUp() / tearDown() での環境例外
                 if "in setUp" in err_text or "in tearDown" in err_text:
@@ -535,6 +601,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                         reason="SETUP_ERROR",
                         output=output,
                         reason_detail="Test failure occurred during setUp/tearDown rather than test body assertion.",
+                        tests_run=tests_run,
+                        failures=len(failures),
+                        errors=len(errors),
                     )
                 # テスト本体内での予期せぬ例外 (アサーション失敗ではない)
                 return RedVerificationResult(
@@ -543,6 +612,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                     reason="UNHANDLED_EXCEPTION",
                     output=output,
                     reason_detail="Test exited with error/exception without an assertion failure (failures=0, errors>0).",
+                    tests_run=tests_run,
+                    failures=len(failures),
+                    errors=len(errors),
                 )
 
             # 判定 E: アサーション失敗 (failures > 0, errors == 0) による真正な Red
@@ -553,11 +625,19 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                     reason="GENUINE_RED",
                     output=output,
                     reason_detail="Candidate test failed as expected with assertion failure (Genuine Red).",
+                    tests_run=tests_run,
+                    failures=len(failures),
+                    errors=len(errors),
                 )
 
         # フォールバック (構造化 JSON が取得できなかった場合)
         m_ran = re.search(r"Ran (\d+) tests?", output)
         ran_count = int(m_ran.group(1)) if m_ran else 0
+        m_fail = re.search(r"failures=(\d+)", output)
+        fail_count = int(m_fail.group(1)) if m_fail else (1 if "FAIL:" in output else 0)
+        m_err = re.search(r"errors=(\d+)", output)
+        err_count = int(m_err.group(1)) if m_err else (1 if "ERROR:" in output else 0)
+
         if ran_count == 0 or "NO TESTS RAN" in output or proc.returncode == 5:
             return RedVerificationResult(
                 is_reproduced=False,
@@ -565,6 +645,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 reason="NO_TESTS_RAN",
                 output=output,
                 reason_detail="No test methods were executed during unittest run (ran_count=0).",
+                tests_run=ran_count,
+                failures=fail_count,
+                errors=err_count,
             )
 
         if proc.returncode == 0:
@@ -574,6 +657,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 reason="ALREADY_GREEN",
                 output=output,
                 reason_detail="Candidate test passed against current codebase without failures.",
+                tests_run=ran_count,
+                failures=0,
+                errors=0,
             )
 
         if (
@@ -587,6 +673,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 reason="IMPORT_ERROR",
                 output=output,
                 reason_detail="Test failed due to ImportError / ModuleNotFoundError.",
+                tests_run=ran_count,
+                failures=fail_count,
+                errors=err_count,
             )
 
         if "in setUp" in output or "in tearDown" in output:
@@ -596,6 +685,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 reason="SETUP_ERROR",
                 output=output,
                 reason_detail="Test failure occurred during setUp/tearDown rather than test body assertion.",
+                tests_run=ran_count,
+                failures=fail_count,
+                errors=err_count,
             )
 
         return RedVerificationResult(
@@ -604,4 +696,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             reason="UNHANDLED_EXCEPTION",
             output=output,
             reason_detail="Test exited with error/exception without structured test result.",
+            tests_run=ran_count,
+            failures=fail_count,
+            errors=err_count,
         )

@@ -21,6 +21,7 @@ from auto_developer.audit_store import AuditStore
 from auto_developer.dispatcher import AuditDispatcher, TaskDispatcher
 from auto_developer.models import Task
 from auto_developer.runner import CommandRunnerAdapter
+from auto_developer.verifier import RedTestVerifier
 
 
 class TestLevel7RealLoopE2E(unittest.TestCase):
@@ -139,6 +140,12 @@ class TestLevel7RealLoopE2E(unittest.TestCase):
         self.assertEqual(stored_finding.red_verification_reason, "GENUINE_RED")
         self.assertEqual(stored_finding.before_commit_sha, initial_commit_sha)
 
+        # 機能III.1: 存在しないコミットを指定した場合の Fail-Closed 検証
+        verifier = RedTestVerifier(repo_dir=self.repo_dir)
+        invalid_commit_res = verifier.verify_candidate_test(finding.reproduction_test_code, commit="0" * 40)
+        self.assertFalse(invalid_commit_res.is_reproduced)
+        self.assertEqual(invalid_commit_res.reason, "COMMIT_CHECKOUT_FAILED")
+
         # --- c. TaskDispatcher による PLAN.md からの AUD タスク取得 ---
         task_disp = TaskDispatcher()
         tasks = task_disp.parse_plan(self.plan_path)
@@ -226,6 +233,19 @@ class TestLevel7RealLoopE2E(unittest.TestCase):
         self.assertEqual(proof["before_result"]["reason"], "GENUINE_RED")
         self.assertEqual(proof["after_result"]["reason"], "ALREADY_GREEN")
 
+        # 機能III.2: proof の詳細フィールド検証 (tests_run, failures, errors, output_hash)
+        self.assertIn("tests_run", proof["before_result"])
+        self.assertIn("failures", proof["before_result"])
+        self.assertIn("errors", proof["before_result"])
+        self.assertIn("output_hash", proof["before_result"])
+        self.assertGreaterEqual(proof["before_result"]["tests_run"], 1)
+
+        self.assertIn("tests_run", proof["after_result"])
+        self.assertIn("failures", proof["after_result"])
+        self.assertIn("errors", proof["after_result"])
+        self.assertIn("output_hash", proof["after_result"])
+        self.assertGreaterEqual(proof["after_result"]["tests_run"], 1)
+
         # 免疫テストが非破壊的に昇格配置されたこと
         promoted_immunity_file = self.repo_dir / "tests" / "immunity" / "test_immunity_BUG_REAL_001.py"
         self.assertTrue(promoted_immunity_file.exists())
@@ -243,6 +263,10 @@ class TestLevel7RealLoopE2E(unittest.TestCase):
         self.assertIn("[BUG-REAL-001]", lessons_text)
         self.assertIn("Zero division handling returns -999 instead of 0", lessons_text)
         self.assertIn("test_immunity_BUG_REAL_001.py", lessons_text)
+        # 機能III.2: LESSONS.md のコミット拘束および再現テストハッシュ参照
+        self.assertIn(f"commit {initial_commit_sha}", lessons_text)
+        self.assertIn(f"commit {after_commit_sha}", lessons_text)
+        self.assertIn(f"test_sha256: {stored_finding.code_hash}", lessons_text)
 
         # --- h. 次回タスクにおける昇格教訓の自動検知と実 Maker への注入実証 ---
         next_task = Task(

@@ -535,7 +535,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. シードバグを用いた本番経路 Level 7 E2E 全通し実証と全体検証ゲート合格 (GGG.4 / Phase 47 完了判定):
      - モックを排除した実 `CommandRunnerAdapter` による本番経路 E2E：独立監査（異系統モデル検証済） → 隔離Red実証 → PLAN登録（AUDタスク） → Makerへの教訓実注入（stdin / context_file） → Maker修正 → After Green検証 → 免疫テスト自動昇格（非破壊） → LESSONS.md自動追記 → 次回Makerへの教訓自動注入までが一気通貫で完結することを実証。
      - 全自動検証ゲート（278+ テスト、Ruff、Mypy）の完全合格確認と Evidence Bundle 生成。
-- [ ] 機能HHH (Stage 7 Learning Proof のGitコミット拘束とMakerインターフェース正式化 Stage 7 Commit-Bound Learning Proof and Formal Maker Interface):
+- [x] 機能HHH (Stage 7 Learning Proof のGitコミット拘束とMakerインターフェース正式化 Stage 7 Commit-Bound Learning Proof and Formal Maker Interface):
   1. 修正前後コミットへの Red/Green 証明拘束 (HHH.1 / Sol氏 Phase 47 P1指摘):
      - `AuditResolutionManager.resolve_task()` は、Git リポジトリでない場合、または作業ツリーに未コミット変更（`git status --porcelain` の結果から `.dev/` 配下を除いたもの）が存在する場合、`UNCOMMITTED_AFTER_STATE` で拒絶し、Finding・免疫テスト・LESSONS.md を一切変更しない。
      - `finding.before_commit_sha` が実在するコミットでない場合（`unknown`・空・不正値を含む）は `INVALID_BEFORE_COMMIT` で拒絶する。
@@ -551,6 +551,16 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - Maker が `AUTO_DEV_CONTEXT_FILE` と `AUTO_DEV_LESSONS_FILE` を受信し、両ファイルが実在したことをアサートする。
      - 修正をコミットせずに `resolve_task()` を呼んだ場合に `UNCOMMITTED_AFTER_STATE` で拒絶され、免疫テストが作成されないことを検証する。
      - 全自動検証ゲート（286+ テスト、Ruff、Mypy）に合格し、`verify-step` / `commit-step` で正規に発行された Evidence Record を含む Evidence Bundle が `VERIFIED` となること。
+- [ ] 機能III (Stage 7 コミット指定検証のFail-Closed・Proof詳細化・実行隔離強化 Stage 7 Commit Verification Fail-Closed, Detailed Proofs, and Execution Isolation):
+  1. コミット指定検証の Fail-Closed 徹底 (III.1 / Sol氏 Phase 48 P1指摘):
+     - `RedTestVerifier.verify_candidate_test(..., commit=...)` および `_create_isolated_clone(..., commit=...)` において、`commit` が指定されている場合に `git checkout --detach <commit>` が失敗、またはクローンに失敗した時は `shutil.copytree` へのフォールバックを物理遮断し、`COMMIT_CHECKOUT_FAILED`（exit_code != 0, is_reproduced=False）で即座に検証拒絶（Fail-Closed）する。
+     - 存在しないコミット（例: `"0" * 40`）を指定した場合に、現行作業ツリーでテストを実行して Green を返さないことを単体テストで決定論的に実証。
+  2. Learning Proof 監査詳細化と LESSONS.md コミット拘束参照 (III.2 / Sol氏 Phase 48 P2指摘):
+     - `red_green_proof` の `before_result` / `after_result` に、実行されたテスト件数（`tests_run`）、失敗件数（`failures`）、エラー件数（`errors`）、および実行出力ハッシュ（`output_hash`）を記録する。
+     - `AuditResolutionManager.record_lesson()` は、`LESSONS.md` に追記する教訓エントリの `- Proof:` 行に、Before Commit SHA、After Commit SHA、および再現テストハッシュ（`code_hash`）の参照を明記し、教訓から実コミット証跡への物理トレーサビリティを確立する。
+  3. 候補テストのOSレベル実行隔離・リソース境界強化と Level 7 E2E 通し試験 (III.3):
+     - `RedTestVerifier._execute_test()` において、プロセス実行時のリソース境界（タイムアウト制限に加え、過剰なメモリ・プロセスフォーク・巨大ファイル出力を防ぐ制限）および環境変数の遮断を行い、外部生成候補コードに対する防御層を強化する。
+     - `tests/test_level7_real_loop_e2e.py` を更新し、コミット指定 Fail-Closed、Proof 詳細記録、LESSONS.md のコミット参照追記、および全自動検証ゲート（292+ テスト、Ruff、Mypy）に合格すること。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

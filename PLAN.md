@@ -7,15 +7,15 @@
 -->
 
 ## 現在の目標
-- Phase 48: Stage 7 — Learning Proof のGitコミット拘束とMakerインターフェース正式化 (SPEC.md 機能HHH)
-  - 修正前後の実コミットに対して同一再現テストを Red/Green 実行し、その結果を Proof に固定する。未コミット状態・コミット未前進では解決させない（機能HHH.1）
-  - `AUTO_DEV_CONTEXT_FILE` / `AUTO_DEV_LESSONS_FILE` を正式な環境変数インターフェースとして公開し、監査で実際に渡したモデル名を Finding に記録する（機能HHH.2）
-  - Maker が修正をコミットする形に Level 7 E2E を更新し、コミット拘束付き Proof と未コミット拒絶を実証する（機能HHH.3）
-- スコープ外（Phase 49 以降）: 実LLM（異系統）による監査・修正の受入試験、候補テストのOSレベル隔離
+- Phase 49: Stage 7 — コミット指定検証のFail-Closed・Proof詳細化・実行隔離強化 (SPEC.md 機能III)
+  - `RedTestVerifier` で commit 指定時の checkout 失敗に対するフォールバック（`copytree`）を物理遮断し、`COMMIT_CHECKOUT_FAILED` で即座に検証拒絶（Fail-Closed）する（機能III.1 / Sol氏 Phase 48 P1指摘）
+  - `red_green_proof` にテスト数・出力ハッシュ等の監査詳細を記録し、`LESSONS.md` に Before/After コミット SHA・テストハッシュの参照を記録する（機能III.2 / Sol氏 Phase 48 P2指摘）
+  - `RedTestVerifier._execute_test()` のリソース境界・環境制限を強化し、Level 7 クローズドループ E2E 受入試験を更新・実証する（機能III.3）
+- スコープ外（Phase 50 以降）: 異系統LLM（実API）によるクロスプロバイダー自律監査・修正の実稼働
 
-## 作業手順（Phase 48 から適用・LESSONS.md 2026-11-10 の教訓に基づく）
+## 作業手順（Phase 48 から継続・LESSONS.md 2026-11-10 の教訓に基づく）
 - Checker への入力は、SPEC の該当節を要約せず原文のまま切り出して渡す:
-  `awk '/^- \[ \] 機能HHH/,/^## 3\./' SPEC.md` の出力と、`git diff <checkpoint>`（未追跡ファイルは `git add -N` 後）の出力をそのまま貼る。自分の言葉で書き直さない。
+  `awk '/^- \[ \] 機能III/,/^## 3\./' SPEC.md` の出力と、`git diff <checkpoint>`（未追跡ファイルは `git add -N` 後）の出力をそのまま貼る。自分の言葉で書き直さない。
 - Evidence Record は手書きしない。各ステップで以下の正規経路のみを使う:
   1. `python3 scripts/nightly_orchestrator.py verify-step --checkpoint <checkpoint> --task-id <n>`
   2. Checker 査読（APPROVE / REJECT）
@@ -23,17 +23,15 @@
   `.git/nightly_evidence/` 配下のファイルを直接編集・作成しない。正規経路が失敗した場合は止まってこのファイルに記録する。
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- HHH.1 により `resolve_task()` は Git リポジトリ・クリーンな作業ツリー・前進したコミットを必須とする。以下の既存テストは Git 管理外の一時ディレクトリで修正をコミットせずに `resolve_task()` を呼んでおり、新しい仕様では正しく拒絶されるため、テスト用の Git 初期化と「Red 時点のコミット → 修正コミット」の手順を追加する。アサーション（期待する成功・拒絶理由・免疫テスト配置・LESSONS 記録）は弱めない。
-  - `tests/test_audit_resolution.py`（`resolve_task` 呼び出しを含む全テスト）
-  - `tests/test_audit_lesson_recording.py::test_full_self_improvement_e2e_loop`
-  - `tests/test_lesson_injection.py::test_e2e_closed_self_improvement_loop`
-  - `tests/test_level7_real_loop_e2e.py`（HHH.3 で更新）
+- III.1: 不正なコミット SHA を指定した検証が、現行ツリーフォールバックによる Green ではなく `COMMIT_CHECKOUT_FAILED`（is_reproduced=False）で拒絶されるテストを追加する。
+- III.2: `red_green_proof` に詳細フィールドが追加されるため、既存の Proof 構造アサーションに破壊的変更がないことを確認しつつ新フィールドを検証する。
+- III.3: `tests/test_level7_real_loop_e2e.py` において、Proof の詳細値および LESSONS.md に追記されたコミット SHA 参照を検証する。
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [x] 1. 修正前後コミットへの Red/Green 証明拘束（未コミット拒絶・コミット未前進拒絶・両コミットでの隔離再実行・Proof 固定）の実装と単体テスト、既存テストのGit化（Red-First）（HHH.1）
-- [x] 2. `AUTO_DEV_CONTEXT_FILE` / `AUTO_DEV_LESSONS_FILE` 環境変数の正式公開と、監査モデル名 `auditor_model` の Finding 記録の実装と単体テスト（Red-First）（HHH.2）
-- [x] 3. コミット拘束付き Level 7 E2E 受入への更新・全体検証ゲート合格・正規 Evidence による Bundle 生成（HHH.3）
+- [x] 1. コミット指定検証の Fail-Closed 徹底（checkout 失敗時のフォールバック遮断と `COMMIT_CHECKOUT_FAILED` 返却）の実装と単体テスト（Red-First）（III.1）
+- [x] 2. Learning Proof 監査詳細化（テスト数・出力ハッシュ記録）と LESSONS.md コミット拘束参照の実装と単体テスト（Red-First）（III.2）
+- [x] 3. 候補テストのOSレベル実行隔離・リソース境界強化と Level 7 E2E 通し試験・全体検証ゲート合格・正規 Evidence による Bundle 生成（III.3）
 
 ## 止まっていること・判断待ち
 - なし
