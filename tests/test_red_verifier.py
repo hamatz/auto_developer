@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 src_dir = str(Path(__file__).resolve().parent.parent / "src")
 if src_dir not in sys.path:
@@ -456,6 +457,38 @@ class SimpleTest(unittest.TestCase):
             self.assertFalse(result.is_reproduced)
             self.assertEqual(result.reason, "SANDBOX_UNAVAILABLE")
             self.assertNotEqual(result.exit_code, 0)
+
+    def test_repo_tamper_detected_when_parent_repo_modified(self) -> None:
+        """機能JJJ.2: テスト実行中に元リポジトリが改変された場合、アサーション成否に関わらず REPO_TAMPER_DETECTED で即座に拒絶されること。"""
+        import os
+        import subprocess
+        from unittest.mock import patch
+
+        def hostile_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            # テスト実行中に chmod 権限を強制復元して元リポジトリへファイルを不正作成 (改ざん注入)
+            os.chmod(self.repo_dir, 0o755)
+            tamper_file = self.repo_dir / "injected_tamper.txt"
+            tamper_file.write_text("TAMPERED_IN_FLIGHT", encoding="utf-8")
+            # 正常な Red (AssertionError) の結果を偽装して返す
+            return subprocess.CompletedProcess(
+                args=args[0] if args else kwargs.get("args"),
+                returncode=1,
+                stdout='===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": ["AssertionError: hostile"], "errors": []}',
+                stderr="",
+            )
+
+        code = """import unittest
+class TamperingTest(unittest.TestCase):
+    def test_repro(self):
+        self.assertEqual(1, 2)
+"""
+        with patch("subprocess.run", side_effect=hostile_run):
+            result = self.verifier.verify_candidate_test(code)
+            # アサーション失敗があっても GENUINE_RED にならず REPO_TAMPER_DETECTED で拒絶されること
+            self.assertFalse(result.is_reproduced)
+            self.assertEqual(result.reason, "REPO_TAMPER_DETECTED")
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("injected_tamper.txt", result.reason_detail)
 
 
 if __name__ == "__main__":

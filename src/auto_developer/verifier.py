@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -460,6 +461,89 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             return "bwrap"
         return None
 
+    def _capture_repo_snapshot(self) -> dict[str, Any]:
+        """元リポジトリの改ざん検知用スナップショットを取得する (JJJ.2)。"""
+        resolved_repo = self.repo_dir.resolve()
+        is_git = (resolved_repo / ".git").is_dir()
+        if is_git:
+            # 1. HEAD ハッシュ
+            proc_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=resolved_repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            head_commit = proc_head.stdout.strip() if proc_head.returncode == 0 else ""
+
+            # 2. ステータス (追跡・未追跡・無視ファイルすべて)
+            proc_status = subprocess.run(
+                ["git", "status", "--porcelain", "--ignored", "--untracked-files=all"],
+                cwd=resolved_repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            status_text = proc_status.stdout if proc_status.returncode == 0 else ""
+
+            # 3. diff ハッシュ
+            diff_args = ["git", "diff", "HEAD", "--binary"] if head_commit else ["git", "diff", "--binary"]
+            proc_diff = subprocess.run(
+                diff_args,
+                cwd=resolved_repo,
+                capture_output=True,
+                check=False,
+            )
+            diff_hash = hashlib.sha256(proc_diff.stdout).hexdigest() if proc_diff.returncode == 0 else ""
+
+            return {
+                "type": "git",
+                "head": head_commit,
+                "status": status_text,
+                "diff_hash": diff_hash,
+            }
+
+        # 非 Git リポジトリ: ファイルツリー走査
+        file_hashes: dict[str, str] = {}
+        for p in sorted(resolved_repo.rglob("*")):
+            if p.is_file():
+                rel = str(p.relative_to(resolved_repo))
+                with contextlib.suppress(OSError):
+                    file_hashes[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+        return {
+            "type": "tree",
+            "files": file_hashes,
+        }
+
+    def _compare_repo_snapshots(
+        self, before: dict[str, Any], after: dict[str, Any]
+    ) -> list[str]:
+        """実行前後のスナップショットを比較し、改ざんされた相対パス一覧を返す (JJJ.2)。"""
+        if before.get("type") == "git" and after.get("type") == "git":
+            if before == after:
+                return []
+            changed_paths: list[str] = []
+            if before.get("head") != after.get("head"):
+                changed_paths.append(".git/HEAD")
+            before_lines = set(before.get("status", "").splitlines())
+            after_lines = set(after.get("status", "").splitlines())
+            for line in after_lines - before_lines:
+                parts = line.strip().split(maxsplit=1)
+                changed_paths.append(parts[1] if len(parts) == 2 else line.strip())
+            for line in before_lines - after_lines:
+                parts = line.strip().split(maxsplit=1)
+                changed_paths.append(parts[1] if len(parts) == 2 else line.strip())
+            if not changed_paths and before.get("diff_hash") != after.get("diff_hash"):
+                changed_paths.append("tracked_diff_modified")
+            return sorted(set(changed_paths))
+        if before.get("type") == "tree" and after.get("type") == "tree":
+            b_files = before.get("files", {})
+            a_files = after.get("files", {})
+            all_keys = set(b_files.keys()) | set(a_files.keys())
+            diffs = [k for k in all_keys if b_files.get(k) != a_files.get(k)]
+            return sorted(diffs)
+        return ["snapshot_type_mismatch"]
+
     def _execute_test(
         self,
         test_file: Path,
@@ -562,6 +646,8 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
         preexec = (lambda: self._apply_resource_limits(timeout_sec)) if os.name == "posix" else None
 
+        before_snapshot = self._capture_repo_snapshot()
+
         try:
             with self._lockdown_repo(self.repo_dir):
                 proc = subprocess.run(
@@ -594,6 +680,18 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             if profile_file and profile_file.exists():
                 with contextlib.suppress(OSError):
                     profile_file.unlink()
+
+        # 3. 元リポジトリ改ざん検知 (JJJ.2: 多層防御)
+        after_snapshot = self._capture_repo_snapshot()
+        tampered_paths = self._compare_repo_snapshots(before_snapshot, after_snapshot)
+        if tampered_paths:
+            return RedVerificationResult(
+                is_reproduced=False,
+                exit_code=1,
+                reason="REPO_TAMPER_DETECTED",
+                output=f"Parent repository tampering detected after candidate test execution. Modified paths: {tampered_paths}",
+                reason_detail=f"Parent repository was tampered with during test execution: {', '.join(tampered_paths)}",
+            )
 
         if proc.returncode != 0 and ("sandbox-exec:" in proc.stderr or "sandbox_apply:" in proc.stderr):
             return RedVerificationResult(
