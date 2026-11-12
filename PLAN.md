@@ -37,7 +37,7 @@
 - [x] 1. OSサンドボックス（macOS `sandbox-exec` / Linux `bwrap`）による候補テスト実行と `SANDBOX_UNAVAILABLE` Fail-Closed の実装、サブプロセス経由の canary 書き換え・ネットワーク接続が遮断される単体テスト（Red-First）（JJJ.1）
 - [x] 2. 実行前後の元リポジトリ状態比較による `REPO_TAMPER_DETECTED` の実装と単体テスト（Red-First）（JJJ.2）
 - [x] 3. プロセスグループ単位の子孫プロセス回収・プロセス数上限の実装と残存プロセスゼロの単体テスト（Red-First）、`test_large.bin` の削除（JJJ.3）
-- [ ] 4. サンドボックス下の Level 7 E2E 更新（悪意ある再現テストの拒絶）・報告の正確性・全体検証ゲート合格・正規 Evidence による Bundle 生成（JJJ.4）
+- [x] 4. サンドボックス下の Level 7 E2E 更新（悪意ある再現テストの拒絶）・報告の正確性・全体検証ゲート合格・正規 Evidence による Bundle 生成（JJJ.4）
 
 ## 止まっていること・判断待ち
 - 【決定済み 2026-11-12】CI のサンドボックス基盤: 人間の判断で案A（`runs-on: macos-latest`）を採用。`.github/workflows/verify.yml` の変更は Phase 50 準備コミットに含め、PR 上でコードオーナーが承認する。
