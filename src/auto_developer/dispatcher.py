@@ -133,6 +133,8 @@ class AuditDispatcher:
 
         # 1. 再現テストコードの Red 検証
         verification = self.verifier.verify_candidate_test(finding.reproduction_test_code)
+        finding.red_verification_reason = verification.reason
+        finding.red_verification_output = verification.output
         if not (verification.is_reproduced and verification.reason == "GENUINE_RED"):
             finding.status = "REJECTED"
             return finding

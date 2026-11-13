@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -380,6 +383,142 @@ class TestHostileTamper(unittest.TestCase):
         # 7. LESSONS.md に登録されていないこと
         lessons_text = self.lessons_path.read_text(encoding="utf-8") if self.lessons_path.exists() else ""
         self.assertNotIn("BUG-HOSTILE-001", lessons_text)
+
+    def test_hostile_confidential_read_blocked_by_sandbox_and_not_promoted(self) -> None:
+        """機能KKK.4: ホストの機密情報（~/.ssh等）や親リポジトリ非公開ファイルの読み取りを
+        試みる悪意ある再現テストがOSサンドボックスで遮断され、PLAN/免疫/LESSONSに昇格しないことを実証。
+        """
+        # 親リポジトリ内に機密ファイルを作成
+        secret_file = self.repo_dir / "secret_credentials.env"
+        secret_file.write_text("SUPER_SECRET_TOKEN=xyz123", encoding="utf-8")
+        subprocess.run(["git", "add", "secret_credentials.env"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: add confidential file"], cwd=self.repo_dir, check=True)
+
+        host_ssh_probe = Path.home() / ".ssh" / "id_rsa"
+
+        # 機密読み取りを試みるテストコード
+        hostile_read_code = f"""import os, sys, unittest
+from pathlib import Path
+
+class TestConfidentialRead(unittest.TestCase):
+    def test_steal_credentials(self):
+        # 1. ホストの ~/.ssh/id_rsa の読み取り試行
+        ssh_path = Path('{host_ssh_probe}')
+        try:
+            if ssh_path.exists():
+                _ = ssh_path.read_text()
+        except (PermissionError, FileNotFoundError, OSError):
+            pass
+
+        # 2. 親リポジトリの機密ファイル読み取り試行
+        parent_secret = Path('{secret_file.resolve()}')
+        # カーネルレベルで deny されているため、exists() または read_text() で PermissionError
+        _ = parent_secret.read_text()
+        self.assertEqual(1, 2)
+"""
+        audit_store = AuditStore(repo_dir=self.repo_dir)
+        finding = AuditFinding(
+            finding_id="BUG-CONFIDENTIAL-001",
+            severity="P0",
+            spec_reference="SECURITY",
+            location="src/calc.py:1",
+            description="Hostile test attempting to read host secrets and parent confidential files",
+            reproduction_test_code=hostile_read_code,
+            code_hash=hashlib.sha256(hostile_read_code.encode("utf-8")).hexdigest(),
+            auditor_model="attacker-sim",
+        )
+
+        # 1. AuditDispatcher による Red 検証
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, audit_store=audit_store)
+        dispatched = dispatcher.dispatch_finding(finding, plan_path=self.plan_path)
+
+        # 読み取り例外により真正な Red と判定されず REJECTED
+        self.assertEqual(dispatched.status, "REJECTED")
+
+        # 2. PLAN.md に登録されていないこと
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        self.assertNotIn("BUG-CONFIDENTIAL-001", plan_content)
+
+        # 3. 解決試行も遮断されること
+        res_manager = AuditResolutionManager(repo_dir=self.repo_dir)
+        resolve_res = res_manager.resolve_task(f"AUD-{finding.finding_id}")
+        self.assertFalse(resolve_res["success"])
+
+        # 4. 免疫テストに昇格されていないこと
+        promoted_immunity_file = self.immunity_dir / "test_immunity_BUG_CONFIDENTIAL_001.py"
+        self.assertFalse(promoted_immunity_file.exists())
+
+        # 5. LESSONS.md に登録されていないこと
+        lessons_text = self.lessons_path.read_text(encoding="utf-8") if self.lessons_path.exists() else ""
+        self.assertNotIn("BUG-CONFIDENTIAL-001", lessons_text)
+
+    def test_hostile_untracked_tamper_blocked_by_snapshot_and_not_promoted(self) -> None:
+        """機能KKK.4: 未追跡・無視ファイルの改ざんがスナップショット比較で検知され、
+        REPO_TAMPER_DETECTED により REJECTED となり PLAN/免疫/LESSONS に昇格しないことを実証。
+        """
+        from typing import Any
+        from unittest.mock import patch
+
+        # 親リポジトリに未追跡ファイルを作成
+        untracked_file = self.repo_dir / "untracked_config.ini"
+        untracked_file.write_text("DEBUG=false\n", encoding="utf-8")
+
+        tamper_code = """import unittest
+
+class TestUntrackedTamper(unittest.TestCase):
+    def test_tamper(self):
+        # 通常の失敗テスト
+        self.assertEqual(1, 2)
+"""
+        audit_store = AuditStore(repo_dir=self.repo_dir)
+        finding = AuditFinding(
+            finding_id="BUG-UNTRACKED-TAMPER-001",
+            severity="P0",
+            spec_reference="SECURITY",
+            location="src/calc.py:1",
+            description="Hostile test attempting to tamper with untracked file content",
+            reproduction_test_code=tamper_code,
+            code_hash=hashlib.sha256(tamper_code.encode("utf-8")).hexdigest(),
+            auditor_model="attacker-sim",
+        )
+
+        orig_popen = subprocess.Popen
+
+        def tampering_popen(*args: Any, **kwargs: Any) -> Any:
+            cmd = args[0] if args else kwargs.get("args", [])
+            if cmd and any("sandbox" in str(c) or "bwrap" in str(c) or "-c" in str(c) for c in cmd):
+                # テストプロセス起動中に未追跡ファイルの内容のみを書き換える
+                os.system(f"chflags -R nouchg '{self.repo_dir}' 2>/dev/null || true")
+                with contextlib.suppress(Exception):
+                    os.chmod(untracked_file, stat.S_IRUSR | stat.S_IWUSR)
+                untracked_file.write_text("DEBUG=true\nTAMPERED=yes\n", encoding="utf-8")
+            return orig_popen(*args, **kwargs)
+
+        # 1. AuditDispatcher による Red 検証（実行中に未追跡ファイルの改ざんが発生）
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, audit_store=audit_store)
+        with patch("subprocess.Popen", side_effect=tampering_popen):
+            dispatched = dispatcher.dispatch_finding(finding, plan_path=self.plan_path)
+
+        # REPO_TAMPER_DETECTED により REJECTED
+        self.assertEqual(dispatched.status, "REJECTED")
+        self.assertEqual(dispatched.red_verification_reason, "REPO_TAMPER_DETECTED")
+
+        # 2. PLAN.md に登録されていないこと
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        self.assertNotIn("BUG-UNTRACKED-TAMPER-001", plan_content)
+
+        # 3. 解決試行も遮断されること
+        res_manager = AuditResolutionManager(repo_dir=self.repo_dir)
+        resolve_res = res_manager.resolve_task(f"AUD-{finding.finding_id}")
+        self.assertFalse(resolve_res["success"])
+
+        # 4. 免疫テストに昇格されていないこと
+        promoted_immunity_file = self.immunity_dir / "test_immunity_BUG_UNTRACKED_TAMPER_001.py"
+        self.assertFalse(promoted_immunity_file.exists())
+
+        # 5. LESSONS.md に登録されていないこと
+        lessons_text = self.lessons_path.read_text(encoding="utf-8") if self.lessons_path.exists() else ""
+        self.assertNotIn("BUG-UNTRACKED-TAMPER-001", lessons_text)
 
 
 if __name__ == "__main__":
