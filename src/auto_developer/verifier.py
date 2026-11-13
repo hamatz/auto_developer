@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import hashlib
 import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -14,6 +16,11 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    import resource
+except ImportError:
+    resource = None  # type: ignore[assignment]
 
 from auto_developer.guard import validate_test_ast
 
@@ -58,6 +65,7 @@ class RedVerificationResult:
     tests_run: int = 0
     failures: int = 0
     errors: int = 0
+    process_limit_status: str = ""
 
 
 class CommitCheckoutError(RuntimeError):
@@ -429,12 +437,41 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 except OSError:
                     pass
 
-    @staticmethod
-    def _apply_resource_limits(timeout_sec: int) -> None:
+    def _compute_nproc_limit(self, margin: int = 50) -> tuple[tuple[int, int] | None, str]:
+        """現在のユーザープロセス数に基づいて RLIMIT_NPROC の (soft, hard) 上限を計算する (JJJ.3)。
+
+        RLIMIT_NPROC はプロセス単位ではなくユーザー(UID)全体のプロセス数上限であるため、
+        現在のプロセス数 + マージンで設定する。取得に失敗した場合は制限を設定せずステータスを返す。
+        """
+        if not hasattr(resource, "RLIMIT_NPROC") or os.name != "posix":
+            return None, "unsupported"
+
+        try:
+            _cur_soft, cur_hard = resource.getrlimit(resource.RLIMIT_NPROC)
+            res = subprocess.run(
+                ["ps", "-u", str(os.getuid()), "-o", "pid="],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode != 0:
+                return None, f"ps_failed(code={res.returncode})"
+            lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+            cur_proc_count = len(lines)
+            target = cur_proc_count + margin
+            if cur_hard != resource.RLIM_INFINITY and target > cur_hard:
+                target = cur_hard
+            return (target, cur_hard), f"applied: limit={target} (cur_count={cur_proc_count}, margin={margin})"
+        except Exception as e:  # noqa: BLE001
+            return None, f"error: {e}"
+
+    def _apply_resource_limits(
+        self,
+        timeout_sec: int,
+        nproc_limits: tuple[int, int] | None = None,
+    ) -> None:
         """Apply OS-level execution resource boundaries to child process (POSIX)."""
         with contextlib.suppress(Exception):
-            import resource
-
             # 1. ファイル出力上限 (巨大ファイル作成によるディスク浪費・DoS防止: 10MB)
             if hasattr(resource, "RLIMIT_FSIZE"):
                 max_fsize = 10 * 1024 * 1024
@@ -452,6 +489,102 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 with contextlib.suppress(ValueError, OSError):
                     resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit))
 
+            # 4. プロセス生成数上限 (RLIMIT_NPROC: 動的計算された上限を設定) (JJJ.3)
+            if nproc_limits and hasattr(resource, "RLIMIT_NPROC"):
+                with contextlib.suppress(ValueError, OSError):
+                    resource.setrlimit(resource.RLIMIT_NPROC, nproc_limits)
+
+    def _get_sandbox_backend(self) -> str | None:
+        """利用可能な OS サンドボックス機構を検出する (macOS: sandbox-exec, Linux: bwrap)。"""
+        if sys.platform == "darwin" and shutil.which("sandbox-exec"):
+            return "sandbox-exec"
+        if shutil.which("bwrap"):
+            return "bwrap"
+        return None
+
+    def _capture_repo_snapshot(self) -> dict[str, Any]:
+        """元リポジトリの改ざん検知用スナップショットを取得する (JJJ.2)。"""
+        resolved_repo = self.repo_dir.resolve()
+        is_git = (resolved_repo / ".git").is_dir()
+        if is_git:
+            # 1. HEAD ハッシュ
+            proc_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=resolved_repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            head_commit = proc_head.stdout.strip() if proc_head.returncode == 0 else ""
+
+            # 2. ステータス (追跡・未追跡・無視ファイルすべて)
+            proc_status = subprocess.run(
+                ["git", "status", "--porcelain", "--ignored", "--untracked-files=all"],
+                cwd=resolved_repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            status_text = proc_status.stdout if proc_status.returncode == 0 else ""
+
+            # 3. diff ハッシュ
+            diff_args = ["git", "diff", "HEAD", "--binary"] if head_commit else ["git", "diff", "--binary"]
+            proc_diff = subprocess.run(
+                diff_args,
+                cwd=resolved_repo,
+                capture_output=True,
+                check=False,
+            )
+            diff_hash = hashlib.sha256(proc_diff.stdout).hexdigest() if proc_diff.returncode == 0 else ""
+
+            return {
+                "type": "git",
+                "head": head_commit,
+                "status": status_text,
+                "diff_hash": diff_hash,
+            }
+
+        # 非 Git リポジトリ: ファイルツリー走査
+        file_hashes: dict[str, str] = {}
+        for p in sorted(resolved_repo.rglob("*")):
+            if p.is_file():
+                rel = str(p.relative_to(resolved_repo))
+                with contextlib.suppress(OSError):
+                    file_hashes[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+        return {
+            "type": "tree",
+            "files": file_hashes,
+        }
+
+    def _compare_repo_snapshots(
+        self, before: dict[str, Any], after: dict[str, Any]
+    ) -> list[str]:
+        """実行前後のスナップショットを比較し、改ざんされた相対パス一覧を返す (JJJ.2)。"""
+        if before.get("type") == "git" and after.get("type") == "git":
+            if before == after:
+                return []
+            changed_paths: list[str] = []
+            if before.get("head") != after.get("head"):
+                changed_paths.append(".git/HEAD")
+            before_lines = set(before.get("status", "").splitlines())
+            after_lines = set(after.get("status", "").splitlines())
+            for line in after_lines - before_lines:
+                parts = line.strip().split(maxsplit=1)
+                changed_paths.append(parts[1] if len(parts) == 2 else line.strip())
+            for line in before_lines - after_lines:
+                parts = line.strip().split(maxsplit=1)
+                changed_paths.append(parts[1] if len(parts) == 2 else line.strip())
+            if not changed_paths and before.get("diff_hash") != after.get("diff_hash"):
+                changed_paths.append("tracked_diff_modified")
+            return sorted(set(changed_paths))
+        if before.get("type") == "tree" and after.get("type") == "tree":
+            b_files = before.get("files", {})
+            a_files = after.get("files", {})
+            all_keys = set(b_files.keys()) | set(a_files.keys())
+            diffs = [k for k in all_keys if b_files.get(k) != a_files.get(k)]
+            return sorted(diffs)
+        return ["snapshot_type_mismatch"]
+
     def _execute_test(
         self,
         test_file: Path,
@@ -463,15 +596,43 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         本体リポジトリ汚染を防ぐため、実行作業ディレクトリは使い捨ての一時クローン sandbox_dir に隔離し、
         シークレット等の機密環境変数を除外サニタイズした上で、本体作業ツリーを OS 権限レベルおよび
         カーネルファイルフラグで読取専用にロックダウンして実行する。
+        さらに、OS レベルのサンドボックス (macOS sandbox-exec / Linux bwrap) の内側でのみ実行し、
+        外部ネットワーク接続および元リポジトリへのファイル書き込みをカーネルレベルで遮断する (JJJ.1)。
+        また、プロセスグループ分離 (start_new_session=True) により子孫プロセスを一括回収する (JJJ.3)。
+
+        【既知の制約 (Known Limitation)】:
+        プロセスグループ単位での SIGKILL による一括回収（リーピング）を行うが、
+        子プロセスが意図的に `setsid()` や独自プロセスグループ (`setpgid`) を呼び出して
+        セッション・プロセスグループを切り離した場合、親からのプロセスグループシグナルは
+        届かない。完全なプロセスツリー追跡およびプロセス隔離には、OS レベルの
+        cgroup やコンテナ (PID namespace) が必要である。
         """
+        nproc_limits, proc_limit_status = self._compute_nproc_limit()
+
+        def _res(**kwargs: Any) -> RedVerificationResult:
+            if "process_limit_status" not in kwargs:
+                kwargs["process_limit_status"] = proc_limit_status
+            return RedVerificationResult(**kwargs)
+
         # 0. root (UID 0) 実行検知と安全遮断 (OSパーミッション迂回の防止)
         if hasattr(os, "geteuid") and os.geteuid() == 0:
-            return RedVerificationResult(
+            return _res(
                 is_reproduced=False,
                 exit_code=1,
                 reason="ROOT_EXECUTION_FORBIDDEN",
                 output="Running candidate tests as root (UID 0) bypasses OS permission lockdown and is forbidden.",
                 reason_detail="Running candidate tests as root (UID 0) bypasses OS permission lockdown and is forbidden.",
+            )
+
+        # 0.1 OS サンドボックス基盤の確認 (Fail-Closed: サンドボックス不可時は即座に拒絶)
+        backend = self._get_sandbox_backend()
+        if not backend:
+            return _res(
+                is_reproduced=False,
+                exit_code=1,
+                reason="SANDBOX_UNAVAILABLE",
+                output="OS sandbox mechanism (sandbox-exec on macOS or bwrap on Linux) is not available or failed to initialize.",
+                reason_detail="OS sandbox execution environment is unavailable (Fail-Closed).",
             )
 
         # 1. 環境変数のサニタイズ（シークレット・APIキー・危険動的変数の除外）
@@ -485,60 +646,149 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
         # 2. 実行作業ディレクトリの隔離 (本体 repo_dir への書き込み防止)
         exec_cwd = sandbox_dir or Path(search_dir)
+        exec_resolved = exec_cwd.resolve()
+        repo_resolved = self.repo_dir.resolve()
 
         # PYTHONPATH は元リポジトリではなく、一時クローンのパスを設定
-        src_path = str((exec_cwd / "src").resolve())
-        repo_path = str(exec_cwd.resolve())
+        src_path = str(exec_resolved / "src")
+        repo_path = str(exec_resolved)
         sanitized_env["PYTHONPATH"] = f"{src_path}:{repo_path}"
+        sanitized_env["TMPDIR"] = str(exec_resolved)
 
-        cmd = [
+        runner_args = [
             sys.executable,
             "-c",
             self.RUNNER_CODE,
             search_dir,
             test_file.name,
-            str(self.repo_dir.resolve()),
+            str(repo_resolved),
         ]
 
-        preexec = (lambda: self._apply_resource_limits(timeout_sec)) if os.name == "posix" else None
-
-        try:
-            with self._lockdown_repo(self.repo_dir):
-                proc = subprocess.run(
-                    cmd,
-                    cwd=exec_cwd,
-                    env=sanitized_env,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_sec,
-                    preexec_fn=preexec,
-                    check=False,
-                )
-        except subprocess.TimeoutExpired as e:
-            return RedVerificationResult(
-                is_reproduced=False,
-                exit_code=124,
-                reason="TIMEOUT",
-                output=str(e),
-                reason_detail=f"Test timed out after {timeout_sec}s",
-            )
-        except Exception as e:  # noqa: BLE001
-            return RedVerificationResult(
+        profile_file: Path | None = None
+        if backend == "sandbox-exec":
+            profile_content = f"""(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write* (subpath "{exec_resolved}"))
+(allow file-write* (literal "/dev/null"))
+(allow file-write* (literal "/dev/zero"))
+(allow file-write* (literal "/dev/dtracehelper"))
+(deny file-write* (subpath "{repo_resolved}"))
+(deny network*)
+"""
+            with tempfile.NamedTemporaryFile("w", suffix=".sb", delete=False, dir=str(exec_resolved)) as tf:
+                tf.write(profile_content)
+                tf.flush()
+                profile_file = Path(tf.name)
+            cmd = ["sandbox-exec", "-f", str(profile_file)] + runner_args
+        elif backend == "bwrap":
+            cmd = [
+                "bwrap",
+                "--ro-bind", "/", "/",
+                "--bind", str(exec_resolved), str(exec_resolved),
+                "--dev", "/dev",
+                "--proc", "/proc",
+                "--unshare-net",
+                "--die-with-parent",
+            ] + runner_args
+        else:
+            return _res(
                 is_reproduced=False,
                 exit_code=1,
-                reason="EXECUTION_ERROR",
-                output=str(e),
-                reason_detail=str(e),
+                reason="SANDBOX_UNAVAILABLE",
+                output=f"Unknown sandbox backend: {backend}",
+                reason_detail="Unknown sandbox backend.",
             )
 
-        output = (proc.stdout + "\n" + proc.stderr).strip()
+        preexec = (
+            (lambda: self._apply_resource_limits(timeout_sec, nproc_limits))
+            if os.name == "posix"
+            else None
+        )
+
+        before_snapshot = self._capture_repo_snapshot()
+
+        proc = subprocess.Popen(
+            cmd,
+            cwd=exec_cwd,
+            env=sanitized_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=bool(os.name == "posix"),
+            preexec_fn=preexec,  # noqa: PLW1509
+        )
+        pgid = proc.pid
+        stdout = ""
+        stderr = ""
+
+        try:
+            try:
+                with self._lockdown_repo(self.repo_dir):
+                    stdout, stderr = proc.communicate(timeout=timeout_sec)
+            except subprocess.TimeoutExpired as e:
+                if pgid and os.name == "posix":
+                    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                        os.killpg(pgid, signal.SIGKILL)
+                with contextlib.suppress(Exception):
+                    stdout, stderr = proc.communicate(timeout=5)
+                return _res(
+                    is_reproduced=False,
+                    exit_code=124,
+                    reason="TIMEOUT",
+                    output=str(e),
+                    reason_detail=f"Test timed out after {timeout_sec}s",
+                )
+            except Exception as e:  # noqa: BLE001
+                if pgid and os.name == "posix":
+                    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                        os.killpg(pgid, signal.SIGKILL)
+                return _res(
+                    is_reproduced=False,
+                    exit_code=1,
+                    reason="EXECUTION_ERROR",
+                    output=str(e),
+                    reason_detail=str(e),
+                )
+        finally:
+            # 正常終了時・例外時にも残存した子孫プロセスグループ全体を一括回収 (JJJ.3)
+            if pgid and os.name == "posix":
+                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                    os.killpg(pgid, signal.SIGKILL)
+            if profile_file and profile_file.exists():
+                with contextlib.suppress(OSError):
+                    profile_file.unlink()
+
+        # 3. 元リポジトリ改ざん検知 (JJJ.2: 多層防御)
+        after_snapshot = self._capture_repo_snapshot()
+        tampered_paths = self._compare_repo_snapshots(before_snapshot, after_snapshot)
+        if tampered_paths:
+            return _res(
+                is_reproduced=False,
+                exit_code=1,
+                reason="REPO_TAMPER_DETECTED",
+                output=f"Parent repository tampering detected after candidate test execution. Modified paths: {tampered_paths}",
+                reason_detail=f"Parent repository was tampered with during test execution: {', '.join(tampered_paths)}",
+            )
+
+        returncode = proc.returncode if proc.returncode is not None else 1
+        if returncode != 0 and ("sandbox-exec:" in stderr or "sandbox_apply:" in stderr):
+            return _res(
+                is_reproduced=False,
+                exit_code=returncode,
+                reason="SANDBOX_UNAVAILABLE",
+                output=stderr,
+                reason_detail="OS sandbox failed to execute candidate test.",
+            )
+
+        output = (stdout + "\n" + stderr).strip()
 
         # 構造化 TestResult (JSON) の抽出
         marker = "===AUTO_DEV_TEST_RESULT==="
         parsed_result: dict[str, Any] | None = None
-        if marker in proc.stdout:
+        if marker in stdout:
             try:
-                json_part = proc.stdout.split(marker, 1)[1].strip()
+                json_part = stdout.split(marker, 1)[1].strip()
                 parsed_result = json.loads(json_part)
             except (json.JSONDecodeError, IndexError, ValueError):
                 parsed_result = None
@@ -549,10 +799,10 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             errors: list[dict[str, str]] = parsed_result.get("errors", [])
 
             # 判定 A: 実行件数チェック (0件実行)
-            if tests_run == 0 or proc.returncode == 5:
-                return RedVerificationResult(
+            if tests_run == 0 or returncode == 5:
+                return _res(
                     is_reproduced=False,
-                    exit_code=proc.returncode,
+                    exit_code=returncode,
                     reason="NO_TESTS_RAN",
                     output=output,
                     reason_detail="No test methods were executed during unittest run (ran_count=0).",
@@ -563,7 +813,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
             # 判定 B: すでに Green (エラーも失敗もなし)
             if tests_run > 0 and len(failures) == 0 and len(errors) == 0:
-                return RedVerificationResult(
+                return _res(
                     is_reproduced=False,
                     exit_code=0,
                     reason="ALREADY_GREEN",
@@ -583,9 +833,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                     or "ModuleNotFoundError" in err_text
                     or any("_FailedTest" in str(e) for e in errors)
                 ):
-                    return RedVerificationResult(
+                    return _res(
                         is_reproduced=False,
-                        exit_code=proc.returncode,
+                        exit_code=returncode,
                         reason="IMPORT_ERROR",
                         output=output,
                         reason_detail="Test failed due to ImportError / ModuleNotFoundError.",
@@ -595,9 +845,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                     )
                 # setUp() / tearDown() での環境例外
                 if "in setUp" in err_text or "in tearDown" in err_text:
-                    return RedVerificationResult(
+                    return _res(
                         is_reproduced=False,
-                        exit_code=proc.returncode,
+                        exit_code=returncode,
                         reason="SETUP_ERROR",
                         output=output,
                         reason_detail="Test failure occurred during setUp/tearDown rather than test body assertion.",
@@ -606,9 +856,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                         errors=len(errors),
                     )
                 # テスト本体内での予期せぬ例外 (アサーション失敗ではない)
-                return RedVerificationResult(
+                return _res(
                     is_reproduced=False,
-                    exit_code=proc.returncode,
+                    exit_code=returncode,
                     reason="UNHANDLED_EXCEPTION",
                     output=output,
                     reason_detail="Test exited with error/exception without an assertion failure (failures=0, errors>0).",
@@ -619,9 +869,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
             # 判定 E: アサーション失敗 (failures > 0, errors == 0) による真正な Red
             if len(failures) > 0:
-                return RedVerificationResult(
+                return _res(
                     is_reproduced=True,
-                    exit_code=proc.returncode,
+                    exit_code=returncode,
                     reason="GENUINE_RED",
                     output=output,
                     reason_detail="Candidate test failed as expected with assertion failure (Genuine Red).",
@@ -638,10 +888,10 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         m_err = re.search(r"errors=(\d+)", output)
         err_count = int(m_err.group(1)) if m_err else (1 if "ERROR:" in output else 0)
 
-        if ran_count == 0 or "NO TESTS RAN" in output or proc.returncode == 5:
-            return RedVerificationResult(
+        if ran_count == 0 or "NO TESTS RAN" in output or returncode == 5:
+            return _res(
                 is_reproduced=False,
-                exit_code=proc.returncode,
+                exit_code=returncode,
                 reason="NO_TESTS_RAN",
                 output=output,
                 reason_detail="No test methods were executed during unittest run (ran_count=0).",
@@ -650,8 +900,8 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 errors=err_count,
             )
 
-        if proc.returncode == 0:
-            return RedVerificationResult(
+        if returncode == 0:
+            return _res(
                 is_reproduced=False,
                 exit_code=0,
                 reason="ALREADY_GREEN",
@@ -667,9 +917,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             or "ModuleNotFoundError:" in output
             or "ImportError:" in output
         ):
-            return RedVerificationResult(
+            return _res(
                 is_reproduced=False,
-                exit_code=proc.returncode,
+                exit_code=returncode,
                 reason="IMPORT_ERROR",
                 output=output,
                 reason_detail="Test failed due to ImportError / ModuleNotFoundError.",
@@ -679,9 +929,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             )
 
         if "in setUp" in output or "in tearDown" in output:
-            return RedVerificationResult(
+            return _res(
                 is_reproduced=False,
-                exit_code=proc.returncode,
+                exit_code=returncode,
                 reason="SETUP_ERROR",
                 output=output,
                 reason_detail="Test failure occurred during setUp/tearDown rather than test body assertion.",
@@ -690,9 +940,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 errors=err_count,
             )
 
-        return RedVerificationResult(
+        return _res(
             is_reproduced=False,
-            exit_code=proc.returncode,
+            exit_code=returncode,
             reason="UNHANDLED_EXCEPTION",
             output=output,
             reason_detail="Test exited with error/exception without structured test result.",

@@ -9,7 +9,9 @@ on:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    # Phase 50 (SPEC 機能JJJ.1): 候補テストは OS サンドボックス内でのみ実行する（基盤がなければ Fail-Closed）。
+    # macOS ランナーには sandbox-exec が標準で入っており、ローカルと同じ経路を検証できる（人間の判断: 2026-11-12 案A）。
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:

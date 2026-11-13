@@ -551,7 +551,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - Maker が `AUTO_DEV_CONTEXT_FILE` と `AUTO_DEV_LESSONS_FILE` を受信し、両ファイルが実在したことをアサートする。
      - 修正をコミットせずに `resolve_task()` を呼んだ場合に `UNCOMMITTED_AFTER_STATE` で拒絶され、免疫テストが作成されないことを検証する。
      - 全自動検証ゲート（286+ テスト、Ruff、Mypy）に合格し、`verify-step` / `commit-step` で正規に発行された Evidence Record を含む Evidence Bundle が `VERIFIED` となること。
-- [ ] 機能III (Stage 7 コミット指定検証のFail-Closed・Proof詳細化・実行隔離強化 Stage 7 Commit Verification Fail-Closed, Detailed Proofs, and Execution Isolation):
+- [x] 機能III (Stage 7 コミット指定検証のFail-Closed・Proof詳細化・実行隔離強化 Stage 7 Commit Verification Fail-Closed, Detailed Proofs, and Execution Isolation):
   1. コミット指定検証の Fail-Closed 徹底 (III.1 / Sol氏 Phase 48 P1指摘):
      - `RedTestVerifier.verify_candidate_test(..., commit=...)` および `_create_isolated_clone(..., commit=...)` において、`commit` が指定されている場合に `git checkout --detach <commit>` が失敗、またはクローンに失敗した時は `shutil.copytree` へのフォールバックを物理遮断し、`COMMIT_CHECKOUT_FAILED`（exit_code != 0, is_reproduced=False）で即座に検証拒絶（Fail-Closed）する。
      - 存在しないコミット（例: `"0" * 40`）を指定した場合に、現行作業ツリーでテストを実行して Green を返さないことを単体テストで決定論的に実証。
@@ -561,6 +561,24 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   3. 候補テストのOSレベル実行隔離・リソース境界強化と Level 7 E2E 通し試験 (III.3):
      - `RedTestVerifier._execute_test()` において、プロセス実行時のリソース境界（タイムアウト制限に加え、過剰なメモリ・プロセスフォーク・巨大ファイル出力を防ぐ制限）および環境変数の遮断を行い、外部生成候補コードに対する防御層を強化する。
      - `tests/test_level7_real_loop_e2e.py` を更新し、コミット指定 Fail-Closed、Proof 詳細記録、LESSONS.md のコミット参照追記、および全自動検証ゲート（292+ テスト、Ruff、Mypy）に合格すること。
+- [ ] 機能JJJ (Stage 7 候補テストのOSサンドボックス実行・元リポジトリ改ざん検知・子孫プロセス回収 Stage 7 OS Sandbox Execution, Repository Tamper Detection, and Process Reaping):
+  1. OSサンドボックスによる候補テスト実行と Fail-Closed (JJJ.1 / Sol氏 Phase 49 P0指摘):
+     - `RedTestVerifier._execute_test()` は候補テストを OS のサンドボックス機構の内側でのみ実行する。macOS では `sandbox-exec` を用い、ファイル書き込みは一時サンドボックスディレクトリ・実行専用の一時ディレクトリ・`/dev/null` 等の必要最小限のみを許可する許可リスト方式とし、ネットワークを遮断する。Linux では `bwrap`（bubblewrap）が利用可能な場合に同等の構成（元リポジトリを含むホストのファイルシステムは読み取り専用、書き込みは一時ディレクトリのみ、ネットワーク名前空間の分離）で実行する。サンドボックスの制約は、候補コードが起動した子孫プロセス（シェル・`chmod` 等）にも及ぶこと。
+     - 利用可能なサンドボックス機構がない、またはサンドボックスの起動自体に失敗した場合は、非サンドボックス実行へフォールバックせず `SANDBOX_UNAVAILABLE`（is_reproduced=False, exit_code != 0）で検証を拒絶する。環境変数・引数等による非サンドボックス実行の許可経路は設けない。
+     - 候補テストがサブプロセス経由（例: `sh -c 'chmod u+w <canary>; echo CHANGED > <canary>'`）で元リポジトリの canary ファイルを書き換えようとしても canary が `ORIGINAL` のまま変化しないこと、およびサンドボックス外へのネットワーク接続が失敗することを単体テストで実証する（Sol氏 Phase 49 再現手順）。
+  2. 元リポジトリ改ざん検知による多層防御 (JJJ.2 / Sol氏 Phase 49 P0指摘):
+     - 候補テスト実行の直前と直後で元リポジトリ（`self.repo_dir`）の状態スナップショットを取得・比較する。Git 管理下では HEAD・`git status --porcelain --ignored --untracked-files=all` の出力・`git diff HEAD --binary` のハッシュを、Git 管理外ではファイルツリー（相対パス・内容ハッシュ）を比較対象とする。
+     - 差異を検知した場合は、テスト結果（Red/Green）に関わらず `REPO_TAMPER_DETECTED`（is_reproduced=False, exit_code != 0）を返し、差異のあったパスを `reason_detail` に記録する。改ざんを伴う実行を `GENUINE_RED` として受理しない。
+     - サンドボックスを経由せずに元リポジトリを書き換える実行（テスト用に注入した実行関数）に対しても `REPO_TAMPER_DETECTED` が返ることを単体テストで実証する。
+  3. プロセス数制限と子孫プロセスの一括回収 (JJJ.3 / Sol氏 Phase 49 P1指摘):
+     - 候補テストは新しいセッション（`start_new_session=True`）で起動し、正常終了・タイムアウト・例外のいずれの場合も、そのプロセスグループ全体を `os.killpg`（SIGKILL）で回収する。
+     - 子プロセス生成数に上限を設ける。`RLIMIT_NPROC` がユーザー全体のプロセス数を数える OS では、起動時点のユーザープロセス数を基準に上乗せ上限を設定する。上限を設定できない場合はその旨を結果に記録する。
+     - 候補テストがバックグラウンドで長時間プロセス（固有マーカー付きの `sleep`）を複数起動した場合でも、`verify_candidate_test()` の復帰後にマーカー付きプロセスが1つも残存しないことを単体テストで実証する。`setsid` 等でプロセスグループを離脱したプロセスは本機能の回収対象外であり、既知の限界として設計ドキュメントに明記する。
+     - リポジトリに誤ってコミットされた生成物 `test_large.bin` を削除する。
+  4. 受入・報告の正確性・全体検証ゲート (JJJ.4):
+     - `tests/test_level7_real_loop_e2e.py` を、サンドボックス実行下で Level 7 クローズドループが完走することを検証する形に更新し、サブプロセス経由の元リポジトリ書き換えを試みる悪意ある再現テストが `REPO_TAMPER_DETECTED` または canary 不変のいずれかで拒絶され、PLAN登録・免疫昇格・LESSONS記録に進まないことを検証する。
+     - `NIGHTLY_REPORT.md` の成果要約は、実証した範囲と未実証の範囲（既知の限界）を分けて記載し、検証していない性質（例: 完全なOS隔離、実Multi-LLM運用）を達成済みと記載しない。
+     - 全自動検証ゲート（295+ テスト、Ruff、Mypy）に合格し、`verify-step` / `commit-step` で正規に発行された Evidence Record を含む Evidence Bundle が `VERIFIED` となること。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

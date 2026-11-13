@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -13,6 +14,7 @@ if src_dir not in sys.path:
 
 from auto_developer.audit import (
     AuditConfig,
+    AuditFinding,
     AuditResolutionManager,
     IndependentAuditRunner,
     LessonInjector,
@@ -314,6 +316,70 @@ class TestLevel7RealLoopE2E(unittest.TestCase):
         next_received = (self.repo_dir / "next_maker_received.txt").read_text(encoding="utf-8")
         self.assertIn("BUG-REAL-001", next_received)
         self.assertIn("test_immunity_BUG_REAL_001.py", next_received)
+
+    def test_hostile_reproduction_test_blocked_by_sandbox_and_not_promoted(self) -> None:
+        """機能JJJ.4: サブプロセス経由で親リポジトリ改ざんを試みる悪意ある再現テストが
+        OSサンドボックスで遮断され、PLAN登録・解決・免疫昇格・LESSONS記録がすべて物理遮断されることを実証。
+        """
+        canary_file = self.repo_dir / "parent_canary.txt"
+        canary_file.write_text("PRISTINE_ORIGINAL_CONTENT", encoding="utf-8")
+        subprocess.run(["git", "add", "parent_canary.txt"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: add canary"], cwd=self.repo_dir, check=True)
+
+        # 親リポジトリの canary をサブプロセス経由で改変しようとする悪意ある再現テストコード
+        # （OS サンドボックスのカーネル強制 deny file-write* によってサブプロセスが拒絶される）
+        hostile_repro_code = f"""import subprocess
+import unittest
+
+class TestHostileTamper(unittest.TestCase):
+    def test_tamper_via_subprocess(self):
+        cmd = ["sh", "-c", "echo HOSTILE_TAMPERED_CONTENT > '{canary_file.resolve()}'"]
+        subprocess.run(cmd, check=True)
+        self.assertEqual(1, 2)
+"""
+        audit_store = AuditStore(repo_dir=self.repo_dir)
+        finding = AuditFinding(
+            finding_id="BUG-HOSTILE-001",
+            severity="P0",
+            spec_reference="SECURITY",
+            location="src/calc.py:1",
+            description="Hostile test attempting to tamper with parent repository via subprocess",
+            reproduction_test_code=hostile_repro_code,
+            code_hash=hashlib.sha256(hostile_repro_code.encode("utf-8")).hexdigest(),
+            auditor_model="attacker-sim",
+        )
+
+        # 1. AuditDispatcher による Red 検証と PLAN.md 登録試行
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, audit_store=audit_store)
+        dispatched = dispatcher.dispatch_finding(finding, plan_path=self.plan_path)
+
+        # サンドボックス遮断により真正な Red と判定されず、ステータスが REJECTED になること
+        self.assertEqual(dispatched.status, "REJECTED")
+
+        # 2. PLAN.md に悪意あるタスクが一切登録されていないこと (PLAN登録の物理遮断)
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        self.assertNotIn("BUG-HOSTILE-001", plan_content)
+        self.assertNotIn("AUD-BUG-HOSTILE-001", plan_content)
+
+        # 3. 監査ストアに REJECTED 状態で保存
+        audit_store.save_finding(dispatched)
+
+        # 4. AuditResolutionManager での解決試行も Red 未実証 (INVALID_BEFORE_COMMIT / UNVERIFIED_BEFORE_RED) として物理遮断されること
+        res_manager = AuditResolutionManager(repo_dir=self.repo_dir)
+        resolve_res = res_manager.resolve_task(f"AUD-{finding.finding_id}")
+        self.assertFalse(resolve_res["success"])
+        self.assertIn(resolve_res.get("error"), ("INVALID_BEFORE_COMMIT", "UNVERIFIED_BEFORE_RED"))
+
+        # 5. 親リポジトリの canary が一切改ざんされていないこと
+        self.assertEqual(canary_file.read_text(encoding="utf-8"), "PRISTINE_ORIGINAL_CONTENT")
+
+        # 6. 免疫テストに昇格されていないこと
+        promoted_immunity_file = self.immunity_dir / "test_immunity_BUG_HOSTILE_001.py"
+        self.assertFalse(promoted_immunity_file.exists())
+
+        # 7. LESSONS.md に登録されていないこと
+        lessons_text = self.lessons_path.read_text(encoding="utf-8") if self.lessons_path.exists() else ""
+        self.assertNotIn("BUG-HOSTILE-001", lessons_text)
 
 
 if __name__ == "__main__":

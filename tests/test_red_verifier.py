@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import contextlib
+import os
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from typing import Any
 
 src_dir = str(Path(__file__).resolve().parent.parent / "src")
 if src_dir not in sys.path:
@@ -408,6 +413,183 @@ class EnvCheckTest(unittest.TestCase):
             os.environ.pop("LD_TEST_PRELOAD", None)
             os.environ.pop("PYTHONSTARTUP", None)
             os.environ.pop("MY_SECRET_TOKEN", None)
+
+    def test_sandbox_prevents_subprocess_tampering_of_parent_repo(self) -> None:
+        """機能JJJ.1: 候補テストがサブプロセス経由で元リポジトリの canary を書き換えようとしても、OSサンドボックスにより物理遮断され ORIGINAL が保たれること。"""
+        canary = self.repo_dir / "canary_jjj1.txt"
+        canary.write_text("ORIGINAL", encoding="utf-8")
+        canary_abs = str(canary.resolve())
+
+        code = f"""import subprocess
+import unittest
+
+class HostileSubprocessTest(unittest.TestCase):
+    def test_tamper(self):
+        # サブプロセスを起動して chmod +w し、canary の書き換えを試みる (Sol氏 Phase 49 再現手順)
+        subprocess.run(["sh", "-c", "chmod 777 '{canary_abs}' && echo TAMPERED > '{canary_abs}'"], capture_output=True)
+        self.assertEqual(1, 2)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        # canary は絶対に改変されていないこと (物理的不変性)
+        self.assertEqual(canary.read_text(encoding="utf-8"), "ORIGINAL")
+        self.assertTrue(result.is_reproduced)
+
+    def test_sandbox_blocks_network_access(self) -> None:
+        """機能JJJ.1: 候補テストからの外部ネットワーク接続が OS サンドボックスにより拒絶されること。"""
+        code = """import unittest
+import urllib.request
+
+class NetAccessTest(unittest.TestCase):
+    def test_connect(self):
+        urllib.request.urlopen("https://example.com", timeout=2)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        # ネットワーク接続失敗（URLError / OSError）により ALREADY_GREEN にならず失敗すること
+        self.assertFalse(result.is_reproduced)
+        self.assertIn("URLError", result.output)
+
+    def test_fails_closed_when_sandbox_unavailable(self) -> None:
+        """機能JJJ.1: 利用可能なOSサンドボックス機構がない場合、非サンドボックスへフォールバックせず SANDBOX_UNAVAILABLE で拒絶すること。"""
+        from unittest.mock import patch
+        code = """import unittest
+class SimpleTest(unittest.TestCase):
+    def test_repro(self):
+        self.assertEqual(1, 2)
+"""
+        with patch.object(self.verifier, "_get_sandbox_backend", return_value=None):
+            result = self.verifier.verify_candidate_test(code)
+            self.assertFalse(result.is_reproduced)
+            self.assertEqual(result.reason, "SANDBOX_UNAVAILABLE")
+            self.assertNotEqual(result.exit_code, 0)
+
+    def test_repo_tamper_detected_when_parent_repo_modified(self) -> None:
+        """機能JJJ.2: テスト実行中に元リポジトリが改変された場合、アサーション成否に関わらず REPO_TAMPER_DETECTED で即座に拒絶されること。"""
+        from unittest.mock import MagicMock, patch
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 99999
+        mock_proc.returncode = 1
+
+        def hostile_communicate(timeout: int | None = None) -> tuple[str, str]:
+            # テスト実行中にフラグ・パーミッションを強制復元して元リポジトリへファイルを不正作成 (改ざん注入)
+            subprocess.run(["chflags", "nouchg", str(self.repo_dir)], check=False)
+            os.chmod(self.repo_dir, 0o755)
+            tamper_file = self.repo_dir / "injected_tamper.txt"
+            tamper_file.write_text("TAMPERED_IN_FLIGHT", encoding="utf-8")
+            # 正常な Red (AssertionError) の結果を偽装して返す
+            return (
+                '===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [{"err": "hostile"}], "errors": []}',
+                "",
+            )
+
+        mock_proc.communicate.side_effect = hostile_communicate
+
+        orig_popen = subprocess.Popen
+
+        def popen_router(*args: Any, **kwargs: Any) -> Any:
+            cmd = args[0] if args else kwargs.get("args", [])
+            if cmd and any("sandbox" in str(c) or "bwrap" in str(c) or "-c" in str(c) for c in cmd):
+                return mock_proc
+            return orig_popen(*args, **kwargs)
+
+        code = """import unittest
+class TamperingTest(unittest.TestCase):
+    def test_repro(self):
+        self.assertEqual(1, 2)
+"""
+        with patch("subprocess.Popen", side_effect=popen_router):
+            result = self.verifier.verify_candidate_test(code)
+            # アサーション失敗があっても GENUINE_RED にならず REPO_TAMPER_DETECTED で拒絶されること
+            self.assertFalse(result.is_reproduced)
+            self.assertEqual(result.reason, "REPO_TAMPER_DETECTED")
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("injected_tamper.txt", result.reason_detail)
+
+    def test_reaps_multiple_descendant_processes_on_completion(self) -> None:
+        """機能JJJ.3: 候補テストが複数のバックグラウンドプロセスを起動しても、完了後にすべて一括回収されること。"""
+        marker = "auto_dev_test_multi_zombie_marker_completion_1122"
+        code = f"""import subprocess
+import sys
+import unittest
+
+class MultiZombieProcessTest(unittest.TestCase):
+    def test_spawn_multiple_and_exit(self):
+        # 3つのバックグラウンドプロセスを起動
+        for i in range(3):
+            cmd = [sys.executable, "-c", "import time; # {marker}\\ntime.sleep(60)"]
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.assertEqual(1, 1)
+"""
+        try:
+            result = self.verifier.verify_candidate_test(code)
+            self.assertEqual(result.reason, "ALREADY_GREEN")
+
+            # 完了後、マーカーを持つプロセスが1つも残存していないこと
+            time.sleep(0.2)
+            p_check = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True, check=False)
+            surviving = [p for p in p_check.stdout.strip().splitlines() if p and int(p) != os.getpid()]
+            self.assertEqual(surviving, [], f"Zombie processes survived after completion: {surviving}")
+        finally:
+            p_clean = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True, check=False)
+            for p in p_clean.stdout.strip().splitlines():
+                if p and int(p) != os.getpid():
+                    with contextlib.suppress(Exception):
+                        os.kill(int(p), 9)
+
+    def test_reaps_multiple_descendant_processes_on_timeout(self) -> None:
+        """機能JJJ.3: 候補テストがタイムアウトした場合でも、起動した子孫プロセス全体が一括回収されること。"""
+        marker = "auto_dev_test_multi_zombie_marker_timeout_3344"
+        code = f"""import subprocess
+import sys
+import time
+import unittest
+
+class TimeoutZombieProcessTest(unittest.TestCase):
+    def test_spawn_and_hang(self):
+        # 3つのバックグラウンドプロセスを起動
+        for i in range(3):
+            cmd = [sys.executable, "-c", "import time; # {marker}\\ntime.sleep(60)"]
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # テスト自身が無限ループでハング
+        while True:
+            time.sleep(0.1)
+"""
+        try:
+            result = self.verifier.verify_candidate_test(code, timeout_sec=2)
+            self.assertEqual(result.reason, "TIMEOUT")
+
+            # タイムアウト後、マーカーを持つプロセスが1つも残存していないこと
+            time.sleep(0.2)
+            p_check = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True, check=False)
+            surviving = [p for p in p_check.stdout.strip().splitlines() if p and int(p) != os.getpid()]
+            self.assertEqual(surviving, [], f"Zombie processes survived after timeout: {surviving}")
+        finally:
+            p_clean = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True, check=False)
+            for p in p_clean.stdout.strip().splitlines():
+                if p and int(p) != os.getpid():
+                    with contextlib.suppress(Exception):
+                        os.kill(int(p), 9)
+
+    def test_nproc_limit_computation_and_status_recording(self) -> None:
+        """機能JJJ.3: RLIMIT_NPROC の動的計算と RedVerificationResult への設定ステータス記録を検証。"""
+        limits, status = self.verifier._compute_nproc_limit(margin=30)
+        if os.name == "posix":
+            self.assertIn("applied: limit=", status)
+            self.assertIsNotNone(limits)
+            assert limits is not None
+            self.assertGreaterEqual(limits[0], 30)
+
+        # 実際のテスト実行結果に process_limit_status が記録されること
+        code = """import unittest
+class SimpleTest(unittest.TestCase):
+    def test_pass(self):
+        self.assertEqual(1, 1)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        if os.name == "posix":
+            self.assertIn("applied: limit=", result.process_limit_status)
+        else:
+            self.assertEqual(result.process_limit_status, "unsupported")
 
 
 if __name__ == "__main__":

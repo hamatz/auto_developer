@@ -58,6 +58,9 @@
   * 未検証コードの混入を防ぐため、決定論的検証（`verify-step`）通過時にハッシュ拘束された Evidence Token を発行。コミット処理（`commit-step`）はこの証跡を検証・ワンタイム消費しない限り Exit 3 で物理遮断する。
 * **Decision 6 (翌朝の意思決定支援: Actionable Morning Brief)**:
   * 単なる件数ダンプを廃止し、人間が朝戻ってきた際に3分で状況を把握し、具体的なコマンド（差分確認、ログ調査、再試行、破棄）とともに次の判断を下せる `AUTO DEVELOPER / MORNING BRIEF` および CLI コマンド `morning-brief` を提供する。
+* **Decision 7 (プロセスグループ隔離と既知の制約: Process Group Isolation & Known Limitation)**:
+  * 候補テスト実行時のプロセス暴走やゾンビ化を防ぐため、`start_new_session=True` による独立プロセスグループを作成し、タイムアウトや終了時に `os.killpg(pgid, signal.SIGKILL)` で子孫プロセス全体を一括回収（リーピング）する。
+  * 【既知の制約 (Known Limitation)】: 子プロセスが意図的に `setsid()` や独自プロセスグループ (`setpgid`) を呼び出してセッションを切り離した場合、親からのプロセスグループシグナルは届かない。完全なプロセスツリー追跡およびプロセス隔離には OS レベルの cgroup やコンテナ (PID namespace) が必要である。
 
 --------------------------------------------------------------------------------
 
