@@ -505,6 +505,58 @@ class TamperingTest(unittest.TestCase):
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("injected_tamper.txt", result.reason_detail)
 
+    def test_repo_tamper_detected_when_untracked_content_tampered_in_flight(self) -> None:
+        """機能KKK.2: テスト実行中に未追跡ファイルの内容のみが改変された場合でも、REPO_TAMPER_DETECTED で拒絶されること。"""
+        from unittest.mock import MagicMock, patch
+
+        # Git リポジトリ初期化
+        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True)
+        dummy_init = self.repo_dir / "init.txt"
+        dummy_init.write_text("INIT", encoding="utf-8")
+        subprocess.run(["git", "add", "init.txt"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.repo_dir, check=True)
+
+        # 未追跡ファイルを事前に配置
+        probe_untracked = self.repo_dir / "existing_untracked.txt"
+        probe_untracked.write_text("PRISTINE_UNTRACKED", encoding="utf-8")
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 99998
+        mock_proc.returncode = 1
+
+        def hostile_communicate(timeout: int | None = None) -> tuple[str, str]:
+            # テスト実行中にフラグを戻して未追跡ファイルの内容のみを書き換える
+            subprocess.run(["chflags", "-R", "nouchg", str(self.repo_dir)], check=False)
+            os.chmod(self.repo_dir, 0o755)
+            os.chmod(probe_untracked, 0o644)
+            probe_untracked.write_text("TAMPERED_UNTRACKED_IN_FLIGHT", encoding="utf-8")
+            return (
+                '===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [{"err": "hostile"}], "errors": []}',
+                "",
+            )
+
+        mock_proc.communicate.side_effect = hostile_communicate
+        orig_popen = subprocess.Popen
+
+        def popen_router(*args: Any, **kwargs: Any) -> Any:
+            cmd = args[0] if args else kwargs.get("args", [])
+            if cmd and any("sandbox" in str(c) or "bwrap" in str(c) or "-c" in str(c) for c in cmd):
+                return mock_proc
+            return orig_popen(*args, **kwargs)
+
+        code = """import unittest
+class TamperingUntrackedContentTest(unittest.TestCase):
+    def test_repro(self):
+        self.assertEqual(1, 2)
+"""
+        with patch("subprocess.Popen", side_effect=popen_router):
+            result = self.verifier.verify_candidate_test(code)
+            self.assertFalse(result.is_reproduced)
+            self.assertEqual(result.reason, "REPO_TAMPER_DETECTED")
+            self.assertIn("existing_untracked.txt", result.reason_detail)
+
     def test_reaps_multiple_descendant_processes_on_completion(self) -> None:
         """機能JJJ.3: 候補テストが複数のバックグラウンドプロセスを起動しても、完了後にすべて一括回収されること。"""
         marker = "auto_dev_test_multi_zombie_marker_completion_1122"
@@ -640,6 +692,40 @@ class ReadParentRepoTest(unittest.TestCase):
         self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
         # 秘密内容が結果の出力に漏洩していないこと
         self.assertNotIn(secret_content, result.output)
+
+    def test_repo_tamper_detects_untracked_and_ignored_content_modifications(self) -> None:
+        """機能KKK.2: 未追跡ファイルおよび無視ファイルの内容のみが変更された場合でも、
+        スナップショット比較で確実に改ざんが検知されること (Sol氏 Phase 50 再現手順)。
+        """
+        # Git リポジトリ初期化
+        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True)
+
+        # .gitignore をコミット
+        gitignore = self.repo_dir / ".gitignore"
+        gitignore.write_text("*.ignored\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".gitignore"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.repo_dir, check=True)
+
+        # 1. 未追跡ファイルと無視ファイルを作成
+        untracked = self.repo_dir / "probe_untracked.txt"
+        untracked.write_text("ORIGINAL_UNTRACKED", encoding="utf-8")
+        ignored = self.repo_dir / "probe.ignored"
+        ignored.write_text("ORIGINAL_IGNORED", encoding="utf-8")
+
+        before_snapshot = self.verifier._capture_repo_snapshot()
+
+        # 2. ファイル名・パスはそのまま、内容のみ改ざん
+        untracked.write_text("TAMPERED_UNTRACKED_CONTENT", encoding="utf-8")
+        ignored.write_text("TAMPERED_IGNORED_CONTENT", encoding="utf-8")
+
+        after_snapshot = self.verifier._capture_repo_snapshot()
+
+        # 3. 比較により、両方のパスが検知されること
+        diffs = self.verifier._compare_repo_snapshots(before_snapshot, after_snapshot)
+        self.assertIn("probe_untracked.txt", diffs)
+        self.assertIn("probe.ignored", diffs)
 
 
 if __name__ == "__main__":

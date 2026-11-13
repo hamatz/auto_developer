@@ -527,6 +527,27 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             )
             status_text = proc_status.stdout if proc_status.returncode == 0 else ""
 
+            # 2.1 未追跡・無視ファイルの内容ハッシュ・種別記録 (KKK.2 / Sol氏 Phase 50 P1指摘)
+            untracked_hashes: dict[str, str] = {}
+            for line in status_text.splitlines():
+                if line.startswith(("?? ", "!! ")):
+                    rel_path = line[3:].strip()
+                    if rel_path.startswith('"') and rel_path.endswith('"'):
+                        rel_path = rel_path[1:-1]
+                    p = resolved_repo / rel_path
+                    try:
+                        if p.is_symlink():
+                            target = os.readlink(p)
+                            untracked_hashes[rel_path] = f"symlink:{target}"
+                        elif p.is_file():
+                            untracked_hashes[rel_path] = f"file:{hashlib.sha256(p.read_bytes()).hexdigest()}"
+                        elif p.is_dir():
+                            untracked_hashes[rel_path] = "dir"
+                        else:
+                            untracked_hashes[rel_path] = "missing"
+                    except OSError as e:
+                        untracked_hashes[rel_path] = f"error:{e}"
+
             # 3. diff ハッシュ
             diff_args = ["git", "diff", "HEAD", "--binary"] if head_commit else ["git", "diff", "--binary"]
             proc_diff = subprocess.run(
@@ -541,6 +562,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 "type": "git",
                 "head": head_commit,
                 "status": status_text,
+                "untracked_hashes": untracked_hashes,
                 "diff_hash": diff_hash,
             }
 
@@ -574,6 +596,14 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             for line in before_lines - after_lines:
                 parts = line.strip().split(maxsplit=1)
                 changed_paths.append(parts[1] if len(parts) == 2 else line.strip())
+
+            # 未追跡・無視ファイルの内容差分検知 (KKK.2)
+            b_untracked = before.get("untracked_hashes", {})
+            a_untracked = after.get("untracked_hashes", {})
+            for path in set(b_untracked.keys()) | set(a_untracked.keys()):
+                if b_untracked.get(path) != a_untracked.get(path):
+                    changed_paths.append(path)
+
             if not changed_paths and before.get("diff_hash") != after.get("diff_hash"):
                 changed_paths.append("tracked_diff_modified")
             return sorted(set(changed_paths))
