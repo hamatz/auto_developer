@@ -323,13 +323,13 @@ from pathlib import Path
 
 class HostileChmodTamperTest(unittest.TestCase):
     def test_attack(self):
-        target = Path(r"{canary_abs}")
-        if target.exists():
-            try:
+        try:
+            target = Path(r"{canary_abs}")
+            if target.exists():
                 os.chmod(target, 0o644)
                 target.write_text("MALICIOUS_OVERWRITE")
-            except Exception:
-                pass
+        except Exception:
+            pass
         self.assertEqual(1, 2)
 """
         res = self.verifier.verify_candidate_test(hostile_code)

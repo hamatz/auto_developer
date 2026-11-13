@@ -666,6 +666,11 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
         profile_file: Path | None = None
         if backend == "sandbox-exec":
+            home_resolved = Path.home().resolve()
+            py_bin = Path(sys.executable).resolve()
+            py_prefix = Path(sys.prefix).resolve()
+            py_base_prefix = Path(sys.base_prefix).resolve()
+
             profile_content = f"""(version 1)
 (allow default)
 (deny file-write*)
@@ -675,6 +680,12 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 (allow file-write* (literal "/dev/dtracehelper"))
 (deny file-write* (subpath "{repo_resolved}"))
 (deny network*)
+(deny file-read* (subpath "{home_resolved}"))
+(allow file-read* (subpath "{py_prefix}"))
+(allow file-read* (subpath "{py_base_prefix}"))
+(allow file-read* (literal "{py_bin}"))
+(allow file-read* (subpath "{exec_resolved}"))
+(deny file-read* (subpath "{repo_resolved}"))
 """
             with tempfile.NamedTemporaryFile("w", suffix=".sb", delete=False, dir=str(exec_resolved)) as tf:
                 tf.write(profile_content)
@@ -682,15 +693,25 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 profile_file = Path(tf.name)
             cmd = ["sandbox-exec", "-f", str(profile_file)] + runner_args
         elif backend == "bwrap":
-            cmd = [
-                "bwrap",
-                "--ro-bind", "/", "/",
-                "--bind", str(exec_resolved), str(exec_resolved),
+            cmd = ["bwrap"]
+            for sys_dir in ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]:
+                if Path(sys_dir).exists():
+                    cmd.extend(["--ro-bind", sys_dir, sys_dir])
+            for pfx in [sys.prefix, sys.base_prefix]:
+                pfx_path = Path(pfx).resolve()
+                if pfx_path.exists() and not any(
+                    pfx_path == Path(sd) or Path(sd) in pfx_path.parents for sd in ["/usr", "/bin", "/lib", "/lib64"]
+                ):
+                    cmd.extend(["--ro-bind", str(pfx_path), str(pfx_path)])
+            cmd.extend([
                 "--dev", "/dev",
                 "--proc", "/proc",
+                "--tmpfs", "/tmp",
+                "--bind", str(exec_resolved), str(exec_resolved),
                 "--unshare-net",
                 "--die-with-parent",
-            ] + runner_args
+            ])
+            cmd.extend(runner_args)
         else:
             return _res(
                 is_reproduced=False,

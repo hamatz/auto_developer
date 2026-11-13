@@ -320,13 +320,13 @@ class HostileChmodTest(unittest.TestCase):
             os.chmod(p_local, 0o644)
             p_local.write_text("TAMPERED_LOCAL")
         # 元リポジトリの絶対パスへも chmod して改変試行
-        p_abs = Path(r"{canary_abs_path}")
-        if p_abs.exists():
-            try:
+        try:
+            p_abs = Path(r"{canary_abs_path}")
+            if p_abs.exists():
                 os.chmod(p_abs, 0o644)
                 p_abs.write_text("TAMPERED_ABSOLUTE")
-            except Exception:
-                pass
+        except Exception:
+            pass
         self.assertEqual(1, 2)
 """
         result = self.verifier.verify_candidate_test(code)
@@ -590,6 +590,56 @@ class SimpleTest(unittest.TestCase):
             self.assertIn("applied: limit=", result.process_limit_status)
         else:
             self.assertEqual(result.process_limit_status, "unsupported")
+
+    def test_sandbox_blocks_reading_host_home_secrets(self) -> None:
+        """機能KKK.1: サンドボックス内で実行された候補テストがホストのホームディレクトリ内の機密ファイルを読み取れないこと。"""
+        home = Path.home().resolve()
+        probe_secret = home / f".test_secret_probe_{os.getpid()}.txt"
+        secret_content = "SUPER_SECRET_HOST_TOKEN_ABC123"
+        probe_secret.write_text(secret_content, encoding="utf-8")
+        try:
+            code = f"""import unittest
+from pathlib import Path
+
+class ReadSecretTest(unittest.TestCase):
+    def test_leak_secret(self):
+        target = Path("{probe_secret}")
+        # 秘密ファイルを読み取って例外メッセージまたはアサーションで漏洩させようとする
+        content = target.read_text(encoding="utf-8")
+        self.assertEqual(content, "WRONG_TOKEN")
+"""
+            result = self.verifier.verify_candidate_test(code)
+            # サンドボックスにより読み取り例外 (PermissionError / FileNotFoundError) が発生し、
+            # 真正な Red ではなく UNHANDLED_EXCEPTION になること
+            self.assertFalse(result.is_reproduced)
+            self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
+            # 秘密内容が結果の出力に漏洩していないこと
+            self.assertNotIn(secret_content, result.output)
+        finally:
+            if probe_secret.exists():
+                probe_secret.unlink()
+
+    def test_sandbox_blocks_reading_parent_repo_confidential_files(self) -> None:
+        """機能KKK.1: サンドボックス内で実行された候補テストが元リポジトリの機密ファイル（.env 等）を読み取れないこと。"""
+        parent_secret = self.repo_dir / ".env.confidential"
+        secret_content = "CONFIDENTIAL_DB_PASSWORD_XYZ987"
+        parent_secret.write_text(secret_content, encoding="utf-8")
+
+        code = f"""import unittest
+from pathlib import Path
+
+class ReadParentRepoTest(unittest.TestCase):
+    def test_leak_repo_secret(self):
+        target = Path("{parent_secret.resolve()}")
+        content = target.read_text(encoding="utf-8")
+        self.assertEqual(content, "WRONG_PASSWORD")
+"""
+        result = self.verifier.verify_candidate_test(code)
+        # サンドボックスにより読み取り例外が発生し、UNHANDLED_EXCEPTION になること
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
+        # 秘密内容が結果の出力に漏洩していないこと
+        self.assertNotIn(secret_content, result.output)
 
 
 if __name__ == "__main__":
