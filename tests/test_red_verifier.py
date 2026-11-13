@@ -727,6 +727,37 @@ class ReadParentRepoTest(unittest.TestCase):
         self.assertIn("probe_untracked.txt", diffs)
         self.assertIn("probe.ignored", diffs)
 
+    def test_lockdown_active_before_subprocess_popen_spawn(self) -> None:
+        """機能KKK.3: subprocess.Popen が呼び出された時点で、
+        すでに元リポジトリが _lockdown_repo により書き込み禁止になっていること（起動順序レース解消）。
+        """
+        import stat
+        from unittest.mock import patch
+
+        is_locked_at_spawn = False
+        orig_popen = subprocess.Popen
+
+        def inspecting_popen(*args: Any, **kwargs: Any) -> Any:
+            nonlocal is_locked_at_spawn
+            cmd = args[0] if args else kwargs.get("args", [])
+            if cmd and any("sandbox" in str(c) or "bwrap" in str(c) or "-c" in str(c) for c in cmd):
+                st = os.stat(self.repo_dir)
+                is_locked_at_spawn = not bool(st.st_mode & stat.S_IWUSR)
+            return orig_popen(*args, **kwargs)
+
+        code = """import unittest
+class SimplePassTest(unittest.TestCase):
+    def test_pass(self):
+        self.assertEqual(1, 1)
+"""
+        with patch("subprocess.Popen", side_effect=inspecting_popen):
+            result = self.verifier.verify_candidate_test(code)
+            self.assertEqual(result.reason, "ALREADY_GREEN")
+            self.assertTrue(
+                is_locked_at_spawn,
+                "Repository must already be locked down (read-only) at the moment Popen is invoked!",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

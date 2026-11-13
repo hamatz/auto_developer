@@ -759,53 +759,52 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
         before_snapshot = self._capture_repo_snapshot()
 
-        proc = subprocess.Popen(
-            cmd,
-            cwd=exec_cwd,
-            env=sanitized_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=bool(os.name == "posix"),
-            preexec_fn=preexec,  # noqa: PLW1509
-        )
-        pgid = proc.pid
+        pgid: int | None = None
         stdout = ""
         stderr = ""
+        returncode = 1
+        timed_out = False
+        timeout_err: str = ""
+        execution_err: str = ""
 
         try:
-            try:
-                with self._lockdown_repo(self.repo_dir):
+            # 起動順序是正 (KKK.3 / Sol氏 Phase 50 P1指摘):
+            # 元リポジトリを先に完全ロックダウンし、保護された安全な状態の内側で Popen を起動
+            with self._lockdown_repo(self.repo_dir):
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=exec_cwd,
+                    env=sanitized_env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=bool(os.name == "posix"),
+                    preexec_fn=preexec,  # noqa: PLW1509
+                )
+                pgid = proc.pid
+
+                try:
                     stdout, stderr = proc.communicate(timeout=timeout_sec)
-            except subprocess.TimeoutExpired as e:
-                if pgid and os.name == "posix":
-                    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                        os.killpg(pgid, signal.SIGKILL)
-                with contextlib.suppress(Exception):
-                    stdout, stderr = proc.communicate(timeout=5)
-                return _res(
-                    is_reproduced=False,
-                    exit_code=124,
-                    reason="TIMEOUT",
-                    output=str(e),
-                    reason_detail=f"Test timed out after {timeout_sec}s",
-                )
-            except Exception as e:  # noqa: BLE001
-                if pgid and os.name == "posix":
-                    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                        os.killpg(pgid, signal.SIGKILL)
-                return _res(
-                    is_reproduced=False,
-                    exit_code=1,
-                    reason="EXECUTION_ERROR",
-                    output=str(e),
-                    reason_detail=str(e),
-                )
+                except subprocess.TimeoutExpired as e:
+                    timed_out = True
+                    timeout_err = str(e)
+                    if pgid and os.name == "posix":
+                        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                            os.killpg(pgid, signal.SIGKILL)
+                    with contextlib.suppress(Exception):
+                        stdout, stderr = proc.communicate(timeout=5)
+                except Exception as e:  # noqa: BLE001
+                    execution_err = str(e)
+                    if pgid and os.name == "posix":
+                        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                            os.killpg(pgid, signal.SIGKILL)
+                finally:
+                    # 正常終了時・例外時にも残存した子孫プロセスグループ全体を一括回収 (JJJ.3)
+                    if pgid and os.name == "posix":
+                        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                            os.killpg(pgid, signal.SIGKILL)
+                returncode = proc.returncode if proc.returncode is not None else 1
         finally:
-            # 正常終了時・例外時にも残存した子孫プロセスグループ全体を一括回収 (JJJ.3)
-            if pgid and os.name == "posix":
-                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                    os.killpg(pgid, signal.SIGKILL)
             if profile_file and profile_file.exists():
                 with contextlib.suppress(OSError):
                     profile_file.unlink()
@@ -820,6 +819,24 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 reason="REPO_TAMPER_DETECTED",
                 output=f"Parent repository tampering detected after candidate test execution. Modified paths: {tampered_paths}",
                 reason_detail=f"Parent repository was tampered with during test execution: {', '.join(tampered_paths)}",
+            )
+
+        if timed_out:
+            return _res(
+                is_reproduced=False,
+                exit_code=124,
+                reason="TIMEOUT",
+                output=timeout_err,
+                reason_detail=f"Test timed out after {timeout_sec}s",
+            )
+
+        if execution_err:
+            return _res(
+                is_reproduced=False,
+                exit_code=1,
+                reason="EXECUTION_ERROR",
+                output=execution_err,
+                reason_detail=execution_err,
             )
 
         returncode = proc.returncode if proc.returncode is not None else 1
