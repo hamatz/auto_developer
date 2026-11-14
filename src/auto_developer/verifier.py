@@ -836,49 +836,118 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         profile_file: Path | None = None
         home_resolved = Path.home().resolve()
         if backend == "sandbox-exec":
-            py_bin = Path(sys.executable).resolve()
+            py_raw = Path(sys.executable)
+            py_bin = py_raw.resolve()
             py_prefix = Path(sys.prefix).resolve()
             py_base_prefix = Path(sys.base_prefix).resolve()
 
+            # NNN.1: ホームディレクトリ配下の仮想環境に対する最小特権マウントルール生成
+            pfx_rules: list[str] = []
+            toolchain_allows: list[str] = []
+
+            for p in [py_raw, py_bin, py_prefix, py_base_prefix]:
+                if p.is_relative_to("/Applications"):
+                    toolchain_allows.append('(allow file-read* (literal "/Applications"))')
+                    if len(p.parts) >= 3:
+                        toolchain_allows.append(f'(allow file-read* (subpath "{Path(*p.parts[:3])}"))')
+                elif p.is_relative_to("/Library"):
+                    if len(p.parts) >= 4:
+                        toolchain_allows.append(f'(allow file-read* (subpath "{Path(*p.parts[:4])}"))')
+                    elif len(p.parts) >= 3:
+                        toolchain_allows.append(f'(allow file-read* (subpath "{Path(*p.parts[:3])}"))')
+
+            if Path("/Library/Developer").exists():
+                toolchain_allows.append('(allow file-read* (subpath "/Library/Developer"))')
+
+            for pfx in [py_prefix, py_base_prefix]:
+                is_in_home = (
+                    pfx == home_resolved
+                    or pfx.is_relative_to(home_resolved)
+                )
+                if is_in_home:
+                    for sub in ["bin", "lib", "lib64", "include"]:
+                        sub_p = pfx / sub
+                        if sub_p.exists():
+                            pfx_rules.append(f'(allow file-read* (subpath "{sub_p}"))')
+                    cfg = pfx / "pyvenv.cfg"
+                    if cfg.exists():
+                        pfx_rules.append(f'(allow file-read* (literal "{cfg}"))')
+                else:
+                    pfx_rules.append(f'(allow file-read* (subpath "{pfx}"))')
+
+            toolchain_rules_str = "\n".join(dict.fromkeys(toolchain_allows))
+            unique_pfx_rules = list(dict.fromkeys(pfx_rules))
+            pfx_rules_str = "\n".join(unique_pfx_rules)
+
+            extra_allow_rules: list[str] = []
+            for opt_path in ["/opt/homebrew", "/usr/local"]:
+                if Path(opt_path).exists():
+                    extra_allow_rules.append(f'(allow file-read* (subpath "{opt_path}"))')
+            extra_allow_str = "\n".join(extra_allow_rules)
+
+            # NNN.1: 広範な /Library, /private/etc, /etc の一括 allow を廃止し、
+            # /private/var に対しても db, root, log, audit 等の機密領域を明示拒否（deny）し、
+            # システムライブラリ・実行作業ディレクトリのみの最小権限ホワイトリスト方式を適用
             profile_content = f"""(version 1)
 (allow default)
 (deny network*)
 (deny file-write*)
 (allow file-write* (subpath "{exec_resolved}"))
+(allow file-write* (subpath "{exec_cwd}"))
 (allow file-write* (literal "/dev/null"))
 (allow file-write* (literal "/dev/zero"))
 (allow file-write* (literal "/dev/dtracehelper"))
 (deny file-read*)
 (allow file-read* (literal "/"))
+(allow file-read* (literal "/private"))
+(allow file-read* (literal "/private/var"))
+(allow file-read* (literal "/private/var/folders"))
+(allow file-read* (literal "/var"))
+(allow file-read* (subpath "/var/folders"))
+(allow file-read* (subpath "/private/var/folders"))
+(allow file-read* (literal "/tmp"))
+(allow file-read* (literal "/private/tmp"))
+(allow file-read* (subpath "/tmp"))
+(allow file-read* (subpath "/private/tmp"))
 (allow file-read* (literal "/dev"))
 (allow file-read* (subpath "/dev"))
 (allow file-read* (subpath "/System"))
 (allow file-read* (subpath "/usr"))
-(allow file-read* (subpath "/Library"))
-(allow file-read* (subpath "/Applications"))
-(allow file-read* (subpath "/System/Volumes"))
-(allow file-read* (subpath "/private/etc"))
-(allow file-read* (subpath "/private/var"))
-(allow file-read* (subpath "/etc"))
-(allow file-read* (subpath "/var"))
-(allow file-read* (subpath "{py_prefix}"))
-(allow file-read* (subpath "{py_base_prefix}"))
-(allow file-read* (literal "{py_bin}"))
-(allow file-read* (subpath "{exec_resolved}"))
-(deny file-read* (subpath "/Library/Keychains"))
-(deny file-read* (subpath "/System/Library/Keychains"))
-(deny file-read* (subpath "/etc/sudoers"))
-(deny file-read* (subpath "/private/etc/sudoers"))
-(deny file-read* (subpath "/etc/master.passwd"))
-(deny file-read* (subpath "/private/etc/master.passwd"))
-(deny file-read* (subpath "/private/var/db/dslocal"))
+(deny file-read* (subpath "/Library"))
+(deny file-read* (subpath "/private/var/db"))
 (deny file-read* (subpath "/private/var/root"))
+(deny file-read* (subpath "/private/var/log"))
+(deny file-read* (subpath "/private/var/audit"))
+(deny file-read* (subpath "/private/var/spool"))
+(deny file-read* (subpath "/private/var/vm"))
+(deny file-read* (subpath "/private/var/backups"))
+(deny file-read* (subpath "/var/db"))
+(deny file-read* (subpath "/var/root"))
+(deny file-read* (subpath "/var/log"))
+(deny file-read* (subpath "/var/audit"))
+(deny file-read* (subpath "/var/spool"))
+(deny file-read* (subpath "/var/vm"))
+(deny file-read* (subpath "/var/backups"))
+(deny file-read* (subpath "/private/etc"))
+(deny file-read* (subpath "/etc"))
+(deny file-read* (subpath "/Applications"))
+(deny file-read* (subpath "/Volumes"))
 (deny file-read* (subpath "/Users"))
 (deny file-read* (subpath "{home_resolved}"))
-(allow file-read* (subpath "{py_prefix}"))
-(allow file-read* (subpath "{py_base_prefix}"))
+{toolchain_rules_str}
+{extra_allow_str}
+(allow file-read* (literal "/etc/resolv.conf"))
+(allow file-read* (literal "/private/etc/resolv.conf"))
+(allow file-read* (literal "/etc/hosts"))
+(allow file-read* (literal "/private/etc/hosts"))
+(allow file-read* (subpath "/private/etc/ssl"))
+(allow file-read* (subpath "/etc/ssl"))
+{pfx_rules_str}
+(allow file-read* (literal "{py_raw}"))
 (allow file-read* (literal "{py_bin}"))
+(allow file-read* (subpath "{py_bin}"))
 (allow file-read* (subpath "{exec_resolved}"))
+(allow file-read* (subpath "{exec_cwd}"))
 (deny file-read* (subpath "{repo_resolved}"))
 (deny file-write* (subpath "{repo_resolved}"))
 """
@@ -905,8 +974,8 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 item_path = Path(etc_item)
                 if item_path.exists():
                     cmd.extend(["--ro-bind", str(item_path), str(item_path)])
-            for pfx in [sys.prefix, sys.base_prefix]:
-                pfx_path = Path(pfx).resolve()
+            for pfx_raw in [sys.prefix, sys.base_prefix]:
+                pfx_path = Path(pfx_raw).resolve()
                 if pfx_path.exists() and not any(
                     pfx_path == Path(sd) or Path(sd) in pfx_path.parents for sd in ["/usr", "/bin", "/lib", "/lib64"]
                 ):

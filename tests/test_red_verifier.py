@@ -975,6 +975,27 @@ class ReadUnallowedPathTest(unittest.TestCase):
         self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
         self.assertIn("PermissionError", result.output)
 
+    def test_sandbox_blocks_reading_broad_system_dirs_like_library_and_var(self) -> None:
+        """機能NNN.1: macOS sandbox-exec において広範な /Library, /private/var, /etc 全体 allow を廃止し、
+        システム設定・キャッシュへのアクセスが PermissionError で遮断されること（Sol氏 Phase 53 P1指摘）。
+        """
+        if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
+            self.skipTest("macOS sandbox-exec is only available on macOS")
+
+        code = """import os, unittest
+
+class ReadBroadSystemDirsTest(unittest.TestCase):
+    def test_read_library(self):
+        # /Library へのアクセスが遮断されること
+        entries = os.listdir('/Library')
+        self.assertEqual(len(entries), 0)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        # サンドボックスの最小権限化により PermissionError が発生し、UNHANDLED_EXCEPTION になること
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
+        self.assertIn("PermissionError", result.output)
+
     def test_rejects_trivial_red_constant_comparison(self) -> None:
         """機能MMM.3: self.assertEqual(1, 2) のような固定値比較のみの偽陽性 Red は TRIVIAL_RED として拒絶されること。"""
         code = """import unittest
