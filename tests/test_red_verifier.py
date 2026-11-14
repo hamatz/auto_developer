@@ -1091,6 +1091,53 @@ class T(unittest.TestCase):
         self.assertFalse(is_trivial)
         self.assertEqual(msg, "")
 
+    def test_accepts_guarded_fail_with_product_dependency(self) -> None:
+        """機能OOO.2: if compute_val(1) != 2: self.fail(...) のようにプロダクト呼出に依存するガード条件下の fail() は
+        TRIVIAL_RED として誤拒絶されず、GENUINE_RED として受理されること（Sol氏 Phase 54 P1指摘）。
+        """
+        code = """import unittest
+from sample_module import compute_val
+
+class GuardedFailTest(unittest.TestCase):
+    def test_value(self):
+        if compute_val(1) != 999:
+            self.fail("wrong value from product code")
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertTrue(result.is_reproduced)
+        self.assertEqual(result.reason, "GENUINE_RED")
+
+    def test_ast_accepts_guarded_fail_with_product_call(self) -> None:
+        """機能OOO.2: AST 解析で条件分岐ガード付き self.fail() が偽 Red 判定されないこと（Sol氏 Phase 54 再現ケース）。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = """import unittest
+from sample_module import compute_val
+
+class T(unittest.TestCase):
+    def test_value(self):
+        if compute_val(1) != 2:
+            self.fail("wrong value")
+"""
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial)
+        self.assertEqual(msg, "")
+
+    def test_ast_rejects_guarded_fail_with_constant_condition(self) -> None:
+        """機能OOO.2: if 1 == 1: self.fail() のように固定値条件で無条件に到達する fail() は TRIVIAL_RED として拒絶されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = """import unittest
+
+class T(unittest.TestCase):
+    def test_value(self):
+        if 1 == 1:
+            self.fail("constant guard fail")
+"""
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial)
+        self.assertIn("fail() call without exception guard", msg)
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest

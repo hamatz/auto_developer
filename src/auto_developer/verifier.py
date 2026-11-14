@@ -134,6 +134,21 @@ def _is_in_try_block_with_call(call_node: ast.AST, func_node: ast.AST) -> bool:
     return False
 
 
+def _is_in_guarded_branch_with_call(
+    call_node: ast.AST,
+    func_node: ast.AST,
+    dependent_vars: set[str],
+) -> bool:
+    """call_node がプロダクト呼出または因果依存変数を含む条件分岐 (If/While) の配下にあるかを判定する (機能OOO.2)。"""
+    for n in ast.walk(func_node):
+        if isinstance(n, (ast.If, ast.While)):
+            in_body = any(sub is call_node for item in n.body for sub in ast.walk(item))
+            in_orelse = any(sub is call_node for item in n.orelse for sub in ast.walk(item))
+            if (in_body or in_orelse) and _has_causal_dependency(n.test, dependent_vars):
+                return True
+    return False
+
+
 def _check_assert_call(
     call: ast.Call,
     var_env: dict[str, Any],
@@ -147,9 +162,11 @@ def _check_assert_call(
 
     attr = call.func.attr if isinstance(call.func, ast.Attribute) else ""
 
-    # self.fail() の検証
+    # self.fail() の検証 (例外ガードまたは条件分岐因果ガード下の fail を救済: 機能OOO.2)
     if attr == "fail":
-        if not _is_in_try_block_with_call(call, func_node):
+        is_in_try = _is_in_try_block_with_call(call, func_node)
+        is_in_guard = _is_in_guarded_branch_with_call(call, func_node, dependent_vars)
+        if not (is_in_try or is_in_guard):
             trivial_reasons.append("Unconditional self.fail() call without exception guard")
         return
 
