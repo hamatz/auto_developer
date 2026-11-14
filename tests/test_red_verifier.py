@@ -932,6 +932,31 @@ class PassTest(unittest.TestCase):
         self.assertIn(str(bin_dir), ro_bind_targets)
         self.assertIn(str(lib_dir), ro_bind_targets)
 
+    def test_sandbox_blocks_reading_unallowed_host_paths_like_opt(self) -> None:
+        """機能MMM.2: macOS sandbox-exec においてデフォルト拒否（deny file-read*）と明示的許可リストにより、
+        ホワイトリスト外のホストパス（/opt 等）への読み取りが PermissionError で拒絶されること（Sol氏 Phase 52 P1指摘）。
+        """
+        if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
+            self.skipTest("macOS sandbox-exec is only available on macOS")
+
+        opt_path = Path("/opt")
+        if not opt_path.exists():
+            self.skipTest("/opt does not exist on this host")
+
+        code = """import os, unittest
+
+class ReadUnallowedPathTest(unittest.TestCase):
+    def test_read_opt(self):
+        # 許可リストに含まれていない /opt を読み取ろうとする
+        entries = os.listdir('/opt')
+        self.assertEqual(len(entries), 0)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        # サンドボックスのデフォルト拒否により PermissionError が発生し、UNHANDLED_EXCEPTION になること
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
+        self.assertIn("PermissionError", result.output)
+
 
 if __name__ == "__main__":
     unittest.main()

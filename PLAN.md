@@ -36,7 +36,7 @@
 
 ## ステップ
 - [x] 1. Linux 仮想環境マウント包含判定（`is_relative_to`）とサブディレクトリ限定マウント（Red-First）（MMM.1）
-- [ ] 2. macOS `sandbox-exec` 読み取り隔離の強化（Red-First）（MMM.2）
+- [x] 2. macOS `sandbox-exec` 読み取り隔離の強化（Red-First）（MMM.2）
 - [ ] 3. 偽陽性 Red（Trivial / Fake Red）の自動排除機構（AST静的検証・スタックフレーム実行検証・`TRIVIAL_RED` 隔離）（Red-First）（MMM.3）
 - [ ] 4. 独立監査受入条件の固定と Level 7 E2E 完走・Evidence Bundle 生成（MMM.4）
 
