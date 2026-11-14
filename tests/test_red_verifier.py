@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -807,6 +808,33 @@ class PassTest(unittest.TestCase):
         # 4. ホストホームディレクトリ全体がマウントされていないこと
         home_str = str(Path.home().resolve())
         self.assertNotIn(home_str, ro_bind_targets, "Host home directory must NOT be ro-bound!")
+
+    def test_sandbox_blocks_reading_system_keychains_and_sensitive_etc(self) -> None:
+        """機能LLL.2: macOS sandbox-exec においてホーム外の機密パス（/Library/Keychains 等）が
+        明示的 deny され、候補テストから読み取れないこと（Sol氏 Phase 51 P1指摘）。
+        """
+        if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
+            self.skipTest("macOS sandbox-exec is only available on macOS")
+
+        keychain_path = Path("/Library/Keychains/System.keychain")
+        if not keychain_path.exists():
+            self.skipTest("System.keychain not found")
+
+        code = """import unittest
+from pathlib import Path
+
+class ReadKeychainTest(unittest.TestCase):
+    def test_read_system_keychain(self):
+        # システムキーチェーンを読み取ろうとする
+        p = Path('/Library/Keychains/System.keychain')
+        data = p.read_bytes()
+        self.assertEqual(len(data), 0)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        # サンドボックスにより PermissionError が発生し、真正な Red (ALREADY_GREEN / GENUINE_RED) ではなく UNHANDLED_EXCEPTION になること
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
+        self.assertIn("PermissionError", result.output)
 
     def test_bwrap_virtualenv_in_home_mounts_only_prefix_not_home(self) -> None:
         """機能LLL.1: 仮想環境がホーム直下の場合、ホーム全体ではなく subfolder のみがマウントされること。"""
