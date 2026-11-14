@@ -41,17 +41,17 @@ flowchart TD
         direction LR
         subgraph TeamCore ["Team Core (Worktree: team-core)"]
             GuardCore["BoundaryGuard (領空・保護ファイル防壁)"]
-            RunnerCore["Worker Core (NightlyOrchestrator)"]
-            GuardCore --- RunnerCore
+            MakerCore["Maker (実装・テスト生成)"]
+            GuardCore --- MakerCore
         end
         subgraph TeamUI ["Team UI (Worktree: team-ui)"]
             GuardUI["BoundaryGuard (領空・保護ファイル防壁)"]
-            RunnerUI["Worker UI (NightlyOrchestrator)"]
-            GuardUI --- RunnerUI
+            MakerUI["Maker (実装・テスト生成)"]
+            GuardUI --- MakerUI
         end
     end
 
-    subgraph Sandbox ["3. OS-Level Sandbox & Trivial Red Elimination (Red-First 防壁)"]
+    subgraph Sandbox ["3. OS-Level Sandbox & Trivial Red Elimination (Red-First 防壁ゲート)"]
         RedVerifier["RedTestVerifier (候補テスト隔離判定)"]
         MacOSSB["macOS sandbox-exec<br/>(デフォルト拒否: deny file-read* & ホワイトリスト許可)"]
         LinuxSB["Linux bwrap (Bubblewrap)<br/>(--unshare-net & 仮想環境個別マウント)"]
@@ -75,11 +75,13 @@ flowchart TD
         IntWT --> GateVerify --> RC
     end
 
-    subgraph Audit ["6. Independent Multi-LLM Audit Boundary (独立第三者監査)"]
+    subgraph Audit ["6. Independent Multi-LLM Audit Boundary (独立第三者監査 & 学習基盤)"]
         AuditDisp["AuditDispatcher (独立監査ディスパッチ)"]
         ModelPolicy["Model Family Policy<br/>(Maker≠Auditor 異系統LLM強制 / 癒着排除)"]
         AuditStore["AuditStore (監査不変ログ / REJECTED 記録)"]
+        LessonStore[("LESSONS.md<br/>(Trap/地雷の外部記憶・自律学習)")]
         AuditDisp --> ModelPolicy --> AuditStore
+        AuditStore --> LessonStore
     end
 
     subgraph Delivery ["7. Audit & Handoff (人間への引き継ぎ)"]
@@ -91,30 +93,38 @@ flowchart TD
         RC --> Brief
     end
 
+    %% フローと二重ループ (Dual-Loop Architecture)
     MultiOrch -->|"1. 並行 Worktree 準備 & 起動"| Workers
-    Workers -->|"2. Red-First 候補テスト検証"| Sandbox
-    Workers -->|"3. 成果 Bundle 収集"| Preservation
+    Workers -->|"2a. 候補テスト隔離検証 (Red-First)"| Sandbox
+    Sandbox -->|"2b. 真正 Red 承認 (PASSED_RED) / 偽陽性・漏洩は即時差戻し"| Workers
+    Workers -->|"3. Green 実装完了 & 成果収集"| Preservation
     Preservation -->|"4. 監査済み成果引き渡し"| Gate
-    Gate -->|"5. 独立外部監査"| Audit
-    MultiOrch -->|"6. 安全なクリーンアップ<br/>(失敗時は原本 Worktree を保護)"| Workers
+    Gate -->|"5. 独立外部監査へ提出"| Audit
+    Audit -.->|"【Level 7 自律作り直しループ】<br/>監査指摘・地雷を LESSONS.md に蓄積し Maker へフィードバック (Self-Refinement)"| Workers
+    Audit -->|"6. 合格承認 (APPROVED)"| Delivery
+    MultiOrch -->|"7. 安全なクリーンアップ<br/>(失敗時は原本 Worktree を保護)"| Workers
 ```
 
-### 多層防衛アーキテクチャの 6 大支柱
+### 多層防衛アーキテクチャの 6 大支柱と二重自律ループ (Dual-Loop Autonomous Architecture)
+
+Auto Developer は、**「内側の安全な TDD 門番ループ」** と **「外側の自律的自己修復・作り直しループ（Level 7）」** の 2 つのフィードバックループが噛み合うことで、無人での長期自走と絶対的な安全性を両立します。
+
 1. **親プロセスによるライフサイクル監督 & 障害復旧（Host Supervision & Transactional Recovery）**:
    - `MultiTeamOrchestrator` が PGID（プロセスグループID）単位でサブプロセスを統括し、親の不意の終了時にも孫プロセスを含む孤児プロセスを決定論的に回収。`.dev/job_state.json` による状態永続化と `auto-dev recover` によるトランザクショナルなクラッシュ復旧（inspect / plan / apply）を実現します。
 2. **物理的分離と領空防衛（Worktree Isolation & BoundaryGuard）**:
    - 各チームは専用の独立 Git Worktree で物理隔離されて作業を行い、担当外ディレクトリ（領空）や保護対象ファイル（`.github/**`, `SPEC.md`, `scripts/verify_local.sh`, 免疫テスト）の改変はコミット前に物理遮断されます。
-3. **OS レベルサンドボックス & 偽陽性 Red 排除（OS Sandboxing & Trivial Red Defense）**:
-   - Red-First 候補テスト実行時、macOS `sandbox-exec`（デフォルト拒否 `deny file-read*`＋ホワイトリスト個別許可）および Linux `bwrap`（Bubblewrap によるネットワーク完全遮断 `--unshare-net`＆仮想環境個別マウント）により、ホストの機密情報（SSH鍵・クラウドクレデンシャル等）と元リポジトリを完全隔離します。
-   - さらに、AST 静的構文解析と動的 `sys.settrace` 実行トレースにより、自明な無条件失敗テスト（`self.assertEqual(1, 2)` 等）を `TRIVIAL_RED` として検知・自動排除します。
+3. **OS レベルサンドボックス & 偽陽性 Red 排除門番（OS Sandboxing & Inner Red-First Loop）**:
+   - **【内側ループ】** 単なる一過性の検査ではなく、テスト駆動開発（TDD）の安全な門番として機能します。候補テスト生成時、macOS `sandbox-exec`（デフォルト拒否 `deny file-read*`＋ホワイトリスト個別許可）および Linux `bwrap`（Bubblewrap によるネットワーク完全遮断 `--unshare-net`＆仮想環境個別マウント）でホストの機密情報（SSH鍵・クレデンシャル等）や元リポジトリへの干渉を物理遮断。
+   - さらに AST 静的構文解析と動的 `sys.settrace` 実行トレースにより、自明な無条件失敗テスト（`self.assertEqual(1, 2)` 等）を `TRIVIAL_RED` として検知し即時 Maker へ差し戻します。真正な Red（`PASSED_RED`）のみが通過を許可され、本番コードの安全な Green 化へと進みます。
 4. **非破壊的成果保全と独立統合ゲート（Atomic Preservation & IntegrationGate）**:
    - `os.link` による排他的・原子的 Evidence 保全を採用し、TOCTOU 競合による上書きを完全遮断。同一成果は冪等再利用し、異成果衝突時は Worktree 原本を安全に保護します。
    - 独立した統合 Worktree での意味論的結合検証を経て、原子的 Release Candidate タグ（`refs/tags/rc/<job_id>`）を発行します。
 5. **暗号学的証跡と第三者検証（Evidence Bundle & Tamper-Proof Verifier）**:
    - Git Tree SHA、コミット SHA、Checker ログ、SPEC SHA がハッシュ拘束された不変の ZIP パッケージを生成。外部監査 CLI (`auto-dev verify-bundle`) により、改ざんや未検証成果の混入をオフラインかつ物理的に検出可能です。
-6. **Multi-LLM 独立監査境界（Independent Multi-LLM Audit Boundary）**:
-   - 単一 LLM への自己承認依存を排除し、Maker と Checker/Auditor に異系統 LLM（例: Gemini Maker vs Claude Opus / GPT 6.1 Auditor）を強制適用。
-   - 不正な監査 Finding の差し戻し、REJECTED ログの監査証跡記録、および翌朝の人間向け意思決定支援レポート（`NIGHTLY_REPORT.md`）を提供します。
+6. **Multi-LLM 独立監査境界 & 自律作り直しループ（Level 7 Outer Self-Refining Loop）**:
+   - **【外側ループ】** レベル 6 までの「失敗したら止まって人間に朝レポートする（Fail-Fast & Freeze）」を超え、**真の自律夜間開発（Level 7）の核心**を担います。
+   - Maker と独立第三者 Auditor（例: Gemini Maker vs Claude Opus / GPT 6.1 Auditor）を分離して思考の癒着を排除。
+   - 監査人が指摘した課題や拒絶（Findings）は、単に停止するのではなく即座に `LESSONS.md` へ地雷（Trap）として外部記憶化され、Maker へフィードバック。Maker はその教訓を元に自律的に「作り直し・再挑戦」のサイクルを回し、仕様（`SPEC.md`）と受入条件を完全に満たすまで粘り強く動き続けます。
 
 ---
 
