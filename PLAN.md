@@ -38,7 +38,7 @@
 - [x] 1. macOS `sandbox-exec` 読み取り許可範囲の最小権限化（Red-First）（NNN.1）
 - [x] 2. 巧妙な偽 Red（因果関係のない固定値比較等）の AST 解析と排除（Red-First）（NNN.2）
 - [x] 3. 6大受入条件（実行隔離・偽陽性耐性・Evidence・複数ワーカー・Multi-LLM・継続運用）の体系的監査ハーネス（Red-First）（NNN.3）
-- [ ] 4. 独立監査完走・Evidence Bundle 生成と v0.7.0 リリース準備（NNN.4）
+- [x] 4. 独立監査完走・Evidence Bundle 生成と v0.7.0 リリース準備（NNN.4）
 
 ## 止まっていること・判断待ち
 - なし。Phase 53（機能MMM）がマージされ、Sol 氏の評価により「独立監査開始：GO」が確定。6 大受入条件の体系的実証（機能NNN）に着手可能。
