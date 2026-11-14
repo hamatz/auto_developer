@@ -24,6 +24,162 @@ except ImportError:
 
 from auto_developer.guard import validate_test_ast
 
+STDLIB_AND_TEST_MODULES: set[str] = {
+    "unittest",
+    "pytest",
+    "sys",
+    "os",
+    "pathlib",
+    "typing",
+    "json",
+    "re",
+    "math",
+    "time",
+    "datetime",
+    "tempfile",
+    "shutil",
+    "contextlib",
+    "stat",
+    "subprocess",
+    "signal",
+    "collections",
+    "itertools",
+    "functools",
+    "dataclasses",
+    "enum",
+    "abc",
+    "io",
+    "copy",
+    "traceback",
+    "hashlib",
+    "ast",
+    "types",
+    "inspect",
+    "warnings",
+    "errno",
+    "platform",
+    "logging",
+    "random",
+    "string",
+    "struct",
+    "threading",
+    "multiprocessing",
+    "queue",
+    "builtins",
+}
+
+
+def _eval_constant_expr(node: ast.AST) -> tuple[bool, Any]:
+    """リテラル定数、符号付き定数、定数同士の四則演算を安全に評価する。"""
+    if isinstance(node, ast.Constant):
+        return True, node.value
+    if isinstance(node, ast.UnaryOp):
+        ok, val = _eval_constant_expr(node.operand)
+        if ok and isinstance(val, (int, float)):
+            if isinstance(node.op, ast.USub):
+                return True, -val
+            if isinstance(node.op, ast.UAdd):
+                return True, +val
+            if isinstance(node.op, ast.Not):
+                return True, not val
+    if isinstance(node, ast.BinOp):
+        ok_l, val_l = _eval_constant_expr(node.left)
+        ok_r, val_r = _eval_constant_expr(node.right)
+        if (
+            ok_l
+            and ok_r
+            and isinstance(val_l, (int, float, str))
+            and isinstance(val_r, (int, float, str))
+        ):
+            with contextlib.suppress(TypeError, ValueError, ArithmeticError):
+                if isinstance(node.op, ast.Add):
+                    return True, val_l + val_r  # type: ignore[operator]
+                if isinstance(node.op, ast.Sub) and isinstance(val_l, (int, float)) and isinstance(val_r, (int, float)):
+                    return True, val_l - val_r
+                if isinstance(node.op, ast.Mult) and isinstance(val_l, (int, float)) and isinstance(val_r, (int, float)):
+                    return True, val_l * val_r
+    return False, None
+
+
+def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
+    """候補テストの AST を解析し、自己完結した固定値比較や無条件 self.fail() 等の
+    偽陽性 Red (Trivial / Fake Red) を静的に検出する (機能MMM.3)。
+    """
+    if isinstance(target, ast.AST):
+        tree = target
+    elif isinstance(target, Path):
+        try:
+            tree = ast.parse(target.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            return False, ""
+    elif isinstance(target, str):
+        try:
+            tree = ast.parse(target)
+        except (SyntaxError, UnicodeDecodeError):
+            return False, ""
+    else:
+        return False, ""
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not node.name.startswith("test"):
+            continue
+
+        calls: list[ast.Call] = [n for n in ast.walk(node) if isinstance(n, ast.Call)]
+        has_non_assert_call = False
+        trivial_reasons: list[str] = []
+
+        for call in calls:
+            is_self_call = (
+                isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "self"
+            )
+            if not is_self_call:
+                has_non_assert_call = True
+                continue
+
+            attr = call.func.attr if isinstance(call.func, ast.Attribute) else ""
+            if attr == "fail":
+                trivial_reasons.append("Unconditional self.fail() call")
+            elif attr in ("assertEqual", "assertEquals") and len(call.args) >= 2:
+                is_c1, v1 = _eval_constant_expr(call.args[0])
+                is_c2, v2 = _eval_constant_expr(call.args[1])
+                if is_c1 and is_c2 and v1 != v2:
+                    trivial_reasons.append(f"Constant equality mismatch: {v1!r} == {v2!r}")
+            elif attr in ("assertNotEqual", "assertNotEquals") and len(call.args) >= 2:
+                is_c1, v1 = _eval_constant_expr(call.args[0])
+                is_c2, v2 = _eval_constant_expr(call.args[1])
+                if is_c1 and is_c2 and v1 == v2:
+                    trivial_reasons.append(f"Constant inequality mismatch: {v1!r} != {v2!r}")
+            elif attr in ("assertTrue", "assert_") and len(call.args) >= 1:
+                is_c, val = _eval_constant_expr(call.args[0])
+                if is_c and not val:
+                    trivial_reasons.append(f"Constant assertTrue({val!r}) failure")
+            elif attr == "assertFalse" and len(call.args) >= 1:
+                is_c, val = _eval_constant_expr(call.args[0])
+                if is_c and bool(val):
+                    trivial_reasons.append(f"Constant assertFalse({val!r}) failure")
+            elif attr == "assertIsNone" and len(call.args) >= 1:
+                is_c, val = _eval_constant_expr(call.args[0])
+                if is_c and val is not None:
+                    trivial_reasons.append(f"Constant assertIsNone({val!r}) failure")
+            elif attr == "assertIsNotNone" and len(call.args) >= 1:
+                is_c, val = _eval_constant_expr(call.args[0])
+                if is_c and val is None:
+                    trivial_reasons.append("Constant assertIsNotNone(None) failure")
+            elif not (attr.startswith("assert") or attr == "fail"):
+                has_non_assert_call = True
+
+        if trivial_reasons and not has_non_assert_call:
+            return (
+                True,
+                f"Test {node.name} contains trivial assertion without product calls: {'; '.join(trivial_reasons)}",
+            )
+
+    return False, ""
+
 
 class DeterministicVerifier:
     """ローカル検証スクリプトの実行と判定を担当。"""
@@ -332,12 +488,39 @@ except Exception as e:
     sys.exit(1)
 
 result = unittest.TestResult()
-suite.run(result)
+
+executed_product_code = False
+try:
+    resolved_search = str(Path(search_dir).resolve())
+except Exception:
+    resolved_search = search_dir
+
+def _product_code_tracer(frame, event, arg):
+    global executed_product_code
+    if event == "call":
+        fn = frame.f_code.co_filename
+        if fn and fn.startswith(resolved_search):
+            try:
+                rel = os.path.relpath(fn, resolved_search)
+                parts = Path(rel).parts
+                is_test_file = Path(rel).name.startswith("test_") or "tests" in parts
+                if not is_test_file:
+                    executed_product_code = True
+            except Exception:
+                pass
+    return _product_code_tracer
+
+sys.settrace(_product_code_tracer)
+try:
+    suite.run(result)
+finally:
+    sys.settrace(None)
 
 data = {
     "tests_run": result.testsRun,
     "failures": [{"test": str(test), "err": err} for test, err in result.failures],
     "errors": [{"test": str(test), "err": err} for test, err in result.errors],
+    "executed_product_code": executed_product_code,
 }
 print("===AUTO_DEV_TEST_RESULT===")
 print(json.dumps(data))
@@ -984,8 +1167,26 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                     errors=len(errors),
                 )
 
-            # 判定 E: アサーション失敗 (failures > 0, errors == 0) による真正な Red
+            # 判定 E: アサーション失敗 (failures > 0, errors == 0) による Red
             if len(failures) > 0:
+                executed_product = parsed_result.get("executed_product_code", True)
+                is_trivial_ast, trivial_msg = check_trivial_red_ast(test_file)
+                if not executed_product or is_trivial_ast:
+                    reason_msg = (
+                        f"Candidate test failed with assertion failure, but zero product code was executed (Trivial/Fake Red): {trivial_msg}"
+                        if is_trivial_ast
+                        else "Candidate test failed with assertion failure, but zero product code was executed (Trivial/Fake Red)."
+                    )
+                    return _res(
+                        is_reproduced=False,
+                        exit_code=returncode,
+                        reason="TRIVIAL_RED",
+                        output=output,
+                        reason_detail=reason_msg,
+                        tests_run=tests_run,
+                        failures=len(failures),
+                        errors=len(errors),
+                    )
                 return _res(
                     is_reproduced=True,
                     exit_code=returncode,

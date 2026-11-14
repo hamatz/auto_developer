@@ -30,14 +30,14 @@
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - MMM.1: `tests/test_red_verifier.py` に `~/.venvs/...` や `~/projects/.../.venv` 等のサブディレクトリ配置仮想環境における最小マウント検証テストを追加。
 - MMM.2: `tests/test_red_verifier.py` に macOS `sandbox-exec` 読み取り隔離強化の単体テストを追加。
-- MMM.3: `tests/test_audit_dispatch.py` および `tests/test_red_verifier.py` に、`self.assertEqual(1, 2)` や `self.fail()` 等の偽陽性テストが `TRIVIAL_RED` として `REJECTED` されることを検証するテストを追加。既存テストの Red テストコードが固定値比較を行っていた場合は `src/` の関数を呼び出して正しくプロダクト起因で失敗するテストに整合させる。
+- MMM.3: `tests/test_audit_dispatch.py`, `tests/test_red_verifier.py`, `tests/test_immunity_and_red_acceptance.py`, `tests/test_audit_persistence.py` に、`self.assertEqual(1, 2)` や `self.fail()` 等の偽陽性テストが `TRIVIAL_RED` として `REJECTED` されることを検証するテストを追加。既存テストの Red テストコードが固定値比較を行っていた場合は `src/` の関数を呼び出して正しくプロダクト起因で失敗するテストに整合させる。
 - MMM.4: `tests/test_level7_real_loop_e2e.py` に Trivial Red 排除の E2E 検証を追加。
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
 - [x] 1. Linux 仮想環境マウント包含判定（`is_relative_to`）とサブディレクトリ限定マウント（Red-First）（MMM.1）
 - [x] 2. macOS `sandbox-exec` 読み取り隔離の強化（Red-First）（MMM.2）
-- [ ] 3. 偽陽性 Red（Trivial / Fake Red）の自動排除機構（AST静的検証・スタックフレーム実行検証・`TRIVIAL_RED` 隔離）（Red-First）（MMM.3）
+- [x] 3. 偽陽性 Red（Trivial / Fake Red）の自動排除機構（AST静的検証・スタックフレーム実行検証・`TRIVIAL_RED` 隔離）（Red-First）（MMM.3）
 - [ ] 4. 独立監査受入条件の固定と Level 7 E2E 完走・Evidence Bundle 生成（MMM.4）
 
 ## 止まっていること・判断待ち

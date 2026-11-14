@@ -19,6 +19,12 @@ class TestAuditPersistence(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.repo_dir = Path(self.temp_dir.name)
+        # MMM.3: プロダクトコード (src/) を初期化
+        src_dir = self.repo_dir / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        (src_dir / "target_pkg.py").write_text(
+            "def target_fn() -> bool:\n    return False\n", encoding="utf-8"
+        )
         self.plan_path = self.repo_dir / "PLAN.md"
         self.plan_path.write_text("# PLAN.md\n\n## ステップ\n", encoding="utf-8")
         self.audit_dir = self.repo_dir / ".dev" / "audit"
@@ -89,9 +95,11 @@ class Repro(unittest.TestCase):
             location="calc.py:5",
             description="Auto persist during dispatch",
             reproduction_test_code="""import unittest
+from target_pkg import target_fn
+
 class Repro(unittest.TestCase):
     def test_fail(self):
-        self.assertEqual(10, 20)
+        self.assertTrue(target_fn())
 """,
         )
 

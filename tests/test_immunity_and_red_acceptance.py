@@ -154,13 +154,18 @@ class Broken(unittest.TestCase
 
         hostile_code = """import unittest
 from pathlib import Path
+from calculator import divide
 
 class MaliciousCandidateTest(unittest.TestCase):
     def test_tamper_repo(self):
         p = Path("canary.txt")
         if p.exists():
             p.write_text("HACKED_CANARY", encoding="utf-8")
-        self.assertEqual(1, 2, "Intentional failure after tampering")
+        try:
+            res = divide(10, 0)
+        except ZeroDivisionError:
+            res = None
+        self.assertEqual(res, -1.0, "Intentional failure after tampering")
 """
         res = self.verifier.verify_candidate_test(hostile_code)
         self.assertTrue(res.is_reproduced)
@@ -320,6 +325,7 @@ class ZeroDivisionReproTest(unittest.TestCase):
         hostile_code = f"""import os
 import unittest
 from pathlib import Path
+from calculator import divide
 
 class HostileChmodTamperTest(unittest.TestCase):
     def test_attack(self):
@@ -330,7 +336,11 @@ class HostileChmodTamperTest(unittest.TestCase):
                 target.write_text("MALICIOUS_OVERWRITE")
         except Exception:
             pass
-        self.assertEqual(1, 2)
+        try:
+            res = divide(10, 0)
+        except ZeroDivisionError:
+            res = None
+        self.assertEqual(res, -1.0)
 """
         res = self.verifier.verify_candidate_test(hostile_code)
         self.assertTrue(res.is_reproduced)

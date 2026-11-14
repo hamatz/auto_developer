@@ -18,6 +18,12 @@ class TestAuditDispatcher(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.repo_dir = Path(self.temp_dir.name)
+        # MMM.3: プロダクトコード (src/) を初期化
+        src_path = self.repo_dir / "src"
+        src_path.mkdir(parents=True, exist_ok=True)
+        (src_path / "target_pkg.py").write_text(
+            "def target_fn() -> bool:\n    return False\n", encoding="utf-8"
+        )
         self.plan_path = self.repo_dir / "PLAN.md"
         self.plan_path.write_text(
             """# PLAN.md
@@ -42,9 +48,11 @@ class TestAuditDispatcher(unittest.TestCase):
             location="src/auto_developer/guard.py:45",
             description="AST check missing else branch validation",
             reproduction_test_code="""import unittest
+from target_pkg import target_fn
+
 class T(unittest.TestCase):
     def test_repro(self):
-        self.assertEqual(1, 2)
+        self.assertTrue(target_fn())
 """,
         )
 
@@ -86,9 +94,11 @@ class T(unittest.TestCase):
             location="verifier.py",
             description="Duplicate test",
             reproduction_test_code="""import unittest
+from target_pkg import target_fn
+
 class T(unittest.TestCase):
     def test_repro(self):
-        self.assertEqual(1, 2)
+        self.assertTrue(target_fn())
 """,
         )
 
@@ -110,7 +120,7 @@ class T(unittest.TestCase):
             spec_reference="SPEC.md",
             location="a.py",
             description="Genuine red finding",
-            reproduction_test_code="import unittest\nclass T(unittest.TestCase):\n    def test_f(self):\n        self.assertEqual(1, 2)",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_f(self):\n        self.assertTrue(target_fn())",
         )
         f_pass = AuditFinding(
             finding_id="BATCH-002",
@@ -139,7 +149,7 @@ class T(unittest.TestCase):
             spec_reference="SPEC.md DDD.2",
             location="guard.py:10",
             description="Interoperability test",
-            reproduction_test_code="import unittest\nclass T(unittest.TestCase):\n    def test_f(self):\n        self.assertEqual(1, 2)",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_f(self):\n        self.assertTrue(target_fn())",
         )
 
         res = self.dispatcher.dispatch_finding(finding, plan_path=self.plan_path)
@@ -207,7 +217,7 @@ class T(unittest.TestCase):
                 spec_reference="SPEC.md",
                 location="app.py:15",
                 description="Legitimate bug",
-                reproduction_test_code="import unittest\nclass G(unittest.TestCase):\n    def test_g(self):\n        self.assertEqual(1, 2)",
+                reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass G(unittest.TestCase):\n    def test_g(self):\n        self.assertTrue(target_fn())",
             ),
         ]
 
@@ -248,6 +258,29 @@ class T(unittest.TestCase):
         self.assertIsNotNone(f4)
         assert f4 is not None
         self.assertEqual(f4.status, "DISPATCHED")
+
+    def test_dispatch_rejects_trivial_red_finding_without_adding_to_plan(self) -> None:
+        """機能MMM.3: self.assertEqual(1, 2) や self.fail() 等の偽陽性 Red (TRIVIAL_RED) は REJECTED 隔離され PLAN.md に追加されないこと。"""
+        trivial_finding = AuditFinding(
+            finding_id="FINDING-TRIVIAL",
+            severity="P0",
+            spec_reference="SPEC.md MMM.3",
+            location="src/auto_developer/verifier.py:10",
+            description="Trivial red test with constant assertion",
+            reproduction_test_code="""import unittest
+
+class FakeTest(unittest.TestCase):
+    def test_fake(self):
+        self.assertEqual(1, 2)
+""",
+        )
+
+        res = self.dispatcher.dispatch_finding(trivial_finding, plan_path=self.plan_path)
+        self.assertEqual(res.status, "REJECTED")
+        self.assertEqual(res.red_verification_reason, "TRIVIAL_RED")
+
+        content = self.plan_path.read_text(encoding="utf-8")
+        self.assertNotIn("FINDING-TRIVIAL", content)
 
 
 if __name__ == "__main__":

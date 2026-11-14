@@ -24,6 +24,17 @@ class TestRedTestVerifier(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.repo_dir = Path(self.tmp_dir.name)
+        # MMM.3: プロダクトコード (src/) を初期化してコミット
+        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "TestUser"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True)
+        src_dir = self.repo_dir / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        (src_dir / "sample_module.py").write_text(
+            "def compute_val(x: int) -> int:\n    return x * 2\n", encoding="utf-8"
+        )
+        subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.repo_dir, check=True)
         self.verifier = RedTestVerifier(repo_dir=self.repo_dir)
 
     def tearDown(self) -> None:
@@ -32,10 +43,11 @@ class TestRedTestVerifier(unittest.TestCase):
     def test_accepts_genuine_red_assertion_failure(self) -> None:
         """アサーション失敗等による真正な Red テストを正しく True (GENUINE_RED) と判定すること。"""
         code = """import unittest
+from sample_module import compute_val
 
 class BugReproTest(unittest.TestCase):
     def test_repro_failure(self):
-        self.assertEqual(1 + 1, 3, "Intentional reproduction failure")
+        self.assertEqual(compute_val(2), 5, "Intentional reproduction failure")
 """
         result = self.verifier.verify_candidate_test(code)
         self.assertTrue(result.is_reproduced)
@@ -46,10 +58,11 @@ class BugReproTest(unittest.TestCase):
     def test_rejects_already_green_test(self) -> None:
         """現行コードですでに Green (通過) してしまうテストは False (ALREADY_GREEN) と判定すること。"""
         code = """import unittest
+from sample_module import compute_val
 
 class AlreadyPassedTest(unittest.TestCase):
     def test_passing(self):
-        self.assertEqual(1 + 1, 2)
+        self.assertEqual(compute_val(2), 4)
 """
         result = self.verifier.verify_candidate_test(code)
         self.assertFalse(result.is_reproduced)
@@ -194,6 +207,7 @@ class AbsolutePathTamperTest(unittest.TestCase):
         hostile_code = f"""import os
 import unittest
 from pathlib import Path
+from sample_module import compute_val
 
 class CreateDeleteTamperTest(unittest.TestCase):
     def test_tamper(self):
@@ -205,12 +219,12 @@ class CreateDeleteTamperTest(unittest.TestCase):
             Path(r"{abs_create}").write_text("SPURIOUS", encoding="utf-8")
         except Exception:
             pass
-        self.assertEqual(1, 2)
+        self.assertEqual(compute_val(2), 5)
 """
         result = self.verifier.verify_candidate_test(hostile_code)
         self.assertTrue(canary_to_delete.exists(), "canary_delete.txt must not be deleted!")
         self.assertFalse(new_file_target.exists(), "unwanted_created.txt must not be created!")
-        self.assertTrue(result.is_reproduced)  # try-exceptで握りつぶした場合は assertEqual(1, 2) が failure となる
+        self.assertTrue(result.is_reproduced)  # try-exceptで握りつぶした場合は compute_val(2)==5 が failure となる
         self.assertEqual(result.reason, "GENUINE_RED")
 
     def test_candidate_test_does_not_inherit_sensitive_environment_secrets(self) -> None:
@@ -236,9 +250,11 @@ class SecretInspectionTest(unittest.TestCase):
         test_file = self.repo_dir / "test_file_repro.py"
         test_file.write_text(
             """import unittest
+from sample_module import compute_val
+
 class FileReproTest(unittest.TestCase):
     def test_file_failure(self):
-        self.fail("Explicit repro failure")
+        self.assertEqual(compute_val(3), 10)
 """,
             encoding="utf-8",
         )
@@ -328,7 +344,8 @@ class HostileChmodTest(unittest.TestCase):
                 p_abs.write_text("TAMPERED_ABSOLUTE")
         except Exception:
             pass
-        self.assertEqual(1, 2)
+        from sample_module import compute_val
+        self.assertEqual(compute_val(2), 5)
 """
         result = self.verifier.verify_candidate_test(code)
 
@@ -428,7 +445,8 @@ class HostileSubprocessTest(unittest.TestCase):
     def test_tamper(self):
         # サブプロセスを起動して chmod +w し、canary の書き換えを試みる (Sol氏 Phase 49 再現手順)
         subprocess.run(["sh", "-c", "chmod 777 '{canary_abs}' && echo TAMPERED > '{canary_abs}'"], capture_output=True)
-        self.assertEqual(1, 2)
+        from sample_module import compute_val
+        self.assertEqual(compute_val(2), 5)
 """
         result = self.verifier.verify_candidate_test(code)
         # canary は絶対に改変されていないこと (物理的不変性)
@@ -956,6 +974,46 @@ class ReadUnallowedPathTest(unittest.TestCase):
         self.assertFalse(result.is_reproduced)
         self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
         self.assertIn("PermissionError", result.output)
+
+    def test_rejects_trivial_red_constant_comparison(self) -> None:
+        """機能MMM.3: self.assertEqual(1, 2) のような固定値比較のみの偽陽性 Red は TRIVIAL_RED として拒絶されること。"""
+        code = """import unittest
+
+class TrivialComparisonTest(unittest.TestCase):
+    def test_fake(self):
+        self.assertEqual(1, 2)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "TRIVIAL_RED")
+
+    def test_rejects_trivial_red_immediate_fail(self) -> None:
+        """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
+        code = """import unittest
+
+class ImmediateFailTest(unittest.TestCase):
+    def test_fake(self):
+        self.fail("Unconditional failure without product code")
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "TRIVIAL_RED")
+
+    def test_rejects_trivial_red_without_calling_product_code(self) -> None:
+        """機能MMM.3: プロダクトモジュールを import していてもテスト実行時にプロダクトコードが呼び出されない場合は TRIVIAL_RED として拒絶されること。"""
+        code = """import unittest
+from sample_module import compute_val
+
+class UnexercisedProductTest(unittest.TestCase):
+    def test_fake(self):
+        # sample_module を import したが一度も呼び出さずにアサーション失敗
+        x = 10
+        y = 20
+        self.assertEqual(x, y)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "TRIVIAL_RED")
 
 
 if __name__ == "__main__":
