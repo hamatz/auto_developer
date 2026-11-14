@@ -37,7 +37,7 @@
 ## ステップ
 - [x] 1. AST 解析の文実行順序化（Program Order）による後続代入汚染の排除（Red-First）（OOO.1）
 - [x] 2. 条件付き（`if`/`while`）`self.fail()` の因果依存ガード判定（Red-First）（OOO.2）
-- [ ] 3. 独立監査受入ハーネス・Level 7 E2E 完走確認と受入テスト拡充（Red-First）（OOO.3）
+- [x] 3. 独立監査受入ハーネス・Level 7 E2E 完走確認と受入テスト拡充（Red-First）（OOO.3）
 - [ ] 4. 報告書の正確化（受入ハーネス実証）・Evidence Bundle 生成と v0.7.0 リリース準備（OOO.4）
 
 ## 止まっていること・判断待ち
