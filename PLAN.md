@@ -38,7 +38,7 @@
 - [x] 1. AST 解析の文実行順序化（Program Order）による後続代入汚染の排除（Red-First）（OOO.1）
 - [x] 2. 条件付き（`if`/`while`）`self.fail()` の因果依存ガード判定（Red-First）（OOO.2）
 - [x] 3. 独立監査受入ハーネス・Level 7 E2E 完走確認と受入テスト拡充（Red-First）（OOO.3）
-- [ ] 4. 報告書の正確化（受入ハーネス実証）・Evidence Bundle 生成と v0.7.0 リリース準備（OOO.4）
+- [x] 4. 報告書の正確化（受入ハーネス実証）・Evidence Bundle 生成と v0.7.0 リリース準備（OOO.4）
 
 ## 止まっていること・判断待ち
 - なし。Sol 氏の指摘（AST 後続代入による汚染、条件付き self.fail の誤拒絶）に対応する Phase 55（機能OOO）に着手可能。
