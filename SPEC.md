@@ -608,7 +608,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. Level 7 E2E 完走・整合性・Evidence Bundle 生成 (LLL.4):
      - `tests/test_level7_real_loop_e2e.py` において、最小化されたサンドボックス下で Level 7 自己改善ループが完走し、敵対的/不正な Finding の流入がすべて安全に排除されることを検証する。
      - `NIGHTLY_REPORT.md` を更新し、検証ゲート（全310+ テスト、Ruff、Mypy）に合格し、正規の Evidence Record を持つ Bundle を作成する。
-- [ ] 機能MMM (Stage 7 独立監査受入条件の固定と偽陽性Red排除・OS隔離強化 Stage 7 Independent Audit Acceptance and Trivial Red Elimination):
+- [x] 機能MMM (Stage 7 独立監査受入条件の固定と偽陽性Red排除・OS隔離強化 Stage 7 Independent Audit Acceptance and Trivial Red Elimination):
   1. Linux 仮想環境マウント包含判定（`is_relative_to`）とサブディレクトリ限定マウント (MMM.1 / Sol氏 Phase 52 P1指摘):
      - `pfx_path == home_resolved or pfx_path.is_relative_to(home_resolved)` による包含関係判定を行い、ホームディレクトリ配下に配置された仮想環境（`~/.venvs/...`, `~/projects/.../.venv` 等）であっても、仮想環境全体を `--ro-bind` せず、`bin`, `lib`, `lib64`, `include`, `pyvenv.cfg` のみに限定マウントする。
      - サブディレクトリ配置の仮想環境から同一ユーザーホーム直下の他ファイルや別ディレクトリへの読み取り漏洩が防止されることを単体テストで実証する。
@@ -622,6 +622,17 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. 独立監査受入条件の固定と Level 7 E2E 完走・Evidence Bundle 生成 (MMM.4):
      - `tests/test_level7_real_loop_e2e.py` において、偽陽性 Red（Trivial Red）や包含仮想環境漏洩プローブが安全に排除され、真正な指摘のみが Level 7 自己改善ループを完走することを実証する。
      - `NIGHTLY_REPORT.md` を更新し、検証ゲート（全テスト、Ruff、Mypy）に合格し、正規の Evidence Record を持つ Bundle を作成する。
+- [ ] 機能NNN (Stage 7 独立第三者監査の実行と6大受入条件の体系的実証 Stage 7 Independent Audit Execution and Systemic Verification of 6 Acceptance Criteria):
+  1. macOS `sandbox-exec` 読み取り許可範囲の最小権限化 (NNN.1 / Sol氏 Phase 53 P1指摘):
+     - macOS の `sandbox-exec` プロファイルにおいて、広範な `/Library`, `/private/var`, `/etc` 全体 allow を廃止し、システム動的ライブラリ（`/System/Library/Frameworks`, `/usr/lib`）および明示的な Python 実行ランタイムパスのみに厳格縮小する。
+     - ユーザー設定・キャッシュ・サービス固有設定へのアクセス遮断を単体テストで実証する。
+  2. 巧妙な偽 Red（因果関係のない固定値比較等）の AST 解析と排除 (NNN.2 / Sol氏 Phase 53 P1指摘):
+     - プロダクトコードを形骸的に呼び出しつつ、アサーション自体は無関係な固定値比較を行う偽 Red（例: `add(1, 2); self.assertEqual(1, 2)`）を検知する。
+     - AST 解析において、失敗したアサーション式内の引数がプロダクトコードの戻り値・関数呼出・代入変数に依存しているかを解析し、因果関係のない合成失敗を `TRIVIAL_RED` として確実に隔離・排除する。
+  3. 6大受入条件（実行隔離・偽陽性耐性・Evidence改ざん検知・複数ワーカー耐障害性・Multi-LLM境界・Level 7継続自己修復）の体系的監査ハーネス (NNN.3):
+     - 独立第三者監査の受入基準（実行隔離、偽陽性耐性、Evidence、複数ワーカー、Multi-LLM、継続運用）を網羅する体系的監査スイートを整備し、Fail-Closed に判定する。
+  4. 独立監査完走・Evidence Bundle 生成と v0.7.0 リリース準備 (NNN.4):
+     - Level 7 E2E 完走を確認し、6大受入条件を満たした独立監査 Evidence Bundle を生成、v0.7.0 リリースを確定する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

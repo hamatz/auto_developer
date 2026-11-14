@@ -975,6 +975,27 @@ class ReadUnallowedPathTest(unittest.TestCase):
         self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
         self.assertIn("PermissionError", result.output)
 
+    def test_sandbox_blocks_reading_broad_system_dirs_like_library_and_var(self) -> None:
+        """機能NNN.1: macOS sandbox-exec において広範な /Library, /private/var, /etc 全体 allow を廃止し、
+        システム設定・キャッシュへのアクセスが PermissionError で遮断されること（Sol氏 Phase 53 P1指摘）。
+        """
+        if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
+            self.skipTest("macOS sandbox-exec is only available on macOS")
+
+        code = """import os, unittest
+
+class ReadBroadSystemDirsTest(unittest.TestCase):
+    def test_read_library(self):
+        # /Library へのアクセスが遮断されること
+        entries = os.listdir('/Library')
+        self.assertEqual(len(entries), 0)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        # サンドボックスの最小権限化により PermissionError が発生し、UNHANDLED_EXCEPTION になること
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
+        self.assertIn("PermissionError", result.output)
+
     def test_rejects_trivial_red_constant_comparison(self) -> None:
         """機能MMM.3: self.assertEqual(1, 2) のような固定値比較のみの偽陽性 Red は TRIVIAL_RED として拒絶されること。"""
         code = """import unittest
@@ -986,6 +1007,55 @@ class TrivialComparisonTest(unittest.TestCase):
         result = self.verifier.verify_candidate_test(code)
         self.assertFalse(result.is_reproduced)
         self.assertEqual(result.reason, "TRIVIAL_RED")
+
+    def test_rejects_trivial_red_calling_product_code_with_unrelated_constant_comparison(self) -> None:
+        """機能NNN.2: プロダクトコードを形骸的に呼び出しつつ、アサーション自体は無関係な固定値比較を行う偽 Red
+        （例: compute_val(1); self.assertEqual(1, 2)）を TRIVIAL_RED として拒絶すること（Sol氏 Phase 53 P1指摘）。
+        """
+        code = """import unittest
+from sample_module import compute_val
+
+class FakeBugTest(unittest.TestCase):
+    def test_fake_bug(self):
+        compute_val(1)
+        self.assertEqual(1, 2)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "TRIVIAL_RED")
+        self.assertIn("Trivial", result.reason_detail)
+
+    def test_rejects_trivial_red_variables_with_no_data_dependency(self) -> None:
+        """機能NNN.2: プロダクトコードを呼び出していても、アサーションで使われる変数がプロダクトコードの戻り値等に
+        一切依存せず固定値比較で失敗する合成テストを TRIVIAL_RED として拒絶すること。
+        """
+        code = """import unittest
+from sample_module import compute_val
+
+class FakeBugVarTest(unittest.TestCase):
+    def test_fake_bug_var(self):
+        x = 10
+        y = 20
+        compute_val(1)
+        self.assertEqual(x, y)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "TRIVIAL_RED")
+
+    def test_accepts_genuine_red_with_causal_dependency(self) -> None:
+        """機能NNN.2: プロダクトコードの戻り値や引数に依存するアサーション失敗は GENUINE_RED として受理されること。"""
+        code = """import unittest
+from sample_module import compute_val
+
+class GenuineBugTest(unittest.TestCase):
+    def test_genuine_bug(self):
+        res = compute_val(2)
+        self.assertEqual(res, 999)  # 戻り値に対するアサーション
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertTrue(result.is_reproduced)
+        self.assertEqual(result.reason, "GENUINE_RED")
 
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""

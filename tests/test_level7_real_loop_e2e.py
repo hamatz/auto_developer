@@ -603,6 +603,23 @@ class TestUntrackedTamper(unittest.TestCase):
                 ),
                 auditor_model="gpt-6.1-sol",
             ),
+            # 6. 形骸的プロダクト呼出を伴う偽 Red (NNN.2 / Sol氏 Phase 53 P1指摘)
+            AuditFinding(
+                finding_id="BATCH-SUBTLE-TRIVIAL-006",
+                severity="P0",
+                spec_reference="SPEC.md NNN.2",
+                location="src/calc.py:3",
+                description="Subtle trivial red calling product code but failing on unrelated constant comparison",
+                reproduction_test_code=(
+                    "import unittest\n"
+                    "from calc import calc_div\n"
+                    "class FakeSubtle(unittest.TestCase):\n"
+                    "    def test_fail(self):\n"
+                    "        calc_div(10, 2)\n"
+                    "        self.assertEqual(1, 2)\n"
+                ),
+                auditor_model="gpt-6.1-sol",
+            ),
         ]
 
         audit_store = AuditStore(repo_dir=self.repo_dir)
@@ -639,6 +656,12 @@ class TestUntrackedTamper(unittest.TestCase):
         self.assertEqual(s5.status, "REJECTED")
         self.assertEqual(s5.red_verification_reason, "TRIVIAL_RED")
 
+        s6 = audit_store.get_finding("BATCH-SUBTLE-TRIVIAL-006")
+        self.assertIsNotNone(s6)
+        assert s6 is not None
+        self.assertEqual(s6.status, "REJECTED")
+        self.assertEqual(s6.red_verification_reason, "TRIVIAL_RED")
+
         # 3. PLAN.md に真正な指摘のみが登録されていること
         plan_content = self.plan_path.read_text(encoding="utf-8")
         self.assertIn("BATCH-GENUINE-004", plan_content)
@@ -646,6 +669,7 @@ class TestUntrackedTamper(unittest.TestCase):
         self.assertNotIn("BATCH-PASS-002", plan_content)
         self.assertNotIn("BATCH-SECRET-003", plan_content)
         self.assertNotIn("BATCH-TRIVIAL-005", plan_content)
+        self.assertNotIn("BATCH-SUBTLE-TRIVIAL-006", plan_content)
 
         # 4. 実 Maker プロセスによる修正実行 (CommandRunnerAdapter)
         dev_dir = self.repo_dir / ".dev"

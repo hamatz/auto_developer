@@ -25,22 +25,62 @@ except ImportError:
 from auto_developer.guard import validate_test_ast
 
 
-def _eval_constant_expr(node: ast.AST) -> tuple[bool, Any]:
-    """リテラル定数、符号付き定数、定数同士の四則演算を安全に評価する。"""
+def _eval_constant_expr(node: ast.AST, var_env: dict[str, Any] | None = None) -> tuple[bool, Any]:
+    """リテラル定数、符号付き定数、定数変数、定数同士の四則演算等を安全に評価する。"""
     if isinstance(node, ast.Constant):
         return True, node.value
+    if isinstance(node, ast.Name):
+        if var_env is not None and node.id in var_env:
+            return True, var_env[node.id]
+        if node.id in ("True", "False", "None"):
+            val_map = {"True": True, "False": False, "None": None}
+            return True, val_map[node.id]
+        return False, None
+    if isinstance(node, (ast.List, ast.Tuple)):
+        elems = []
+        for elt in node.elts:
+            ok, v = _eval_constant_expr(elt, var_env)
+            if not ok:
+                return False, None
+            elems.append(v)
+        return True, list(elems) if isinstance(node, ast.List) else tuple(elems)
+    if isinstance(node, ast.Set):
+        s_elems = set()
+        for elt in node.elts:
+            ok, v = _eval_constant_expr(elt, var_env)
+            if not ok:
+                return False, None
+            try:
+                s_elems.add(v)
+            except TypeError:
+                return False, None
+        return True, s_elems
+    if isinstance(node, ast.Dict):
+        d = {}
+        for k, v in zip(node.keys, node.values):
+            if k is None:
+                return False, None
+            ok_k, vk = _eval_constant_expr(k, var_env)
+            ok_v, vv = _eval_constant_expr(v, var_env)
+            if not (ok_k and ok_v):
+                return False, None
+            try:
+                d[vk] = vv
+            except TypeError:
+                return False, None
+        return True, d
     if isinstance(node, ast.UnaryOp):
-        ok, val = _eval_constant_expr(node.operand)
+        ok, val = _eval_constant_expr(node.operand, var_env)
         if ok and isinstance(val, (int, float)):
             if isinstance(node.op, ast.USub):
                 return True, -val
             if isinstance(node.op, ast.UAdd):
                 return True, +val
-            if isinstance(node.op, ast.Not):
-                return True, not val
+        if ok and isinstance(node.op, ast.Not):
+            return True, not val
     if isinstance(node, ast.BinOp):
-        ok_l, val_l = _eval_constant_expr(node.left)
-        ok_r, val_r = _eval_constant_expr(node.right)
+        ok_l, val_l = _eval_constant_expr(node.left, var_env)
+        ok_r, val_r = _eval_constant_expr(node.right, var_env)
         if (
             ok_l
             and ok_r
@@ -57,9 +97,46 @@ def _eval_constant_expr(node: ast.AST) -> tuple[bool, Any]:
     return False, None
 
 
+def _is_assert_call(call: ast.Call) -> bool:
+    if (
+        isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "self"
+    ):
+        attr = call.func.attr
+        return attr.startswith("assert") or attr == "fail"
+    return False
+
+
+def _has_causal_dependency(node: ast.AST, dependent_vars: set[str]) -> bool:
+    """ノードが関数呼出（非アサーション）または関数呼出に依存する変数を含んでいるかを判定する。"""
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call) and not _is_assert_call(sub):
+            return True
+        if isinstance(sub, ast.Name) and sub.id in dependent_vars:
+            return True
+    return False
+
+
+def _is_in_try_block_with_call(call_node: ast.AST, func_node: ast.AST) -> bool:
+    """call_node が非アサーション呼出を含む try ブロックの body 内にあるか（例外検証テストの fail を救済）。"""
+    for n in ast.walk(func_node):
+        if isinstance(n, ast.Try):
+            in_body = any(sub is call_node for item in n.body for sub in ast.walk(item))
+            if in_body:
+                has_call = any(
+                    isinstance(sub, ast.Call) and not _is_assert_call(sub)
+                    for item in n.body
+                    for sub in ast.walk(item)
+                )
+                if has_call:
+                    return True
+    return False
+
+
 def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
-    """候補テストの AST を解析し、自己完結した固定値比較や無条件 self.fail() 等の
-    偽陽性 Red (Trivial / Fake Red) を静的に検出する (機能MMM.3)。
+    """候補テストの AST を解析し、自己完結した固定値比較や因果関係のない固定値失敗等の
+    偽陽性 Red (Trivial / Fake Red) を静的に検出する (機能MMM.3 / 機能NNN.2)。
     """
     if isinstance(target, ast.AST):
         tree = target
@@ -82,56 +159,104 @@ def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
         if not node.name.startswith("test"):
             continue
 
+        var_env: dict[str, Any] = {}
+        dependent_vars: set[str] = set()
+
+        # 関数内文の順次解析により、変数定義・呼出依存関係を構築
+        for stmt in node.body:
+            # 1. 代入文 (Assign, AnnAssign)
+            if isinstance(stmt, ast.Assign):
+                rhs = stmt.value
+                val_has_dep = _has_causal_dependency(rhs, dependent_vars)
+                target_names = [n.id for t in stmt.targets for n in ast.walk(t) if isinstance(n, ast.Name)]
+                if val_has_dep:
+                    for name in target_names:
+                        dependent_vars.add(name)
+                        var_env.pop(name, None)
+                else:
+                    ok_const, const_val = _eval_constant_expr(rhs, var_env)
+                    if ok_const:
+                        for name in target_names:
+                            var_env[name] = const_val
+                            dependent_vars.discard(name)
+                    else:
+                        for name in target_names:
+                            dependent_vars.add(name)
+                            var_env.pop(name, None)
+
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                rhs = stmt.value
+                val_has_dep = _has_causal_dependency(rhs, dependent_vars)
+                target_names = [n.id for n in ast.walk(stmt.target) if isinstance(n, ast.Name)]
+                if val_has_dep:
+                    for name in target_names:
+                        dependent_vars.add(name)
+                        var_env.pop(name, None)
+                else:
+                    ok_const, const_val = _eval_constant_expr(rhs, var_env)
+                    if ok_const:
+                        for name in target_names:
+                            var_env[name] = const_val
+                            dependent_vars.discard(name)
+                    else:
+                        for name in target_names:
+                            dependent_vars.add(name)
+                            var_env.pop(name, None)
+
+        # アサーション呼出の因果依存性および無条件失敗の検証
         calls: list[ast.Call] = [n for n in ast.walk(node) if isinstance(n, ast.Call)]
-        has_non_assert_call = False
         trivial_reasons: list[str] = []
 
         for call in calls:
-            is_self_call = (
-                isinstance(call.func, ast.Attribute)
-                and isinstance(call.func.value, ast.Name)
-                and call.func.value.id == "self"
-            )
-            if not is_self_call:
-                has_non_assert_call = True
+            if not _is_assert_call(call):
                 continue
 
             attr = call.func.attr if isinstance(call.func, ast.Attribute) else ""
-            if attr == "fail":
-                trivial_reasons.append("Unconditional self.fail() call")
-            elif attr in ("assertEqual", "assertEquals") and len(call.args) >= 2:
-                is_c1, v1 = _eval_constant_expr(call.args[0])
-                is_c2, v2 = _eval_constant_expr(call.args[1])
-                if is_c1 and is_c2 and v1 != v2:
-                    trivial_reasons.append(f"Constant equality mismatch: {v1!r} == {v2!r}")
-            elif attr in ("assertNotEqual", "assertNotEquals") and len(call.args) >= 2:
-                is_c1, v1 = _eval_constant_expr(call.args[0])
-                is_c2, v2 = _eval_constant_expr(call.args[1])
-                if is_c1 and is_c2 and v1 == v2:
-                    trivial_reasons.append(f"Constant inequality mismatch: {v1!r} != {v2!r}")
-            elif attr in ("assertTrue", "assert_") and len(call.args) >= 1:
-                is_c, val = _eval_constant_expr(call.args[0])
-                if is_c and not val:
-                    trivial_reasons.append(f"Constant assertTrue({val!r}) failure")
-            elif attr == "assertFalse" and len(call.args) >= 1:
-                is_c, val = _eval_constant_expr(call.args[0])
-                if is_c and bool(val):
-                    trivial_reasons.append(f"Constant assertFalse({val!r}) failure")
-            elif attr == "assertIsNone" and len(call.args) >= 1:
-                is_c, val = _eval_constant_expr(call.args[0])
-                if is_c and val is not None:
-                    trivial_reasons.append(f"Constant assertIsNone({val!r}) failure")
-            elif attr == "assertIsNotNone" and len(call.args) >= 1:
-                is_c, val = _eval_constant_expr(call.args[0])
-                if is_c and val is None:
-                    trivial_reasons.append("Constant assertIsNotNone(None) failure")
-            elif not (attr.startswith("assert") or attr == "fail"):
-                has_non_assert_call = True
 
-        if trivial_reasons and not has_non_assert_call:
+            # self.fail() の検証
+            if attr == "fail":
+                if not _is_in_try_block_with_call(call, node):
+                    trivial_reasons.append("Unconditional self.fail() call without exception guard")
+                continue
+
+            # 引数がプロダクトコード呼出や依存変数に繋がっているか検証
+            arg_has_dependency = any(_has_causal_dependency(arg, dependent_vars) for arg in call.args)
+            if arg_has_dependency:
+                # プロダクトコードとの因果依存があるため Trivial Red ではない
+                continue
+
+            # 因果依存がない引数の固定値比較失敗判定
+            if attr in ("assertEqual", "assertEquals") and len(call.args) >= 2:
+                is_c1, v1 = _eval_constant_expr(call.args[0], var_env)
+                is_c2, v2 = _eval_constant_expr(call.args[1], var_env)
+                if is_c1 and is_c2 and v1 != v2:
+                    trivial_reasons.append(f"Constant equality mismatch without causal dependency: {v1!r} == {v2!r}")
+            elif attr in ("assertNotEqual", "assertNotEquals") and len(call.args) >= 2:
+                is_c1, v1 = _eval_constant_expr(call.args[0], var_env)
+                is_c2, v2 = _eval_constant_expr(call.args[1], var_env)
+                if is_c1 and is_c2 and v1 == v2:
+                    trivial_reasons.append(f"Constant inequality mismatch without causal dependency: {v1!r} != {v2!r}")
+            elif attr in ("assertTrue", "assert_") and len(call.args) >= 1:
+                is_c, val = _eval_constant_expr(call.args[0], var_env)
+                if is_c and not bool(val):
+                    trivial_reasons.append(f"Constant assertTrue({val!r}) failure without causal dependency")
+            elif attr == "assertFalse" and len(call.args) >= 1:
+                is_c, val = _eval_constant_expr(call.args[0], var_env)
+                if is_c and bool(val):
+                    trivial_reasons.append(f"Constant assertFalse({val!r}) failure without causal dependency")
+            elif attr == "assertIsNone" and len(call.args) >= 1:
+                is_c, val = _eval_constant_expr(call.args[0], var_env)
+                if is_c and val is not None:
+                    trivial_reasons.append(f"Constant assertIsNone({val!r}) failure without causal dependency")
+            elif attr == "assertIsNotNone" and len(call.args) >= 1:
+                is_c, val = _eval_constant_expr(call.args[0], var_env)
+                if is_c and val is None:
+                    trivial_reasons.append("Constant assertIsNotNone(None) failure without causal dependency")
+
+        if trivial_reasons:
             return (
                 True,
-                f"Test {node.name} contains trivial assertion without product calls: {'; '.join(trivial_reasons)}",
+                f"Test {node.name} contains trivial assertion without causal dependency: {'; '.join(trivial_reasons)}",
             )
 
     return False, ""
@@ -836,49 +961,118 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         profile_file: Path | None = None
         home_resolved = Path.home().resolve()
         if backend == "sandbox-exec":
-            py_bin = Path(sys.executable).resolve()
+            py_raw = Path(sys.executable)
+            py_bin = py_raw.resolve()
             py_prefix = Path(sys.prefix).resolve()
             py_base_prefix = Path(sys.base_prefix).resolve()
 
+            # NNN.1: ホームディレクトリ配下の仮想環境に対する最小特権マウントルール生成
+            pfx_rules: list[str] = []
+            toolchain_allows: list[str] = []
+
+            for p in [py_raw, py_bin, py_prefix, py_base_prefix]:
+                if p.is_relative_to("/Applications"):
+                    toolchain_allows.append('(allow file-read* (literal "/Applications"))')
+                    if len(p.parts) >= 3:
+                        toolchain_allows.append(f'(allow file-read* (subpath "{Path(*p.parts[:3])}"))')
+                elif p.is_relative_to("/Library"):
+                    if len(p.parts) >= 4:
+                        toolchain_allows.append(f'(allow file-read* (subpath "{Path(*p.parts[:4])}"))')
+                    elif len(p.parts) >= 3:
+                        toolchain_allows.append(f'(allow file-read* (subpath "{Path(*p.parts[:3])}"))')
+
+            if Path("/Library/Developer").exists():
+                toolchain_allows.append('(allow file-read* (subpath "/Library/Developer"))')
+
+            for pfx in [py_prefix, py_base_prefix]:
+                is_in_home = (
+                    pfx == home_resolved
+                    or pfx.is_relative_to(home_resolved)
+                )
+                if is_in_home:
+                    for sub in ["bin", "lib", "lib64", "include"]:
+                        sub_p = pfx / sub
+                        if sub_p.exists():
+                            pfx_rules.append(f'(allow file-read* (subpath "{sub_p}"))')
+                    cfg = pfx / "pyvenv.cfg"
+                    if cfg.exists():
+                        pfx_rules.append(f'(allow file-read* (literal "{cfg}"))')
+                else:
+                    pfx_rules.append(f'(allow file-read* (subpath "{pfx}"))')
+
+            toolchain_rules_str = "\n".join(dict.fromkeys(toolchain_allows))
+            unique_pfx_rules = list(dict.fromkeys(pfx_rules))
+            pfx_rules_str = "\n".join(unique_pfx_rules)
+
+            extra_allow_rules: list[str] = []
+            for opt_path in ["/opt/homebrew", "/usr/local"]:
+                if Path(opt_path).exists():
+                    extra_allow_rules.append(f'(allow file-read* (subpath "{opt_path}"))')
+            extra_allow_str = "\n".join(extra_allow_rules)
+
+            # NNN.1: 広範な /Library, /private/etc, /etc の一括 allow を廃止し、
+            # /private/var に対しても db, root, log, audit 等の機密領域を明示拒否（deny）し、
+            # システムライブラリ・実行作業ディレクトリのみの最小権限ホワイトリスト方式を適用
             profile_content = f"""(version 1)
 (allow default)
 (deny network*)
 (deny file-write*)
 (allow file-write* (subpath "{exec_resolved}"))
+(allow file-write* (subpath "{exec_cwd}"))
 (allow file-write* (literal "/dev/null"))
 (allow file-write* (literal "/dev/zero"))
 (allow file-write* (literal "/dev/dtracehelper"))
 (deny file-read*)
 (allow file-read* (literal "/"))
+(allow file-read* (literal "/private"))
+(allow file-read* (literal "/private/var"))
+(allow file-read* (literal "/private/var/folders"))
+(allow file-read* (literal "/var"))
+(allow file-read* (subpath "/var/folders"))
+(allow file-read* (subpath "/private/var/folders"))
+(allow file-read* (literal "/tmp"))
+(allow file-read* (literal "/private/tmp"))
+(allow file-read* (subpath "/tmp"))
+(allow file-read* (subpath "/private/tmp"))
 (allow file-read* (literal "/dev"))
 (allow file-read* (subpath "/dev"))
 (allow file-read* (subpath "/System"))
 (allow file-read* (subpath "/usr"))
-(allow file-read* (subpath "/Library"))
-(allow file-read* (subpath "/Applications"))
-(allow file-read* (subpath "/System/Volumes"))
-(allow file-read* (subpath "/private/etc"))
-(allow file-read* (subpath "/private/var"))
-(allow file-read* (subpath "/etc"))
-(allow file-read* (subpath "/var"))
-(allow file-read* (subpath "{py_prefix}"))
-(allow file-read* (subpath "{py_base_prefix}"))
-(allow file-read* (literal "{py_bin}"))
-(allow file-read* (subpath "{exec_resolved}"))
-(deny file-read* (subpath "/Library/Keychains"))
-(deny file-read* (subpath "/System/Library/Keychains"))
-(deny file-read* (subpath "/etc/sudoers"))
-(deny file-read* (subpath "/private/etc/sudoers"))
-(deny file-read* (subpath "/etc/master.passwd"))
-(deny file-read* (subpath "/private/etc/master.passwd"))
-(deny file-read* (subpath "/private/var/db/dslocal"))
+(deny file-read* (subpath "/Library"))
+(deny file-read* (subpath "/private/var/db"))
 (deny file-read* (subpath "/private/var/root"))
+(deny file-read* (subpath "/private/var/log"))
+(deny file-read* (subpath "/private/var/audit"))
+(deny file-read* (subpath "/private/var/spool"))
+(deny file-read* (subpath "/private/var/vm"))
+(deny file-read* (subpath "/private/var/backups"))
+(deny file-read* (subpath "/var/db"))
+(deny file-read* (subpath "/var/root"))
+(deny file-read* (subpath "/var/log"))
+(deny file-read* (subpath "/var/audit"))
+(deny file-read* (subpath "/var/spool"))
+(deny file-read* (subpath "/var/vm"))
+(deny file-read* (subpath "/var/backups"))
+(deny file-read* (subpath "/private/etc"))
+(deny file-read* (subpath "/etc"))
+(deny file-read* (subpath "/Applications"))
+(deny file-read* (subpath "/Volumes"))
 (deny file-read* (subpath "/Users"))
 (deny file-read* (subpath "{home_resolved}"))
-(allow file-read* (subpath "{py_prefix}"))
-(allow file-read* (subpath "{py_base_prefix}"))
+{toolchain_rules_str}
+{extra_allow_str}
+(allow file-read* (literal "/etc/resolv.conf"))
+(allow file-read* (literal "/private/etc/resolv.conf"))
+(allow file-read* (literal "/etc/hosts"))
+(allow file-read* (literal "/private/etc/hosts"))
+(allow file-read* (subpath "/private/etc/ssl"))
+(allow file-read* (subpath "/etc/ssl"))
+{pfx_rules_str}
+(allow file-read* (literal "{py_raw}"))
 (allow file-read* (literal "{py_bin}"))
+(allow file-read* (subpath "{py_bin}"))
 (allow file-read* (subpath "{exec_resolved}"))
+(allow file-read* (subpath "{exec_cwd}"))
 (deny file-read* (subpath "{repo_resolved}"))
 (deny file-write* (subpath "{repo_resolved}"))
 """
@@ -905,8 +1099,8 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 item_path = Path(etc_item)
                 if item_path.exists():
                     cmd.extend(["--ro-bind", str(item_path), str(item_path)])
-            for pfx in [sys.prefix, sys.base_prefix]:
-                pfx_path = Path(pfx).resolve()
+            for pfx_raw in [sys.prefix, sys.base_prefix]:
+                pfx_path = Path(pfx_raw).resolve()
                 if pfx_path.exists() and not any(
                     pfx_path == Path(sd) or Path(sd) in pfx_path.parents for sd in ["/usr", "/bin", "/lib", "/lib64"]
                 ):
