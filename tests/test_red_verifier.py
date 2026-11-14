@@ -320,13 +320,13 @@ class HostileChmodTest(unittest.TestCase):
             os.chmod(p_local, 0o644)
             p_local.write_text("TAMPERED_LOCAL")
         # 元リポジトリの絶対パスへも chmod して改変試行
-        p_abs = Path(r"{canary_abs_path}")
-        if p_abs.exists():
-            try:
+        try:
+            p_abs = Path(r"{canary_abs_path}")
+            if p_abs.exists():
                 os.chmod(p_abs, 0o644)
                 p_abs.write_text("TAMPERED_ABSOLUTE")
-            except Exception:
-                pass
+        except Exception:
+            pass
         self.assertEqual(1, 2)
 """
         result = self.verifier.verify_candidate_test(code)
@@ -505,6 +505,58 @@ class TamperingTest(unittest.TestCase):
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("injected_tamper.txt", result.reason_detail)
 
+    def test_repo_tamper_detected_when_untracked_content_tampered_in_flight(self) -> None:
+        """機能KKK.2: テスト実行中に未追跡ファイルの内容のみが改変された場合でも、REPO_TAMPER_DETECTED で拒絶されること。"""
+        from unittest.mock import MagicMock, patch
+
+        # Git リポジトリ初期化
+        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True)
+        dummy_init = self.repo_dir / "init.txt"
+        dummy_init.write_text("INIT", encoding="utf-8")
+        subprocess.run(["git", "add", "init.txt"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.repo_dir, check=True)
+
+        # 未追跡ファイルを事前に配置
+        probe_untracked = self.repo_dir / "existing_untracked.txt"
+        probe_untracked.write_text("PRISTINE_UNTRACKED", encoding="utf-8")
+
+        mock_proc = MagicMock()
+        mock_proc.pid = 99998
+        mock_proc.returncode = 1
+
+        def hostile_communicate(timeout: int | None = None) -> tuple[str, str]:
+            # テスト実行中にフラグを戻して未追跡ファイルの内容のみを書き換える
+            subprocess.run(["chflags", "-R", "nouchg", str(self.repo_dir)], check=False)
+            os.chmod(self.repo_dir, 0o755)
+            os.chmod(probe_untracked, 0o644)
+            probe_untracked.write_text("TAMPERED_UNTRACKED_IN_FLIGHT", encoding="utf-8")
+            return (
+                '===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [{"err": "hostile"}], "errors": []}',
+                "",
+            )
+
+        mock_proc.communicate.side_effect = hostile_communicate
+        orig_popen = subprocess.Popen
+
+        def popen_router(*args: Any, **kwargs: Any) -> Any:
+            cmd = args[0] if args else kwargs.get("args", [])
+            if cmd and any("sandbox" in str(c) or "bwrap" in str(c) or "-c" in str(c) for c in cmd):
+                return mock_proc
+            return orig_popen(*args, **kwargs)
+
+        code = """import unittest
+class TamperingUntrackedContentTest(unittest.TestCase):
+    def test_repro(self):
+        self.assertEqual(1, 2)
+"""
+        with patch("subprocess.Popen", side_effect=popen_router):
+            result = self.verifier.verify_candidate_test(code)
+            self.assertFalse(result.is_reproduced)
+            self.assertEqual(result.reason, "REPO_TAMPER_DETECTED")
+            self.assertIn("existing_untracked.txt", result.reason_detail)
+
     def test_reaps_multiple_descendant_processes_on_completion(self) -> None:
         """機能JJJ.3: 候補テストが複数のバックグラウンドプロセスを起動しても、完了後にすべて一括回収されること。"""
         marker = "auto_dev_test_multi_zombie_marker_completion_1122"
@@ -590,6 +642,121 @@ class SimpleTest(unittest.TestCase):
             self.assertIn("applied: limit=", result.process_limit_status)
         else:
             self.assertEqual(result.process_limit_status, "unsupported")
+
+    def test_sandbox_blocks_reading_host_home_secrets(self) -> None:
+        """機能KKK.1: サンドボックス内で実行された候補テストがホストのホームディレクトリ内の機密ファイルを読み取れないこと。"""
+        home = Path.home().resolve()
+        probe_secret = home / f".test_secret_probe_{os.getpid()}.txt"
+        secret_content = "SUPER_SECRET_HOST_TOKEN_ABC123"
+        probe_secret.write_text(secret_content, encoding="utf-8")
+        try:
+            code = f"""import unittest
+from pathlib import Path
+
+class ReadSecretTest(unittest.TestCase):
+    def test_leak_secret(self):
+        target = Path("{probe_secret}")
+        # 秘密ファイルを読み取って例外メッセージまたはアサーションで漏洩させようとする
+        content = target.read_text(encoding="utf-8")
+        self.assertEqual(content, "WRONG_TOKEN")
+"""
+            result = self.verifier.verify_candidate_test(code)
+            # サンドボックスにより読み取り例外 (PermissionError / FileNotFoundError) が発生し、
+            # 真正な Red ではなく UNHANDLED_EXCEPTION になること
+            self.assertFalse(result.is_reproduced)
+            self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
+            # 秘密内容が結果の出力に漏洩していないこと
+            self.assertNotIn(secret_content, result.output)
+        finally:
+            if probe_secret.exists():
+                probe_secret.unlink()
+
+    def test_sandbox_blocks_reading_parent_repo_confidential_files(self) -> None:
+        """機能KKK.1: サンドボックス内で実行された候補テストが元リポジトリの機密ファイル（.env 等）を読み取れないこと。"""
+        parent_secret = self.repo_dir / ".env.confidential"
+        secret_content = "CONFIDENTIAL_DB_PASSWORD_XYZ987"
+        parent_secret.write_text(secret_content, encoding="utf-8")
+
+        code = f"""import unittest
+from pathlib import Path
+
+class ReadParentRepoTest(unittest.TestCase):
+    def test_leak_repo_secret(self):
+        target = Path("{parent_secret.resolve()}")
+        content = target.read_text(encoding="utf-8")
+        self.assertEqual(content, "WRONG_PASSWORD")
+"""
+        result = self.verifier.verify_candidate_test(code)
+        # サンドボックスにより読み取り例外が発生し、UNHANDLED_EXCEPTION になること
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
+        # 秘密内容が結果の出力に漏洩していないこと
+        self.assertNotIn(secret_content, result.output)
+
+    def test_repo_tamper_detects_untracked_and_ignored_content_modifications(self) -> None:
+        """機能KKK.2: 未追跡ファイルおよび無視ファイルの内容のみが変更された場合でも、
+        スナップショット比較で確実に改ざんが検知されること (Sol氏 Phase 50 再現手順)。
+        """
+        # Git リポジトリ初期化
+        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True)
+
+        # .gitignore をコミット
+        gitignore = self.repo_dir / ".gitignore"
+        gitignore.write_text("*.ignored\n", encoding="utf-8")
+        subprocess.run(["git", "add", ".gitignore"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.repo_dir, check=True)
+
+        # 1. 未追跡ファイルと無視ファイルを作成
+        untracked = self.repo_dir / "probe_untracked.txt"
+        untracked.write_text("ORIGINAL_UNTRACKED", encoding="utf-8")
+        ignored = self.repo_dir / "probe.ignored"
+        ignored.write_text("ORIGINAL_IGNORED", encoding="utf-8")
+
+        before_snapshot = self.verifier._capture_repo_snapshot()
+
+        # 2. ファイル名・パスはそのまま、内容のみ改ざん
+        untracked.write_text("TAMPERED_UNTRACKED_CONTENT", encoding="utf-8")
+        ignored.write_text("TAMPERED_IGNORED_CONTENT", encoding="utf-8")
+
+        after_snapshot = self.verifier._capture_repo_snapshot()
+
+        # 3. 比較により、両方のパスが検知されること
+        diffs = self.verifier._compare_repo_snapshots(before_snapshot, after_snapshot)
+        self.assertIn("probe_untracked.txt", diffs)
+        self.assertIn("probe.ignored", diffs)
+
+    def test_lockdown_active_before_subprocess_popen_spawn(self) -> None:
+        """機能KKK.3: subprocess.Popen が呼び出された時点で、
+        すでに元リポジトリが _lockdown_repo により書き込み禁止になっていること（起動順序レース解消）。
+        """
+        import stat
+        from unittest.mock import patch
+
+        is_locked_at_spawn = False
+        orig_popen = subprocess.Popen
+
+        def inspecting_popen(*args: Any, **kwargs: Any) -> Any:
+            nonlocal is_locked_at_spawn
+            cmd = args[0] if args else kwargs.get("args", [])
+            if cmd and any("sandbox" in str(c) or "bwrap" in str(c) or "-c" in str(c) for c in cmd):
+                st = os.stat(self.repo_dir)
+                is_locked_at_spawn = not bool(st.st_mode & stat.S_IWUSR)
+            return orig_popen(*args, **kwargs)
+
+        code = """import unittest
+class SimplePassTest(unittest.TestCase):
+    def test_pass(self):
+        self.assertEqual(1, 1)
+"""
+        with patch("subprocess.Popen", side_effect=inspecting_popen):
+            result = self.verifier.verify_candidate_test(code)
+            self.assertEqual(result.reason, "ALREADY_GREEN")
+            self.assertTrue(
+                is_locked_at_spawn,
+                "Repository must already be locked down (read-only) at the moment Popen is invoked!",
+            )
 
 
 if __name__ == "__main__":

@@ -527,6 +527,27 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             )
             status_text = proc_status.stdout if proc_status.returncode == 0 else ""
 
+            # 2.1 未追跡・無視ファイルの内容ハッシュ・種別記録 (KKK.2 / Sol氏 Phase 50 P1指摘)
+            untracked_hashes: dict[str, str] = {}
+            for line in status_text.splitlines():
+                if line.startswith(("?? ", "!! ")):
+                    rel_path = line[3:].strip()
+                    if rel_path.startswith('"') and rel_path.endswith('"'):
+                        rel_path = rel_path[1:-1]
+                    p = resolved_repo / rel_path
+                    try:
+                        if p.is_symlink():
+                            target = os.readlink(p)
+                            untracked_hashes[rel_path] = f"symlink:{target}"
+                        elif p.is_file():
+                            untracked_hashes[rel_path] = f"file:{hashlib.sha256(p.read_bytes()).hexdigest()}"
+                        elif p.is_dir():
+                            untracked_hashes[rel_path] = "dir"
+                        else:
+                            untracked_hashes[rel_path] = "missing"
+                    except OSError as e:
+                        untracked_hashes[rel_path] = f"error:{e}"
+
             # 3. diff ハッシュ
             diff_args = ["git", "diff", "HEAD", "--binary"] if head_commit else ["git", "diff", "--binary"]
             proc_diff = subprocess.run(
@@ -541,6 +562,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 "type": "git",
                 "head": head_commit,
                 "status": status_text,
+                "untracked_hashes": untracked_hashes,
                 "diff_hash": diff_hash,
             }
 
@@ -574,6 +596,14 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             for line in before_lines - after_lines:
                 parts = line.strip().split(maxsplit=1)
                 changed_paths.append(parts[1] if len(parts) == 2 else line.strip())
+
+            # 未追跡・無視ファイルの内容差分検知 (KKK.2)
+            b_untracked = before.get("untracked_hashes", {})
+            a_untracked = after.get("untracked_hashes", {})
+            for path in set(b_untracked.keys()) | set(a_untracked.keys()):
+                if b_untracked.get(path) != a_untracked.get(path):
+                    changed_paths.append(path)
+
             if not changed_paths and before.get("diff_hash") != after.get("diff_hash"):
                 changed_paths.append("tracked_diff_modified")
             return sorted(set(changed_paths))
@@ -666,6 +696,11 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
         profile_file: Path | None = None
         if backend == "sandbox-exec":
+            home_resolved = Path.home().resolve()
+            py_bin = Path(sys.executable).resolve()
+            py_prefix = Path(sys.prefix).resolve()
+            py_base_prefix = Path(sys.base_prefix).resolve()
+
             profile_content = f"""(version 1)
 (allow default)
 (deny file-write*)
@@ -675,6 +710,12 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 (allow file-write* (literal "/dev/dtracehelper"))
 (deny file-write* (subpath "{repo_resolved}"))
 (deny network*)
+(deny file-read* (subpath "{home_resolved}"))
+(allow file-read* (subpath "{py_prefix}"))
+(allow file-read* (subpath "{py_base_prefix}"))
+(allow file-read* (literal "{py_bin}"))
+(allow file-read* (subpath "{exec_resolved}"))
+(deny file-read* (subpath "{repo_resolved}"))
 """
             with tempfile.NamedTemporaryFile("w", suffix=".sb", delete=False, dir=str(exec_resolved)) as tf:
                 tf.write(profile_content)
@@ -682,15 +723,25 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 profile_file = Path(tf.name)
             cmd = ["sandbox-exec", "-f", str(profile_file)] + runner_args
         elif backend == "bwrap":
-            cmd = [
-                "bwrap",
-                "--ro-bind", "/", "/",
-                "--bind", str(exec_resolved), str(exec_resolved),
+            cmd = ["bwrap"]
+            for sys_dir in ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]:
+                if Path(sys_dir).exists():
+                    cmd.extend(["--ro-bind", sys_dir, sys_dir])
+            for pfx in [sys.prefix, sys.base_prefix]:
+                pfx_path = Path(pfx).resolve()
+                if pfx_path.exists() and not any(
+                    pfx_path == Path(sd) or Path(sd) in pfx_path.parents for sd in ["/usr", "/bin", "/lib", "/lib64"]
+                ):
+                    cmd.extend(["--ro-bind", str(pfx_path), str(pfx_path)])
+            cmd.extend([
                 "--dev", "/dev",
                 "--proc", "/proc",
+                "--tmpfs", "/tmp",
+                "--bind", str(exec_resolved), str(exec_resolved),
                 "--unshare-net",
                 "--die-with-parent",
-            ] + runner_args
+            ])
+            cmd.extend(runner_args)
         else:
             return _res(
                 is_reproduced=False,
@@ -708,53 +759,52 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
         before_snapshot = self._capture_repo_snapshot()
 
-        proc = subprocess.Popen(
-            cmd,
-            cwd=exec_cwd,
-            env=sanitized_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=bool(os.name == "posix"),
-            preexec_fn=preexec,  # noqa: PLW1509
-        )
-        pgid = proc.pid
+        pgid: int | None = None
         stdout = ""
         stderr = ""
+        returncode = 1
+        timed_out = False
+        timeout_err: str = ""
+        execution_err: str = ""
 
         try:
-            try:
-                with self._lockdown_repo(self.repo_dir):
+            # 起動順序是正 (KKK.3 / Sol氏 Phase 50 P1指摘):
+            # 元リポジトリを先に完全ロックダウンし、保護された安全な状態の内側で Popen を起動
+            with self._lockdown_repo(self.repo_dir):
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=exec_cwd,
+                    env=sanitized_env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=bool(os.name == "posix"),
+                    preexec_fn=preexec,  # noqa: PLW1509
+                )
+                pgid = proc.pid
+
+                try:
                     stdout, stderr = proc.communicate(timeout=timeout_sec)
-            except subprocess.TimeoutExpired as e:
-                if pgid and os.name == "posix":
-                    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                        os.killpg(pgid, signal.SIGKILL)
-                with contextlib.suppress(Exception):
-                    stdout, stderr = proc.communicate(timeout=5)
-                return _res(
-                    is_reproduced=False,
-                    exit_code=124,
-                    reason="TIMEOUT",
-                    output=str(e),
-                    reason_detail=f"Test timed out after {timeout_sec}s",
-                )
-            except Exception as e:  # noqa: BLE001
-                if pgid and os.name == "posix":
-                    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                        os.killpg(pgid, signal.SIGKILL)
-                return _res(
-                    is_reproduced=False,
-                    exit_code=1,
-                    reason="EXECUTION_ERROR",
-                    output=str(e),
-                    reason_detail=str(e),
-                )
+                except subprocess.TimeoutExpired as e:
+                    timed_out = True
+                    timeout_err = str(e)
+                    if pgid and os.name == "posix":
+                        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                            os.killpg(pgid, signal.SIGKILL)
+                    with contextlib.suppress(Exception):
+                        stdout, stderr = proc.communicate(timeout=5)
+                except Exception as e:  # noqa: BLE001
+                    execution_err = str(e)
+                    if pgid and os.name == "posix":
+                        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                            os.killpg(pgid, signal.SIGKILL)
+                finally:
+                    # 正常終了時・例外時にも残存した子孫プロセスグループ全体を一括回収 (JJJ.3)
+                    if pgid and os.name == "posix":
+                        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                            os.killpg(pgid, signal.SIGKILL)
+                returncode = proc.returncode if proc.returncode is not None else 1
         finally:
-            # 正常終了時・例外時にも残存した子孫プロセスグループ全体を一括回収 (JJJ.3)
-            if pgid and os.name == "posix":
-                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                    os.killpg(pgid, signal.SIGKILL)
             if profile_file and profile_file.exists():
                 with contextlib.suppress(OSError):
                     profile_file.unlink()
@@ -769,6 +819,24 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 reason="REPO_TAMPER_DETECTED",
                 output=f"Parent repository tampering detected after candidate test execution. Modified paths: {tampered_paths}",
                 reason_detail=f"Parent repository was tampered with during test execution: {', '.join(tampered_paths)}",
+            )
+
+        if timed_out:
+            return _res(
+                is_reproduced=False,
+                exit_code=124,
+                reason="TIMEOUT",
+                output=timeout_err,
+                reason_detail=f"Test timed out after {timeout_sec}s",
+            )
+
+        if execution_err:
+            return _res(
+                is_reproduced=False,
+                exit_code=1,
+                reason="EXECUTION_ERROR",
+                output=execution_err,
+                reason_detail=execution_err,
             )
 
         returncode = proc.returncode if proc.returncode is not None else 1

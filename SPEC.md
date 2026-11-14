@@ -561,7 +561,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   3. 候補テストのOSレベル実行隔離・リソース境界強化と Level 7 E2E 通し試験 (III.3):
      - `RedTestVerifier._execute_test()` において、プロセス実行時のリソース境界（タイムアウト制限に加え、過剰なメモリ・プロセスフォーク・巨大ファイル出力を防ぐ制限）および環境変数の遮断を行い、外部生成候補コードに対する防御層を強化する。
      - `tests/test_level7_real_loop_e2e.py` を更新し、コミット指定 Fail-Closed、Proof 詳細記録、LESSONS.md のコミット参照追記、および全自動検証ゲート（292+ テスト、Ruff、Mypy）に合格すること。
-- [ ] 機能JJJ (Stage 7 候補テストのOSサンドボックス実行・元リポジトリ改ざん検知・子孫プロセス回収 Stage 7 OS Sandbox Execution, Repository Tamper Detection, and Process Reaping):
+- [x] 機能JJJ (Stage 7 候補テストのOSサンドボックス実行・元リポジトリ改ざん検知・子孫プロセス回収 Stage 7 OS Sandbox Execution, Repository Tamper Detection, and Process Reaping):
   1. OSサンドボックスによる候補テスト実行と Fail-Closed (JJJ.1 / Sol氏 Phase 49 P0指摘):
      - `RedTestVerifier._execute_test()` は候補テストを OS のサンドボックス機構の内側でのみ実行する。macOS では `sandbox-exec` を用い、ファイル書き込みは一時サンドボックスディレクトリ・実行専用の一時ディレクトリ・`/dev/null` 等の必要最小限のみを許可する許可リスト方式とし、ネットワークを遮断する。Linux では `bwrap`（bubblewrap）が利用可能な場合に同等の構成（元リポジトリを含むホストのファイルシステムは読み取り専用、書き込みは一時ディレクトリのみ、ネットワーク名前空間の分離）で実行する。サンドボックスの制約は、候補コードが起動した子孫プロセス（シェル・`chmod` 等）にも及ぶこと。
      - 利用可能なサンドボックス機構がない、またはサンドボックスの起動自体に失敗した場合は、非サンドボックス実行へフォールバックせず `SANDBOX_UNAVAILABLE`（is_reproduced=False, exit_code != 0）で検証を拒絶する。環境変数・引数等による非サンドボックス実行の許可経路は設けない。
@@ -579,6 +579,21 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `tests/test_level7_real_loop_e2e.py` を、サンドボックス実行下で Level 7 クローズドループが完走することを検証する形に更新し、サブプロセス経由の元リポジトリ書き換えを試みる悪意ある再現テストが `REPO_TAMPER_DETECTED` または canary 不変のいずれかで拒絶され、PLAN登録・免疫昇格・LESSONS記録に進まないことを検証する。
      - `NIGHTLY_REPORT.md` の成果要約は、実証した範囲と未実証の範囲（既知の限界）を分けて記載し、検証していない性質（例: 完全なOS隔離、実Multi-LLM運用）を達成済みと記載しない。
      - 全自動検証ゲート（295+ テスト、Ruff、Mypy）に合格し、`verify-step` / `commit-step` で正規に発行された Evidence Record を含む Evidence Bundle が `VERIFIED` となること。
+- [ ] 機能KKK (Stage 7 候補テストの機密読み取り隔離・未追跡改ざん検知完全化・実行順序レース是正 Stage 7 Confidential Read Isolation, Full Untracked Tamper Detection, and Execution Sequence Correction):
+  1. サンドボックス内機密ファイル読み取り遮断 (KKK.1 / Sol氏 Phase 50 P0指摘):
+     - Linux `bwrap`: `--ro-bind / /` によるホストルート全体公開を廃止。実行に必要な Python ランタイム（`/usr`, `/lib`, `/lib64`, `/bin`, `sys.executable` および仮想環境パス等）のみを読み取り専用とし、一時クローン/一時ディレクトリのみを読み書き可能とする。ホスト上のホームディレクトリ（`~`、`~/.ssh/`、`~/.aws/` 等）および元リポジトリ（`self.repo_dir`）は原則非公開（マウント除外）とする。
+     - macOS `sandbox-exec`: `(allow default)` ベースを廃止または制限し、ホストのホームディレクトリや元リポジトリへの読み取り（`file-read*`）を明示的に拒絶（deny）するプロファイルへ強化。
+     - 候補テストが `~/.ssh/id_rsa` や親リポジトリ内の非公開ファイルを読み取ろうとした場合に、読み取り例外（`PermissionError` / `FileNotFoundError`）等により `is_reproduced=False` で拒絶されることを単体テストで実証。
+  2. 未追跡・無視ファイルの内容改ざん検知の完全化 (KKK.2 / Sol氏 Phase 50 P1指摘):
+     - `_capture_repo_snapshot()` において、未追跡ファイルおよび無視ファイル（`git status --porcelain --ignored`）についても、ファイルパスの一覧だけでなく、ファイル種別（通常ファイル/ディレクトリ/シンボリックリンク）および内容の SHA-256 ハッシュ（シンボリックリンクはリンク先）をスナップショットに記録する。
+     - 既存の未追跡・無視ファイルの中身のみが書き換えられた場合、あるいはシンボリックリンク先が差し替えられた場合でも、差分を検知してテスト結果に関わらず `REPO_TAMPER_DETECTED`（is_reproduced=False, exit_code != 0）で即座に拒絶されることを単体テストで決定論的に実証する。
+  3. サンドボックス起動と元リポジトリ保護の起動順序是正 (KKK.3 / Sol氏 Phase 50 P1指摘):
+     - `_execute_test()` において、`subprocess.Popen` を呼び出す前に `_lockdown_repo` コンテキストに入り、元リポジトリが OS 権限・ファイルフラグで確実に保護された状態でサンドボックスプロセスを起動する（TOCTOU レースの解消）。
+     - 順序: [スナップショット取得 → 元リポジトリロックダウン → サンドボックス起動・実行・子孫回収 → ロックダウン解除 → スナップショット比較]。
+  4. Level 7 E2E サンドボックス下自律ループの完走と報告書の更新 (KKK.4):
+     - `tests/test_level7_real_loop_e2e.py` において、機密ファイル読み取り試行や未追跡ファイル改ざん試行がすべて遮断され、Level 7 クローズドループが完走することを検証。
+     - `NIGHTLY_REPORT.md` を更新し、機密読み取り境界の達成および残存する限界を正確に記録。
+     - 全自動検証ゲート（303+ テスト、Ruff、Mypy）に合格し、`verify-step` / `commit-step` で正規に発行された Evidence Record を含む Evidence Bundle が `VERIFIED` となること。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

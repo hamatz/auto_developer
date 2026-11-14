@@ -233,6 +233,30 @@
 - Immunity Test: `tests/test_runner_lesson_wiring.py` (`test_command_runner_delivers_lessons_to_maker_process`)
 - Proof: 実サブプロセスで起動された Maker が標準入力またはコンテキストファイル経由で教訓文字列を完全に取得できることを実証。
 
+### [2026-11-13] 書き込み遮断だけでは不十分な機密ファイル読み取り境界 (Read Access is Information Leak)
+- Context: `src/auto_developer/verifier.py` (OS サンドボックス設定)
+- Trap: サンドボックスでファイル書き込み（`deny file-write*`）および外部ネットワーク通信をカーネルレベルで遮断しても、ホストファイルシステム全体を読み取り可能（`--ro-bind / /` 等）にしていたため、`~/.ssh/`、`~/.aws/`、クラウド認証情報や他プロジェクトの機密コードを候補テストが読み取り可能だった。外部通信が禁止されていても、テスト出力（`stdout`/`stderr`）や例外メッセージに機密を埋め込めばサンドボックス外へ漏洩しうる。
+- Rule: サンドボックスは実行に必要な Python ランタイムおよび一時クローンのみをホワイトリストで読み取り許可し、ホストのホームディレクトリ（`~`）および元リポジトリは原則非公開（マウント除外または明示的 read deny）とする。
+- Rung: 作り（サンドボックスポリシー） & 検査
+- Immunity Test: `tests/test_red_verifier.py`
+- Proof: `~/.ssh` 等の読み取りを試みるテストコードが `PermissionError` または `FileNotFoundError` で即座に拒絶され、機密が漏洩しないことを実証。
+
+### [2026-11-13] 未追跡・無視ファイルの内容改ざん検知の抜け穴 (Untracked Content Tampering)
+- Context: `src/auto_developer/verifier.py` (`_capture_repo_snapshot`)
+- Trap: スナップショット比較において `git status --porcelain --ignored` のパス行のみを追跡していたため、未追跡ファイルや無視ファイルが存在したまま内容だけが書き換えられた場合に `git status` の行が変わらず、改ざんを検知できない脆弱性があった。
+- Rule: スナップショットには未追跡ファイル・無視ファイルについてもファイル種別（通常ファイル/ディレクトリ/シンボリックリンク）および内容の SHA-256 ハッシュを記録し、内容書き換えやリンク先差し替えを確実に検知して `REPO_TAMPER_DETECTED` を発動する。
+- Rung: 検査（多層防御検知）
+- Immunity Test: `tests/test_red_verifier.py`
+- Proof: 一時リポジトリ内の未追跡ファイル内容改ざんが確実に検知されることを実証。
+
+### [2026-11-13] 子プロセス起動とロックダウンの順序競合 (Lockdown Before Spawn)
+- Context: `src/auto_developer/verifier.py` (`_execute_test`)
+- Trap: `subprocess.Popen` で子プロセスを起動した直後に `with self._lockdown_repo(...)` に入る順序にしていたため、プロセス生成からロックダウン完了までの微小な隙間（レースウィンドウ）に元リポジトリが保護されていない時間が発生した。
+- Rule: 順序を完全に逆転し、元リポジトリをロックダウンしたコンテキストの内側で `subprocess.Popen` を起動する。
+- Rung: 作り（プロセスライフサイクル設計）
+- Immunity Test: `tests/test_red_verifier.py`
+- Proof: ロックダウンされた安全な状態下でのみ子プロセスが生成されることを実証。
+
 ### [記入例] 非同期処理とトランザクションのスコープ
 - Context: IndexedDB 操作全般
 - Trap: transaction のスコープ内で外部の fetch を await したため、トランザクションが自動コミットされ例外が発生した
