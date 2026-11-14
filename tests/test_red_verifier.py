@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -757,6 +758,125 @@ class SimplePassTest(unittest.TestCase):
                 is_locked_at_spawn,
                 "Repository must already be locked down (read-only) at the moment Popen is invoked!",
             )
+
+    def test_bwrap_command_excludes_entire_etc_and_minimizes_mounts(self) -> None:
+        """機能LLL.1: Linux bwrap において /etc 全体のマウントが廃止され、
+        最小限のファイルのみが個別にバインドされること（Sol氏 Phase 51 P1指摘）。
+        """
+        from unittest.mock import MagicMock, patch
+
+        bwrap_cmd_captured = []
+        orig_popen = subprocess.Popen
+
+        def capturing_popen(*args: Any, **kwargs: Any) -> Any:
+            nonlocal bwrap_cmd_captured
+            cmd = args[0] if args else kwargs.get("args", [])
+            if cmd and "bwrap" in str(cmd[0]):
+                bwrap_cmd_captured = list(cmd)
+                mock_p = MagicMock()
+                mock_p.pid = 12345
+                mock_p.returncode = 0
+                mock_p.communicate.return_value = (
+                    '===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [], "errors": []}',
+                    "",
+                )
+                return mock_p
+            return orig_popen(*args, **kwargs)
+
+        code = """import unittest
+class PassTest(unittest.TestCase):
+    def test_ok(self):
+        self.assertEqual(1, 1)
+"""
+        with patch.object(self.verifier, "_get_sandbox_backend", return_value="bwrap"), \
+             patch("subprocess.Popen", side_effect=capturing_popen):
+            result = self.verifier.verify_candidate_test(code)
+            self.assertEqual(result.reason, "ALREADY_GREEN")
+
+        # 1. bwrap コマンドが実行されたこと
+        self.assertTrue(bwrap_cmd_captured, "bwrap command must be invoked")
+
+        # 2. --ro-bind のペアを抽出
+        ro_bind_targets = []
+        for i, token in enumerate(bwrap_cmd_captured):
+            if token == "--ro-bind" and i + 1 < len(bwrap_cmd_captured):
+                ro_bind_targets.append(bwrap_cmd_captured[i + 1])
+
+        # 3. /etc 全体のマウントが排除されていること
+        self.assertNotIn("/etc", ro_bind_targets, "/etc entire directory must NOT be ro-bound into sandbox!")
+
+        # 4. ホストホームディレクトリ全体がマウントされていないこと
+        home_str = str(Path.home().resolve())
+        self.assertNotIn(home_str, ro_bind_targets, "Host home directory must NOT be ro-bound!")
+
+    def test_sandbox_blocks_reading_system_keychains_and_sensitive_etc(self) -> None:
+        """機能LLL.2: macOS sandbox-exec においてホーム外の機密パス（/Library/Keychains 等）が
+        明示的 deny され、候補テストから読み取れないこと（Sol氏 Phase 51 P1指摘）。
+        """
+        if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
+            self.skipTest("macOS sandbox-exec is only available on macOS")
+
+        keychain_path = Path("/Library/Keychains/System.keychain")
+        if not keychain_path.exists():
+            self.skipTest("System.keychain not found")
+
+        code = """import unittest
+from pathlib import Path
+
+class ReadKeychainTest(unittest.TestCase):
+    def test_read_system_keychain(self):
+        # システムキーチェーンを読み取ろうとする
+        p = Path('/Library/Keychains/System.keychain')
+        data = p.read_bytes()
+        self.assertEqual(len(data), 0)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        # サンドボックスにより PermissionError が発生し、真正な Red (ALREADY_GREEN / GENUINE_RED) ではなく UNHANDLED_EXCEPTION になること
+        self.assertFalse(result.is_reproduced)
+        self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
+        self.assertIn("PermissionError", result.output)
+
+    def test_bwrap_virtualenv_in_home_mounts_only_prefix_not_home(self) -> None:
+        """機能LLL.1: 仮想環境がホーム直下の場合、ホーム全体ではなく subfolder のみがマウントされること。"""
+        from unittest.mock import MagicMock, patch
+
+        bwrap_cmd_captured = []
+        orig_popen = subprocess.Popen
+
+        def capturing_popen(*args: Any, **kwargs: Any) -> Any:
+            nonlocal bwrap_cmd_captured
+            cmd = args[0] if args else kwargs.get("args", [])
+            if cmd and "bwrap" in str(cmd[0]):
+                bwrap_cmd_captured = list(cmd)
+                mock_p = MagicMock()
+                mock_p.pid = 12345
+                mock_p.returncode = 0
+                mock_p.communicate.return_value = (
+                    '===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [], "errors": []}',
+                    "",
+                )
+                return mock_p
+            return orig_popen(*args, **kwargs)
+
+        code = """import unittest
+class PassTest(unittest.TestCase):
+    def test_ok(self):
+        self.assertEqual(1, 1)
+"""
+        home_path = str(Path.home().resolve())
+        with patch.object(self.verifier, "_get_sandbox_backend", return_value="bwrap"), \
+             patch("sys.prefix", home_path), \
+             patch("sys.base_prefix", home_path), \
+             patch("subprocess.Popen", side_effect=capturing_popen):
+            result = self.verifier.verify_candidate_test(code)
+            self.assertEqual(result.reason, "ALREADY_GREEN")
+
+        ro_bind_targets = [
+            bwrap_cmd_captured[i + 1]
+            for i, token in enumerate(bwrap_cmd_captured)
+            if token == "--ro-bind" and i + 1 < len(bwrap_cmd_captured)
+        ]
+        self.assertNotIn(home_path, ro_bind_targets, "Home path itself must not be ro-bound even if sys.prefix == home")
 
 
 if __name__ == "__main__":

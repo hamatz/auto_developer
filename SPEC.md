@@ -579,7 +579,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `tests/test_level7_real_loop_e2e.py` を、サンドボックス実行下で Level 7 クローズドループが完走することを検証する形に更新し、サブプロセス経由の元リポジトリ書き換えを試みる悪意ある再現テストが `REPO_TAMPER_DETECTED` または canary 不変のいずれかで拒絶され、PLAN登録・免疫昇格・LESSONS記録に進まないことを検証する。
      - `NIGHTLY_REPORT.md` の成果要約は、実証した範囲と未実証の範囲（既知の限界）を分けて記載し、検証していない性質（例: 完全なOS隔離、実Multi-LLM運用）を達成済みと記載しない。
      - 全自動検証ゲート（295+ テスト、Ruff、Mypy）に合格し、`verify-step` / `commit-step` で正規に発行された Evidence Record を含む Evidence Bundle が `VERIFIED` となること。
-- [ ] 機能KKK (Stage 7 候補テストの機密読み取り隔離・未追跡改ざん検知完全化・実行順序レース是正 Stage 7 Confidential Read Isolation, Full Untracked Tamper Detection, and Execution Sequence Correction):
+- [x] 機能KKK (Stage 7 候補テストの機密読み取り隔離・未追跡改ざん検知完全化・実行順序レース是正 Stage 7 Confidential Read Isolation, Full Untracked Tamper Detection, and Execution Sequence Correction):
   1. サンドボックス内機密ファイル読み取り遮断 (KKK.1 / Sol氏 Phase 50 P0指摘):
      - Linux `bwrap`: `--ro-bind / /` によるホストルート全体公開を廃止。実行に必要な Python ランタイム（`/usr`, `/lib`, `/lib64`, `/bin`, `sys.executable` および仮想環境パス等）のみを読み取り専用とし、一時クローン/一時ディレクトリのみを読み書き可能とする。ホスト上のホームディレクトリ（`~`、`~/.ssh/`、`~/.aws/` 等）および元リポジトリ（`self.repo_dir`）は原則非公開（マウント除外）とする。
      - macOS `sandbox-exec`: `(allow default)` ベースを廃止または制限し、ホストのホームディレクトリや元リポジトリへの読み取り（`file-read*`）を明示的に拒絶（deny）するプロファイルへ強化。
@@ -594,6 +594,20 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `tests/test_level7_real_loop_e2e.py` において、機密ファイル読み取り試行や未追跡ファイル改ざん試行がすべて遮断され、Level 7 クローズドループが完走することを検証。
      - `NIGHTLY_REPORT.md` を更新し、機密読み取り境界の達成および残存する限界を正確に記録。
      - 全自動検証ゲート（303+ テスト、Ruff、Mypy）に合格し、`verify-step` / `commit-step` で正規に発行された Evidence Record を含む Evidence Bundle が `VERIFIED` となること。
+- [ ] 機能LLL (Stage 7 サンドボックス読み取り最小化とMulti-LLM独立監査境界の確立 Stage 7 Sandbox Read Minimization and Multi-LLM Independent Audit Boundary):
+  1. Linux `bwrap` 読み取りマウントの最小特権化 (LLL.1 / Sol氏 Phase 51 P1指摘):
+     - `/etc` 全体の `--ro-bind` を廃止し、DNS解決およびSSL/TLS証明書に必要な最小限のパス（`/etc/resolv.conf`, `/etc/ssl`, `/etc/pki`, `/etc/hosts` 等が存在する場合のみ）に限定マウントする。
+     - Python 仮想環境がユーザーホームディレクトリ配下にある場合、ホームディレクトリの他ファイルや親ディレクトリへの漏洩を防ぎ、仮想環境のパス自体（`sys.prefix`, `sys.base_prefix`）のみを限定的に `--ro-bind` する。
+     - サンドボックス内で `/etc/shadow` や `/etc/sudoers`、サービス固有設定、ホスト機密情報への読み取りが拒絶（`PermissionError` / `FileNotFoundError`）されることを単体テストで決定論的に実証する。
+  2. macOS `sandbox-exec` 読み取りプロファイルの厳格化 (LLL.2 / Sol氏 Phase 51 P1指摘):
+     - `(allow default)` 起点による情報漏洩リスクを低減するため、ホーム外の機密パスやシステム重要設定（`/etc`, `/private/etc`, `/Library/Keychains`, `~/.ssh`, `~/.aws`, `~/.gnupg` 等）への `(deny file-read*)` を明示追加し、読み取りポリシーを厳格化する。
+     - Python 実行に必要な prefix のみが allow され、それ以外の機密領域への読み取り試行が `PermissionError` で遮断されることを単体テストで実証する。
+  3. Multi-LLM 独立監査境界の確立と敵対的/不完全な Finding 耐性 (LLL.3 / Sol氏 指摘):
+     - 異系統 LLM（Maker=Gemini vs Auditor=Claude/別モデル）の無人接続準備として、Auditor が Maker の内部状態（推論・会話ログ等）を参照せず、`SPEC.md` と `git diff` のみから独立して判定できる境界を固定する。
+     - 外部 LLM から悪意ある再現テスト（ホスト機密読み取り・リポジトリ改ざん・リソース枯渇）や、不完全な Finding（構文エラー、未再現、偽陽性 Red）が投入された場合でも、Auto Developer が誤って承認・昇格させず安全に `REJECTED` として自律稼働を継続できる耐性を実証する。
+  4. Level 7 E2E 完走・整合性・Evidence Bundle 生成 (LLL.4):
+     - `tests/test_level7_real_loop_e2e.py` において、最小化されたサンドボックス下で Level 7 自己改善ループが完走し、敵対的/不正な Finding の流入がすべて安全に排除されることを検証する。
+     - `NIGHTLY_REPORT.md` を更新し、検証ゲート（全310+ テスト、Ruff、Mypy）に合格し、正規の Evidence Record を持つ Bundle を作成する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

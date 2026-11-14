@@ -21,6 +21,30 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-13] サンドボックス内で /etc 全体や仮想環境ディレクトリ全体を公開し、ホスト設定・認証情報が露出する余地を残した (Overexposed Host Directories in Sandbox)
+- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`, Linux `bwrap` マウント構成)
+- Trap: Phase 51 で `--ro-bind / /` を廃止した際、システムパスとして `/etc` 全体や、ホーム配下の Python 仮想環境ディレクトリ全体を `--ro-bind` してしまった。Linux の `/etc` にはサービス設定や秘密情報が含まれうる上、仮想環境ディレクトリ全体を公開すると不要な設定やファイルが露出する余地が残る（Sol氏 Phase 51 P1）。
+- Rule: サンドボックスへの読み取り公開は最小特権の原則（Least Privilege）を徹底する。`/etc` 全体の公開は禁止し、DNS/SSL に最低限必要な個別ファイル（`/etc/resolv.conf`, `/etc/ssl` 等）のみを条件付きで公開する。仮想環境も `sys.prefix` のみを厳格に公開し、`/etc/shadow` 等の機密ファイル読み取りが拒絶されることを単体テストで決定論的に実証する。
+- Rung: 作り（bwrap マウントパスの最小化） & 検査
+- Immunity Test: `tests/test_red_verifier.py`（Phase 52 LLL.1 で追加予定）
+- Proof: 候補テストから `/etc/shadow` や `/etc/sudoers` の読み取りを試みた場合に `PermissionError` または `FileNotFoundError` で遮断され、テスト結果が出力へ漏洩しないことを確認する。
+
+### [2026-11-13] macOS sandbox-exec の (allow default) 起点により、明示拒否していないホーム外パスへのアクセスが漏洩しうる (Implicit Read Leaks from Default-Allow Sandbox Profile)
+- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`, macOS `sandbox-exec` TinyScheme プロファイル)
+- Trap: macOS のプロファイルを `(allow default)` 起点で記述し、`~` と元リポジトリのみを `(deny file-read*)` で除外したため、ホームディレクトリ外に置かれた機密ファイル（`/etc`, `/private/etc`, `/Library/Keychains` 等）への読み取りが暗黙的に許可されたままになっていた（Sol氏 Phase 51 P1）。
+- Rule: デフォルト許可プロファイルであっても、システム重要設定・認証情報（`/etc`, `/private/etc`, `/Library/Keychains`, `~/.ssh`, `~/.aws`, `~/.gnupg`）への `file-read*` は明示的に拒絶（deny）する。Python 実行に必要な prefix のみを優先 allow し、機密領域へのアクセスがカーネル拒絶されることを単体テストで実証する。
+- Rung: 作り（sandbox-exec deny リスト強化） & 検査
+- Immunity Test: `tests/test_red_verifier.py`（Phase 52 LLL.2 で追加予定）
+- Proof: 候補テストから `/private/etc/master.passwd` や `/Library/Keychains` の読み取りを試みた場合に `PermissionError` で遮断されることを実証する。
+
+### [2026-11-13] 外部独立 Auditor からの敵対的・不完全な Finding に対する自律的選別耐性 (Resilience Against Hostile/Malformed External Auditor Findings)
+- Context: `src/auto_developer/dispatcher.py` (`AuditDispatcher.dispatch_finding`), `src/auto_developer/verifier.py`, `tests/test_level7_real_loop_e2e.py`
+- Trap: 実 Multi-LLM（Gemini Maker vs Claude Opus Auditor）接続時、外部モデルが敵対的なコード（機密盗取・リポジトリ破壊）や不完全な Finding（構文エラー、未再現、誤判定）を返す可能性がある。これらを無条件で信じてタスク登録・修正を行うと、リポジトリ汚染や無限ループに陥る。
+- Rule: 外部 LLM の出力は一切信用しない。Deterministic Verifier が OS サンドボックス内で再現性を検証し、`GENUINE_RED`（かつリポジトリ改ざん・機密読み取りなし）と判定されたもののみを `PLAN.md` に登録する。不正なコードや偽陽性 Red は即座に `REJECTED` で排除し、パイプラインの安全稼働を保証する。
+- Rung: 作り（AuditDispatcher の厳格な選別と Fail-Closed 処理） & 検査
+- Immunity Test: `tests/test_level7_real_loop_e2e.py`（Phase 52 LLL.3 で追加予定）
+- Proof: 構文エラーや改ざん試行、未再現の Finding が投入された場合に、PLAN.md や免疫テスト、LESSONS.md に昇格せず `REJECTED` で安全停止・スキップされることを実証する。
+
 ### [2026-11-12] リソース制限を実行隔離と取り違え、同一ユーザーの chmod で元リポジトリを書き換えられた (Resource Limits ≠ Isolation)
 - Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`, `_lockdown_repo`, `_apply_resource_limits`), `NIGHTLY_REPORT.md`
 - Trap: Phase 49 III.3 で `RLIMIT_FSIZE` / `RLIMIT_AS` / `RLIMIT_CPU` と環境変数の除外を追加し、「OSレベル実行隔離」が完了したと報告した。しかし候補テストは元リポジトリと同じユーザーで動くため、サブプロセスから `chmod u+w` してファイルを書き換えられ、しかもその実行が `GENUINE_RED` として受理された（Sol氏 Phase 49 P0）。Morning Brief には検証していない「実OS境界に束縛された基盤」という表現を書いた。
