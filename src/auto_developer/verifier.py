@@ -695,8 +695,8 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         ]
 
         profile_file: Path | None = None
+        home_resolved = Path.home().resolve()
         if backend == "sandbox-exec":
-            home_resolved = Path.home().resolve()
             py_bin = Path(sys.executable).resolve()
             py_prefix = Path(sys.prefix).resolve()
             py_base_prefix = Path(sys.base_prefix).resolve()
@@ -724,15 +724,34 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             cmd = ["sandbox-exec", "-f", str(profile_file)] + runner_args
         elif backend == "bwrap":
             cmd = ["bwrap"]
-            for sys_dir in ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"]:
+            # LLL.1: /etc 全体公開を廃止。システムバイナリ・ライブラリのみを公開
+            for sys_dir in ["/usr", "/lib", "/lib64", "/bin", "/sbin"]:
                 if Path(sys_dir).exists():
                     cmd.extend(["--ro-bind", sys_dir, sys_dir])
+            # DNS解決・SSL/TLS証明書等に最低限必要な個別ファイル/ディレクトリのみ限定マウント
+            for etc_item in [
+                "/etc/resolv.conf",
+                "/etc/ssl",
+                "/etc/pki",
+                "/etc/hosts",
+                "/etc/nsswitch.conf",
+                "/etc/localtime",
+            ]:
+                item_path = Path(etc_item)
+                if item_path.exists():
+                    cmd.extend(["--ro-bind", str(item_path), str(item_path)])
             for pfx in [sys.prefix, sys.base_prefix]:
                 pfx_path = Path(pfx).resolve()
                 if pfx_path.exists() and not any(
                     pfx_path == Path(sd) or Path(sd) in pfx_path.parents for sd in ["/usr", "/bin", "/lib", "/lib64"]
                 ):
-                    cmd.extend(["--ro-bind", str(pfx_path), str(pfx_path)])
+                    if pfx_path == home_resolved:
+                        for sub in ["bin", "lib", "lib64", "include"]:
+                            sub_path = pfx_path / sub
+                            if sub_path.exists():
+                                cmd.extend(["--ro-bind", str(sub_path), str(sub_path)])
+                    else:
+                        cmd.extend(["--ro-bind", str(pfx_path), str(pfx_path)])
             cmd.extend([
                 "--dev", "/dev",
                 "--proc", "/proc",
