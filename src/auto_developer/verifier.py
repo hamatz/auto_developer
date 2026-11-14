@@ -24,50 +24,6 @@ except ImportError:
 
 from auto_developer.guard import validate_test_ast
 
-STDLIB_AND_TEST_MODULES: set[str] = {
-    "unittest",
-    "pytest",
-    "sys",
-    "os",
-    "pathlib",
-    "typing",
-    "json",
-    "re",
-    "math",
-    "time",
-    "datetime",
-    "tempfile",
-    "shutil",
-    "contextlib",
-    "stat",
-    "subprocess",
-    "signal",
-    "collections",
-    "itertools",
-    "functools",
-    "dataclasses",
-    "enum",
-    "abc",
-    "io",
-    "copy",
-    "traceback",
-    "hashlib",
-    "ast",
-    "types",
-    "inspect",
-    "warnings",
-    "errno",
-    "platform",
-    "logging",
-    "random",
-    "string",
-    "struct",
-    "threading",
-    "multiprocessing",
-    "queue",
-    "builtins",
-}
-
 
 def _eval_constant_expr(node: ast.AST) -> tuple[bool, Any]:
     """リテラル定数、符号付き定数、定数同士の四則演算を安全に評価する。"""
