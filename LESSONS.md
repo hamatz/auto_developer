@@ -281,6 +281,30 @@
 - Immunity Test: `tests/test_red_verifier.py`
 - Proof: ロックダウンされた安全な状態下でのみ子プロセスが生成されることを実証。
 
+### [2026-11-14] 仮想環境マウントのパス包含判定の抜け穴 (Subdirectory Virtualenv Mount Gap)
+- Context: `src/auto_developer/verifier.py` (`bwrap` マウント処理)
+- Trap: 仮想環境の最小マウントにおいて `pfx_path == home_resolved` と完全一致のみ判定していたため、一般的な `~/.venvs/auto_dev` や `~/projects/.../.venv` 等のサブディレクトリに配置された仮想環境で条件が False となり、仮想環境ディレクトリ全体が `--ro-bind` されて周辺の不要ファイルが露出する余地が生じた。
+- Rule: ホーム配下のパス判定には `pfx_path == home_resolved or pfx_path.is_relative_to(home_resolved)` による包含関係チェックを用い、ホーム配下に存在するすべての仮想環境で `bin`, `lib`, `lib64`, `include`, `pyvenv.cfg` のみに限定マウントする。
+- Rung: 作り（マウント最小化） & 検査
+- Immunity Test: `tests/test_red_verifier.py`
+- Proof: サブディレクトリ配置の仮想環境から同一ユーザーホーム直下の他ファイルへの読み取り漏洩が防止されることを実証。
+
+### [2026-11-14] テスト失敗と真のバグの混同（偽陽性Redの排除） (Trivial Red vs Genuine Failure)
+- Context: `src/auto_developer/dispatcher.py` (`dispatch_finding`), `src/auto_developer/verifier.py`
+- Trap: 外部監査役（LLM）から `self.assertEqual(1, 2)` や `self.fail()` のように製品コード（`src/`）を一切実行せずテスト単体で失敗するコードが提出された場合でも、テストが失敗した（Red）という事実だけで `GENUINE_RED` と誤認し、不要な修正タスクとして PLAN.md に登録してしまう。
+- Rule: 候補テストの Red 検証では、単なるテスト失敗だけでなく、(1) テストコードが `src/` や対象モジュールを import / 利用しているか（AST静的検証）、(2) 失敗例外のスタックフレームに対象プロダクトコードが含まれているか（実行トレース検証）を確認し、プロダクトコードを実行せずに単体で落ちるテストは `TRIVIAL_RED` として `REJECTED` 隔離する。
+- Rung: 検査（多層検証ゲート）
+- Immunity Test: `tests/test_audit_dispatch.py`, `tests/test_red_verifier.py`
+- Proof: 固定値比較や即時 fail 等の偽陽性テストが `TRIVIAL_RED` として即座にリジェクトされ、PLAN.md が汚染されないことを実証。
+
+### [2026-11-14] OSサンドボックスにおけるDefault-Allowの盲点 (Default-Allow Blocklist Fallacy)
+- Context: `src/auto_developer/verifier.py` (macOS `sandbox-exec` プロファイル)
+- Trap: `(allow default)` 起点のブラックリスト（拒否リスト）方式では、開発者が認知していないシステムパスや新規に追加された機密ファイルがデフォルトで読み取り可能となり、完全な情報漏洩防止が成立しない。
+- Rule: 既知パスの deny に依存するだけでなく、ホーム外・親リポジトリ外の機密領域に対する遮断を最大化し、可能な限りホワイトリスト（許可リスト）アプローチまたは最小特権での隔離を徹底する。
+- Rung: 作り（セキュリティ境界設計）
+- Immunity Test: `tests/test_red_verifier.py`
+- Proof: システムキーチェーンや重要システム設定への読み取りが確実に遮断されることを実証。
+
 ### [記入例] 非同期処理とトランザクションのスコープ
 - Context: IndexedDB 操作全般
 - Trap: transaction のスコープ内で外部の fetch を await したため、トランザクションが自動コミットされ例外が発生した
