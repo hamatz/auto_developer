@@ -520,6 +520,164 @@ class TestUntrackedTamper(unittest.TestCase):
         lessons_text = self.lessons_path.read_text(encoding="utf-8") if self.lessons_path.exists() else ""
         self.assertNotIn("BUG-UNTRACKED-TAMPER-001", lessons_text)
 
+    def test_multi_llm_hostile_and_malformed_batch_isolated_from_level7_loop(self) -> None:
+        """機能LLL.4: 外部LLMから構文エラー・偽陽性・機密読み取り・リポジトリ改ざん等の
+        不正・敵対的 Finding 群が投入された場合でも、真正な指摘のみが選別されて
+        Level 7 自律ループ（修正 → After Green → 免疫昇格 → 教訓記録）が安全に完走し、
+        不正な指摘が PLAN / 免疫 / LESSONS に一切波及しないことを実証。
+        """
+        # 初期コミットの SHA
+        initial_commit_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo_dir, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        # 真正なゼロ除算バグ再現テスト
+        repro_code = (
+            "import unittest\n"
+            "from calc import calc_div\n\n"
+            "class TestCalcZeroDivision(unittest.TestCase):\n"
+            "    def test_zero_div(self):\n"
+            "        self.assertEqual(calc_div(10, 0), 0)\n"
+        )
+
+        batch_findings = [
+            # 1. 構文不正
+            AuditFinding(
+                finding_id="BATCH-ERR-001",
+                severity="P2",
+                spec_reference="SPEC.md",
+                location="src/calc.py:1",
+                description="Malformed syntax finding",
+                reproduction_test_code="def broken_syntax(:",
+                auditor_model="claude-opus-5.5",
+            ),
+            # 2. 偽陽性 (最初からPassするテスト)
+            AuditFinding(
+                finding_id="BATCH-PASS-002",
+                severity="P2",
+                spec_reference="SPEC.md",
+                location="src/calc.py:5",
+                description="Already passing finding",
+                reproduction_test_code="import unittest\nclass T(unittest.TestCase):\n    def test_p(self):\n        self.assertEqual(1, 1)",
+                auditor_model="claude-opus-5.5",
+            ),
+            # 3. 機密ファイル読み取り試行
+            AuditFinding(
+                finding_id="BATCH-SECRET-003",
+                severity="P0",
+                spec_reference="SECURITY",
+                location="src/calc.py:1",
+                description="Hostile secret read probe",
+                reproduction_test_code=(
+                    "import unittest\n"
+                    "from pathlib import Path\n"
+                    "class R(unittest.TestCase):\n"
+                    "    def test_leak(self):\n"
+                    "        _ = Path('/Library/Keychains/System.keychain').read_bytes()\n"
+                    "        self.assertEqual(1, 2)\n"
+                ),
+                auditor_model="claude-opus-5.5",
+            ),
+            # 4. 真正なバグ指摘
+            AuditFinding(
+                finding_id="BATCH-GENUINE-004",
+                severity="P0",
+                spec_reference="SPEC.md 3.1",
+                location="src/calc.py:2",
+                description="Zero division handling returns -999 instead of 0",
+                reproduction_test_code=repro_code,
+                auditor_model="claude-opus-5.5",
+            ),
+        ]
+
+        audit_store = AuditStore(repo_dir=self.repo_dir)
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, audit_store=audit_store)
+
+        # 1. バッチ処理による選別
+        dispatched_list = dispatcher.process_findings(batch_findings, plan_path=self.plan_path)
+
+        # 真正な指摘のみが 1 件受領されること
+        self.assertEqual(len(dispatched_list), 1)
+        dispatched_task = dispatched_list[0]
+        self.assertEqual(dispatched_task.finding_id, "BATCH-GENUINE-004")
+        self.assertEqual(dispatched_task.status, "DISPATCHED")
+
+        # 2. 不正・敵対的指摘がすべて REJECTED で AuditStore に記録されていること
+        s1 = audit_store.get_finding("BATCH-ERR-001")
+        self.assertIsNotNone(s1)
+        assert s1 is not None
+        self.assertEqual(s1.status, "REJECTED")
+
+        s2 = audit_store.get_finding("BATCH-PASS-002")
+        self.assertIsNotNone(s2)
+        assert s2 is not None
+        self.assertEqual(s2.status, "REJECTED")
+
+        s3 = audit_store.get_finding("BATCH-SECRET-003")
+        self.assertIsNotNone(s3)
+        assert s3 is not None
+        self.assertEqual(s3.status, "REJECTED")
+
+        # 3. PLAN.md に真正な指摘のみが登録されていること
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        self.assertIn("BATCH-GENUINE-004", plan_content)
+        self.assertNotIn("BATCH-ERR-001", plan_content)
+        self.assertNotIn("BATCH-PASS-002", plan_content)
+        self.assertNotIn("BATCH-SECRET-003", plan_content)
+
+        # 4. 実 Maker プロセスによる修正実行 (CommandRunnerAdapter)
+        dev_dir = self.repo_dir / ".dev"
+        dev_dir.mkdir(parents=True, exist_ok=True)
+        maker_script = dev_dir / "maker_fix.py"
+        maker_script.write_text(
+            "with open('src/calc.py', 'w') as f:\n"
+            "    f.write('def calc_div(a: int, b: int) -> int:\\n    if b == 0:\\n        return 0\\n    return a // b\\n')\n",
+            encoding="utf-8",
+        )
+        task_disp = TaskDispatcher()
+        tasks = task_disp.parse_plan(self.plan_path)
+        target_task = next(t for t in tasks if "BATCH-GENUINE-004" in t.title)
+
+        runner = CommandRunnerAdapter(
+            maker_cmd_template=f"cd {self.repo_dir} && {sys.executable} .dev/maker_fix.py",
+        )
+        code, _ = runner.run_maker(target_task, context={"attempt": 1})
+        self.assertEqual(code, 0)
+
+        # 5. コミット確定
+        subprocess.run(["git", "add", "src/calc.py", "PLAN.md"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "fix: resolve zero division bug"], cwd=self.repo_dir, check=True)
+        after_commit_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo_dir, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        # 6. AuditResolutionManager による解決・免疫昇格・教訓記録
+        res_manager = AuditResolutionManager(repo_dir=self.repo_dir)
+        resolve_res = res_manager.resolve_task(target_task.task_id)
+        self.assertTrue(resolve_res["success"])
+        self.assertEqual(resolve_res["proof"]["before_commit"], initial_commit_sha)
+        self.assertEqual(resolve_res["proof"]["after_commit"], after_commit_sha)
+
+        # 免疫テストが真正なバグのみ昇格していること
+        promoted = self.immunity_dir / "test_immunity_BATCH_GENUINE_004.py"
+        self.assertTrue(promoted.exists())
+        self.assertFalse((self.immunity_dir / "test_immunity_BATCH_ERR_001.py").exists())
+        self.assertFalse((self.immunity_dir / "test_immunity_BATCH_PASS_002.py").exists())
+        self.assertFalse((self.immunity_dir / "test_immunity_BATCH_SECRET_003.py").exists())
+
+        # LESSONS.md の更新
+        record_ok = res_manager.record_lesson(
+            audit_store.get_finding("BATCH-GENUINE-004"),  # type: ignore[arg-type]
+            resolve_res["proof"],
+            lessons_path=self.lessons_path,
+        )
+        self.assertTrue(record_ok)
+        lessons_text = self.lessons_path.read_text(encoding="utf-8")
+        self.assertIn("BATCH-GENUINE-004", lessons_text)
+        self.assertNotIn("BATCH-ERR-001", lessons_text)
+        self.assertNotIn("BATCH-PASS-002", lessons_text)
+        self.assertNotIn("BATCH-SECRET-003", lessons_text)
+
 
 if __name__ == "__main__":
     unittest.main()
