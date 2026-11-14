@@ -622,7 +622,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. 独立監査受入条件の固定と Level 7 E2E 完走・Evidence Bundle 生成 (MMM.4):
      - `tests/test_level7_real_loop_e2e.py` において、偽陽性 Red（Trivial Red）や包含仮想環境漏洩プローブが安全に排除され、真正な指摘のみが Level 7 自己改善ループを完走することを実証する。
      - `NIGHTLY_REPORT.md` を更新し、検証ゲート（全テスト、Ruff、Mypy）に合格し、正規の Evidence Record を持つ Bundle を作成する。
-- [ ] 機能NNN (Stage 7 独立第三者監査の実行と6大受入条件の体系的実証 Stage 7 Independent Audit Execution and Systemic Verification of 6 Acceptance Criteria):
+- [x] 機能NNN (Stage 7 独立第三者監査の実行と6大受入条件の体系的実証 Stage 7 Independent Audit Execution and Systemic Verification of 6 Acceptance Criteria):
   1. macOS `sandbox-exec` 読み取り許可範囲の最小権限化 (NNN.1 / Sol氏 Phase 53 P1指摘):
      - macOS の `sandbox-exec` プロファイルにおいて、広範な `/Library`, `/private/var`, `/etc` 全体 allow を廃止し、システム動的ライブラリ（`/System/Library/Frameworks`, `/usr/lib`）および明示的な Python 実行ランタイムパスのみに厳格縮小する。
      - ユーザー設定・キャッシュ・サービス固有設定へのアクセス遮断を単体テストで実証する。
@@ -633,6 +633,17 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 独立第三者監査の受入基準（実行隔離、偽陽性耐性、Evidence、複数ワーカー、Multi-LLM、継続運用）を網羅する体系的監査スイートを整備し、Fail-Closed に判定する。
   4. 独立監査完走・Evidence Bundle 生成と v0.7.0 リリース準備 (NNN.4):
      - Level 7 E2E 完走を確認し、6大受入条件を満たした独立監査 Evidence Bundle を生成、v0.7.0 リリースを確定する。
+- [ ] 機能OOO (Stage 7 AST 因果解析の厳密化と独立監査受入ハーネス確定 Stage 7 AST Causal Order and Guarded Failure Refinement):
+  1. AST 解析の文実行順序化（Program Order）による後続代入汚染の完全排除 (OOO.1 / Sol氏 Phase 54 P1指摘):
+     - `check_trivial_red_ast` において、代入文とアサーションをメソッド内の実行順（Program Order）に沿って順次走査・評価する。
+     - アサーション実行時点の変数状態・因果関係スナップショットのみを参照し、アサーションより後の再代入（例: `x = compute_val(1); self.assertEqual(x, 2); x = 999`）が直前のアサーション判定に逆流しないことを単体テストで実証する。
+  2. 条件付き（`if` / `while`）`self.fail()` の因果依存ガード判定 (OOO.2 / Sol氏 Phase 54 P1指摘):
+     - `if` / `elif` / `while` 等の条件分岐内に存在する `self.fail()` について、分岐条件式（`test`）がプロダクトコードの関数呼出や依存変数に繋がっている場合は、無条件失敗ではなく正当な条件付き不具合検出テストとして判定（受理）する。
+     - 例: `if compute_val(1) != 2: self.fail("wrong value")` が `TRIVIAL_RED` として誤拒絶されず、正常に受容されることを単体テストで実証する。
+  3. 独立監査受入ハーネス・Level 7 E2E 完走確認と受入テスト拡充 (OOO.3):
+     - `tests/test_level7_real_loop_e2e.py` および `tests/test_independent_audit_runner.py` において、後続再代入を含む正常テストや条件付き `self.fail()` を含む正常テストが安全にパスし、偽 Red のみが確実に排除されることを実証する。
+  4. 報告書の正確化（受入ハーネス実証）・Evidence Bundle 生成と v0.7.0 リリース準備 (OOO.4):
+     - `NIGHTLY_REPORT.md` およびドキュメントの表現を「独立第三者監査に向けた受入ハーネスの整備・実証」として正確に是正し、全テスト通過・改ざん検知・独立 Checker 承認済みの Evidence Bundle を生成して v0.7.0 を確定する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
