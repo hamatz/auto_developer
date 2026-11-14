@@ -25,65 +25,96 @@ Auto Developer は、**「Job Orchestrator（親プロセスによる状態永�
 
 ## 🏗️ システムアーキテクチャ
 
-Auto Developer は、会話セッションから独立した Python オーケストレーター（`MultiTeamOrchestrator` / `NightlyOrchestrator`）が親となり、AIセッション（Maker / Checker）および複数チームの並行ワーカーを安全に監督・統合します。
+Auto Developer は、会話セッションから独立した Python オーケストレーター（`MultiTeamOrchestrator` / `NightlyOrchestrator`）が親となり、AIセッション（Maker / Checker）、複数チームの並行ワーカー、OS レベルサンドボックス、および独立した異系統 LLM 監査人を安全に監督・統合します。
 
 ```mermaid
 flowchart TD
-    subgraph Host ["Orchestration Boundary (親プロセス / 監督層)"]
+    subgraph Host ["1. Orchestration Boundary (親プロセス / 監督層)"]
         State[("JobState (.dev/job_state.json)<br/>永続化 & クラッシュ復旧")]
         MultiOrch["MultiTeamOrchestrator<br/>(並列ワーカー監督 & PGID ライフサイクル管理)"]
+        RecoveryEngine["RecoveryEngine (auto-dev recover)<br/>(inspect / plan / apply トランザクション復旧)"]
         State <--> MultiOrch
+        State <--> RecoveryEngine
     end
 
-    subgraph Workers ["Worker Execution Layer (物理 Worktree 分離)"]
+    subgraph Workers ["2. Worker Execution Layer (物理 Worktree 分離)"]
         direction LR
-        subgraph TeamA ["Team Core (Worktree: team-core)"]
-            GuardA["BoundaryGuard (領空検査)"]
-            RunnerA["CLI Worker A<br/>(NightlyOrchestrator)"]
-            BundleA["Evidence Bundle A"]
-            GuardA --- RunnerA --> BundleA
+        subgraph TeamCore ["Team Core (Worktree: team-core)"]
+            GuardCore["BoundaryGuard (領空・保護ファイル防壁)"]
+            RunnerCore["Worker Core (NightlyOrchestrator)"]
+            GuardCore --- RunnerCore
         end
-        subgraph TeamB ["Team UI (Worktree: team-ui)"]
-            GuardB["BoundaryGuard (領空検査)"]
-            RunnerB["CLI Worker B<br/>(NightlyOrchestrator)"]
-            BundleB["Evidence Bundle B"]
-            GuardB --- RunnerB --> BundleB
+        subgraph TeamUI ["Team UI (Worktree: team-ui)"]
+            GuardUI["BoundaryGuard (領空・保護ファイル防壁)"]
+            RunnerUI["Worker UI (NightlyOrchestrator)"]
+            GuardUI --- RunnerUI
         end
     end
 
-    subgraph Preservation ["Non-destructive Evidence Preservation (排他保全)"]
+    subgraph Sandbox ["3. OS-Level Sandbox & Trivial Red Elimination (Red-First 防壁)"]
+        RedVerifier["RedTestVerifier (候補テスト隔離判定)"]
+        MacOSSB["macOS sandbox-exec<br/>(デフォルト拒否: deny file-read* & ホワイトリスト許可)"]
+        LinuxSB["Linux bwrap (Bubblewrap)<br/>(--unshare-net & 仮想環境個別マウント)"]
+        TrivialAST["AST 静的解析 & sys.settrace 実行追跡<br/>(自明失敗・偽陽性 TRIVIAL_RED 排除)"]
+        RedVerifier --> MacOSSB
+        RedVerifier --> LinuxSB
+        RedVerifier --> TrivialAST
+    end
+
+    subgraph Preservation ["4. Non-destructive Evidence Preservation (排他保全)"]
         LinkAtomic["os.link 排他的確定<br/>(TOCTOU 上書き完全遮断)"]
         Idempotent["同一ハッシュ: 冪等再利用<br/>異ハッシュ: 衝突拒否 & 原本保護"]
         PermBase[(".dev/integration_jobs/<job_id>/evidence/<team_id>.zip")]
         LinkAtomic --> Idempotent --> PermBase
     end
 
-    subgraph Gate ["Integration Gate (独立結合 & RC確定)"]
+    subgraph Gate ["5. Integration Gate & Promotion (独立結合 & RC確定)"]
         IntWT["Integration Worktree (int-<job_id>)"]
-        GateVerify["結合検証スクリプト実行<br/>(Core + UI の意味論的結合)"]
+        GateVerify["結合検証スクリプト実行<br/>(型・AST意味論的結合 & 競合調停)"]
         RC["Release Candidate タグ発行<br/>refs/tags/rc/<job_id>"]
         IntWT --> GateVerify --> RC
     end
 
-    subgraph Delivery ["Audit & Handoff (人間への引き継ぎ)"]
-        BundlePkg["Evidence Bundle ZIP<br/>(Tree SHA / Manifest 拘束)"]
+    subgraph Audit ["6. Independent Multi-LLM Audit Boundary (独立第三者監査)"]
+        AuditDisp["AuditDispatcher (独立監査ディスパッチ)"]
+        ModelPolicy["Model Family Policy<br/>(Maker≠Auditor 異系統LLM強制 / 癒着排除)"]
+        AuditStore["AuditStore (監査不変ログ / REJECTED 記録)"]
+        AuditDisp --> ModelPolicy --> AuditStore
+    end
+
+    subgraph Delivery ["7. Audit & Handoff (人間への引き継ぎ)"]
+        BundlePkg["Evidence Bundle ZIP<br/>(Tree SHA / Manifest 暗号拘束)"]
         Brief["Morning Brief (NIGHTLY_REPORT.md)<br/>意思決定支援レポート"]
-        VerifierTool["独立監査 (auto-dev verify-bundle)"]
+        VerifierTool["独立監査 CLI (auto-dev verify-bundle)"]
         RC --> BundlePkg --> VerifierTool
+        AuditStore --> BundlePkg
         RC --> Brief
     end
 
     MultiOrch -->|"1. 並行 Worktree 準備 & 起動"| Workers
-    Workers -->|"2. 成果 Bundle 収集"| Preservation
-    Preservation -->|"3. 監査済み成果引き渡し"| Gate
-    MultiOrch -->|"4. 安全なクリーンアップ<br/>(失敗時は原本 Worktree を保護)"| Workers
+    Workers -->|"2. Red-First 候補テスト検証"| Sandbox
+    Workers -->|"3. 成果 Bundle 収集"| Preservation
+    Preservation -->|"4. 監査済み成果引き渡し"| Gate
+    Gate -->|"5. 独立外部監査"| Audit
+    MultiOrch -->|"6. 安全なクリーンアップ<br/>(失敗時は原本 Worktree を保護)"| Workers
 ```
 
-### 多層防衛アーキテクチャの柱
-1. **物理的分離（Worktree Isolation & BoundaryGuard）**: 各ワーカーは専用の Git Worktree で隔離実行され、担当外ファイル（領空）への改変は即座に遮断されます。
-2. **非破壊的成果保全（Atomic Exclusive Preservation）**: `os.link` による排他的公開を採用し、TOCTOU 競合による上書きを完全遮断。同一成果は冪等に再利用し、異成果衝突時は上書きを拒否して Worktree 原本を安全に保護します。
-3. **独立統合ゲート（IntegrationGate & Release Candidate）**: チーム横断の成果物は独立した統合 Worktree で結合・検証され、全テスト合格時のみ原子的 RC タグ（`rc/<job_id>`）が発行されます。
-4. **暗号学的証跡と第三者監査（Evidence Bundle & Verifier）**: Git Tree SHA、コミット、Checker ログがハッシュ拘束された ZIP パッケージを生成し、改ざんや未検証成果の混入を物理的に検証可能です。
+### 多層防衛アーキテクチャの 6 大支柱
+1. **親プロセスによるライフサイクル監督 & 障害復旧（Host Supervision & Transactional Recovery）**:
+   - `MultiTeamOrchestrator` が PGID（プロセスグループID）単位でサブプロセスを統括し、親の不意の終了時にも孫プロセスを含む孤児プロセスを決定論的に回収。`.dev/job_state.json` による状態永続化と `auto-dev recover` によるトランザクショナルなクラッシュ復旧（inspect / plan / apply）を実現します。
+2. **物理的分離と領空防衛（Worktree Isolation & BoundaryGuard）**:
+   - 各チームは専用の独立 Git Worktree で物理隔離されて作業を行い、担当外ディレクトリ（領空）や保護対象ファイル（`.github/**`, `SPEC.md`, `scripts/verify_local.sh`, 免疫テスト）の改変はコミット前に物理遮断されます。
+3. **OS レベルサンドボックス & 偽陽性 Red 排除（OS Sandboxing & Trivial Red Defense）**:
+   - Red-First 候補テスト実行時、macOS `sandbox-exec`（デフォルト拒否 `deny file-read*`＋ホワイトリスト個別許可）および Linux `bwrap`（Bubblewrap によるネットワーク完全遮断 `--unshare-net`＆仮想環境個別マウント）により、ホストの機密情報（SSH鍵・クラウドクレデンシャル等）と元リポジトリを完全隔離します。
+   - さらに、AST 静的構文解析と動的 `sys.settrace` 実行トレースにより、自明な無条件失敗テスト（`self.assertEqual(1, 2)` 等）を `TRIVIAL_RED` として検知・自動排除します。
+4. **非破壊的成果保全と独立統合ゲート（Atomic Preservation & IntegrationGate）**:
+   - `os.link` による排他的・原子的 Evidence 保全を採用し、TOCTOU 競合による上書きを完全遮断。同一成果は冪等再利用し、異成果衝突時は Worktree 原本を安全に保護します。
+   - 独立した統合 Worktree での意味論的結合検証を経て、原子的 Release Candidate タグ（`refs/tags/rc/<job_id>`）を発行します。
+5. **暗号学的証跡と第三者検証（Evidence Bundle & Tamper-Proof Verifier）**:
+   - Git Tree SHA、コミット SHA、Checker ログ、SPEC SHA がハッシュ拘束された不変の ZIP パッケージを生成。外部監査 CLI (`auto-dev verify-bundle`) により、改ざんや未検証成果の混入をオフラインかつ物理的に検出可能です。
+6. **Multi-LLM 独立監査境界（Independent Multi-LLM Audit Boundary）**:
+   - 単一 LLM への自己承認依存を排除し、Maker と Checker/Auditor に異系統 LLM（例: Gemini Maker vs Claude Opus / GPT 6.1 Auditor）を強制適用。
+   - 不正な監査 Finding の差し戻し、REJECTED ログの監査証跡記録、および翌朝の人間向け意思決定支援レポート（`NIGHTLY_REPORT.md`）を提供します。
 
 ---
 
@@ -325,91 +356,70 @@ auto-dev rollback-step --checkpoint <commit_hash> --task-id <id> --reason "原�
 
 ## 🏗️ アーキテクチャと実装ロードマップ (Architecture & Roadmap Matrix)
 
-Auto Developer は、単一ワーカーの厳格な直列実行（Stage 1）から、複数チームによる並列自律開発・監査・多段配信（Stage 5）までを見据えた段階的アーキテクチャを採用しています。
-
-```mermaid
-flowchart TD
-    subgraph Host ["Orchestration Boundary (親プロセス / 監督層)"]
-        State[("JobState (.dev/job_state.json)<br/>永続化 & クラッシュ復旧")]
-        MultiOrch["MultiTeamOrchestrator<br/>(並列ワーカー監督 & PGID ライフサイクル管理)"]
-        State <--> MultiOrch
-    end
-
-    subgraph Workers ["Worker Execution Layer (物理 Worktree 分離)"]
-        direction LR
-        subgraph TeamA ["Team Core (Worktree: team-core)"]
-            GuardA["BoundaryGuard (領空検査)"]
-            RunnerA["CLI Worker A<br/>(NightlyOrchestrator)"]
-            BundleA["Evidence Bundle A"]
-            GuardA --- RunnerA --> BundleA
-        end
-        subgraph TeamB ["Team UI (Worktree: team-ui)"]
-            GuardB["BoundaryGuard (領空検査)"]
-            RunnerB["CLI Worker B<br/>(NightlyOrchestrator)"]
-            BundleB["Evidence Bundle B"]
-            GuardB --- RunnerB --> BundleB
-        end
-    end
-
-    subgraph Preservation ["Non-destructive Evidence Preservation (排他保全)"]
-        LinkAtomic["os.link 排他的確定<br/>(TOCTOU 上書き完全遮断)"]
-        Idempotent["同一ハッシュ: 冪等再利用<br/>異ハッシュ: 衝突拒否 & 原本保護"]
-        PermBase[(".dev/integration_jobs/<job_id>/evidence/<team_id>.zip")]
-        LinkAtomic --> Idempotent --> PermBase
-    end
-
-    subgraph Gate ["Integration Gate (独立結合 & RC確定)"]
-        IntWT["Integration Worktree (int-<job_id>)"]
-        GateVerify["結合検証スクリプト実行<br/>(Core + UI の意味論的結合)"]
-        RC["Release Candidate タグ発行<br/>refs/tags/rc/<job_id>"]
-        IntWT --> GateVerify --> RC
-    end
-
-    subgraph Delivery ["Audit & Handoff (人間への引き継ぎ)"]
-        BundlePkg["Evidence Bundle ZIP<br/>(Tree SHA / Manifest 拘束)"]
-        Brief["Morning Brief (NIGHTLY_REPORT.md)<br/>意思決定支援レポート"]
-        VerifierTool["独立監査 (auto-dev verify-bundle)"]
-        RC --> BundlePkg --> VerifierTool
-        RC --> Brief
-    end
-
-    MultiOrch -->|"1. 並行 Worktree 準備 & 起動"| Workers
-    Workers -->|"2. 成果 Bundle 収集"| Preservation
-    Preservation -->|"3. 監査済み成果引き渡し"| Gate
-    MultiOrch -->|"4. 安全なクリーンアップ<br/>(失敗時は原本 Worktree を保護)"| Workers
-```
+Auto Developer は、単一ワーカーの厳格な直列実行（Stage 1）から、複数チームによる並列自律開発、暗号学的証跡保全、意味論的調停、多段プロモーション、自己治癒・耐障害性、そして OS レベルサンドボックス＆ Multi-LLM 独立監査（Stage 7）まで、段階的かつ体系的に構築された防衛アーキテクチャを採用しています。
 
 ### 実装状況・ロードマップ対比表
 
-現在、**Stage 1 〜 Stage 3 の全機能が実装・実証済み（Tested & Verified）** です。
+現在、**Stage 1 〜 Stage 7 の全機能が実装・実証済み（Tested & Verified）** です。全 321 件の自動テストおよび第三者 LLM 監査に合格しています。
 
-| Stage | レイヤ / マイルストーン | 主な責務・機能 | ステータス | 独立検証状況 |
+| Stage | レイヤ / マイルストーン | 主な責務・コア機能 | 実装ステータス | 検証状況・実証エビデンス |
 | :--- | :--- | :--- | :--- | :--- |
-| **Stage 1** | **Single Worker Serial Pipeline** | ・EGM 規律 [Maker → Verify → Checker → Commit]<br/>・保護ファイル外部不変条件検査<br/>・決定論的 Evidence Token 発行 & ワンタイム消費<br/>・Quarantine 隔離退避 & 状態永続化 (`--resume`) | **実装・実証完了**<br/>(Phase 1〜15) | ✅ 自動検証ゲート合格<br/>✅ 受入テスト合格 |
+| **Stage 1** | **Single Worker Serial Pipeline** | ・EGM 規律 [Maker → Verify → Checker → Commit]<br/>・保護ファイル外部不変条件検査 (`SPEC.md`, `.github/**`)<br/>・決定論的 Evidence Token 発行 & ワンタイム消費<br/>・Quarantine 隔離退避 & 状態永続化 (`--resume`) | **実装・実証完了**<br/>(Phase 1〜15) | ✅ 自動検証ゲート合格<br/>✅ 受入テスト全件合格 |
 | **Stage 2** | **Evidence Bundling & Audit Tooling** | ・提出用 Evidence Bundle ZIP パッケージング<br/>・機密情報（`.env` 等）排除・サニタイズ<br/>・Tree SHA / Manifest 暗号学的拘束<br/>・独立監査 CLI (`auto-dev verify-bundle`) | **実装・実証完了**<br/>(Phase 16〜25) | ✅ 独立復元・改ざん検知テスト合格<br/>✅ 第三者監査検証合格 |
-| **Stage 3** | **Multi-Team Parallel Worktree Orchestration** | ・`MultiTeamOrchestrator` & `WorktreeManager`<br/>・チーム別 Worktree 物理分離 & `BoundaryGuard` 領空検査<br/>・`start_new_session` & 起動時 PGID 保持によるプロセスグループ監督<br/>・決定論的孤児防止（親先行終了時の孫回収、ゾンビ誤認排除）<br/>・`os.link` による排他的・原子的 Evidence 保全 (TOCTOU 排除)<br/>・異ハッシュ衝突時の原本 Worktree 保護 & 冪等再利用<br/>・2-Phase 統合ゲート (`IntegrationGate`) & 原子的 RC 発行 | **実装・実証完了**<br/>(Phase 26〜33) | ✅ 全 23 単体・E2E テスト合格<br/>✅ 2 プロセス同時保存独立試験合格<br/>✅ 孤児回収・ゾンビ排除実証合格 |
-| **Stage 4** | **Semantic Conflict Detection & Resolution** | ・複数チームブランチ統合時の意味論的矛盾検出<br/>・型・インターフェース互換性自動解析<br/>・LLM 支援による競合解消調停（Arbitrator） | **設計完了 / 実装中**<br/>(Next Phase) | 📋 設計承認済み<br/>🔄 順次実装予定 |
-| **Stage 5** | **Multi-Stage Delivery & Verification Promotion** | ・Staging / Production 多段デリバリーパイプライン<br/>・Canary 検証 & 自動ロールバックプロモーション<br/>・分散オーケストレーション連携 | **ロードマップ**<br/>(Future Milestone) | 🔭 将来計画 |
+| **Stage 3** | **Multi-Team Parallel Worktree Orchestration** | ・`MultiTeamOrchestrator` & `WorktreeManager`<br/>・チーム別 Worktree 物理分離 & `BoundaryGuard` 領空検査<br/>・`start_new_session` & 起動時 PGID 保持によるプロセス監督<br/>・決定論的孤児防止（親先行終了時の孫プロセス回収）<br/>・`os.link` による排他的・原子的 Evidence 保全 (TOCTOU 排除)<br/>・異ハッシュ衝突時の原本 Worktree 保護 & 冪等再利用 | **実装・実証完了**<br/>(Phase 26〜33) | ✅ 全 23 単体・E2E テスト合格<br/>✅ 2 プロセス同時保存独立試験合格<br/>✅ 孤児回収・ゾンビ排除実証合格 |
+| **Stage 4** | **Semantic Conflict Detection & Resolution** | ・複数チームブランチ統合時の意味論的矛盾・型不整合検出<br/>・型・インターフェース互換性自動解析<br/>・独立統合 Worktree での結合検証スクリプト自動実行<br/>・調停機構（Arbitrator）による競合検出と安全な差し戻し | **実装・実証完了**<br/>(Phase 34〜40) | ✅ 意味論的結合テスト合格<br/>✅ 競合検知・自動調停テスト合格 |
+| **Stage 5** | **Multi-Stage Delivery & Release Candidate** | ・Staging / Production 多段プロモーションパイプライン<br/>・原子的 Release Candidate タグ（`refs/tags/rc/<job_id>`）発行<br/>・Canary 独立検証 & 失敗時のクリーンアップ・安全ロールバック | **実装・実証完了**<br/>(Phase 41〜45) | ✅ RC 発行・昇格テスト合格<br/>✅ ロールバック検証テスト合格 |
+| **Stage 6** | **Failure Resilience, Auto-Healing & Process Supervision** | ・`auto-dev recover`（inspect / plan / apply）トランザクション復旧<br/>・SIGKILL・クラッシュ時の不整合自動診断 & 冪等修復<br/>・PGID ベースの確実なプロセスツリー回収 & ゾンビ誤認完全排除 | **実装・実証完了**<br/>(Phase 46〜48) | ✅ Pilot 04 カオステスト合格<br/>✅ 4 大クラッシュポイント復旧合格 |
+| **Stage 7** | **Independent Multi-LLM Audit & OS Sandbox Defense** | ・macOS `sandbox-exec`（デフォルト拒否 `deny file-read*` & 許可リスト）<br/>・Linux `bwrap`（Bubblewrap ネットワーク遮断 & 仮想環境個別マウント）<br/>・偽陽性 Red（Trivial / Fake Red）排除（AST 静的解析＋実行トレース）<br/>・Maker≠Auditor 異系統 LLM 独立監査境界 & REJECTED 不正記録 | **実装・実証完了**<br/>(Phase 49〜53) | ✅ 全 321 件テスト合格<br/>✅ 外部 LLM（GPT 6.1-Sol）監査合格<br/>✅ OS サンドボックス機密遮断実証 |
 
 ---
 
 ## 📁 ディレクトリ構成
 
+Auto Developer は、モジュール間の依存関係と責務が厳格に分離されたパッケージ構成を採用しています。
+
 ```text
 auto_developer/
-├── AGENTS.md                  # エージェント憲章（行動規範）
-├── SPEC.md                    # プロダクト仕様書と不変条件
+├── AGENTS.md                  # エージェント憲章（Maker / Checker 独立行動規範）
+├── SPEC.md                    # プロダクト仕様書と保護不変条件
 ├── PLAN.md                    # タスク計画・ステート管理ファイル
-├── LESSONS.md                 # 過去の地雷・設計ミスの外部記憶
+├── LESSONS.md                 # 過去の地雷・設計ミスの外部記憶（Level 7 学習基盤）
 ├── PROMPTS.md                 # Maker / Checker 無記憶プロンプト集
-├── docs/designs/              # EGM 承認済みの詳細設計書
+├── docs/designs/              # 詳細アーキテクチャ・設計仕様書
+├── src/auto_developer/        # コア実装パッケージ（全 19 モジュール）
+│   ├── audit.py               # Multi-LLM 独立監査ポリシー・モデル判定・Finding 構造化
+│   ├── audit_store.py         # 監査証跡不変永続化ストア（REJECTED ログ記録）
+│   ├── boundary.py            # チーム担当範囲（領空）定義
+│   ├── bundler.py             # 暗号学的 Evidence Bundle ZIP 生成・検証
+│   ├── cli.py                 # auto-dev CLI エントリポイント
+│   ├── dispatcher.py          # 外部独立 LLM 監査ディスパッチャー
+│   ├── evidence.py            # 決定論的 Evidence Token 発行・消費
+│   ├── guard.py               # BoundaryGuard 領空検査・保護ファイル防壁
+│   ├── integration_gate.py    # 結合 Worktree 独立検証 & 原子的 RC 発行
+│   ├── manifest.py            # Bundle Manifest 構造化・SHA-256 拘束
+│   ├── models.py              # コアデータモデル・列挙型定義
+│   ├── multi_team.py          # 並列チームオーケストレーター・PGID 監督
+│   ├── orchestrator.py        # NightlyOrchestrator コアエンジン
+│   ├── recovery.py            # トランザクショナル・クラッシュ復旧エンジン
+│   ├── reporter.py            # Morning Brief（意思決定支援レポート）生成
+│   ├── runner.py              # 独立監査ランナー
+│   ├── verifier.py            # OS サンドボックス (bwrap / sandbox-exec) & RedTestVerifier
+│   └── worktree.py            # Git Worktree ライフサイクル管理 & ゼロロス保全
 ├── scripts/
-│   ├── nightly_orchestrator.py # 自律型親オーケストレーター & CLI
+│   ├── nightly_orchestrator.py # 後方互換 CLI エイリアス
 │   └── verify_local.sh        # 不変条件検査 & 決定論的検証ゲート
-├── skills/
-│   └── nightly-run/SKILL.md   # Antigravity ワークスペーススキル定義
-├── tests/
-│   └── test_nightly_orchestrator.py # 受入テストスイート (12 tests)
+├── skills/                    # Antigravity ワークスペーススキル定義（全 4 スキル）
+│   ├── nightly-setup/SKILL.md # /nightly-setup 規律ファイル初期セットアップ
+│   ├── nightly-run/SKILL.md   # /nightly-run 自律パイプライン夜間実行
+│   ├── nightly-bundle/SKILL.md# /nightly-bundle 監査用 Evidence Bundle パッケージング
+│   └── nightly-verify/SKILL.md# /nightly-verify 独立第三者監査検証
+├── tests/                     # 包括的テストスイート（26 スイート / 321 tests）
+│   ├── immunity/              # 免疫テスト（改変不可の外部不変条件）
+│   ├── test_red_verifier.py   # OS サンドボックス & 偽陽性 Red 排除テスト
+│   ├── test_audit_*.py        # Multi-LLM 独立監査境界テスト
+│   ├── test_multi_team*.py    # 並列 Worktree & 領空検査テスト
+│   ├── test_recovery.py       # クラッシュ復旧テスト
+│   └── ...                    # 各モジュール受入・結合テスト
 └── pyproject.toml             # Python パッケージ & ツール設定
 ```
 

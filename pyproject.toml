@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "auto-developer"
-version = "0.3.0"
+version = "0.7.0"
 description = "Antigravity Autonomous Pipeline Orchestrator"
 readme = "README.md"
 requires-python = ">=3.10"
