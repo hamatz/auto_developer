@@ -754,11 +754,15 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 if pfx_path.exists() and not any(
                     pfx_path == Path(sd) or Path(sd) in pfx_path.parents for sd in ["/usr", "/bin", "/lib", "/lib64"]
                 ):
-                    if pfx_path == home_resolved:
+                    is_in_home = pfx_path == home_resolved or pfx_path.is_relative_to(home_resolved)
+                    if is_in_home:
                         for sub in ["bin", "lib", "lib64", "include"]:
                             sub_path = pfx_path / sub
                             if sub_path.exists():
                                 cmd.extend(["--ro-bind", str(sub_path), str(sub_path)])
+                        cfg_path = pfx_path / "pyvenv.cfg"
+                        if cfg_path.exists():
+                            cmd.extend(["--ro-bind", str(cfg_path), str(cfg_path)])
                     else:
                         cmd.extend(["--ro-bind", str(pfx_path), str(pfx_path)])
             cmd.extend([

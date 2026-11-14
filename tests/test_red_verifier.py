@@ -878,6 +878,60 @@ class PassTest(unittest.TestCase):
         ]
         self.assertNotIn(home_path, ro_bind_targets, "Home path itself must not be ro-bound even if sys.prefix == home")
 
+    def test_bwrap_virtualenv_in_home_subdirectory_mounts_only_bin_lib_not_entire_venv(self) -> None:
+        """機能MMM.1: 仮想環境がホーム配下のサブディレクトリ（~/.venvs/... や ~/repo/.venv）の場合、
+        仮想環境ディレクトリ全体ではなく、bin, lib などのサブフォルダのみがマウントされること（Sol氏 Phase 52 P1指摘）。
+        """
+        from unittest.mock import MagicMock, patch
+
+        bwrap_cmd_captured = []
+        orig_popen = subprocess.Popen
+
+        def capturing_popen(*args: Any, **kwargs: Any) -> Any:
+            nonlocal bwrap_cmd_captured
+            cmd = args[0] if args else kwargs.get("args", [])
+            if cmd and "bwrap" in str(cmd[0]):
+                bwrap_cmd_captured = list(cmd)
+                mock_p = MagicMock()
+                mock_p.pid = 12345
+                mock_p.returncode = 0
+                mock_p.communicate.return_value = (
+                    '===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [], "errors": []}',
+                    "",
+                )
+                return mock_p
+            return orig_popen(*args, **kwargs)
+
+        code = """import unittest
+class PassTest(unittest.TestCase):
+    def test_ok(self):
+        self.assertEqual(1, 1)
+"""
+        home_path = Path.home().resolve()
+        # ホームディレクトリ配下の仮想環境サブディレクトリ (例: ~/.venvs/my_env)
+        sub_venv_dir = home_path / ".venvs" / "my_project_env"
+        bin_dir = sub_venv_dir / "bin"
+        lib_dir = sub_venv_dir / "lib"
+
+        with patch.object(self.verifier, "_get_sandbox_backend", return_value="bwrap"), \
+             patch("sys.prefix", str(sub_venv_dir)), \
+             patch("sys.base_prefix", str(sub_venv_dir)), \
+             patch.object(Path, "exists", return_value=True), \
+             patch("subprocess.Popen", side_effect=capturing_popen):
+            result = self.verifier.verify_candidate_test(code)
+            self.assertEqual(result.reason, "ALREADY_GREEN")
+
+        ro_bind_targets = [
+            bwrap_cmd_captured[i + 1]
+            for i, token in enumerate(bwrap_cmd_captured)
+            if token == "--ro-bind" and i + 1 < len(bwrap_cmd_captured)
+        ]
+        # 仮想環境ディレクトリ全体がマウントされていないこと
+        self.assertNotIn(str(sub_venv_dir), ro_bind_targets, "Subdirectory venv root must NOT be ro-bound directly into sandbox!")
+        # bin, lib などの必須サブディレクトリのみがマウントされていること
+        self.assertIn(str(bin_dir), ro_bind_targets)
+        self.assertIn(str(lib_dir), ro_bind_targets)
+
 
 if __name__ == "__main__":
     unittest.main()
