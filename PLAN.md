@@ -7,17 +7,17 @@
 -->
 
 ## 現在の目標
-- Phase 51: Stage 7 — 候補テストの機密読み取り隔離・未追跡改ざん検知完全化・実行順序レース是正 (SPEC.md 機能KKK)
-  - サンドボックス内機密ファイル読み取り遮断（Bubblewrap のルートマウント見直し、macOS sandbox-exec の `(deny file-read*)` 適用、ホワイトリスト方式による Python ランタイム・一時クローンのみ許可、ホストのホームディレクトリ `~` や元リポジトリの read deny）（機能KKK.1 / Sol氏 Phase 50 P0指摘）
-  - 未追跡・無視ファイルの内容 SHA-256 ハッシュ記録による改ざん検知の完全化（機能KKK.2 / Sol氏 Phase 50 P1指摘）
-  - サンドボックス起動と元リポジトリ保護の起動順序是正（TOCTOU レース解消: ロックダウン内側での Popen 起動）（機能KKK.3 / Sol氏 Phase 50 P1指摘）
-  - サンドボックス下での Level 7 E2E 更新（機密読み取り・未追跡改ざんの物理遮断）・報告の正確性・全体検証ゲート合格・正規 Evidence による Bundle 生成（機能KKK.4）
-- スコープ外（Phase 52 以降）: 独立監査（Red-Team レビュー）の実施、実Multi-LLM無人接続。
+- Phase 52: Stage 7 — サンドボックス読み取り最小化とMulti-LLM独立監査境界の確立 (SPEC.md 機能LLL)
+  - Linux `bwrap` 読み取りマウントの最小特権化（`/etc` 全体公開廃止 → `/etc/resolv.conf`, `/etc/ssl` 等の最小ホワイトリスト化、Python仮想環境パス限定、機密パス読み取り拒絶の単体テスト）（機能LLL.1 / Sol氏 Phase 51 P1指摘）
+  - macOS `sandbox-exec` 読み取りプロファイルの厳格化（ホーム外機密パス・システム設定への deny 追加、単体テスト）（機能LLL.2 / Sol氏 Phase 51 P1指摘）
+  - Multi-LLM 独立監査境界の確立と敵対的/不正 Finding 耐性の実証（Auditor の独立性担保、不正・敵対的 Finding の安全な `REJECTED` 処理）（機能LLL.3 / Sol氏 指摘）
+  - Level 7 E2E 完走・整合性・Evidence Bundle 生成（機能LLL.4）
+- スコープ外（Phase 53 以降）: 実外部LLM API（Anthropic/OpenAI）の本番接続と無人自律開発パイプライン実稼働。
 
-## 作業手順（Phase 51 から更新・LESSONS.md 2026-11-13 の教訓に基づく）
-- Maker と Checker は別系統のモデルにする（AGENTS.md Rule 6）。Maker が Claude 系のとき、Checker サブエージェントは `Model: "pro"`（Gemini 系）を明示指定する。`inherit` は使わない。commit-step の `--checker-reason` に Checker のモデル指定を書く。
+## 作業手順（Phase 52 から更新・LESSONS.md 2026-11-13 の教訓に基づく）
+- Maker と Checker は別系統のモデルにする（AGENTS.md Rule 6）。Maker が Gemini 系のとき、Checker サブエージェントは `Model: "pro"` を明示指定する。`inherit` は使わない。commit-step の `--checker-reason` に Checker のモデル指定を書く。
 - Checker への入力は要約・再構成しない。以下をファイルに書き出し、Checker にはそのパスを渡して直接読ませる:
-  1. `awk '/^- \[ \] 機能KKK/,/^## 3\./' SPEC.md > .dev/checker/spec_kkk.md`
+  1. `awk '/^- \[ \] 機能LLL/,/^## 3\./' SPEC.md > .dev/checker/spec_lll.md`
   2. `git add -N . && git diff <checkpoint> > .dev/checker/diff_task<n>.patch`（未追跡ファイルも差分に含める）
 - verify-step の前に `git status --porcelain` を確認し、意図しないファイル（実験の生成物など）がないことを確かめる。実験・挙動確認は必ず `mktemp -d` で作った一時ディレクトリで行い、リポジトリ直下で実行しない。
 - Evidence Record は手書きしない。各ステップで以下の正規経路のみを使う:
@@ -28,17 +28,17 @@
 - Bundle 生成後に SPEC.md や追跡ファイルを変更しない（Evidence の spec_sha と不一致になる）。SPEC の完了マークは次フェーズの準備コミットで付ける。
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- KKK.1: サンドボックスの読み取りポリシーが強化（元リポジトリに対する `deny file-read*`）されたため、元リポジトリのパスに対する `target.exists()` が `PermissionError` を送出する。`tests/test_immunity_and_red_acceptance.py` の受入テスト8において、改変試行ブロック全体を try-except で囲むように更新する（テストの意図・期待値は変更しない）。
-- KKK.2: 未追跡・無視ファイルの内容改ざんを検証するテストを追加する。
-- KKK.3: ロックダウン内側での Popen 起動順序を検証するテストを追加する。
-- KKK.4: `tests/test_level7_real_loop_e2e.py` に機密ファイル読み取り試行の拒絶経路を追加する。
+- LLL.1: Linux `bwrap` において `/etc` 全体公開を廃止し、`/etc/shadow` 等へのアクセス拒絶をテストする新規テストを追加。
+- LLL.2: macOS `sandbox-exec` において `/private/etc` 等へのアクセス拒絶をテストする新規テストを追加。
+- LLL.3: 不完全・敵対的な Finding に対する `AuditDispatcher` の耐性を検証するテストを追加。
+- LLL.4: `tests/test_level7_real_loop_e2e.py` に新規拒絶シナリオを追加。
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [x] 1. 候補テストのサンドボックス内機密ファイル読み取り遮断（ホストホームディレクトリ・元リポジトリの read deny）の実装と単体テスト（Red-First）（KKK.1）
-- [x] 2. 未追跡・無視ファイルの内容 SHA-256 ハッシュ記録による改ざん検知の完全化と単体テスト（Red-First）（KKK.2）
-- [x] 3. サンドボックス起動と元リポジトリ保護の起動順序是正（ロックダウン内側での Popen 起動）の実装と単体テスト（Red-First）（KKK.3）
-- [x] 4. サンドボックス下の Level 7 E2E 更新（機密読み取り・未追跡改ざんの物理遮断）・報告の正確性・全体検証ゲート合格・正規 Evidence による Bundle 生成（KKK.4）
+- [ ] 1. Linux `bwrap` 読み取りマウントの最小特権化（`/etc` 全体公開廃止・個別ファイル化・仮想環境限定・機密拒絶単体テスト）（Red-First）（LLL.1）
+- [ ] 2. macOS `sandbox-exec` 読み取りプロファイルの厳格化（ホーム外機密パス・システム設定への deny 追加・単体テスト）（Red-First）（LLL.2）
+- [ ] 3. Multi-LLM 独立監査境界の確立と敵対的/不正 Finding 耐性の実証（Auditor の独立性担保・不正 Finding の安全な REJECTED 処理）（Red-First）（LLL.3）
+- [ ] 4. Level 7 E2E 完走・報告書更新・全体検証ゲート合格・正規 Evidence による Bundle 生成（LLL.4）
 
 ## 止まっていること・判断待ち
-- なし。Phase 50 がマージされ、P0/P1 の3点（機密読み取り境界、未追跡ファイル改ざん検知、起動順序レース）の修正方針が確定済み。
+- なし。Phase 51 がマージされ、P1（Linux `/etc` および仮想環境公開範囲の最小化、macOS deny リスト強化、Multi-LLM 独立境界・敵対耐性）の修正方針が確定済み。
