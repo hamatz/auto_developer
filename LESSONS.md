@@ -21,6 +21,22 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-14] 製品コードを実行しただけの巧妙な偽 Red（因果関係のない固定値比較）は製品不具合の証明にならない (Product Code Execution ≠ Defect Authenticity)
+- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`, AST 解析および動的実行トレース)
+- Trap: Phase 53 で AST 解析（定数比較検出）と `sys.settrace()` による製品コード実行トレースを導入した。しかし、テスト内で `add(1, 2)` のように形式的に製品コードを呼んだ上で `self.assertEqual(1, 2)` や無関係な固定値比較で失敗させる巧妙な偽 Red は、製品コードを通過しているためトレース検証を通過しうる（Sol氏 Phase 53 P1）。
+- Rule: テストメソッドが製品コードを呼んだこと（実行の有無）だけでなく、アサーションの引数・比較対象が製品コードの戻り値や副作用と因果関係を持つかを AST レベルで検証する。因果関係のない合成された失敗は `TRIVIAL_RED` として確実に排除する。
+- Rung: 作り（AST 因果性解析の深化） & 検査
+- Immunity Test: `tests/test_red_verifier.py`（Phase 54 NNN.2 で追加予定）
+- Proof: 形式的に `src/` の関数を呼び出してから固定値比較を行うテストが `TRIVIAL_RED` として `REJECTED` されることを実証。
+
+### [2026-11-14] macOS sandbox-exec の広範なシステムディレクトリ許可（/Library, /private/var, /etc）による潜在的情報露出 (Broad Directory Allowances in macOS Sandbox Profile)
+- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._generate_macos_profile`)
+- Trap: Phase 53 で `(deny file-read*)` のデフォルト拒否を追加したが、実行に必要なライブラリを確保するために `/Library` や `/private/var`、`/etc` 全体を allow していたため、ユーザーキャッシュやサービス設定などの不要な情報が露出する潜在的リスクが残っていた（Sol氏 Phase 53 P1）。
+- Rule: 読み取り許可はシステム動的ライブラリ（`/System/Library/Frameworks`, `/usr/lib`）および Python 実行環境のプレフィックス配下に厳格に限定し、`/Library` や `/private/var`、`/etc` 全体の一括 allow は廃止する。
+- Rung: 作り（sandbox-exec 許可リスト最小化） & 検査
+- Immunity Test: `tests/test_red_verifier.py`（Phase 54 NNN.1 で追加予定）
+- Proof: `/Library` や `/private/var` 直下の非公開パスへの読み取りが `PermissionError` で遮断されることを実証。
+
 ### [2026-11-13] サンドボックス内で /etc 全体や仮想環境ディレクトリ全体を公開し、ホスト設定・認証情報が露出する余地を残した (Overexposed Host Directories in Sandbox)
 - Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`, Linux `bwrap` マウント構成)
 - Trap: Phase 51 で `--ro-bind / /` を廃止した際、システムパスとして `/etc` 全体や、ホーム配下の Python 仮想環境ディレクトリ全体を `--ro-bind` してしまった。Linux の `/etc` にはサービス設定や秘密情報が含まれうる上、仮想環境ディレクトリ全体を公開すると不要な設定やファイルが露出する余地が残る（Sol氏 Phase 51 P1）。
