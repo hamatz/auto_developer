@@ -151,6 +151,7 @@ class T(unittest.TestCase):
         next_task = task_dispatcher.get_next_pending_task(tasks)
 
         self.assertIsNotNone(next_task, "Dispatched task must be recognized by TaskDispatcher!")
+        assert next_task is not None
         self.assertEqual(next_task.task_id, "AUD-F-001")
         self.assertIn("Fix: [F-001] Interoperability test", next_task.title)
 
@@ -158,6 +159,95 @@ class T(unittest.TestCase):
         task_dispatcher.mark_task_status(self.plan_path, next_task, "completed")
         updated_content = self.plan_path.read_text(encoding="utf-8")
         self.assertIn("- [x] AUD-F-001. Fix: [F-001] Interoperability test", updated_content)
+
+    def test_multi_llm_malformed_and_hostile_findings_rejected_and_persisted(self) -> None:
+        """機能LLL.3: 外部LLMから構文エラー・偽陽性Red・機密読み取り・リポジトリ改ざん等の
+        不正・敵対的 Finding が投入された場合でも、安全に REJECTED として AuditStore に保存され、
+        PLAN.md を汚染しないこと（Sol氏 指摘）。
+        """
+        findings = [
+            # 1. 構文不正 (Broken syntax)
+            AuditFinding(
+                finding_id="HOSTILE-SYNTAX-001",
+                severity="P1",
+                spec_reference="SPEC.md",
+                location="app.py:1",
+                description="Broken syntax finding",
+                reproduction_test_code="def broken_syntax(:",
+            ),
+            # 2. 偽陽性 (Already green / pass)
+            AuditFinding(
+                finding_id="HOSTILE-PASS-002",
+                severity="P2",
+                spec_reference="SPEC.md",
+                location="app.py:5",
+                description="Passing test",
+                reproduction_test_code="import unittest\nclass P(unittest.TestCase):\n    def test_p(self):\n        self.assertEqual(1, 1)",
+            ),
+            # 3. 機密ファイル読み取り試行 (Confidential read)
+            AuditFinding(
+                finding_id="HOSTILE-READ-003",
+                severity="P0",
+                spec_reference="SECURITY",
+                location="app.py:10",
+                description="Secret read probe",
+                reproduction_test_code=(
+                    "import unittest\n"
+                    "from pathlib import Path\n"
+                    "class R(unittest.TestCase):\n"
+                    "    def test_r(self):\n"
+                    "        _ = Path('/Library/Keychains/System.keychain').read_bytes()\n"
+                    "        self.assertEqual(1, 2)\n"
+                ),
+            ),
+            # 4. 真正な Red 指摘 (Genuine bug finding)
+            AuditFinding(
+                finding_id="GENUINE-BUG-004",
+                severity="P1",
+                spec_reference="SPEC.md",
+                location="app.py:15",
+                description="Legitimate bug",
+                reproduction_test_code="import unittest\nclass G(unittest.TestCase):\n    def test_g(self):\n        self.assertEqual(1, 2)",
+            ),
+        ]
+
+        dispatched_list = self.dispatcher.process_findings(findings, plan_path=self.plan_path)
+
+        # 真正な指摘のみが 1 件 DISPATCHED されること
+        self.assertEqual(len(dispatched_list), 1)
+        self.assertEqual(dispatched_list[0].finding_id, "GENUINE-BUG-004")
+
+        # PLAN.md には真正な指摘のみが登録され、不正・敵対的指摘は一切登録されないこと
+        content = self.plan_path.read_text(encoding="utf-8")
+        self.assertIn("GENUINE-BUG-004", content)
+        self.assertNotIn("HOSTILE-SYNTAX-001", content)
+        self.assertNotIn("HOSTILE-PASS-002", content)
+        self.assertNotIn("HOSTILE-READ-003", content)
+
+        # AuditStore にすべての指摘が保存され、拒絶されたものは REJECTED で記録されていること
+        store = self.dispatcher.audit_store
+        f1 = store.get_finding("HOSTILE-SYNTAX-001")
+        self.assertIsNotNone(f1, "Rejected finding must be persisted in AuditStore")
+        assert f1 is not None
+        self.assertEqual(f1.status, "REJECTED")
+        self.assertIn(f1.red_verification_reason, ("SYNTAX_ERROR", "BROKEN_SYNTAX"))
+
+        f2 = store.get_finding("HOSTILE-PASS-002")
+        self.assertIsNotNone(f2)
+        assert f2 is not None
+        self.assertEqual(f2.status, "REJECTED")
+        self.assertEqual(f2.red_verification_reason, "ALREADY_GREEN")
+
+        f3 = store.get_finding("HOSTILE-READ-003")
+        self.assertIsNotNone(f3)
+        assert f3 is not None
+        self.assertEqual(f3.status, "REJECTED")
+        self.assertIn(f3.red_verification_reason, ("UNHANDLED_EXCEPTION", "EXECUTION_ERROR"))
+
+        f4 = store.get_finding("GENUINE-BUG-004")
+        self.assertIsNotNone(f4)
+        assert f4 is not None
+        self.assertEqual(f4.status, "DISPATCHED")
 
 
 if __name__ == "__main__":

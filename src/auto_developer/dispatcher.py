@@ -137,6 +137,7 @@ class AuditDispatcher:
         finding.red_verification_output = verification.output
         if not (verification.is_reproduced and verification.reason == "GENUINE_RED"):
             finding.status = "REJECTED"
+            self.audit_store.save_finding(finding)
             return finding
 
         import hashlib

@@ -37,7 +37,7 @@
 ## ステップ
 - [x] 1. Linux `bwrap` 読み取りマウントの最小特権化（`/etc` 全体公開廃止・個別ファイル化・仮想環境限定・機密拒絶単体テスト）（Red-First）（LLL.1）
 - [x] 2. macOS `sandbox-exec` 読み取りプロファイルの厳格化（ホーム外機密パス・システム設定への deny 追加・単体テスト）（Red-First）（LLL.2）
-- [ ] 3. Multi-LLM 独立監査境界の確立と敵対的/不正 Finding 耐性の実証（Auditor の独立性担保・不正 Finding の安全な REJECTED 処理）（Red-First）（LLL.3）
+- [x] 3. Multi-LLM 独立監査境界の確立と敵対的/不正 Finding 耐性の実証（Auditor の独立性担保・不正 Finding の安全な REJECTED 処理）（Red-First）（LLL.3）
 - [ ] 4. Level 7 E2E 完走・報告書更新・全体検証ゲート合格・正規 Evidence による Bundle 生成（LLL.4）
 
 ## 止まっていること・判断待ち
