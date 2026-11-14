@@ -134,9 +134,166 @@ def _is_in_try_block_with_call(call_node: ast.AST, func_node: ast.AST) -> bool:
     return False
 
 
+def _check_assert_call(
+    call: ast.Call,
+    var_env: dict[str, Any],
+    dependent_vars: set[str],
+    func_node: ast.AST,
+    trivial_reasons: list[str],
+) -> None:
+    """アサーション呼出を現在のプログラム状態 (var_env, dependent_vars) で評価する。"""
+    if not _is_assert_call(call):
+        return
+
+    attr = call.func.attr if isinstance(call.func, ast.Attribute) else ""
+
+    # self.fail() の検証
+    if attr == "fail":
+        if not _is_in_try_block_with_call(call, func_node):
+            trivial_reasons.append("Unconditional self.fail() call without exception guard")
+        return
+
+    # 引数がプロダクトコード呼出や依存変数に繋がっているか検証
+    arg_has_dependency = any(_has_causal_dependency(arg, dependent_vars) for arg in call.args)
+    if arg_has_dependency:
+        # プロダクトコードとの因果依存があるため Trivial Red ではない
+        return
+
+    # 因果依存がない引数の固定値比較失敗判定
+    if attr in ("assertEqual", "assertEquals") and len(call.args) >= 2:
+        is_c1, v1 = _eval_constant_expr(call.args[0], var_env)
+        is_c2, v2 = _eval_constant_expr(call.args[1], var_env)
+        if is_c1 and is_c2 and v1 != v2:
+            trivial_reasons.append(f"Constant equality mismatch without causal dependency: {v1!r} == {v2!r}")
+    elif attr in ("assertNotEqual", "assertNotEquals") and len(call.args) >= 2:
+        is_c1, v1 = _eval_constant_expr(call.args[0], var_env)
+        is_c2, v2 = _eval_constant_expr(call.args[1], var_env)
+        if is_c1 and is_c2 and v1 == v2:
+            trivial_reasons.append(f"Constant inequality mismatch without causal dependency: {v1!r} != {v2!r}")
+    elif attr in ("assertTrue", "assert_") and len(call.args) >= 1:
+        is_c, val = _eval_constant_expr(call.args[0], var_env)
+        if is_c and not bool(val):
+            trivial_reasons.append(f"Constant assertTrue({val!r}) failure without causal dependency")
+    elif attr == "assertFalse" and len(call.args) >= 1:
+        is_c, val = _eval_constant_expr(call.args[0], var_env)
+        if is_c and bool(val):
+            trivial_reasons.append(f"Constant assertFalse({val!r}) failure without causal dependency")
+    elif attr == "assertIsNone" and len(call.args) >= 1:
+        is_c, val = _eval_constant_expr(call.args[0], var_env)
+        if is_c and val is not None:
+            trivial_reasons.append(f"Constant assertIsNone({val!r}) failure without causal dependency")
+    elif attr == "assertIsNotNone" and len(call.args) >= 1:
+        is_c, val = _eval_constant_expr(call.args[0], var_env)
+        if is_c and val is None:
+            trivial_reasons.append("Constant assertIsNotNone(None) failure without causal dependency")
+
+
+def _process_stmts_in_order(
+    stmts: list[ast.stmt],
+    var_env: dict[str, Any],
+    dependent_vars: set[str],
+    func_node: ast.AST,
+    trivial_reasons: list[str],
+) -> None:
+    """文を実行順序 (Program Order) に沿って走査し、変数の最新状態を維持しながらアサーションを順次検証する (機能OOO.1)。"""
+    for stmt in stmts:
+        # 1. 複合文の再帰走査
+        if isinstance(stmt, ast.If):
+            for call in [n for n in ast.walk(stmt.test) if isinstance(n, ast.Call) and _is_assert_call(n)]:
+                _check_assert_call(call, var_env, dependent_vars, func_node, trivial_reasons)
+            body_env, body_deps = var_env.copy(), dependent_vars.copy()
+            _process_stmts_in_order(stmt.body, body_env, body_deps, func_node, trivial_reasons)
+            if stmt.orelse:
+                else_env, else_deps = var_env.copy(), dependent_vars.copy()
+                _process_stmts_in_order(stmt.orelse, else_env, else_deps, func_node, trivial_reasons)
+                dependent_vars.update(else_deps)
+            dependent_vars.update(body_deps)
+            continue
+
+        if isinstance(stmt, ast.Try):
+            try_env, try_deps = var_env.copy(), dependent_vars.copy()
+            _process_stmts_in_order(stmt.body, try_env, try_deps, func_node, trivial_reasons)
+            dependent_vars.update(try_deps)
+            for handler in stmt.handlers:
+                h_env, h_deps = var_env.copy(), dependent_vars.copy()
+                _process_stmts_in_order(handler.body, h_env, h_deps, func_node, trivial_reasons)
+                dependent_vars.update(h_deps)
+            if stmt.orelse:
+                o_env, o_deps = var_env.copy(), dependent_vars.copy()
+                _process_stmts_in_order(stmt.orelse, o_env, o_deps, func_node, trivial_reasons)
+                dependent_vars.update(o_deps)
+            if stmt.finalbody:
+                f_env, f_deps = var_env.copy(), dependent_vars.copy()
+                _process_stmts_in_order(stmt.finalbody, f_env, f_deps, func_node, trivial_reasons)
+                dependent_vars.update(f_deps)
+            continue
+
+        if isinstance(stmt, (ast.For, ast.While)):
+            _process_stmts_in_order(stmt.body, var_env, dependent_vars, func_node, trivial_reasons)
+            if stmt.orelse:
+                _process_stmts_in_order(stmt.orelse, var_env, dependent_vars, func_node, trivial_reasons)
+            continue
+
+        if isinstance(stmt, ast.With):
+            for item in stmt.items:
+                for call in [n for n in ast.walk(item.context_expr) if isinstance(n, ast.Call) and _is_assert_call(n)]:
+                    _check_assert_call(call, var_env, dependent_vars, func_node, trivial_reasons)
+            _process_stmts_in_order(stmt.body, var_env, dependent_vars, func_node, trivial_reasons)
+            continue
+
+        # 2. 単文内のアサーション呼出の評価（代入文等の場合も、代入実行前の環境で評価）
+        for call in [n for n in ast.walk(stmt) if isinstance(n, ast.Call) and _is_assert_call(n)]:
+            _check_assert_call(call, var_env, dependent_vars, func_node, trivial_reasons)
+
+        # 3. 代入文 (Assign, AnnAssign, AugAssign) による環境の更新
+        if isinstance(stmt, ast.Assign):
+            rhs = stmt.value
+            val_has_dep = _has_causal_dependency(rhs, dependent_vars)
+            target_names = [n.id for t in stmt.targets for n in ast.walk(t) if isinstance(n, ast.Name)]
+            if val_has_dep:
+                for name in target_names:
+                    dependent_vars.add(name)
+                    var_env.pop(name, None)
+            else:
+                ok_const, const_val = _eval_constant_expr(rhs, var_env)
+                if ok_const:
+                    for name in target_names:
+                        var_env[name] = const_val
+                        dependent_vars.discard(name)
+                else:
+                    for name in target_names:
+                        dependent_vars.add(name)
+                        var_env.pop(name, None)
+
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            rhs = stmt.value
+            val_has_dep = _has_causal_dependency(rhs, dependent_vars)
+            target_names = [n.id for n in ast.walk(stmt.target) if isinstance(n, ast.Name)]
+            if val_has_dep:
+                for name in target_names:
+                    dependent_vars.add(name)
+                    var_env.pop(name, None)
+            else:
+                ok_const, const_val = _eval_constant_expr(rhs, var_env)
+                if ok_const:
+                    for name in target_names:
+                        var_env[name] = const_val
+                        dependent_vars.discard(name)
+                else:
+                    for name in target_names:
+                        dependent_vars.add(name)
+                        var_env.pop(name, None)
+
+        elif isinstance(stmt, ast.AugAssign):
+            target_names = [n.id for n in ast.walk(stmt.target) if isinstance(n, ast.Name)]
+            for name in target_names:
+                dependent_vars.add(name)
+                var_env.pop(name, None)
+
+
 def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
     """候補テストの AST を解析し、自己完結した固定値比較や因果関係のない固定値失敗等の
-    偽陽性 Red (Trivial / Fake Red) を静的に検出する (機能MMM.3 / 機能NNN.2)。
+    偽陽性 Red (Trivial / Fake Red) を静的に検出する (機能MMM.3 / 機能NNN.2 / 機能OOO.1)。
     """
     if isinstance(target, ast.AST):
         tree = target
@@ -161,97 +318,10 @@ def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
 
         var_env: dict[str, Any] = {}
         dependent_vars: set[str] = set()
-
-        # 関数内文の順次解析により、変数定義・呼出依存関係を構築
-        for stmt in node.body:
-            # 1. 代入文 (Assign, AnnAssign)
-            if isinstance(stmt, ast.Assign):
-                rhs = stmt.value
-                val_has_dep = _has_causal_dependency(rhs, dependent_vars)
-                target_names = [n.id for t in stmt.targets for n in ast.walk(t) if isinstance(n, ast.Name)]
-                if val_has_dep:
-                    for name in target_names:
-                        dependent_vars.add(name)
-                        var_env.pop(name, None)
-                else:
-                    ok_const, const_val = _eval_constant_expr(rhs, var_env)
-                    if ok_const:
-                        for name in target_names:
-                            var_env[name] = const_val
-                            dependent_vars.discard(name)
-                    else:
-                        for name in target_names:
-                            dependent_vars.add(name)
-                            var_env.pop(name, None)
-
-            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
-                rhs = stmt.value
-                val_has_dep = _has_causal_dependency(rhs, dependent_vars)
-                target_names = [n.id for n in ast.walk(stmt.target) if isinstance(n, ast.Name)]
-                if val_has_dep:
-                    for name in target_names:
-                        dependent_vars.add(name)
-                        var_env.pop(name, None)
-                else:
-                    ok_const, const_val = _eval_constant_expr(rhs, var_env)
-                    if ok_const:
-                        for name in target_names:
-                            var_env[name] = const_val
-                            dependent_vars.discard(name)
-                    else:
-                        for name in target_names:
-                            dependent_vars.add(name)
-                            var_env.pop(name, None)
-
-        # アサーション呼出の因果依存性および無条件失敗の検証
-        calls: list[ast.Call] = [n for n in ast.walk(node) if isinstance(n, ast.Call)]
         trivial_reasons: list[str] = []
 
-        for call in calls:
-            if not _is_assert_call(call):
-                continue
-
-            attr = call.func.attr if isinstance(call.func, ast.Attribute) else ""
-
-            # self.fail() の検証
-            if attr == "fail":
-                if not _is_in_try_block_with_call(call, node):
-                    trivial_reasons.append("Unconditional self.fail() call without exception guard")
-                continue
-
-            # 引数がプロダクトコード呼出や依存変数に繋がっているか検証
-            arg_has_dependency = any(_has_causal_dependency(arg, dependent_vars) for arg in call.args)
-            if arg_has_dependency:
-                # プロダクトコードとの因果依存があるため Trivial Red ではない
-                continue
-
-            # 因果依存がない引数の固定値比較失敗判定
-            if attr in ("assertEqual", "assertEquals") and len(call.args) >= 2:
-                is_c1, v1 = _eval_constant_expr(call.args[0], var_env)
-                is_c2, v2 = _eval_constant_expr(call.args[1], var_env)
-                if is_c1 and is_c2 and v1 != v2:
-                    trivial_reasons.append(f"Constant equality mismatch without causal dependency: {v1!r} == {v2!r}")
-            elif attr in ("assertNotEqual", "assertNotEquals") and len(call.args) >= 2:
-                is_c1, v1 = _eval_constant_expr(call.args[0], var_env)
-                is_c2, v2 = _eval_constant_expr(call.args[1], var_env)
-                if is_c1 and is_c2 and v1 == v2:
-                    trivial_reasons.append(f"Constant inequality mismatch without causal dependency: {v1!r} != {v2!r}")
-            elif attr in ("assertTrue", "assert_") and len(call.args) >= 1:
-                is_c, val = _eval_constant_expr(call.args[0], var_env)
-                if is_c and not bool(val):
-                    trivial_reasons.append(f"Constant assertTrue({val!r}) failure without causal dependency")
-            elif attr == "assertFalse" and len(call.args) >= 1:
-                is_c, val = _eval_constant_expr(call.args[0], var_env)
-                if is_c and bool(val):
-                    trivial_reasons.append(f"Constant assertFalse({val!r}) failure without causal dependency")
-            elif attr == "assertIsNone" and len(call.args) >= 1:
-                is_c, val = _eval_constant_expr(call.args[0], var_env)
-                if is_c and val is not None:
-                    trivial_reasons.append(f"Constant assertIsNone({val!r}) failure without causal dependency")
-            elif attr == "assertIsNotNone" and len(call.args) >= 1:
-                is_c, val = _eval_constant_expr(call.args[0], var_env)
-                if is_c and val is None:
-                    trivial_reasons.append("Constant assertIsNotNone(None) failure without causal dependency")
+        # 文を実行順序 (Program Order) に沿って走査し、変数の最新状態を維持しながらアサーションを順次検証
+        _process_stmts_in_order(node.body, var_env, dependent_vars, node, trivial_reasons)
 
         if trivial_reasons:
             return (

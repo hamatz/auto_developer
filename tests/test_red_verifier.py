@@ -1057,6 +1057,40 @@ class GenuineBugTest(unittest.TestCase):
         self.assertTrue(result.is_reproduced)
         self.assertEqual(result.reason, "GENUINE_RED")
 
+    def test_accepts_genuine_red_with_later_reassignment(self) -> None:
+        """機能OOO.1: アサーション実行時点ではプロダクト呼出に依存し、その後に無関係な再代入が行われる場合でも、
+        後続代入が過去のアサーションに逆流して TRIVIAL_RED と誤判定されず、GENUINE_RED として受理されること（Sol氏 Phase 54 P1指摘）。
+        """
+        code = """import unittest
+from sample_module import compute_val
+
+class LegitimateReassignmentTest(unittest.TestCase):
+    def test_value(self):
+        x = compute_val(2)
+        self.assertEqual(x, 999)
+        x = 12345
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertTrue(result.is_reproduced)
+        self.assertEqual(result.reason, "GENUINE_RED")
+
+    def test_ast_does_not_pollute_earlier_assertions_with_later_reassignment(self) -> None:
+        """機能OOO.1: 後続代入を含む正常テストに対して check_trivial_red_ast が False を返すこと（Sol氏 Phase 54 再現ケース）。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = """import unittest
+from sample_module import compute_val
+
+class T(unittest.TestCase):
+    def test_value(self):
+        x = compute_val(1)
+        self.assertEqual(x, 2)
+        x = 999
+"""
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial)
+        self.assertEqual(msg, "")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest
