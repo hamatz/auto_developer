@@ -7,17 +7,17 @@
 -->
 
 ## 現在の目標
-- Phase 52: Stage 7 — サンドボックス読み取り最小化とMulti-LLM独立監査境界の確立 (SPEC.md 機能LLL)
-  - Linux `bwrap` 読み取りマウントの最小特権化（`/etc` 全体公開廃止 → `/etc/resolv.conf`, `/etc/ssl` 等の最小ホワイトリスト化、Python仮想環境パス限定、機密パス読み取り拒絶の単体テスト）（機能LLL.1 / Sol氏 Phase 51 P1指摘）
-  - macOS `sandbox-exec` 読み取りプロファイルの厳格化（ホーム外機密パス・システム設定への deny 追加、単体テスト）（機能LLL.2 / Sol氏 Phase 51 P1指摘）
-  - Multi-LLM 独立監査境界の確立と敵対的/不正 Finding 耐性の実証（Auditor の独立性担保、不正・敵対的 Finding の安全な `REJECTED` 処理）（機能LLL.3 / Sol氏 指摘）
-  - Level 7 E2E 完走・整合性・Evidence Bundle 生成（機能LLL.4）
-- スコープ外（Phase 53 以降）: 実外部LLM API（Anthropic/OpenAI）の本番接続と無人自律開発パイプライン実稼働。
+- Phase 53: Stage 7 — 独立監査受入条件の固定と偽陽性Red排除・OS隔離強化 (SPEC.md 機能MMM)
+  - Linux 仮想環境マウント包含判定（`is_relative_to`）とサブディレクトリ限定マウント（機能MMM.1 / Sol氏 Phase 52 P1指摘）
+  - macOS `sandbox-exec` 読み取り隔離の強化（機能MMM.2 / Sol氏 Phase 52 P1指摘）
+  - 偽陽性 Red（Trivial / Fake Red）の自動排除機構（AST静的検証・スタックフレーム実行検証・`TRIVIAL_RED` 隔離）（機能MMM.3 / Sol氏 Phase 52 重要指摘）
+  - 独立監査受入条件の固定と Level 7 E2E 完走・Evidence Bundle 生成（機能MMM.4）
+- スコープ外（Phase 54 以降）: 実際の異系統実外部LLM API（Anthropic/OpenAI）との本番接続による無人自律開発パイプライン実稼働。
 
-## 作業手順（Phase 52 から更新・LESSONS.md 2026-11-13 の教訓に基づく）
+## 作業手順（Phase 53 から更新・LESSONS.md 2026-11-14 の教訓に基づく）
 - Maker と Checker は別系統のモデルにする（AGENTS.md Rule 6）。Maker が Gemini 系のとき、Checker サブエージェントは `Model: "pro"` を明示指定する。`inherit` は使わない。commit-step の `--checker-reason` に Checker のモデル指定を書く。
 - Checker への入力は要約・再構成しない。以下をファイルに書き出し、Checker にはそのパスを渡して直接読ませる:
-  1. `awk '/^- \[ \] 機能LLL/,/^## 3\./' SPEC.md > .dev/checker/spec_lll.md`
+  1. `awk '/^- \[ \] 機能MMM/,/^## 3\./' SPEC.md > .dev/checker/spec_mmm.md`
   2. `git add -N . && git diff <checkpoint> > .dev/checker/diff_task<n>.patch`（未追跡ファイルも差分に含める）
 - verify-step の前に `git status --porcelain` を確認し、意図しないファイル（実験の生成物など）がないことを確かめる。実験・挙動確認は必ず `mktemp -d` で作った一時ディレクトリで行い、リポジトリ直下で実行しない。
 - Evidence Record は手書きしない。各ステップで以下の正規経路のみを使う:
@@ -28,17 +28,17 @@
 - Bundle 生成後に SPEC.md や追跡ファイルを変更しない（Evidence の spec_sha と不一致になる）。SPEC の完了マークは次フェーズの準備コミットで付ける。
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- LLL.1: Linux `bwrap` において `/etc` 全体公開を廃止し、`/etc/shadow` 等へのアクセス拒絶をテストする新規テストを追加。
-- LLL.2: macOS `sandbox-exec` において `/private/etc` 等へのアクセス拒絶をテストする新規テストを追加。
-- LLL.3: 不完全・敵対的な Finding に対する `AuditDispatcher` の耐性を検証するテストを追加。
-- LLL.4: `tests/test_level7_real_loop_e2e.py` に新規拒絶シナリオを追加。
+- MMM.1: `tests/test_red_verifier.py` に `~/.venvs/...` や `~/projects/.../.venv` 等のサブディレクトリ配置仮想環境における最小マウント検証テストを追加。
+- MMM.2: `tests/test_red_verifier.py` に macOS `sandbox-exec` 読み取り隔離強化の単体テストを追加。
+- MMM.3: `tests/test_audit_dispatch.py`, `tests/test_red_verifier.py`, `tests/test_immunity_and_red_acceptance.py`, `tests/test_audit_persistence.py` に、`self.assertEqual(1, 2)` や `self.fail()` 等の偽陽性テストが `TRIVIAL_RED` として `REJECTED` されることを検証するテストを追加。既存テストの Red テストコードが固定値比較を行っていた場合は `src/` の関数を呼び出して正しくプロダクト起因で失敗するテストに整合させる。
+- MMM.4: `tests/test_level7_real_loop_e2e.py` に Trivial Red 排除の E2E 検証を追加。
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [x] 1. Linux `bwrap` 読み取りマウントの最小特権化（`/etc` 全体公開廃止・個別ファイル化・仮想環境限定・機密拒絶単体テスト）（Red-First）（LLL.1）
-- [x] 2. macOS `sandbox-exec` 読み取りプロファイルの厳格化（ホーム外機密パス・システム設定への deny 追加・単体テスト）（Red-First）（LLL.2）
-- [x] 3. Multi-LLM 独立監査境界の確立と敵対的/不正 Finding 耐性の実証（Auditor の独立性担保・不正 Finding の安全な REJECTED 処理）（Red-First）（LLL.3）
-- [x] 4. Level 7 E2E 完走・報告書更新・全体検証ゲート合格・正規 Evidence による Bundle 生成（LLL.4）
+- [x] 1. Linux 仮想環境マウント包含判定（`is_relative_to`）とサブディレクトリ限定マウント（Red-First）（MMM.1）
+- [x] 2. macOS `sandbox-exec` 読み取り隔離の強化（Red-First）（MMM.2）
+- [x] 3. 偽陽性 Red（Trivial / Fake Red）の自動排除機構（AST静的検証・スタックフレーム実行検証・`TRIVIAL_RED` 隔離）（Red-First）（MMM.3）
+- [x] 4. 独立監査受入条件の固定と Level 7 E2E 完走・Evidence Bundle 生成（MMM.4）
 
 ## 止まっていること・判断待ち
-- なし。Phase 51 がマージされ、P1（Linux `/etc` および仮想環境公開範囲の最小化、macOS deny リスト強化、Multi-LLM 独立境界・敵対耐性）の修正方針が確定済み。
+- なし。Phase 52 がマージされ、P1（Linux 仮想環境の包含関係対応、macOS 読み取り隔離強化、偽陽性 Red 排除）の修正方針が確定済み。

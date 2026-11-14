@@ -588,6 +588,21 @@ class TestUntrackedTamper(unittest.TestCase):
                 reproduction_test_code=repro_code,
                 auditor_model="claude-opus-5.5",
             ),
+            # 5. 偽陽性 Red (Trivial / Fake Red: 固定値比較・プロダクト非呼出)
+            AuditFinding(
+                finding_id="BATCH-TRIVIAL-005",
+                severity="P0",
+                spec_reference="SPEC.md MMM.3",
+                location="src/calc.py:3",
+                description="Trivial red assertion failure without exercising product code",
+                reproduction_test_code=(
+                    "import unittest\n"
+                    "class FakeTrivial(unittest.TestCase):\n"
+                    "    def test_fail(self):\n"
+                    "        self.assertEqual(1, 2)\n"
+                ),
+                auditor_model="gpt-6.1-sol",
+            ),
         ]
 
         audit_store = AuditStore(repo_dir=self.repo_dir)
@@ -618,12 +633,19 @@ class TestUntrackedTamper(unittest.TestCase):
         assert s3 is not None
         self.assertEqual(s3.status, "REJECTED")
 
+        s5 = audit_store.get_finding("BATCH-TRIVIAL-005")
+        self.assertIsNotNone(s5)
+        assert s5 is not None
+        self.assertEqual(s5.status, "REJECTED")
+        self.assertEqual(s5.red_verification_reason, "TRIVIAL_RED")
+
         # 3. PLAN.md に真正な指摘のみが登録されていること
         plan_content = self.plan_path.read_text(encoding="utf-8")
         self.assertIn("BATCH-GENUINE-004", plan_content)
         self.assertNotIn("BATCH-ERR-001", plan_content)
         self.assertNotIn("BATCH-PASS-002", plan_content)
         self.assertNotIn("BATCH-SECRET-003", plan_content)
+        self.assertNotIn("BATCH-TRIVIAL-005", plan_content)
 
         # 4. 実 Maker プロセスによる修正実行 (CommandRunnerAdapter)
         dev_dir = self.repo_dir / ".dev"

@@ -594,7 +594,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `tests/test_level7_real_loop_e2e.py` において、機密ファイル読み取り試行や未追跡ファイル改ざん試行がすべて遮断され、Level 7 クローズドループが完走することを検証。
      - `NIGHTLY_REPORT.md` を更新し、機密読み取り境界の達成および残存する限界を正確に記録。
      - 全自動検証ゲート（303+ テスト、Ruff、Mypy）に合格し、`verify-step` / `commit-step` で正規に発行された Evidence Record を含む Evidence Bundle が `VERIFIED` となること。
-- [ ] 機能LLL (Stage 7 サンドボックス読み取り最小化とMulti-LLM独立監査境界の確立 Stage 7 Sandbox Read Minimization and Multi-LLM Independent Audit Boundary):
+- [x] 機能LLL (Stage 7 サンドボックス読み取り最小化とMulti-LLM独立監査境界の確立 Stage 7 Sandbox Read Minimization and Multi-LLM Independent Audit Boundary):
   1. Linux `bwrap` 読み取りマウントの最小特権化 (LLL.1 / Sol氏 Phase 51 P1指摘):
      - `/etc` 全体の `--ro-bind` を廃止し、DNS解決およびSSL/TLS証明書に必要な最小限のパス（`/etc/resolv.conf`, `/etc/ssl`, `/etc/pki`, `/etc/hosts` 等が存在する場合のみ）に限定マウントする。
      - Python 仮想環境がユーザーホームディレクトリ配下にある場合、ホームディレクトリの他ファイルや親ディレクトリへの漏洩を防ぎ、仮想環境のパス自体（`sys.prefix`, `sys.base_prefix`）のみを限定的に `--ro-bind` する。
@@ -608,6 +608,20 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. Level 7 E2E 完走・整合性・Evidence Bundle 生成 (LLL.4):
      - `tests/test_level7_real_loop_e2e.py` において、最小化されたサンドボックス下で Level 7 自己改善ループが完走し、敵対的/不正な Finding の流入がすべて安全に排除されることを検証する。
      - `NIGHTLY_REPORT.md` を更新し、検証ゲート（全310+ テスト、Ruff、Mypy）に合格し、正規の Evidence Record を持つ Bundle を作成する。
+- [ ] 機能MMM (Stage 7 独立監査受入条件の固定と偽陽性Red排除・OS隔離強化 Stage 7 Independent Audit Acceptance and Trivial Red Elimination):
+  1. Linux 仮想環境マウント包含判定（`is_relative_to`）とサブディレクトリ限定マウント (MMM.1 / Sol氏 Phase 52 P1指摘):
+     - `pfx_path == home_resolved or pfx_path.is_relative_to(home_resolved)` による包含関係判定を行い、ホームディレクトリ配下に配置された仮想環境（`~/.venvs/...`, `~/projects/.../.venv` 等）であっても、仮想環境全体を `--ro-bind` せず、`bin`, `lib`, `lib64`, `include`, `pyvenv.cfg` のみに限定マウントする。
+     - サブディレクトリ配置の仮想環境から同一ユーザーホーム直下の他ファイルや別ディレクトリへの読み取り漏洩が防止されることを単体テストで実証する。
+  2. macOS `sandbox-exec` 読み取り隔離の強化 (MMM.2 / Sol氏 Phase 52 P1指摘):
+     - macOS の `sandbox-exec` プロファイルにおいて、既知の機密パスだけでなく、ホームディレクトリ外のユーザーデータやシステム管理パスへの保護を強化し、候補テストからの不当なファイル読み取りを拒絶する。
+     - 単体テストで読み取り制限の厳格性を検証する。
+  3. 偽陽性 Red（Trivial / Fake Red）の自動排除機構 (MMM.3 / Sol氏 Phase 52 重要指摘):
+     - `self.assertEqual(1, 2)` や `self.fail()` のように、プロダクトコード（`src/` 配下）を一切呼び出さずテストメソッド内のみで自己完結して失敗するテストを検知する。
+     - AST 解析（テストコードが対象コードまたは `src/` を import / 利用しているか）およびトレースバック検証（失敗例外のスタックフレームに対象プロダクトコードが含まれているか）を実施し、対象コードと無関係な失敗は `TRIVIAL_RED` として `REJECTED` 隔離し、PLAN.md への混入を遮断する。
+     - 固定値比較、即時 `self.fail()`、対象モジュール非呼出の偽陽性テストが排除されることを単体テストで実証する。
+  4. 独立監査受入条件の固定と Level 7 E2E 完走・Evidence Bundle 生成 (MMM.4):
+     - `tests/test_level7_real_loop_e2e.py` において、偽陽性 Red（Trivial Red）や包含仮想環境漏洩プローブが安全に排除され、真正な指摘のみが Level 7 自己改善ループを完走することを実証する。
+     - `NIGHTLY_REPORT.md` を更新し、検証ゲート（全テスト、Ruff、Mypy）に合格し、正規の Evidence Record を持つ Bundle を作成する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
