@@ -668,6 +668,73 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
                 self.assertEqual(err_output.get("status"), "AUDIT_PENDING")
                 self.assertIn("AUDIT_INTERRUPTED", err_output.get("error", ""))
 
+    def test_auditor_client_fails_closed_when_prompt_is_empty(self) -> None:
+        """AUD-001: プロンプトが空または未置換の {prompt} で標準入力も空の場合、汎用メッセージへ逃げず Exit 1 (FAILED) で安全停止すること。"""
+        import io
+        from unittest import mock
+
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        stderr_capture = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO("")), mock.patch("sys.stderr", stderr_capture):
+            exit_code = auditor_client.main([
+                "--model", "claude-opus-5.5",
+                "--prompt", "{prompt}",
+                "--repo-dir", str(self.repo_dir),
+            ])
+            self.assertEqual(exit_code, 1)
+            err_output = json.loads(stderr_capture.getvalue())
+            self.assertEqual(err_output.get("status"), "FAILED")
+            self.assertIn("EMPTY_AUDIT_PROMPT", err_output.get("error", ""))
+
+    def test_auditor_client_default_max_tokens_is_8192(self) -> None:
+        """AUD-002: SPEC VVV.1 に従い、--max-tokens のデフォルト値が 8192 であること。"""
+        from unittest import mock
+
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        mock_resp_body = json.dumps({
+            "id": "msg_success_12345",
+            "model": "claude-opus-5-5",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "[]"}],
+            "usage": {"input_tokens": 1000, "output_tokens": 10},
+        }).encode("utf-8")
+
+        mock_resp = mock.MagicMock()
+        mock_resp.read.return_value = mock_resp_body
+        mock_resp.__enter__.return_value = mock_resp
+
+        env_file = self.repo_dir / ".env"
+        env_file.write_text("ANTHROPIC_API_KEY=test_key\n", encoding="utf-8")
+
+        sent_payload = {}
+
+        def fake_urlopen(req, timeout=120):
+            nonlocal sent_payload
+            sent_payload = json.loads(req.data.decode("utf-8"))
+            return mock_resp
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            exit_code = auditor_client.main([
+                "--model", "claude-opus-5.5",
+                "--prompt", "valid prompt",
+                "--repo-dir", str(self.repo_dir),
+            ])
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(sent_payload.get("max_tokens"), 8192)
+
+
 
 
 

@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prompt", help="Prompt text or path to prompt file")
     parser.add_argument("--repo-dir", default=".", help="Repository root directory")
     parser.add_argument("--api-key", help="API key for LLM provider")
-    parser.add_argument("--max-tokens", type=int, default=16384, help="Max tokens for LLM completion")
+    parser.add_argument("--max-tokens", type=int, default=8192, help="Max tokens for LLM completion")
     parser.add_argument("--mock", action="store_true", help="Explicit mock mode for offline test fixtures only")
     args = parser.parse_args(argv)
 
@@ -111,8 +111,6 @@ def main(argv: list[str] | None = None) -> int:
         if not sys.stdin.isatty():
             prompt_content = sys.stdin.read()
 
-    prompt_hash = hashlib.sha256(prompt_content.encode("utf-8")).hexdigest()
-
     # Determine provider family
     model_lower = args.model.lower()
     if "claude" in model_lower or "anthropic" in model_lower:
@@ -123,6 +121,21 @@ def main(argv: list[str] | None = None) -> int:
         provider = "google"
     else:
         provider = "independent"
+
+    # AUD-001 / Fail-Closed: 空白または未置換テンプレートによる内容皆無の監査実行を遮断
+    if not prompt_content or not prompt_content.strip():
+        err_envelope = {
+            "mode": "MOCK" if args.mock else "LIVE",
+            "provider": provider,
+            "model": args.model,
+            "status": "FAILED",
+            "error": "EMPTY_AUDIT_PROMPT: No audit prompt provided via --prompt or stdin (Fail-Closed)",
+            "findings": [],
+        }
+        print(json.dumps(err_envelope, ensure_ascii=False, indent=2), file=sys.stderr)
+        return 1
+
+    prompt_hash = hashlib.sha256(prompt_content.encode("utf-8")).hexdigest()
 
     timestamp = int(time.time())
 
@@ -196,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
             "max_tokens": args.max_tokens,
             "system": system_instruction,
             "messages": [
-                {"role": "user", "content": prompt_content or "Audit repository diff against SPEC.md"}
+                {"role": "user", "content": prompt_content}
             ],
         }
 
