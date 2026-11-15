@@ -97,8 +97,9 @@ def _extract_findings_from_text(text: str) -> list[dict]:
                 if findings:
                     return findings
         except json.JSONDecodeError as exc:
-            has_decode_error = True
-            decode_error_msg = str(exc)
+            if not empty_block_found:
+                has_decode_error = True
+                decode_error_msg = str(exc)
 
     if has_decode_error:
         raise ValueError(f"Malformed JSON in audit response code block: {decode_error_msg}")
@@ -344,8 +345,9 @@ def main(argv: list[str] | None = None) -> int:
                 if isinstance(block, dict) and block.get("type") == "text":
                     raw_text += block.get("text", "")
 
-        Path(".dev/audit").mkdir(parents=True, exist_ok=True)
-        Path(".dev/audit/last_raw_response.txt").write_text(raw_text, encoding="utf-8")
+        audit_dir = (Path(args.repo_dir) / ".dev" / "audit") if args.repo_dir else Path(".dev/audit")
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        (audit_dir / "last_raw_response.txt").write_text(raw_text, encoding="utf-8")
 
         try:
             findings = _extract_findings_from_text(raw_text)

@@ -926,6 +926,42 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             runner.parse_response(json.dumps(envelope))
         self.assertIn("AUDIT_FAILED", str(cm.exception))
 
+    def test_parse_response_example_empty_block_must_not_mask_real_findings(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 12): IndependentAuditRunner.parse_response は、先頭に例示空配列コードブロックが存在しても、後続の指摘コードブロックを破棄せず抽出すること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        text = (
+            "Example format: ```json\n[]\n```\n\n"
+            "Actual findings:\n```json\n"
+            '[{"finding_id": "AUD-001", "severity": "P0", "spec_reference": "VVV.1", '
+            '"location": "a.py:1", "description": "real bug", '
+            '"reproduction_test_code": "import unittest", "status": "REPORTED"}]\n'
+            "```"
+        )
+        findings = runner.parse_response(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].finding_id, "AUD-001")
+
+    def test_failed_status_envelope_without_provider_keys_is_rejected(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 12): provider や execution_id が含まれないエンベロープでも status: FAILED の場合は欠陥ゼロとみなさず拒絶すること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        envelope = {"status": "FAILED", "error": "UNPARSEABLE_AUDIT_RESPONSE", "findings": []}
+        with self.assertRaises(ValueError) as cm:
+            runner.parse_response(json.dumps(envelope))
+        self.assertIn("AUDIT_FAILED", str(cm.exception))
+
+    def test_explicit_empty_block_with_bracketed_prose_returns_empty(self) -> None:
+        """AUD-004 (Sol Phase 62 / Cycle 12): 有効な ```json [] ``` の後に角括弧を含む散文（例: [src/foo.py]）が存在しても、誤って構文エラーとせず空配列を抽出できること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        text = "```json\n[]\n```\nNo defects found in [src/foo.py]."
+        findings = auditor_client._extract_findings_from_text(text)
+        self.assertEqual(findings, [])
+
 
 if __name__ == "__main__":
     unittest.main()

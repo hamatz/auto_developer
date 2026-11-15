@@ -40,5 +40,7 @@
 - [x] 3. 監査対象コミット拘束およびポスト監査差分検査 (Post-Audit Diff Integrity)（Red-First）（VVV.3）
 - [ ] 4. 最新HEADに対する実Claude Opus 5.5再監査・完全性検証済みEvidence Bundle ZIP生成・v0.7.0正式リリース確定（VVV.4）
 
+- [x] AUD-AUD-001. Fix: [AUD-001] IndependentAuditRunner.parse_response() still takes only the FIRST ```json``` code block when the output is not raw JSON. The auditor_client.py change addressed the case where an empty format example (```json [] ```) comes before a later block with real findings. This parser did not get the same fix. With such output, the example block's `[]` is returned as zero findings and the real findings are silently discarded. This is the 'zero defects' disguise that VVV.1 forbids. (Severity: P1, Loc: src/auto_developer/audit.py:279)
+- [x] AUD-AUD-002. Fix: [AUD-002] parse_response() checks for a non-COMPLETED status only when has_prov_metadata is true, i.e. when mode, execution_id, provider_request_id or provider is present. An envelope such as {"status": "FAILED", "error": "...", "findings": []} has none of those keys. It therefore skips every check and is accepted as a successful audit with zero findings. A failed audit is turned into 'no defects' (fail-open). (Severity: P1, Loc: src/auto_developer/audit.py:296)
 ## 止まっていること・判断待ち
 - なし。Sol 氏の Phase 61 レビュー指摘（P1: stop_reason 検証・max_tokens打ち切り検知・JSON解析失敗のFail-Closed化、P1: test_live_claude_audit.py の環境差異解消と Linux bwrap 修正、考察: 監査対象コミットと最終HEADの差分整合性拘束）に対応する Phase 62（機能VVV）の準備完了。

@@ -275,15 +275,53 @@ class IndependentAuditRunner:
         try:
             data = json.loads(clean_output)
         except json.JSONDecodeError:
-            # 2. 直接パースできない場合（Markdown コードブロックに包まれている場合等）、```json ... ``` を抽出
-            json_match = re.search(r"```json\s*(.*?)\s*```", output, re.DOTALL)
-            if json_match:
+            pass
+
+        # 2. 直接パースできない場合、first '[' to last ']' の直接試行（非空指摘またはエンベロープ辞書）
+        if data is None:
+            start = clean_output.find("[")
+            end = clean_output.rfind("]")
+            if start != -1 and end != -1 and end > start:
                 try:
-                    data = json.loads(json_match.group(1).strip())
+                    parsed = json.loads(clean_output[start : end + 1])
+                    if isinstance(parsed, list):
+                        findings = [item for item in parsed if isinstance(item, dict)]
+                        if findings:
+                            data = findings
+                    elif isinstance(parsed, dict) and ("findings" in parsed or "finding_id" in parsed):
+                        data = parsed
                 except json.JSONDecodeError:
                     pass
-            elif re.fullmatch(r"(?:```(?:json)?\s*)?\[\s*\](?:\s*```)?", clean_output):
+
+        # 3. Markdown コードブロックの探索（複数ブロック走査＆非空指摘の優先）
+        if data is None:
+            all_code_blocks = list(re.finditer(r"```(?:json)?\s*\n?(.*?)\n?```", clean_output, re.DOTALL))
+            empty_block_found = False
+            for m in all_code_blocks:
+                content = m.group(1).strip()
+                if not content.startswith(("[", "{")):
+                    continue
+                try:
+                    parsed = json.loads(content)
+                    if isinstance(parsed, list):
+                        findings = [item for item in parsed if isinstance(item, dict)]
+                        if findings:
+                            data = findings
+                            break
+                        if len(parsed) == 0:
+                            empty_block_found = True
+                    elif isinstance(parsed, dict) and "findings" in parsed:
+                        data = parsed
+                        break
+                except json.JSONDecodeError:
+                    pass
+
+            if data is None and empty_block_found:
                 data = []
+
+        # 4. 厳格な単一コードブロックまたは空配列
+        if data is None and re.fullmatch(r"(?:```(?:json)?\s*)?\[\s*\](?:\s*```)?", clean_output):
+            data = []
 
         if data is None:
             raise ValueError(f"Could not parse valid JSON from audit response: {output[:200]}")
@@ -293,18 +331,18 @@ class IndependentAuditRunner:
             exec_id = data.get("execution_id") or data.get("id")
             prov_req_id = data.get("provider_request_id") or data.get("id")
             raw_mode = data.get("mode")
-            has_prov_metadata = bool(raw_mode or exec_id or prov_req_id or data.get("provider"))
+            status = data.get("status")
+            has_prov_metadata = bool(raw_mode or exec_id or prov_req_id or data.get("provider") or status)
+
+            # AUD-002 (Sol Phase 62 / Cycle 11 & 12): Envelope status validation (Fail-Closed: reject non-COMPLETED status)
+            if status and status != "COMPLETED":
+                raise ValueError(
+                    f"AUDIT_{status}: Live audit envelope returned non-completed status '{status}': {data.get('error') or ''}"
+                )
 
             if has_prov_metadata:
                 mode = raw_mode or ("MOCK" if (exec_id and str(exec_id).startswith("mock_")) else "LIVE")
                 stop_reason = data.get("stop_reason")
-                status = data.get("status")
-
-                # AUD-002 (Sol Phase 62 / Cycle 11): Envelope status validation (Fail-Closed: reject non-COMPLETED status)
-                if status and status != "COMPLETED":
-                    raise ValueError(
-                        f"AUDIT_{status}: Live audit envelope returned non-completed status '{status}': {data.get('error') or ''}"
-                    )
 
                 # AUD-001 / AUD-002 / VVV.1 / Sol Phase 61 P1: mode: LIVE 時の stop_reason 厳格検証（Fail-Closed allow-list）
                 if mode == "LIVE" and (not stop_reason or stop_reason != "end_turn"):
@@ -319,7 +357,7 @@ class IndependentAuditRunner:
                     "provider_request_id": prov_req_id,
                     "model": data.get("model"),
                     "resolved_model": data.get("resolved_model") or data.get("model"),
-                    "status": data.get("status"),
+                    "status": status,
                     "stop_reason": stop_reason,
                     "usage": data.get("usage"),
                 }
