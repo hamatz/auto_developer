@@ -285,7 +285,16 @@ def _process_stmts_in_order(
                 dependent_vars.add(name)
             continue
 
-        if isinstance(stmt, (ast.For, ast.While)):
+        if isinstance(stmt, ast.While):
+            for call in [n for n in ast.walk(stmt.test) if isinstance(n, ast.Call) and _is_assert_call(n)]:
+                _check_assert_call(call, var_env, dependent_vars, func_node, trivial_reasons)
+            is_c, test_val = _eval_constant_expr(stmt.test, var_env)
+            if is_c and not bool(test_val):
+                # 静的に False: body は到達不能なので走査抑止 (機能PPP.2)
+                if stmt.orelse:
+                    _process_stmts_in_order(stmt.orelse, var_env, dependent_vars, func_node, trivial_reasons)
+                continue
+
             _process_stmts_in_order(stmt.body, var_env, dependent_vars, func_node, trivial_reasons)
             if stmt.orelse:
                 _process_stmts_in_order(stmt.orelse, var_env, dependent_vars, func_node, trivial_reasons)
@@ -297,6 +306,23 @@ def _process_stmts_in_order(
                 elif isinstance(item, (ast.AnnAssign, ast.AugAssign)):
                     loop_assigned.update(n.id for n in ast.walk(item.target) if isinstance(n, ast.Name))
             for name in loop_assigned:
+                var_env.pop(name, None)
+                dependent_vars.add(name)
+            continue
+
+        if isinstance(stmt, ast.For):
+            _process_stmts_in_order(stmt.body, var_env, dependent_vars, func_node, trivial_reasons)
+            if stmt.orelse:
+                _process_stmts_in_order(stmt.orelse, var_env, dependent_vars, func_node, trivial_reasons)
+            for_assigned: set[str] = set()
+            for_assigned.update(n.id for n in ast.walk(stmt.target) if isinstance(n, ast.Name))
+            for item in stmt.body:
+                if isinstance(item, ast.Assign):
+                    for t in item.targets:
+                        for_assigned.update(n.id for n in ast.walk(t) if isinstance(n, ast.Name))
+                elif isinstance(item, (ast.AnnAssign, ast.AugAssign)):
+                    for_assigned.update(n.id for n in ast.walk(item.target) if isinstance(n, ast.Name))
+            for name in for_assigned:
                 var_env.pop(name, None)
                 dependent_vars.add(name)
             continue

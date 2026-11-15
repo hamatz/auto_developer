@@ -36,7 +36,7 @@
 
 ## ステップ
 - [x] 1. 条件分岐（`if`/`while`）における変数合流（Merge）と不確定性保護（Red-First）（PPP.1）
-- [ ] 2. 静的到達不能コード（`if False:` 等）の判定抑止と不確実性の安全側判定（Red-First）（PPP.2）
+- [x] 2. 静的到達不能コード（`if False:` 等）の判定抑止と不確実性の安全側判定（Red-First）（PPP.2）
 - [ ] 3. 判定の不確実性保護・受入ハーネスと Level 7 E2E 完走確認（Red-First）（PPP.3）
 - [ ] 4. 最終 Evidence Bundle 生成・受入ハーネス確定と正式独立第三者監査移行準備（PPP.4）
 

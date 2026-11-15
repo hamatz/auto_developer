@@ -1174,6 +1174,55 @@ class GenuineBranchTest(unittest.TestCase):
         self.assertTrue(result.is_reproduced)
         self.assertEqual(result.reason, "GENUINE_RED")
 
+    def test_ast_does_not_reject_unreachable_assertion_in_false_if(self) -> None:
+        """機能PPP.2: if False: のように静的に到達不能な分岐内にあるアサーションが
+        偽 Red (TRIVIAL_RED) の根拠として誤検出されないこと（Sol氏 Phase 55 指摘再現）。
+        """
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = """import unittest
+
+class T(unittest.TestCase):
+    def test_case(self):
+        if False:
+            self.assertEqual(1, 2)
+"""
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial)
+        self.assertEqual(msg, "")
+
+    def test_ast_does_not_reject_unreachable_assertion_in_false_while(self) -> None:
+        """機能PPP.2: while False: / while 0: のように到達不能なループ内にあるアサーションが誤検出されないこと。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = """import unittest
+
+class T(unittest.TestCase):
+    def test_case(self):
+        while False:
+            self.assertEqual(1, 2)
+"""
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial)
+        self.assertEqual(msg, "")
+
+    def test_ast_does_not_reject_unreachable_assertion_in_dead_else(self) -> None:
+        """機能PPP.2: if True: のデッドブランチ (else) 内にあるアサーションが誤検出されないこと。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = """import unittest
+
+class T(unittest.TestCase):
+    def test_case(self):
+        if True:
+            pass
+        else:
+            self.assertEqual(1, 2)
+"""
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial)
+        self.assertEqual(msg, "")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest
