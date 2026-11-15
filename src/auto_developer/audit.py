@@ -311,8 +311,8 @@ class IndependentAuditRunner:
                         collected_findings.extend(findings)
                     elif len(parsed["findings"]) == 0:
                         empty_block_found = True
-                else:
-                    found_envelope = parsed
+                elif "error" in parsed:
+                    raise ValueError(f"AUDIT_FAILED: Auditor response contains error: {parsed.get('error')}")
         except json.JSONDecodeError:
             # 2. Markdown コードブロックの探索（複数ブロック走査＆全件集約）
             all_code_blocks = list(re.finditer(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", clean_output, re.DOTALL))
@@ -497,7 +497,7 @@ class IndependentAuditRunner:
         elif empty_block_found:
             data = []
         else:
-            data = []
+            raise ValueError(f"Could not parse valid JSON findings from audit response: {output[:200]}")
 
         if not data:
             return []

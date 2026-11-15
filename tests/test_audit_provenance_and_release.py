@@ -1503,6 +1503,15 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             runner.parse_response(text)
         self.assertIn("AUDIT_FAILED", str(ctx.exception))
 
+    def test_error_only_object_is_not_zero_findings(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 24): error のみを含むオブジェクトや findings が非リストのオブジェクトがゼロ欠陥に偽装されず、Fail-Closed（ValueError）で拒絶されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        with self.assertRaises(ValueError):
+            runner.parse_response('{"error": "Rate limit exceeded"}')
+
+        with self.assertRaises(ValueError):
+            runner.parse_response('{"findings": "none"}')
+
 
 if __name__ == "__main__":
     unittest.main()
