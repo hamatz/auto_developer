@@ -1060,6 +1060,55 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.parse_response(text)
 
+    def test_fenced_truncated_live_envelope_is_rejected(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 15): fenced された truncated (stop_reason=max_tokens) LIVE envelope が内部 findings スライスによりエンベロープ検証をバイパスせず拒絶されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        envelope = {
+            "mode": "LIVE",
+            "provider": "anthropic",
+            "model": "claude-opus-5.5",
+            "provider_request_id": "msg_01TRUNC",
+            "execution_id": "msg_01TRUNC",
+            "status": "COMPLETED",
+            "stop_reason": "max_tokens",
+            "findings": [{
+                "finding_id": "AUD-T-001",
+                "severity": "P1",
+                "spec_reference": "VVV.1",
+                "location": "a.py:1",
+                "description": "partial finding before truncation",
+                "reproduction_test_code": "import unittest",
+                "status": "REPORTED",
+            }],
+        }
+        output = "```json\n" + json.dumps(envelope) + "\n```"
+        with self.assertRaises(ValueError):
+            runner.parse_response(output)
+
+    def test_failed_envelope_after_log_line_is_rejected(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 15): ログ行の後に続く status=FAILED の envelope が内部 findings スライスによりエンベロープ検証をバイパスせず拒絶されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        envelope = {
+            "mode": "LIVE",
+            "provider": "anthropic",
+            "provider_request_id": "msg_01FAIL",
+            "status": "FAILED",
+            "error": "UNPARSEABLE",
+            "stop_reason": "end_turn",
+            "findings": [{
+                "finding_id": "AUD-T-001",
+                "severity": "P1",
+                "spec_reference": "VVV.1",
+                "location": "a.py:1",
+                "description": "partial finding before truncation",
+                "reproduction_test_code": "import unittest",
+                "status": "REPORTED",
+            }],
+        }
+        output = "auditor: warning: retrying request\n" + json.dumps(envelope)
+        with self.assertRaises(ValueError):
+            runner.parse_response(output)
+
 
 if __name__ == "__main__":
     unittest.main()

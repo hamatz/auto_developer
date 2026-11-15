@@ -277,19 +277,43 @@ class IndependentAuditRunner:
         except json.JSONDecodeError:
             pass
 
-        # 2. 直接パースできない場合、first '[' to last ']' の直接試行（非空指摘またはエンベロープ辞書）
+        # 2. 直接パースできない場合、エンベロープ辞書（{...}）または生配列（[...]）の抽出試行
+        # エンベロープ辞書が外側にある場合（start_brace < start_bracket）、エンベロープ検証をバイパスさせないよう辞書を優先抽出する
         if data is None:
-            start = clean_output.find("[")
-            end = clean_output.rfind("]")
-            if start != -1 and end != -1 and end > start:
+            start_brace = clean_output.find("{")
+            end_brace = clean_output.rfind("}")
+            start_bracket = clean_output.find("[")
+            end_bracket = clean_output.rfind("]")
+
+            # 辞書が外側に先行する場合、まず {...} のパースを試みる
+            if (
+                start_brace != -1
+                and end_brace != -1
+                and end_brace > start_brace
+                and (start_bracket == -1 or start_brace < start_bracket)
+            ):
                 try:
-                    parsed = json.loads(clean_output[start : end + 1])
-                    if isinstance(parsed, list):
-                        findings = [item for item in parsed if isinstance(item, dict)]
+                    parsed_dict = json.loads(clean_output[start_brace : end_brace + 1])
+                    if isinstance(parsed_dict, dict) and (
+                        "findings" in parsed_dict
+                        or "finding_id" in parsed_dict
+                        or "status" in parsed_dict
+                        or "mode" in parsed_dict
+                    ):
+                        data = parsed_dict
+                except json.JSONDecodeError:
+                    pass
+
+            # 辞書として抽出されなかった場合、生配列 [...] のパースを試みる
+            if data is None and start_bracket != -1 and end_bracket != -1 and end_bracket > start_bracket:
+                try:
+                    parsed_list = json.loads(clean_output[start_bracket : end_bracket + 1])
+                    if isinstance(parsed_list, list):
+                        findings = [item for item in parsed_list if isinstance(item, dict)]
                         if findings:
                             data = findings
-                    elif isinstance(parsed, dict) and ("findings" in parsed or "finding_id" in parsed):
-                        data = parsed
+                    elif isinstance(parsed_list, dict) and ("findings" in parsed_list or "finding_id" in parsed_list):
+                        data = parsed_list
                 except json.JSONDecodeError:
                     pass
 
