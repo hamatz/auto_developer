@@ -299,22 +299,32 @@ class IndependentAuditRunner:
                     or parsed.get("stop_reason")
                 )
                 if is_prov:
+                    status = parsed.get("status")
+                    if status and status != "COMPLETED":
+                        raise ValueError(f"AUDIT_{status}: Live audit envelope returned non-completed status '{status}': {parsed.get('error') or ''}")
                     found_envelope = parsed
                     if "findings" in parsed and isinstance(parsed["findings"], list):
-                        findings = [item for item in parsed["findings"] if isinstance(item, dict)]
-                        if findings:
-                            collected_findings.extend(findings)
-                        elif len(parsed["findings"]) == 0:
+                        findings = [item for item in parsed["findings"] if isinstance(item, dict) and "finding_id" in item]
+                        if len(parsed["findings"]) == 0:
                             empty_block_found = True
+                        elif len(findings) == len(parsed["findings"]):
+                            collected_findings.extend(findings)
+                        else:
+                            raise ValueError(f"AUDIT_PARSE_ERROR: JSON findings array contains non-finding items: {parsed['findings']}")
                 elif "finding_id" in parsed and "findings" not in parsed:
                     collected_findings.append(parsed)
                 elif "findings" in parsed and isinstance(parsed["findings"], list):
+                    status = parsed.get("status")
+                    if status and status != "COMPLETED":
+                        raise ValueError(f"AUDIT_{status}: Live audit envelope returned non-completed status '{status}': {parsed.get('error') or ''}")
                     found_envelope = parsed
-                    findings = [item for item in parsed["findings"] if isinstance(item, dict)]
-                    if findings:
-                        collected_findings.extend(findings)
-                    elif len(parsed["findings"]) == 0:
+                    findings = [item for item in parsed["findings"] if isinstance(item, dict) and "finding_id" in item]
+                    if len(parsed["findings"]) == 0:
                         empty_block_found = True
+                    elif len(findings) == len(parsed["findings"]):
+                        collected_findings.extend(findings)
+                    else:
+                        raise ValueError(f"AUDIT_PARSE_ERROR: JSON findings array contains non-finding items: {parsed['findings']}")
         except json.JSONDecodeError:
             # 2. Markdown コードブロックの探索（複数ブロック走査＆全件集約）
             all_code_blocks = list(re.finditer(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", clean_output, re.DOTALL))
@@ -412,14 +422,30 @@ class IndependentAuditRunner:
                                     or parsed_out.get("stop_reason")
                                 )
                                 if is_prov:
-                                    found_envelope = parsed_out
+                                    if parsed_out.get("error"):
+                                        raise ValueError(f"AUDIT_FAILED: Auditor response contains error: {parsed_out.get('error')}")
+                                    env_status = parsed_out.get("status")
+                                    if env_status and env_status != "COMPLETED":
+                                        raise ValueError(
+                                            f"AUDIT_{env_status}: Live audit envelope returned non-completed status '{env_status}': {parsed_out.get('error') or ''}"
+                                        )
+                                    env_mode = parsed_out.get("mode")
+                                    env_stop = parsed_out.get("stop_reason")
+                                    if (env_mode == "LIVE" or env_stop is not None) and (not env_stop or env_stop != "end_turn"):
+                                        raise ValueError(
+                                            f"AUDIT_INTERRUPTED: Live audit envelope has invalid stop_reason '{env_stop}' (expected 'end_turn')"
+                                        )
+                                    if found_envelope is None:
+                                        found_envelope = parsed_out
                                     if "findings" in parsed_out and isinstance(parsed_out["findings"], list):
-                                        findings = [item for item in parsed_out["findings"] if isinstance(item, dict)]
-                                        if findings and not collected_findings:
-                                            collected_findings.extend(findings)
-                                        elif len(parsed_out["findings"]) == 0:
+                                        findings = [item for item in parsed_out["findings"] if isinstance(item, dict) and "finding_id" in item]
+                                        if len(parsed_out["findings"]) == 0:
                                             empty_block_found = True
-                                    break
+                                        elif len(findings) == len(parsed_out["findings"]):
+                                            if not collected_findings:
+                                                collected_findings.extend(findings)
+                                        else:
+                                            has_decode_error = True
                         except json.JSONDecodeError:
                             pass
 
@@ -430,10 +456,14 @@ class IndependentAuditRunner:
                         try:
                             parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
                             if isinstance(parsed_out, list):
-                                findings = [item for item in parsed_out if isinstance(item, dict)]
-                                if findings:
+                                findings = [item for item in parsed_out if isinstance(item, dict) and "finding_id" in item]
+                                if len(parsed_out) == 0:
+                                    pass
+                                elif len(findings) == len(parsed_out):
                                     collected_findings.extend(findings)
                                     break
+                                else:
+                                    has_decode_error = True
                         except json.JSONDecodeError:
                             pass
 
@@ -445,16 +475,20 @@ class IndependentAuditRunner:
                             parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
                             if isinstance(parsed_out, dict):
                                 findings_fld = parsed_out.get("findings")
-                                if isinstance(findings_fld, list) and len(findings_fld) > 0:
-                                    if found_envelope is None:
-                                        found_envelope = parsed_out
-                                    collected_findings.extend([item for item in findings_fld if isinstance(item, dict)])
-                                    break
-                                elif isinstance(findings_fld, list) and len(findings_fld) == 0:
-                                    if found_envelope is None:
-                                        found_envelope = parsed_out
-                                    if empty_envelope is None:
-                                        empty_envelope = parsed_out
+                                if isinstance(findings_fld, list):
+                                    findings = [item for item in findings_fld if isinstance(item, dict) and "finding_id" in item]
+                                    if len(findings_fld) == 0:
+                                        if found_envelope is None:
+                                            found_envelope = parsed_out
+                                        if empty_envelope is None:
+                                            empty_envelope = parsed_out
+                                    elif len(findings) == len(findings_fld):
+                                        if found_envelope is None:
+                                            found_envelope = parsed_out
+                                        collected_findings.extend(findings)
+                                        break
+                                    else:
+                                        has_decode_error = True
                                 elif "finding_id" in parsed_out:
                                     collected_findings.append(parsed_out)
                                     break

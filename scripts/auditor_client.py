@@ -92,14 +92,22 @@ def _extract_findings_from_text(text: str) -> list[dict]:
             elif isinstance(parsed, dict):
                 if parsed.get("error"):
                     raise ValueError(f"AUDIT_FAILED: Auditor response contains error: {parsed.get('error')}")
-                elif "finding_id" in parsed:
+                elif "finding_id" in parsed and "findings" not in parsed:
                     collected_findings.append(parsed)
                 elif "findings" in parsed and isinstance(parsed["findings"], list):
-                    findings = [item for item in parsed["findings"] if isinstance(item, dict)]
-                    if findings:
-                        collected_findings.extend(findings)
-                    elif len(parsed["findings"]) == 0:
+                    env_status = parsed.get("status")
+                    if env_status and env_status != "COMPLETED":
+                        raise ValueError(f"AUDIT_{env_status}: Live audit envelope returned non-completed status '{env_status}'")
+                    findings = [item for item in parsed["findings"] if isinstance(item, dict) and "finding_id" in item]
+                    if len(parsed["findings"]) == 0:
                         empty_block_found = True
+                    elif len(findings) == len(parsed["findings"]):
+                        collected_findings.extend(findings)
+                    else:
+                        has_decode_error = True
+                        decode_error_msg = f"Findings array contains non-finding items: {parsed['findings']}"
+                elif parsed.get("status") and parsed.get("status") != "COMPLETED":
+                    raise ValueError(f"AUDIT_{parsed.get('status')}: Live audit envelope returned non-completed status '{parsed.get('status')}'")
                 else:
                     has_decode_error = True
                     decode_error_msg = f"Unrecognised JSON object in code block: {list(parsed.keys())}"
@@ -121,9 +129,13 @@ def _extract_findings_from_text(text: str) -> list[dict]:
         try:
             parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
             if isinstance(parsed_out, list):
-                findings = [item for item in parsed_out if isinstance(item, dict)]
-                if findings:
+                findings = [item for item in parsed_out if isinstance(item, dict) and "finding_id" in item]
+                if len(parsed_out) == 0:
+                    pass
+                elif len(findings) == len(parsed_out):
                     return findings
+                else:
+                    raise ValueError(f"JSON array contains non-finding items: {parsed_out}")
         except json.JSONDecodeError:
             pass
 
@@ -132,10 +144,19 @@ def _extract_findings_from_text(text: str) -> list[dict]:
         try:
             parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
             if isinstance(parsed_out, dict):
+                if parsed_out.get("error"):
+                    raise ValueError(f"AUDIT_FAILED: Auditor response contains error: {parsed_out.get('error')}")
+                env_status = parsed_out.get("status")
+                if env_status and env_status != "COMPLETED":
+                    raise ValueError(f"AUDIT_{env_status}: Live audit envelope returned non-completed status '{env_status}'")
                 if "findings" in parsed_out and isinstance(parsed_out["findings"], list):
-                    findings = [item for item in parsed_out["findings"] if isinstance(item, dict)]
-                    if findings:
+                    findings = [item for item in parsed_out["findings"] if isinstance(item, dict) and "finding_id" in item]
+                    if len(parsed_out["findings"]) == 0:
+                        pass
+                    elif len(findings) == len(parsed_out["findings"]):
                         return findings
+                    else:
+                        raise ValueError(f"JSON findings array contains non-finding items: {parsed_out['findings']}")
                 elif "finding_id" in parsed_out:
                     return [parsed_out]
         except json.JSONDecodeError:

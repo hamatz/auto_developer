@@ -1645,6 +1645,81 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.parse_response(text)
 
+    def test_later_raw_failed_envelope_must_be_rejected(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 29): コードブロック外の複数Envelopeにおいて、後続のEnvelopeが非COMPLETED（FAILED等）である場合、先行Envelopeで成功偽装されず Fail-Closed（ValueError）で拒絶されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        ok_env = {
+            "mode": "LIVE",
+            "provider": "anthropic",
+            "provider_request_id": "msg_ok_1",
+            "execution_id": "msg_ok_1",
+            "status": "COMPLETED",
+            "stop_reason": "end_turn",
+            "findings": [],
+        }
+        failed_env = {
+            "mode": "LIVE",
+            "provider": "anthropic",
+            "provider_request_id": "msg_fail_2",
+            "execution_id": "msg_fail_2",
+            "status": "FAILED",
+            "error": "Rate limit",
+            "stop_reason": "end_turn",
+            "findings": [],
+        }
+        text = json.dumps(ok_env) + "\n" + json.dumps(failed_env)
+        with self.assertRaises(ValueError):
+            runner.parse_response(text)
+
+    def test_client_fenced_failed_status_object_is_not_zero_findings(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 29): auditor_client において fenced な status: FAILED オブジェクトは空配列（欠陥ゼロ）として扱われず Fail-Closed（ValueError）で拒絶されること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+        text = '```json\n{"status": "FAILED", "findings": []}\n```'
+        with self.assertRaises(ValueError):
+            auditor_client._extract_findings_from_text(text)
+
+    def test_client_raw_mixed_array_after_example_block_fails_closed(self) -> None:
+        """AUD-003 (Sol Phase 62 / Cycle 29): auditor_client において例示コードブロック外の生mixed配列は非dict要素を黙殺して部分配列を返さず Fail-Closed（ValueError）で拒絶されること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+        f = {"finding_id": "AUD-X", "severity": "P0", "description": "real bug"}
+        text = "Example format: ```json\n[]\n```\nFindings:\n" + json.dumps([f, "P0: second defect as plain string"])
+        with self.assertRaises(ValueError):
+            auditor_client._extract_findings_from_text(text)
+
+    def test_whole_envelope_with_mixed_findings_fails_closed(self) -> None:
+        """AUD-004 (Sol Phase 62 / Cycle 29): parse_response において出力全体が単一Envelopeである場合、findings 配列中の非dict要素を黙殺して部分配列を返さず Fail-Closed（ValueError）で拒絶されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        finding = {
+            "finding_id": "AUD-MX-001",
+            "severity": "P0",
+            "spec_reference": "VVV.1",
+            "location": "a.py:1",
+            "description": "bug",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        env = {
+            "mode": "LIVE",
+            "provider": "anthropic",
+            "provider_request_id": "msg_1",
+            "execution_id": "msg_1",
+            "status": "COMPLETED",
+            "stop_reason": "end_turn",
+            "findings": [finding, "P0: second defect as plain string"],
+        }
+        with self.assertRaises(ValueError):
+            runner.parse_response(json.dumps(env))
+
 
 if __name__ == "__main__":
     unittest.main()
