@@ -282,6 +282,37 @@ class FakeTest(unittest.TestCase):
         content = self.plan_path.read_text(encoding="utf-8")
         self.assertNotIn("FINDING-TRIVIAL", content)
 
+    def test_dispatch_new_finding_with_same_id_as_completed_task_is_not_dropped(self) -> None:
+        """AUD-003 (Sol Phase 62 / Cycle 34): 過去の監査サイクルで完了済み (- [x]) のタスクと同じ finding_id を持つ新たな真正指摘が届いた場合、重複誤認で破棄されず正しく PLAN.md に追加・保存されること。"""
+        # 事前に完了済みタスクとして AUD-002 を PLAN.md に記録しておく
+        self.plan_path.write_text(
+            "# PLAN.md\n\n## ステップ\n- [x] AUD-AUD-002. Fix: [AUD-002] Old fixed defect (Severity: P1, Loc: a.py:1)\n",
+            encoding="utf-8",
+        )
+
+        new_finding = AuditFinding(
+            finding_id="AUD-002",
+            severity="P2",
+            spec_reference="SPEC.md MMM.3",
+            location="src/target_pkg.py:1",
+            description="Brand new defect in target_pkg",
+            reproduction_test_code="""import unittest
+from target_pkg import target_fn
+
+class NewDefectTest(unittest.TestCase):
+    def test_repro(self):
+        self.assertTrue(target_fn())
+""",
+        )
+
+        res = self.dispatcher.dispatch_finding(new_finding, plan_path=self.plan_path)
+        self.assertEqual(res.status, "DISPATCHED")
+
+        content = self.plan_path.read_text(encoding="utf-8")
+        # 新しい指摘のタスク行が追加されていること（未着手 - [ ]）
+        self.assertIn("Brand new defect in target_pkg", content)
+        self.assertTrue(any(line.startswith("- [ ]") and "Brand new defect in target_pkg" in line for line in content.splitlines()))
+
 
 if __name__ == "__main__":
     unittest.main()

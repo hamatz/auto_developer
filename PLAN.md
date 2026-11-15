@@ -54,5 +54,8 @@
 - [x] AUD-AUD-013. Fix: [AUD-001 Cycle 33] parse_response() recognizes code blocks written as ``` json (with space) to prevent silent loss of findings (Severity: P1, Loc: src/auto_developer/audit.py:327)
 - [x] AUD-AUD-014. Fix: [AUD-002 Cycle 33] _extract_findings_from_text() recognizes code blocks written as ``` json (with space) to prevent silent loss of findings (Severity: P1, Loc: scripts/auditor_client.py:73)
 - [x] AUD-AUD-015. Fix: [AUD-003 Cycle 33] _is_preceded_by_try_with_call() requires product/causal call in try body, rejecting isolated builtin calls like int("1") (Severity: P2, Loc: src/auto_developer/verifier.py:165)
+- [x] AUD-AUD-016. Fix: [AUD-001 Cycle 34] _extract_findings_from_text() rejects failed/error envelopes before slicing array findings to prevent silent fail-open (Severity: P1, Loc: scripts/auditor_client.py:54)
+- [x] AUD-AUD-017. Fix: [AUD-002 Cycle 34] _is_product_or_causal_call() rejects method calls on literals/constants (e.g. "1".upper()) in exception guards (Severity: P2, Loc: src/auto_developer/verifier.py:133)
+- [x] AUD-AUD-018. Fix: [AUD-003 Cycle 34] dispatch_finding() idempotency check does not falsely collide with completed tasks (- [x]) from earlier audit cycles (Severity: P2, Loc: src/auto_developer/dispatcher.py:157)
 ## 止まっていること・判断待ち
 - なし。Sol 氏の Phase 61 レビュー指摘（P1: stop_reason 検証・max_tokens打ち切り検知・JSON解析失敗のFail-Closed化、P1: test_live_claude_audit.py の環境差異解消と Linux bwrap 修正、考察: 監査対象コミットと最終HEADの差分整合性拘束）に対応する Phase 62（機能VVV）の準備完了。

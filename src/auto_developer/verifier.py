@@ -125,12 +125,24 @@ def _has_causal_dependency(node: ast.AST, dependent_vars: set[str]) -> bool:
 def _is_product_or_causal_call(
     call: ast.Call, dependent_vars: set[str] | None = None
 ) -> bool:
-    """呼出がプロダクトコードまたは因果依存変数に紐づく有効な呼出かを判定する (機能OOO.2 / AUD-003 Cycle 33)。
-    アサーション呼出および因果依存のない孤立した Python 組み込み関数呼出 (int("1") など) は除外する。
+    """呼出がプロダクトコードまたは因果依存変数に紐づく有効な呼出かを判定する (機能OOO.2 / AUD-003 Cycle 33 / AUD-002 Cycle 34)。
+    アサーション呼出、因果依存のない孤立した Python 組み込み関数呼出 (int("1") など)、
+    およびリテラル・定数に対するメソッド呼出 ("1".upper() など) は除外する。
     """
     if _is_assert_call(call):
         return False
     if isinstance(call.func, ast.Attribute):
+        # builtins モジュール経由の呼出 (builtins.int(...) 等)
+        if isinstance(call.func.value, ast.Name) and call.func.value.id in ("builtins", "__builtins__"):
+            if call.func.attr not in _BUILTIN_NAMES:
+                return True
+            return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
+        # リテラル定数に対するメソッド呼出 ("1".upper(), [].append(1) 等) はプロダクト呼出ではない
+        if isinstance(call.func.value, (ast.Constant, ast.List, ast.Dict, ast.Set, ast.Tuple)):
+            return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
+        is_const, _ = _eval_constant_expr(call.func.value)
+        if is_const:
+            return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
         return True
     if isinstance(call.func, ast.Name) and call.func.id not in _BUILTIN_NAMES:
         return True

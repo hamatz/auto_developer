@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import json
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -154,12 +156,46 @@ class AuditDispatcher:
             target_plan.write_text("# PLAN.md\n\n## ステップ\n", encoding="utf-8")
 
         content = target_plan.read_text(encoding="utf-8")
-        token = f"[{finding.finding_id}]"
+        lines = content.splitlines()
 
         # 2. 二重登録防止 (Idempotency)
-        if token in content:
+        # 既に未着手 (- [ ]) の同一指摘または同一コードハッシュが存在する場合は二重追加を防ぐ
+        is_already_open = any(
+            line.strip().startswith("- [ ]") and (f"[{finding.finding_id}]" in line or finding.description in line)
+            for line in lines
+        )
+        if is_already_open:
             finding.status = "DISPATCHED"
+            with contextlib.suppress(ValueError):
+                self.audit_store.save_finding(finding)
             return finding
+
+        # 過去の完了済みタスクや既存ストアとの ID 衝突回避 (Cycle間の finding_id 再利用対策: AUD-018)
+        json_file = self.audit_store.findings_dir / f"{finding.finding_id}.json"
+        has_completed_collision = any(
+            line.strip().startswith("- [x]") and f"[{finding.finding_id}]" in line
+            for line in lines
+        )
+        has_store_collision = False
+        if json_file.exists():
+            try:
+                data = json.loads(json_file.read_text(encoding="utf-8"))
+                if data.get("code_hash") != finding.code_hash:
+                    has_store_collision = True
+            except OSError:
+                pass
+
+        if has_completed_collision or has_store_collision:
+            import re
+            existing_nums = [int(n) for n in re.findall(r"AUD-(?:AUD-)?(\d+)", content)]
+            store_nums = [
+                int(m.group(1))
+                for p in self.audit_store.findings_dir.glob("*.json")
+                if (m := re.search(r"(\d+)", p.stem))
+            ]
+            all_nums = existing_nums + store_nums
+            next_num = max(all_nums, default=0) + 1
+            finding.finding_id = f"AUD-{next_num:03d}"
 
         # 3. タスク行の作成と挿入 (TaskDispatcher互換書式)
         task_id = f"AUD-{finding.finding_id}"
@@ -167,8 +203,6 @@ class AuditDispatcher:
             f"- [ ] {task_id}. Fix: [{finding.finding_id}] {finding.description} "
             f"(Severity: {finding.severity}, Loc: {finding.location})"
         )
-
-        lines = content.splitlines()
         step_idx = -1
         stop_idx = -1
         for idx, line in enumerate(lines):

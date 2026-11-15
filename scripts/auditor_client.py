@@ -49,6 +49,20 @@ def _extract_findings_from_text(text: str) -> list[dict]:
     """
     clean_text = text.strip()
 
+    # 0. Check for enclosing error/failure envelope (Fail-Closed: reject failed envelopes even if findings array is present: AUD-016)
+    decoder = json.JSONDecoder()
+    for m in re.finditer(r"\{", clean_text):
+        try:
+            p_obj, _ = decoder.raw_decode(clean_text, m.start())
+            if isinstance(p_obj, dict):
+                if p_obj.get("error"):
+                    raise ValueError(f"AUDIT_FAILED: Auditor response contains error: {p_obj.get('error')}")
+                env_status = p_obj.get("status")
+                if env_status and env_status != "COMPLETED" and "finding_id" not in p_obj:
+                    raise ValueError(f"AUDIT_{env_status}: Live audit envelope returned non-completed status '{env_status}'")
+        except json.JSONDecodeError:
+            pass
+
     # 1. First, check if the raw text from first '[' to last ']' forms a valid JSON list of findings
     # This correctly handles cases where findings contain embedded code blocks or markdown fences in strings.
     start = clean_text.find("[")

@@ -1831,6 +1831,22 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             if str(Path(__file__).parent.parent / "scripts") in sys.path:
                 sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
 
+    def test_failed_envelope_with_partial_findings_is_rejected_client(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 34): auditor_client._extract_findings_from_text において、外側封筒が FAILED / エラーを持つ場合、部分的な findings 配列のスライス抽出で成功扱いせず Fail-Closed で拒絶すること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+            text = json.dumps({
+                "status": "FAILED",
+                "error": "Rate limit exceeded mid-audit",
+                "findings": [{"finding_id": "AUD-PARTIAL", "severity": "P1", "description": "partial"}],
+            })
+            with self.assertRaises(ValueError):
+                auditor_client._extract_findings_from_text(text)
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
 
 
 
