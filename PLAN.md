@@ -35,7 +35,7 @@
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [ ] 1. 監査対象 SPEC のコミット拘束と監査入力ハッシュの厳格証明（Red-First）（RRR.1）
+- [x] 1. 監査対象 SPEC のコミット拘束と監査入力ハッシュの厳格証明（Red-First）（RRR.1）
 - [ ] 2. NightlyOrchestrator への独立監査ステージの本番自動組み込み（Red-First）（RRR.2）
 - [ ] 3. モデル上限・障害時の弾力的フォールバックと実外部モデル監査・Level 7閉ループ実証（Red-First）（RRR.3）
 - [ ] 4. 独立監査 Evidence Bundle 生成と v0.7.0 正式リリース確定（RRR.4）

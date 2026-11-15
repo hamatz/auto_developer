@@ -112,6 +112,10 @@ class AuditFinding:
     code_hash: str | None = None
     auditor_model: str | None = None
     baseline_commit: str | None = None
+    target_commit: str | None = None
+    target_tree_sha: str | None = None
+    spec_sha256: str | None = None
+    diff_sha256: str | None = None
     # NOTE: auditor_model は監査ランナー設定で渡されたモデル識別子の記録値であり、
     # 外部プロバイダーの実行時同一性を暗号学的に証明するものではない (HHH.2)。
 
@@ -134,6 +138,10 @@ class AuditFinding:
             code_hash=data.get("code_hash"),
             auditor_model=data.get("auditor_model"),
             baseline_commit=data.get("baseline_commit"),
+            target_commit=data.get("target_commit"),
+            target_tree_sha=data.get("target_tree_sha"),
+            spec_sha256=data.get("spec_sha256"),
+            diff_sha256=data.get("diff_sha256"),
         )
 
 
@@ -326,31 +334,88 @@ class IndependentAuditRunner:
     def audit_repository(
         self,
         repo_dir: Path,
-        spec_path: Path,
+        target_commit: str = "HEAD",
         baseline_commit: str | None = None,
-        head_commit: str = "HEAD",
+        spec_path: Path | str | None = None,
+        head_commit: str | None = None,
     ) -> list[AuditFinding]:
-        """指定されたベースラインコミットからの diff を抽出し、独立プロンプトで外部監査を実行する (QQQ.1)。"""
+        """指定されたベースラインコミットからの diff およびコミット拘束された SPEC を抽出し、独立外部監査を実行する (RRR.1)。"""
+        import hashlib
         import subprocess
+
+        # 古い位置引数呼び出し（第2引数に spec_path が渡された場合）との後方互換対応
+        if isinstance(target_commit, Path) or (isinstance(target_commit, str) and target_commit.endswith(".md")):
+            spec_path = target_commit
+            target_commit = head_commit or "HEAD"
 
         target_baseline = baseline_commit or self.baseline_commit
         if not target_baseline:
             raise ValueError("baseline_commit must be specified for repository audit")
 
+        target = head_commit or target_commit
+        # ターゲットコミットSHAおよびTree SHAの解決
+        rev_res = subprocess.run(
+            ["git", "rev-parse", target],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        target_sha = rev_res.stdout.strip()
+
+        tree_res = subprocess.run(
+            ["git", "rev-parse", f"{target_sha}^{{tree}}"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        target_tree_sha = tree_res.stdout.strip()
+
         # baseline から target までの git diff を厳格に抽出
         diff_res = subprocess.run(
-            ["git", "diff", target_baseline, head_commit],
+            ["git", "diff", target_baseline, target_sha],
             cwd=repo_dir,
             capture_output=True,
             text=True,
             check=True,
         )
         git_diff = diff_res.stdout
-        spec_content = spec_path.read_text(encoding="utf-8")
+
+        # SPEC.md の内容を target_commit から厳密に抽出 (RRR.1 / Sol氏 P1指摘)
+        # 作業ツリーの未コミットSPECによる監査入力乖離を防止
+        spec_content: str | None = None
+        show_spec = subprocess.run(
+            ["git", "show", f"{target_sha}:SPEC.md"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if show_spec.returncode == 0 and show_spec.stdout:
+            spec_content = show_spec.stdout
+        elif spec_path is not None:
+            p = Path(spec_path)
+            if not p.is_absolute():
+                p = repo_dir / p
+            if p.exists():
+                spec_content = p.read_text(encoding="utf-8")
+        elif (repo_dir / "SPEC.md").exists():
+            spec_content = (repo_dir / "SPEC.md").read_text(encoding="utf-8")
+
+        if spec_content is None:
+            raise FileNotFoundError(f"SPEC.md not found in commit {target_sha} or repository {repo_dir}")
+
+        spec_sha256 = hashlib.sha256(spec_content.encode("utf-8")).hexdigest()
+        diff_sha256 = hashlib.sha256(git_diff.encode("utf-8")).hexdigest()
 
         findings = self.audit(spec_content=spec_content, git_diff=git_diff)
         for finding in findings:
             finding.baseline_commit = target_baseline
+            finding.target_commit = target_sha
+            finding.target_tree_sha = target_tree_sha
+            finding.spec_sha256 = spec_sha256
+            finding.diff_sha256 = diff_sha256
         return findings
 
     def screen_and_dispatch_findings(

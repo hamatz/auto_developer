@@ -634,5 +634,92 @@ class TestTamper(unittest.TestCase):
         self.assertNotIn("AUD-TAMPER-001", plan_content)
 
 
+class TestCommitBoundSpecAndAuditInputProvenance(unittest.TestCase):
+    """機能RRR.1: 監査対象 SPEC のコミット拘束と監査入力ハッシュの厳格証明。"""
+
+    def setUp(self) -> None:
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.repo_dir = Path(self.tmp_dir.name)
+        import subprocess
+
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Audit Runner"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "audit@example.com"], cwd=self.repo_dir, check=True)
+
+        (self.repo_dir / "SPEC.md").write_text("# Spec v1\nMust return 42.\n", encoding="utf-8")
+        src_dir = self.repo_dir / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        (src_dir / "app.py").write_text("def run(): return 40\n", encoding="utf-8")
+
+        subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "base commit"], cwd=self.repo_dir, check=True)
+        res_base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_dir, check=True, capture_output=True, text=True)
+        self.baseline_sha = res_base.stdout.strip()
+
+        # 第2コミット（ターゲットコミット）
+        (src_dir / "app.py").write_text("def run(): return 41\n", encoding="utf-8")
+        (self.repo_dir / "SPEC.md").write_text("# Spec v2\nMust return 100.\n", encoding="utf-8")
+        subprocess.run(["git", "commit", "-am", "target commit"], cwd=self.repo_dir, check=True)
+        res_target = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_dir, check=True, capture_output=True, text=True)
+        self.target_sha = res_target.stdout.strip()
+
+        # 作業ツリーで未コミットの SPEC 変更を行う（監査入力乖離シミュレーション）
+        (self.repo_dir / "SPEC.md").write_text("# Spec UNCOMMITTED DIRTY\nMust return 99999.\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.tmp_dir.cleanup()
+
+    def test_audit_repository_extracts_commit_bound_spec_and_input_provenance(self) -> None:
+        """RRR.1: audit_repository が作業ツリーの未コミットSPECを無視し、target_commit の SPEC を厳格抽出して入力ハッシュを拘束すること。"""
+        import hashlib
+
+        from auto_developer.audit import IndependentAuditRunner
+        from auto_developer.audit_store import AuditStore
+
+        cmd_template = (
+            'echo \'[{"finding_id": "RRR-BOUND-001", "severity": "P1", '
+            '"spec_reference": "SPEC.md v2", "location": "src/app.py:1", '
+            '"description": "Return mismatch", "reproduction_test_code": "import unittest\\nclass T(unittest.TestCase):\\n    def test_x(self): self.fail()", '
+            '"status": "REPORTED"}]\''
+        )
+        runner = IndependentAuditRunner(
+            auditor_cmd_template=cmd_template,
+            model_name="claude-opus-5.5",
+            baseline_commit=self.baseline_sha,
+        )
+
+        findings = runner.audit_repository(
+            repo_dir=self.repo_dir,
+            target_commit=self.target_sha,
+            baseline_commit=self.baseline_sha,
+        )
+
+        self.assertEqual(len(findings), 1)
+        f = findings[0]
+        self.assertEqual(f.finding_id, "RRR-BOUND-001")
+        self.assertEqual(f.baseline_commit, self.baseline_sha)
+        self.assertEqual(f.target_commit, self.target_sha)
+        self.assertIsNotNone(f.target_tree_sha)
+        self.assertIsNotNone(f.spec_sha256)
+        self.assertIsNotNone(f.diff_sha256)
+
+        # 抽出された SPEC はコミット時点の "# Spec v2" のハッシュであり、未コミットの "# Spec UNCOMMITTED DIRTY" ではないこと
+        expected_spec_sha = hashlib.sha256(b"# Spec v2\nMust return 100.\n").hexdigest()
+        dirty_spec_sha = hashlib.sha256(b"# Spec UNCOMMITTED DIRTY\nMust return 99999.\n").hexdigest()
+        self.assertEqual(f.spec_sha256, expected_spec_sha)
+        self.assertNotEqual(f.spec_sha256, dirty_spec_sha)
+
+        # AuditStore への永続化と復元
+        store = AuditStore(repo_dir=self.repo_dir)
+        store.save_finding(f)
+        loaded = store.get_finding("RRR-BOUND-001")
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded.target_commit, self.target_sha)
+        self.assertEqual(loaded.target_tree_sha, f.target_tree_sha)
+        self.assertEqual(loaded.spec_sha256, expected_spec_sha)
+        self.assertEqual(loaded.diff_sha256, f.diff_sha256)
+
+
 if __name__ == "__main__":
     unittest.main()
