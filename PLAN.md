@@ -29,14 +29,14 @@
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - SSS.1: `tests/test_cli.py` および `tests/test_nightly_orchestrator.py` に `--enable-audit` 等のCLI引数、起動前バリデーション（`--auditor-cmd` 未設定時の Exit 2、同一モデル拒絶）を検証するテストを追加。
-- SSS.2: `tests/test_independent_audit_runner.py` において、対象コミット内に `SPEC.md` が存在しない場合に作業ツリーへフォールバックせず `FileNotFoundError("SPEC_NOT_FOUND_IN_COMMIT")` で Fail-Closed 拒絶されることを検証するテストを追加。
+- SSS.2: `tests/test_independent_audit_runner.py` において、対象コミット内に `SPEC.md` が存在しない場合に作業ツリーへフォールバックせず `FileNotFoundError("SPEC_NOT_FOUND_IN_COMMIT")` で Fail-Closed 拒絶されることを検証するテストを追加。また `tests/test_level7_real_loop_e2e.py` で `SPEC.md` を対象コミット内に拘束するよう更新。
 - SSS.3: `tests/test_independent_audit_runner.py` において、フォールバック時であっても同系統モデルが排除され、異系統モデルのみが選択されること、および適切なモデルがない場合に `AUDIT_PENDING` へ安全退避することを検証するテストを追加。
 - SSS.4: `NIGHTLY_REPORT.md` を更新し、実外部モデル独立監査の実稼働および v0.7.0 正式リリース確定を記録。
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
 - [x] 1. CLI からの独立監査有効化・設定オプション追加と起動前設定バリデーション（Red-First）（SSS.1）
-- [ ] 2. audit_repository における SPEC コミット拘束の厳格化とフォールバック完全撤廃（Red-First）（SSS.2）
+- [x] 2. audit_repository における SPEC コミット拘束の厳格化とフォールバック完全撤廃（Red-First）（SSS.2）
 - [ ] 3. モデルフォールバック時の同系統モデル排除と異系統モデル堅持（Red-First）（SSS.3）
 - [ ] 4. 実外部異系統 LLM による監査実績の証跡記録・全検証ゲート合格・最終 Evidence Bundle 生成と v0.7.0 正式リリース確定（SSS.4）
 

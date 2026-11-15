@@ -720,6 +720,34 @@ class TestCommitBoundSpecAndAuditInputProvenance(unittest.TestCase):
         self.assertEqual(loaded.spec_sha256, expected_spec_sha)
         self.assertEqual(loaded.diff_sha256, f.diff_sha256)
 
+    def test_audit_repository_fails_closed_when_spec_missing_in_target_commit(self) -> None:
+        """SSS.2 / Sol氏 Phase 58 P1: target_commit に SPEC.md がない場合、作業ツリーへフォールバックせず Fail-Closed で拒絶すること。"""
+        import subprocess
+
+        from auto_developer.audit import IndependentAuditRunner
+
+        # SPEC.md を削除した新しいコミットを作成
+        subprocess.run(["git", "rm", "-f", "SPEC.md"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "commit without SPEC"], cwd=self.repo_dir, check=True)
+        res_no_spec = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_dir, check=True, capture_output=True, text=True)
+        commit_no_spec = res_no_spec.stdout.strip()
+
+        # 作業ツリーに SPEC.md を再配置（フォールバック抜けテスト）
+        (self.repo_dir / "SPEC.md").write_text("# Spec in working tree\n", encoding="utf-8")
+
+        runner = IndependentAuditRunner(
+            auditor_cmd_template="echo '[]'",
+            model_name="claude-opus-5.5",
+        )
+
+        with self.assertRaises(FileNotFoundError) as cm:
+            runner.audit_repository(
+                repo_dir=self.repo_dir,
+                target_commit=commit_no_spec,
+                baseline_commit=self.baseline_sha,
+            )
+        self.assertIn("SPEC_NOT_FOUND_IN_COMMIT", str(cm.exception))
+
 
 class TestResilientModelFallbackAndAuditEvidence(unittest.TestCase):
     """機能RRR.3: モデル上限・障害時の弾力的フォールバックと実外部モデル監査・Level 7閉ループ実証。"""

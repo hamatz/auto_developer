@@ -428,29 +428,31 @@ class IndependentAuditRunner:
         )
         git_diff = diff_res.stdout
 
-        # SPEC.md の内容を target_commit から厳密に抽出 (RRR.1 / Sol氏 P1指摘)
-        # 作業ツリーの未コミットSPECによる監査入力乖離を防止
-        spec_content: str | None = None
+        # SPEC.md の内容を target_commit から厳密に抽出 (SSS.2 / Sol氏 Phase 58 P1指摘)
+        # 作業ツリーへのフォールバックを完全撤廃し、コミット内に存在しない場合は Fail-Closed で即座に拒絶
+        spec_git_path = "SPEC.md"
+        if spec_path is not None:
+            p = Path(spec_path)
+            if p.is_absolute():
+                try:
+                    spec_git_path = str(p.relative_to(repo_dir))
+                except ValueError:
+                    spec_git_path = p.name
+            else:
+                spec_git_path = str(p)
+
         show_spec = subprocess.run(
-            ["git", "show", f"{target_sha}:SPEC.md"],
+            ["git", "show", f"{target_sha}:{spec_git_path}"],
             cwd=repo_dir,
             capture_output=True,
             text=True,
             check=False,
         )
-        if show_spec.returncode == 0 and show_spec.stdout:
-            spec_content = show_spec.stdout
-        elif spec_path is not None:
-            p = Path(spec_path)
-            if not p.is_absolute():
-                p = repo_dir / p
-            if p.exists():
-                spec_content = p.read_text(encoding="utf-8")
-        elif (repo_dir / "SPEC.md").exists():
-            spec_content = (repo_dir / "SPEC.md").read_text(encoding="utf-8")
-
-        if spec_content is None:
-            raise FileNotFoundError(f"SPEC.md not found in commit {target_sha} or repository {repo_dir}")
+        if show_spec.returncode != 0 or not show_spec.stdout:
+            raise FileNotFoundError(
+                f"SPEC_NOT_FOUND_IN_COMMIT: {spec_git_path} not found in target commit {target_sha}"
+            )
+        spec_content = show_spec.stdout
 
         spec_sha256 = hashlib.sha256(spec_content.encode("utf-8")).hexdigest()
         diff_sha256 = hashlib.sha256(git_diff.encode("utf-8")).hexdigest()
