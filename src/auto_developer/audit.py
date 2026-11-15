@@ -298,6 +298,13 @@ class IndependentAuditRunner:
             if has_prov_metadata:
                 mode = raw_mode or ("MOCK" if (exec_id and str(exec_id).startswith("mock_")) else "LIVE")
                 stop_reason = data.get("stop_reason")
+                status = data.get("status")
+
+                # AUD-002 (Sol Phase 62 / Cycle 11): Envelope status validation (Fail-Closed: reject non-COMPLETED status)
+                if status and status != "COMPLETED":
+                    raise ValueError(
+                        f"AUDIT_{status}: Live audit envelope returned non-completed status '{status}': {data.get('error') or ''}"
+                    )
 
                 # AUD-001 / AUD-002 / VVV.1 / Sol Phase 61 P1: mode: LIVE 時の stop_reason 厳格検証（Fail-Closed allow-list）
                 if mode == "LIVE" and (not stop_reason or stop_reason != "end_turn"):

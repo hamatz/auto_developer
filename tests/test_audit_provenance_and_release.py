@@ -892,6 +892,40 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         findings = auditor_client._extract_findings_from_text(text)
         self.assertEqual(findings, [])
 
+    def test_extract_findings_prioritizes_raw_findings_outside_empty_example_codeblock(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 11): コードブロック内の例示空配列（```json [] ```）が存在しても、ブロック外に生のJSON指摘配列が存在する場合は破棄せず正しく抽出すること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        text = (
+            "If there were no defects I would reply ```json\n[]\n```.\n"
+            "However I found the following defects:\n"
+            '[{"finding_id": "AUD-001", "severity": "P0", "description": "real bug"}]'
+        )
+        findings = auditor_client._extract_findings_from_text(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["finding_id"], "AUD-001")
+
+    def test_runner_parse_response_rejects_envelope_with_non_completed_status(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 11): IndependentAuditRunner.parse_response は status が COMPLETED 以外のエンベロープ（FAILED, AUDIT_PENDING 等）を空指摘（欠陥ゼロ）として処理せず、Fail-Closed（ValueError）で拒絶すること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        envelope = {
+            "mode": "LIVE",
+            "provider": "anthropic",
+            "model": "claude-opus-5.5",
+            "status": "FAILED",
+            "error": "UNPARSEABLE_AUDIT_RESPONSE: No valid JSON array found",
+            "stop_reason": "end_turn",
+            "findings": [],
+        }
+        with self.assertRaises(ValueError) as cm:
+            runner.parse_response(json.dumps(envelope))
+        self.assertIn("AUDIT_FAILED", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

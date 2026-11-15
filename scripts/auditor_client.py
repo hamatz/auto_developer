@@ -48,7 +48,22 @@ def _extract_findings_from_text(text: str) -> list[dict]:
     If any JSON code block fails to decode, fail closed instead of masking behind an empty example block.
     """
     clean_text = text.strip()
-    # 1. Inspect ALL markdown code blocks ```json ... ```
+
+    # 1. First, check if the raw text from first '[' to last ']' forms a valid JSON list of findings
+    # This correctly handles cases where findings contain embedded code blocks or markdown fences in strings.
+    start = clean_text.find("[")
+    end = clean_text.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            parsed = json.loads(clean_text[start : end + 1])
+            if isinstance(parsed, list):
+                findings = [item for item in parsed if isinstance(item, dict)]
+                if findings:
+                    return findings
+        except json.JSONDecodeError:
+            pass
+
+    # 2. Inspect ALL markdown code blocks ```json ... ```
     all_code_blocks = list(re.finditer(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", clean_text, re.DOTALL))
     empty_block_found = False
     has_decode_error = False
@@ -70,6 +85,21 @@ def _extract_findings_from_text(text: str) -> list[dict]:
             has_decode_error = True
             decode_error_msg = str(exc)
 
+    # 3. Check for raw findings in text outside code blocks (handles example code block + raw findings outside)
+    text_outside = re.sub(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", "", clean_text, flags=re.DOTALL)
+    start_out = text_outside.find("[")
+    end_out = text_outside.rfind("]")
+    if start_out != -1 and end_out != -1 and end_out > start_out:
+        try:
+            parsed = json.loads(text_outside[start_out : end_out + 1])
+            if isinstance(parsed, list):
+                findings = [item for item in parsed if isinstance(item, dict)]
+                if findings:
+                    return findings
+        except json.JSONDecodeError as exc:
+            has_decode_error = True
+            decode_error_msg = str(exc)
+
     if has_decode_error:
         raise ValueError(f"Malformed JSON in audit response code block: {decode_error_msg}")
 
@@ -78,20 +108,7 @@ def _extract_findings_from_text(text: str) -> list[dict]:
     if empty_block_found:
         return []
 
-    # 2. Try raw JSON list from first '[' to last ']'
-    start = clean_text.find("[")
-    end = clean_text.rfind("]")
-    if start != -1 and end != -1 and end > start:
-        try:
-            parsed = json.loads(clean_text[start : end + 1])
-            if isinstance(parsed, list):
-                findings = [item for item in parsed if isinstance(item, dict)]
-                if findings:
-                    return findings
-        except json.JSONDecodeError:
-            pass
-
-    # 3. Explicit empty array: must strictly match [] alone or inside single markdown code block
+    # 4. Explicit empty array: must strictly match [] alone or inside single markdown code block
     if re.fullmatch(r"(?:```(?:json)?\s*)?\[\s*\](?:\s*```)?", clean_text):
         return []
 
@@ -326,6 +343,9 @@ def main(argv: list[str] | None = None) -> int:
             for block in content_items:
                 if isinstance(block, dict) and block.get("type") == "text":
                     raw_text += block.get("text", "")
+
+        Path(".dev/audit").mkdir(parents=True, exist_ok=True)
+        Path(".dev/audit/last_raw_response.txt").write_text(raw_text, encoding="utf-8")
 
         try:
             findings = _extract_findings_from_text(raw_text)
