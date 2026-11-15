@@ -879,3 +879,14 @@ class LessonInjector:
                 lines.append(f"- Immunity Test: {entry.immunity_test}")
             lines.append("")
         return "\n".join(lines).strip()
+
+    def get_lessons_for_task(
+        self,
+        task_title: str,
+        task_description: str = "",
+        max_results: int = 5,
+    ) -> str:
+        """タスクのタイトルと説明から関連する教訓を検索し、注入用テキストを返す (QQQ.3 / FFF.4)。"""
+        query = f"{task_title} {task_description}".strip()
+        entries = self.find_relevant_lessons(query=query, max_results=max_results)
+        return self.format_injection(entries)

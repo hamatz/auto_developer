@@ -785,6 +785,130 @@ class TestUntrackedTamper(unittest.TestCase):
         self.assertNotIn("BATCH-PASS-002", lessons_text)
         self.assertNotIn("BATCH-SECRET-003", lessons_text)
 
+    def test_level7_cross_model_baseline_to_resolution_loop(self) -> None:
+        """機能QQQ.3: 実外部異系統モデル独立監査パイプラインとLevel 7完全自己改善閉ループ（Baseline抽出→選別→自律修正→コミット拘束証明→免疫昇格→教訓注入）の完走実証。"""
+        # 1. ベースラインコミットの取得
+        baseline_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo_dir, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        # 2. 追加のシード変更（製品コードのバグ追加）
+        (self.src_dir / "calc.py").write_text(
+            "def calc_div(a: int, b: int) -> int:\n"
+            "    if b == 0:\n"
+            "        return 42\n"  # バグ: 0除算で例外ではなく42を返す
+            "    return a // b\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "commit", "-am", "feat: introduce buggy zero division"], cwd=self.repo_dir, check=True)
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo_dir, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        # 3. 異系統モデル独立監査ランナーによる baseline_diff 監査 (QQQ.1)
+        audit_config = AuditConfig(
+            maker_model="gemini-3.8-flash",
+            auditor_model="claude-opus-5.5",
+            baseline_commit=baseline_sha,
+        )
+        cmd_template = (
+            'echo \'[{"finding_id": "QQQ-GENUINE-CALC-001", "severity": "P0", '
+            '"spec_reference": "SPEC.md QQQ.3", "location": "src/calc.py:3", '
+            '"description": "calc_div returns 42 on zero divisor instead of raising ZeroDivisionError", '
+            '"reproduction_test_code": "import unittest\\nfrom calc import calc_div\\nclass T(unittest.TestCase):\\n    def test_div_zero(self):\\n        with self.assertRaises(ZeroDivisionError):\\n            calc_div(10, 0)", '
+            '"status": "REPORTED"}]\''
+        )
+        spec_path = self.repo_dir / "SPEC.md"
+        spec_path.write_text("# Spec QQQ.3\ncalc_div must raise ZeroDivisionError on b == 0.\n", encoding="utf-8")
+
+        audit_runner = IndependentAuditRunner(
+            auditor_cmd_template=cmd_template,
+            model_name="claude-opus-5.5",
+            config=audit_config,
+            baseline_commit=baseline_sha,
+        )
+        findings = audit_runner.audit_repository(
+            repo_dir=self.repo_dir,
+            spec_path=spec_path,
+            baseline_commit=baseline_sha,
+            head_commit=head_sha,
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].baseline_commit, baseline_sha)
+
+        # 4. 多層防壁による選別と PLAN.md 登録 (QQQ.2)
+        verifier = RedTestVerifier(repo_dir=self.repo_dir)
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=verifier)
+        screen_res = audit_runner.screen_and_dispatch_findings(
+            findings=findings,
+            dispatcher=dispatcher,
+            plan_path=self.plan_path,
+        )
+        self.assertEqual(len(screen_res["dispatched"]), 1)
+        dispatched_finding = screen_res["dispatched"][0]
+        self.assertEqual(dispatched_finding.finding_id, "QQQ-GENUINE-CALC-001")
+        self.assertEqual(dispatched_finding.status, "DISPATCHED")
+
+        # 5. Maker による修正とコミット (Level 7 実ループ)
+        dev_dir = self.repo_dir / ".dev"
+        dev_dir.mkdir(parents=True, exist_ok=True)
+        fix_script = dev_dir / "fix_qqq.py"
+        fix_script.write_text(
+            "with open('src/calc.py', 'w') as f:\n"
+            "    f.write('def calc_div(a: int, b: int) -> int:\\n    return a // b\\n')\n",
+            encoding="utf-8",
+        )
+        task_disp = TaskDispatcher()
+        tasks = task_disp.parse_plan(self.plan_path)
+        aud_task = next(t for t in tasks if "QQQ-GENUINE-CALC-001" in t.title)
+
+        maker_runner = CommandRunnerAdapter(
+            maker_cmd_template=f"cd {self.repo_dir} && {sys.executable} .dev/fix_qqq.py",
+        )
+        exit_code, _ = maker_runner.run_maker(aud_task, context={"attempt": 1})
+        self.assertEqual(exit_code, 0)
+
+        # 修正をコミット (PLAN.md, SPEC.md を含めて作業ツリーをクリーンにする)
+        subprocess.run(["git", "add", "src/calc.py", "PLAN.md", "SPEC.md"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "fix: raise ZeroDivisionError naturally"], cwd=self.repo_dir, check=True)
+        after_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo_dir, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        # 6. AuditResolutionManager による厳格解決・Proof拘束・免疫昇格 (QQQ.3)
+        res_manager = AuditResolutionManager(repo_dir=self.repo_dir)
+        resolve_res = res_manager.resolve_task(aud_task.task_id)
+        self.assertTrue(resolve_res["success"])
+        self.assertEqual(resolve_res["proof"]["before_commit"], head_sha)
+        self.assertEqual(resolve_res["proof"]["after_commit"], after_sha)
+
+        # 免疫テストが非破壊昇格していること
+        promoted_test = self.immunity_dir / "test_immunity_QQQ_GENUINE_CALC_001.py"
+        self.assertTrue(promoted_test.exists())
+
+        # LESSONS.md にコミット拘束された教訓が記録されていること
+        audit_store = AuditStore(repo_dir=self.repo_dir)
+        saved_f = audit_store.get_finding("QQQ-GENUINE-CALC-001")
+        assert saved_f is not None
+        record_ok = res_manager.record_lesson(
+            saved_f,
+            resolve_res["proof"],
+            lessons_path=self.lessons_path,
+        )
+        self.assertTrue(record_ok)
+        lessons_content = self.lessons_path.read_text(encoding="utf-8")
+        self.assertIn("QQQ-GENUINE-CALC-001", lessons_content)
+        self.assertIn(head_sha, lessons_content)
+        self.assertIn(after_sha, lessons_content)
+
+        # 7. 次回 Maker への教訓検索と自動注入の検証
+        injector = LessonInjector(lessons_path=self.lessons_path)
+        relevant_lessons = injector.get_lessons_for_task(
+            task_title="Fix division boundary edge cases",
+            task_description="Handle zero division correctly in calc.py",
+        )
+        self.assertIn("QQQ-GENUINE-CALC-001", relevant_lessons)
+
 
 if __name__ == "__main__":
     unittest.main()
