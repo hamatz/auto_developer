@@ -277,16 +277,13 @@ class IndependentAuditRunner:
         except json.JSONDecodeError:
             # 2. 直接パースできない場合（Markdown コードブロックに包まれている場合等）、```json ... ``` を抽出
             json_match = re.search(r"```json\s*(.*?)\s*```", output, re.DOTALL)
-            raw_json_str = json_match.group(1) if json_match else clean_output
-            try:
-                data = json.loads(raw_json_str)
-            except json.JSONDecodeError:
-                bracket_match = re.search(r"(\[.*\]|\{.*\})", raw_json_str, re.DOTALL)
-                if bracket_match:
-                    try:
-                        data = json.loads(bracket_match.group(1))
-                    except json.JSONDecodeError:
-                        pass
+            if json_match:
+                try:
+                    data = json.loads(json_match.group(1).strip())
+                except json.JSONDecodeError:
+                    pass
+            elif re.fullmatch(r"(?:```(?:json)?\s*)?\[\s*\](?:\s*```)?", clean_output):
+                data = []
 
         if data is None:
             raise ValueError(f"Could not parse valid JSON from audit response: {output[:200]}")

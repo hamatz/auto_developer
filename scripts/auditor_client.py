@@ -287,7 +287,19 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(err_envelope, ensure_ascii=False, indent=2), file=sys.stderr)
             return 1
 
-        provider_req_id = resp_json.get("id") or f"msg_unknown_{timestamp}"
+        provider_req_id = resp_json.get("id")
+        if not provider_req_id or not str(provider_req_id).startswith("msg_"):
+            err_envelope = {
+                "mode": "LIVE",
+                "provider": "anthropic",
+                "model": args.model,
+                "status": "FAILED",
+                "error": f"MISSING_PROVIDER_REQUEST_ID: Anthropic response missing valid provider request id (got {provider_req_id!r})",
+                "stop_reason": stop_reason,
+                "findings": [],
+            }
+            print(json.dumps(err_envelope, ensure_ascii=False, indent=2), file=sys.stderr)
+            return 1
         raw_text = ""
         content_items = resp_json.get("content", [])
         if isinstance(content_items, list):

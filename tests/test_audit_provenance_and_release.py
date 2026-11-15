@@ -734,8 +734,45 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertEqual(sent_payload.get("max_tokens"), 8192)
 
+    def test_runner_parse_response_rejects_prose_with_embedded_empty_brackets(self) -> None:
+        """AUD-001 / VVV.1: parse_response は地の文の中に含まれる '[]' を空配列として誤認せず、Fail-Closed（ValueError）で拒絶すること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        prose = "Review summary: failed to inspect modules with [] due to syntax errors"
+        with self.assertRaises(ValueError):
+            runner.parse_response(prose)
 
+    def test_auditor_client_missing_provider_id_fails_closed(self) -> None:
+        """AUD-002 / UUU.1 / VVV.4: Anthropic API レスポンスに本物の id が含まれない場合、msg_unknown などの自前IDを捏造せず Exit 1 で安全停止すること。"""
+        from unittest import mock
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
 
+        mock_resp_body = json.dumps({
+            # id が欠落
+            "model": "claude-opus-5-5",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "[]"}],
+            "usage": {"input_tokens": 1000, "output_tokens": 10},
+        }).encode("utf-8")
+
+        mock_resp = mock.MagicMock()
+        mock_resp.read.return_value = mock_resp_body
+        mock_resp.__enter__.return_value = mock_resp
+
+        env_file = self.repo_dir / ".env"
+        env_file.write_text("ANTHROPIC_API_KEY=test_key\n", encoding="utf-8")
+
+        with mock.patch("urllib.request.urlopen", return_value=mock_resp):
+            exit_code = auditor_client.main([
+                "--model", "claude-opus-5.5",
+                "--prompt", "valid prompt",
+                "--repo-dir", str(self.repo_dir),
+            ])
+            self.assertEqual(exit_code, 1)
 
 
 if __name__ == "__main__":
