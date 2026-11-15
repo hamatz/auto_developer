@@ -7,17 +7,17 @@
 -->
 
 ## 現在の目標
-- Phase 61: Stage 7 — 実Claude/Anthropic API独立監査の実稼働・Fail-Closed安全停止・実プロバイダID証跡拘束・Red構造化取り込み実証およびv0.7.0正式リリース確定（SPEC.md 機能UUU）
-  - 実Anthropic APIクライアントの実装・Fail-Closed安全停止・本物provider_request_id取得（機能UUU.1 / Sol氏 Phase 60 P0指摘）
-  - audit_stage.json の mode: LIVE / MOCK 分離・実プロバイダID拘束・EvidenceBundler / verify_bundle 厳格化（機能UUU.2 / Sol氏 Phase 60 P1指摘）
-  - 実Claudeによるコード監査実行・意図的Red指摘の構造化取り込み実証（機能UUU.3 / Sol氏 Phase 60 受け入れ条件 #3）
-  - 実Claude監査証跡を内包した最終 Evidence Bundle ZIP の生成・独立検証・v0.7.0 正式リリース確定（機能UUU.4 / Sol氏 Phase 60 結論）
+- Phase 62: Stage 7 — 実Claude監査の完全性検証・stop_reason拘束・Red取り込み環境耐性・ポスト監査差分拘束およびv0.7.0最終リリース確定（SPEC.md 機能VVV）
+  - 監査応答の終了理由検証 (stop_reason)・max_tokens打ち切り検知およびJSON解析失敗のFail-Closed化（機能VVV.1 / Sol氏 Phase 61 P1指摘）
+  - `test_live_claude_audit.py` の環境差異解消および Linux bwrap パス修正（機能VVV.2 / Sol氏 Phase 61 P1指摘）
+  - 監査対象コミット拘束およびポスト監査差分検査 (Post-Audit Diff Integrity)（機能VVV.3 / Sol氏 Phase 61 考察）
+  - 最新HEADに対する実Claude Opus 5.5再監査・完全性検証済みEvidence Bundle ZIP生成・v0.7.0正式リリース確定（機能VVV.4 / Sol氏 Phase 61 結論）
 - スコープ外: 複数Workerの同時並行Git編集、SPEC.md の自律書き換え、クラウド分散実行。
 
-## 作業手順（Phase 61・LESSONS.md 2026-11-15 の教訓に基づく）
+## 作業手順（Phase 62・LESSONS.md 2026-11-15 の教訓に基づく）
 - Maker と Checker は別系統のモデルにする（AGENTS.md Rule 6）。Maker が Gemini 系のとき、Checker サブエージェントは `Model: "pro"` を明示指定する。`inherit` は使わない。commit-step の `--checker-reason` に Checker のモデル指定を書く。
 - Checker への入力は要約・再構成しない。以下をファイルに書き出し、Checker にはそのパスを渡して直接読ませる:
-  1. `awk '/^- \[ \] 機能UUU/,/^## 3\./' SPEC.md > .dev/checker/spec_uuu.md`
+  1. `awk '/^- \[ \] 機能VVV/,/^## 3\./' SPEC.md > .dev/checker/spec_vvv.md`
   2. `git add -N . && git diff <checkpoint> > .dev/checker/diff_task<n>.patch`（未追跡ファイルも差分に含める）
 - verify-step の前に `git status --porcelain` を確認し、意図しないファイル（実験の生成物など）がないことを確かめる。実験・挙動確認は必ず `mktemp -d` で作った一時ディレクトリで行い、リポジトリ直下で実行しない。
 - Evidence Record は手書きしない。各ステップで以下の正規経路のみを使う:
@@ -28,17 +28,17 @@
 - Bundle 生成後に SPEC.md や追跡ファイルを変更しない（Evidence の spec_sha と不一致になる）。SPEC の完了マークは次フェーズの準備コミットで付ける。
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- UUU.1: `tests/test_audit_provenance_and_release.py` 等において、Anthropic API 実呼出し・`provider_request_id`（`msg_...`）の取得、および API キー未設定やエラー時に `findings: []` ではなく `status: "FAILED"` / `"AUDIT_PENDING"` となる Fail-Closed 挙動を検証するテストを追加。
-- UUU.2: `tests/test_bundler.py` および `tests/test_audit_provenance_and_release.py` において、`mode: LIVE` と `MOCK` の区別、および `verify_bundle` が `mode == "LIVE"` かつ `provider_request_id` を検証することをテスト。
-- UUU.3: `tests/test_live_claude_audit.py` を追加し、Claude Opus / Sonnet の実監査レスポンスによる Finding の構造化取り込みと Red 検証をテスト。
-- UUU.4: `NIGHTLY_REPORT.md` を更新し、`mode: LIVE` の監査証跡を含む 10/10 一致の Evidence Bundle 生成と v0.7.0 正式リリース確定を記録。
+- VVV.1: `tests/test_audit_provenance_and_release.py` 等において、`_extract_findings_from_text` が有効な JSON を含まない場合に `[]` ではなくエラー（または FAILED）となること、および `stop_reason == "max_tokens"` での `AUDIT_PENDING` 安全停止・証跡記録を検証するテストを追加。
+- VVV.2: `tests/test_live_claude_audit.py` において、Linux bwrap の `--tmpfs /tmp` マウント順序対応、および OS サンドボックスが未導入・利用不可な環境（非特権コンテナ等）でも構造化指摘取り込みが確実に検証されるテストを追加。
+- VVV.3: `tests/test_bundler.py` において、`audit_target_commit` と Bundle `head_commit` 間にプロダクトコード（`src/**`, `scripts/**`）の差分が存在する場合に未監査として拒絶（`AUDIT_OUTDATED`）するテストを追加。
+- VVV.4: `NIGHTLY_REPORT.md` を更新し、最新 HEAD に対する実 Claude Opus 5.5 監査証跡（`stop_reason: "end_turn"` 拘束）を内包した 10/10 一致の Evidence Bundle 生成と v0.7.0 正式リリース確定を記録。
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [x] 1. 実Anthropic APIクライアントの実装・Fail-Closed安全停止・本物provider_request_id取得（Red-First）（UUU.1）
-- [x] 2. audit_stage.json の mode: LIVE / MOCK 分離・実プロバイダID拘束・EvidenceBundler / verify_bundle 厳格化（Red-First）（UUU.2）
-- [x] 3. 実Claudeによるコード監査実行・意図的Red指摘の構造化取り込み実証（Red-First）（UUU.3）
-- [x] 4. 実Claude監査証跡を内包した最終 Evidence Bundle ZIP の生成・独立検証・v0.7.0 正式リリース確定（UUU.4）
+- [ ] 1. 監査応答の終了理由検証 (stop_reason)・max_tokens打ち切り検知およびJSON解析失敗のFail-Closed化（Red-First）（VVV.1）
+- [ ] 2. `test_live_claude_audit.py` の環境差異解消および Linux bwrap パス修正（Red-First）（VVV.2）
+- [ ] 3. 監査対象コミット拘束およびポスト監査差分検査 (Post-Audit Diff Integrity)（Red-First）（VVV.3）
+- [ ] 4. 最新HEADに対する実Claude Opus 5.5再監査・完全性検証済みEvidence Bundle ZIP生成・v0.7.0正式リリース確定（VVV.4）
 
 ## 止まっていること・判断待ち
-- なし。Sol 氏の Phase 60 レビュー指摘（P0: 実外部モデル呼出しの実体化とFail-Closed、P1: mode: LIVE / MOCK 分離と実プロバイダID拘束、条件#3: 意図的Red指摘の取り込み実証）に対応する Phase 61（機能UUU）の準備完了。
+- なし。Sol 氏の Phase 61 レビュー指摘（P1: stop_reason 検証・max_tokens打ち切り検知・JSON解析失敗のFail-Closed化、P1: test_live_claude_audit.py の環境差異解消と Linux bwrap 修正、考察: 監査対象コミットと最終HEADの差分整合性拘束）に対応する Phase 62（機能VVV）の準備完了。
