@@ -212,19 +212,48 @@ def _process_stmts_in_order(
     func_node: ast.AST,
     trivial_reasons: list[str],
 ) -> None:
-    """文を実行順序 (Program Order) に沿って走査し、変数の最新状態を維持しながらアサーションを順次検証する (機能OOO.1)。"""
+    """文を実行順序 (Program Order) に沿って走査し、変数の最新状態を維持しながらアサーションを順次検証する (機能OOO.1 / PPP.1 / PPP.2)。"""
     for stmt in stmts:
         # 1. 複合文の再帰走査
         if isinstance(stmt, ast.If):
             for call in [n for n in ast.walk(stmt.test) if isinstance(n, ast.Call) and _is_assert_call(n)]:
                 _check_assert_call(call, var_env, dependent_vars, func_node, trivial_reasons)
-            body_env, body_deps = var_env.copy(), dependent_vars.copy()
-            _process_stmts_in_order(stmt.body, body_env, body_deps, func_node, trivial_reasons)
-            if stmt.orelse:
-                else_env, else_deps = var_env.copy(), dependent_vars.copy()
-                _process_stmts_in_order(stmt.orelse, else_env, else_deps, func_node, trivial_reasons)
-                dependent_vars.update(else_deps)
-            dependent_vars.update(body_deps)
+
+            is_c, test_val = _eval_constant_expr(stmt.test, var_env)
+            if is_c:
+                if bool(test_val):
+                    # 静的に True: body のみ実行
+                    _process_stmts_in_order(stmt.body, var_env, dependent_vars, func_node, trivial_reasons)
+                elif stmt.orelse:
+                    # 静的に False: orelse のみ実行 (body は到達不能なので走査抑止: 機能PPP.2)
+                    _process_stmts_in_order(stmt.orelse, var_env, dependent_vars, func_node, trivial_reasons)
+            else:
+                # 動的条件: 実行時まで確定しないため両分岐を走査
+                body_env, body_deps = var_env.copy(), dependent_vars.copy()
+                _process_stmts_in_order(stmt.body, body_env, body_deps, func_node, trivial_reasons)
+                if stmt.orelse:
+                    else_env, else_deps = var_env.copy(), dependent_vars.copy()
+                    _process_stmts_in_order(stmt.orelse, else_env, else_deps, func_node, trivial_reasons)
+                    dependent_vars.update(else_deps)
+                dependent_vars.update(body_deps)
+
+                # 分岐内で代入・変更された変数を不確定化（Merge & Uncertainty Protection: 機能PPP.1）
+                # 分岐前の古い固定値が後続アサーション判定に誤って逆流・残存しないよう var_env から破棄し dependent_vars に昇格
+                assigned_in_branch: set[str] = set()
+                for item in stmt.body + stmt.orelse:
+                    if isinstance(item, ast.Assign):
+                        for t in item.targets:
+                            assigned_in_branch.update(n.id for n in ast.walk(t) if isinstance(n, ast.Name))
+                    elif isinstance(item, (ast.AnnAssign, ast.AugAssign)):
+                        assigned_in_branch.update(n.id for n in ast.walk(item.target) if isinstance(n, ast.Name))
+                    else:
+                        for n in ast.walk(item):
+                            if isinstance(n, ast.Name) and isinstance(getattr(n, "ctx", None), ast.Store):
+                                assigned_in_branch.add(n.id)
+
+                for name in assigned_in_branch:
+                    var_env.pop(name, None)
+                    dependent_vars.add(name)
             continue
 
         if isinstance(stmt, ast.Try):
@@ -243,17 +272,38 @@ def _process_stmts_in_order(
                 f_env, f_deps = var_env.copy(), dependent_vars.copy()
                 _process_stmts_in_order(stmt.finalbody, f_env, f_deps, func_node, trivial_reasons)
                 dependent_vars.update(f_deps)
+
+            try_assigned: set[str] = set()
+            for item in stmt.body:
+                if isinstance(item, ast.Assign):
+                    for t in item.targets:
+                        try_assigned.update(n.id for n in ast.walk(t) if isinstance(n, ast.Name))
+                elif isinstance(item, (ast.AnnAssign, ast.AugAssign)):
+                    try_assigned.update(n.id for n in ast.walk(item.target) if isinstance(n, ast.Name))
+            for name in try_assigned:
+                var_env.pop(name, None)
+                dependent_vars.add(name)
             continue
 
         if isinstance(stmt, (ast.For, ast.While)):
             _process_stmts_in_order(stmt.body, var_env, dependent_vars, func_node, trivial_reasons)
             if stmt.orelse:
                 _process_stmts_in_order(stmt.orelse, var_env, dependent_vars, func_node, trivial_reasons)
+            loop_assigned: set[str] = set()
+            for item in stmt.body:
+                if isinstance(item, ast.Assign):
+                    for t in item.targets:
+                        loop_assigned.update(n.id for n in ast.walk(t) if isinstance(n, ast.Name))
+                elif isinstance(item, (ast.AnnAssign, ast.AugAssign)):
+                    loop_assigned.update(n.id for n in ast.walk(item.target) if isinstance(n, ast.Name))
+            for name in loop_assigned:
+                var_env.pop(name, None)
+                dependent_vars.add(name)
             continue
 
         if isinstance(stmt, ast.With):
-            for item in stmt.items:
-                for call in [n for n in ast.walk(item.context_expr) if isinstance(n, ast.Call) and _is_assert_call(n)]:
+            for w_item in stmt.items:
+                for call in [n for n in ast.walk(w_item.context_expr) if isinstance(n, ast.Call) and _is_assert_call(n)]:
                     _check_assert_call(call, var_env, dependent_vars, func_node, trivial_reasons)
             _process_stmts_in_order(stmt.body, var_env, dependent_vars, func_node, trivial_reasons)
             continue
