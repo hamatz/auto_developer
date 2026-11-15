@@ -21,6 +21,22 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-15] AST 静的解析における文の実行順序（Program Order）の無視による正常テストの誤判定 (Disregarding Program Execution Order in AST Causal Analysis)
+- Context: `src/auto_developer/verifier.py` (`check_trivial_red_ast`, 因果依存性解析)
+- Trap: テストメソッド内の代入文をまとめて先に処理して最終的な変数環境（`var_env`）を構築した後にアサーションを検証したため、アサーション実行後の再代入（例: `x = compute_val(1); self.assertEqual(x, 2); x = 999`）が過去のアサーション時点の評価に逆流し、正常なテストを固定値比較（`999 == 2`）の `TRIVIAL_RED` として誤判定した（Sol氏 Phase 54 P1指摘）。
+- Rule: AST 解析はメソッド内の文の実行順序（Program Order）に沿って順次走査し、アサーションが出現したその時点におけるスコープの変数状態・因果依存関係スナップショットを参照して判定する。アサーション以降の代入が過去の判定に影響してはならない。
+- Rung: 作り（AST 文順次トラバーサル） & 検査
+- Immunity Test: `tests/test_red_verifier.py`（Phase 55 OOO.1 で追加予定）
+- Proof: `x = compute_val(1); self.assertEqual(x, 2); x = 999` が `TRIVIAL_RED` として誤判定されず、正常に処理されることを実証。
+
+### [2026-11-15] 条件付き self.fail() の画一的な無条件失敗誤判定 (Guarded vs Unconditional self.fail() in Static Analysis)
+- Context: `src/auto_developer/verifier.py` (`check_trivial_red_ast`, `_is_in_try_block_with_call`)
+- Trap: `self.fail()` の例外救済を `try` ブロックのみに限定していたため、`if compute_val(1) != 2: self.fail("wrong value")` のように製品コードの戻り値や動的変数に依存する条件分岐下の正当なテストを「無条件失敗」として一律に `TRIVIAL_RED` 排除してしまった（Sol氏 Phase 54 P1指摘）。
+- Rule: `self.fail()` を構文上だけで無条件失敗とみなしてはならない。`If` / `While` などの分岐ガード下に存在し、その条件式が製品コード呼出や依存変数に繋がっている場合は、正当な条件付き不具合検出テストとして受理する。
+- Rung: 作り（分岐条件式の因果依存追跡） & 検査
+- Immunity Test: `tests/test_red_verifier.py`（Phase 55 OOO.2 で追加予定）
+- Proof: `if compute_val(1) != 2: self.fail(...)` が `TRIVIAL_RED` として誤拒絶されず、正常に受理されることを実証。
+
 ### [2026-11-14] 製品コードを実行しただけの巧妙な偽 Red（因果関係のない固定値比較）は製品不具合の証明にならない (Product Code Execution ≠ Defect Authenticity)
 - Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`, AST 解析および動的実行トレース)
 - Trap: Phase 53 で AST 解析（定数比較検出）と `sys.settrace()` による製品コード実行トレースを導入した。しかし、テスト内で `add(1, 2)` のように形式的に製品コードを呼んだ上で `self.assertEqual(1, 2)` や無関係な固定値比較で失敗させる巧妙な偽 Red は、製品コードを通過しているためトレース検証を通過しうる（Sol氏 Phase 53 P1）。

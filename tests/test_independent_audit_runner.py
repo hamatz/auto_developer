@@ -346,6 +346,51 @@ class GenuineTest(unittest.TestCase):
         self.assertIn("GENUINE-001", plan_after)
         self.assertIn("Genuine computation error", plan_after)
 
+        # 3. 後続再代入を含む真正Red指摘のディスパッチ (機能OOO.3: Program Order の受入保証)
+        reassign_finding = AuditFinding(
+            finding_id="GENUINE-REASSIGN-001",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/sample_module.py:2",
+            description="Reassignment after assertion bug",
+            reproduction_test_code="""import unittest
+from sample_module import compute_val
+class ReassignTest(unittest.TestCase):
+    def test_reassign(self):
+        res = compute_val(2)
+        self.assertEqual(res, 999)
+        res = 12345
+""",
+            status="REPORTED",
+            auditor_model="claude-opus-5.5",
+        )
+        dispatched_reassign = dispatcher.dispatch_finding(reassign_finding, plan_path=plan_file)
+        self.assertEqual(dispatched_reassign.status, "DISPATCHED")
+        self.assertEqual(dispatched_reassign.red_verification_reason, "GENUINE_RED")
+        self.assertIn("GENUINE-REASSIGN-001", plan_file.read_text(encoding="utf-8"))
+
+        # 4. 条件付き self.fail() を含む真正Red指摘のディスパッチ (機能OOO.3: Guarded fail の受入保証)
+        guarded_fail_finding = AuditFinding(
+            finding_id="GENUINE-GUARD-FAIL-001",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/sample_module.py:2",
+            description="Guarded fail bug",
+            reproduction_test_code="""import unittest
+from sample_module import compute_val
+class GuardedFailTest(unittest.TestCase):
+    def test_guard(self):
+        if compute_val(2) != 999:
+            self.fail("Guarded condition failure detected")
+""",
+            status="REPORTED",
+            auditor_model="claude-opus-5.5",
+        )
+        dispatched_guard = dispatcher.dispatch_finding(guarded_fail_finding, plan_path=plan_file)
+        self.assertEqual(dispatched_guard.status, "DISPATCHED")
+        self.assertEqual(dispatched_guard.red_verification_reason, "GENUINE_RED")
+        self.assertIn("GENUINE-GUARD-FAIL-001", plan_file.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -620,6 +620,41 @@ class TestUntrackedTamper(unittest.TestCase):
                 ),
                 auditor_model="gpt-6.1-sol",
             ),
+            # 7. 後続再代入を含む真正バグ指摘 (機能OOO.3: Program Order の受入実証)
+            AuditFinding(
+                finding_id="BATCH-GENUINE-REASSIGN-007",
+                severity="P1",
+                spec_reference="SPEC.md OOO.1",
+                location="src/calc.py:2",
+                description="Zero division bug with later variable reassignment",
+                reproduction_test_code=(
+                    "import unittest\n"
+                    "from calc import calc_div\n"
+                    "class ReassignTest(unittest.TestCase):\n"
+                    "    def test_reassign(self):\n"
+                    "        ans = calc_div(10, 0)\n"
+                    "        self.assertEqual(ans, 0)\n"
+                    "        ans = 9999\n"
+                ),
+                auditor_model="claude-opus-5.5",
+            ),
+            # 8. 条件付き self.fail() による真正バグ指摘 (機能OOO.3: Guarded fail の受入実証)
+            AuditFinding(
+                finding_id="BATCH-GENUINE-GUARD-FAIL-008",
+                severity="P1",
+                spec_reference="SPEC.md OOO.2",
+                location="src/calc.py:2",
+                description="Zero division bug with guarded self.fail",
+                reproduction_test_code=(
+                    "import unittest\n"
+                    "from calc import calc_div\n"
+                    "class GuardedFailTest(unittest.TestCase):\n"
+                    "    def test_guard(self):\n"
+                    "        if calc_div(10, 0) != 0:\n"
+                    "            self.fail('Division by zero returned invalid fallback')\n"
+                ),
+                auditor_model="claude-opus-5.5",
+            ),
         ]
 
         audit_store = AuditStore(repo_dir=self.repo_dir)
@@ -628,11 +663,14 @@ class TestUntrackedTamper(unittest.TestCase):
         # 1. バッチ処理による選別
         dispatched_list = dispatcher.process_findings(batch_findings, plan_path=self.plan_path)
 
-        # 真正な指摘のみが 1 件受領されること
-        self.assertEqual(len(dispatched_list), 1)
-        dispatched_task = dispatched_list[0]
-        self.assertEqual(dispatched_task.finding_id, "BATCH-GENUINE-004")
-        self.assertEqual(dispatched_task.status, "DISPATCHED")
+        # 真正な指摘（通常、後続代入、条件付きfailの3件）のみが受領されること (機能OOO.3)
+        self.assertEqual(len(dispatched_list), 3)
+        dispatched_ids = [d.finding_id for d in dispatched_list]
+        self.assertIn("BATCH-GENUINE-004", dispatched_ids)
+        self.assertIn("BATCH-GENUINE-REASSIGN-007", dispatched_ids)
+        self.assertIn("BATCH-GENUINE-GUARD-FAIL-008", dispatched_ids)
+        for d in dispatched_list:
+            self.assertEqual(d.status, "DISPATCHED")
 
         # 2. 不正・敵対的指摘がすべて REJECTED で AuditStore に記録されていること
         s1 = audit_store.get_finding("BATCH-ERR-001")
@@ -665,6 +703,8 @@ class TestUntrackedTamper(unittest.TestCase):
         # 3. PLAN.md に真正な指摘のみが登録されていること
         plan_content = self.plan_path.read_text(encoding="utf-8")
         self.assertIn("BATCH-GENUINE-004", plan_content)
+        self.assertIn("BATCH-GENUINE-REASSIGN-007", plan_content)
+        self.assertIn("BATCH-GENUINE-GUARD-FAIL-008", plan_content)
         self.assertNotIn("BATCH-ERR-001", plan_content)
         self.assertNotIn("BATCH-PASS-002", plan_content)
         self.assertNotIn("BATCH-SECRET-003", plan_content)
