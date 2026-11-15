@@ -41,24 +41,31 @@ def _load_env_file(repo_dir: Path) -> dict[str, str]:
 def _extract_findings_from_text(text: str) -> list[dict]:
     """Extract finding dictionaries from LLM response text.
 
-    Fail-Closed (VVV.1 / Sol Phase 61 P1):
+    Fail-Closed (VVV.1 / Sol Phase 61 P1 / AUD-001):
     If text does not contain a valid JSON array or explicit '[]', raise ValueError.
     Do NOT convert unparseable text or arbitrary prose into '[]' (which would fake zero defects).
+    If multiple code blocks exist (e.g. format example followed by actual findings), prioritize non-empty findings.
     """
     clean_text = text.strip()
-    # 1. Try markdown code block ```json ... ```
-    m = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", clean_text, re.DOTALL)
-    if m:
+    # 1. Inspect ALL markdown code blocks ```json ... ```
+    all_code_blocks = list(re.finditer(r"```(?:json)?\s*\n?(.*?)\n?```", clean_text, re.DOTALL))
+    empty_block_found = False
+    for m in all_code_blocks:
         try:
             parsed = json.loads(m.group(1).strip())
             if isinstance(parsed, list):
-                if len(parsed) == 0:
-                    return []
                 findings = [item for item in parsed if isinstance(item, dict)]
                 if findings:
                     return findings
+                if len(parsed) == 0:
+                    empty_block_found = True
         except json.JSONDecodeError:
             pass
+
+    # If any block had non-empty findings, it was returned above.
+    # If a block was explicitly empty [] and no block had non-empty findings:
+    if empty_block_found:
+        return []
 
     # 2. Try raw JSON list from first '[' to last ']'
     start = clean_text.find("[")

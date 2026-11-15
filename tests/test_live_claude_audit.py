@@ -66,6 +66,7 @@ class TestLiveClaudeAudit(unittest.TestCase):
             "provider_request_id": "msg_01XFDUDYJACGeCrJwHGQAngV",
             "execution_id": "msg_01XFDUDYJACGeCrJwHGQAngV",
             "status": "COMPLETED",
+            "stop_reason": "end_turn",
             "timestamp": 1700000000,
             "prompt_sha256": "0" * 64,
             "response_sha256": "1" * 64,

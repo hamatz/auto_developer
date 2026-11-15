@@ -118,10 +118,12 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
     def test_audit_runner_extracts_envelope_provider_metadata(self) -> None:
         """TTT.1: プロバイダからのエンベロープレスポンス（実行ID・プロバイダ名入り）を正しく解析・抽出できること。"""
         envelope_json = json.dumps({
+            "mode": "LIVE",
             "provider": "anthropic",
             "model": "claude-opus-5.5",
             "execution_id": "msg_01X9Z8A7B6C5D4E3",
             "status": "COMPLETED",
+            "stop_reason": "end_turn",
             "findings": [
                 {
                     "finding_id": "PROV-ENV-001",
@@ -786,6 +788,41 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         text = "I have completed the review.\n\n```json\n[]\n```\n\nNo issues found."
         findings = auditor_client._extract_findings_from_text(text)
         self.assertEqual(findings, [])
+
+    def test_extract_findings_from_text_prioritizes_actual_findings_over_preceding_empty_codeblock(self) -> None:
+        """AUD-001: 応答文中に例示等の空配列コードブロックが先行して存在する場合でも、後続の実指摘コードブロックを正しく抽出し、欠陥ゼロ偽装（[]）を防ぐこと。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        text = (
+            "Example format: ```json\n[]\n```\n\n"
+            "Actual findings:\n```json\n"
+            '[{"finding_id": "AUD-001", "description": "real issue", "severity": "P1"}]\n'
+            "```"
+        )
+        findings = auditor_client._extract_findings_from_text(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["finding_id"], "AUD-001")
+
+    def test_runner_parse_response_rejects_live_envelope_with_non_end_turn_stop_reason(self) -> None:
+        """AUD-002: IndependentAuditRunner.parse_response は mode: LIVE のエンベロープで stop_reason が 'end_turn' 以外（'max_tokens' 等）の場合、Fail-Closed（ValueError）で拒絶すること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        envelope = {
+            "mode": "LIVE",
+            "provider": "anthropic",
+            "model": "claude-opus-5.5",
+            "status": "COMPLETED",
+            "stop_reason": "max_tokens",  # truncated!
+            "findings": [],
+        }
+        output = json.dumps(envelope)
+        with self.assertRaises(ValueError) as cm:
+            runner.parse_response(output)
+        self.assertIn("AUDIT_INTERRUPTED", str(cm.exception))
 
 
 if __name__ == "__main__":
