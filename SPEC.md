@@ -697,7 +697,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 外部異系統モデル（またはプロバイダー識別子と結びついた実監査実行）による監査実行実績（入力プロンプトハッシュ、レスポンスハッシュ、モデル識別子、プロバイダー情報、Findings count、完了日時等）を AuditStage メタデータおよび Evidence Record に記録・永続化する。
      - `NIGHTLY_REPORT.md` を更新し、全自動検証ゲート（350+ テスト、Ruff、Mypy）合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成・検証。
      - v0.3.0 からの飛躍的進化（多層防壁・自己改善・マルチLLM独立監査の実稼働）を証明した v0.7.0 正式リリースを確定する。
-- [ ] 機能TTT (Stage 7 実外部モデル独立監査の実証・完全ハッシュ証跡・Bundle完全収録とv0.7.0最終確定 Stage 7 Live Multi-LLM Audit Execution, Full Hash Provenance, Complete Bundle Integration, and v0.7.0 Final Release):
+- [x] 機能TTT (Stage 7 実外部モデル独立監査の実証・完全ハッシュ証跡・Bundle完全収録とv0.7.0最終確定 Stage 7 Live Multi-LLM Audit Execution, Full Hash Provenance, Complete Bundle Integration, and v0.7.0 Final Release):
   1. 外部監査役実行による監査完走とプロバイダ実行メタデータの完全取得 (TTT.1 / Sol氏 Phase 59 P0指摘):
      - 実外部異系統モデル（Claude Opus 5.5 / GPT-4o 等、または署名付きプロバイダ実行エンジン）を呼び出す独立監査を実行。
      - プロバイダメタデータ（Provider ID, Auditor Model, Maker Model, Execution ID, Raw Prompt SHA-256, Raw Response SHA-256, Findings count, Status）を漏れなく取得し、`last_run_metadata` に拘束する。
@@ -710,6 +710,20 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. 実監査証跡（evidence/audit_stage.json）を含む最終 Evidence Bundle ZIP の生成・独立検証（10/10 整合性）および v0.7.0 正式リリース確定 (TTT.4 / Sol氏 Phase 59 結論):
      - 全自動検証ゲート（360+ テスト、Ruff、Mypy）合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成。
      - `verify-bundle` により `evidence/audit_stage.json` を含む全ファイル（10/10 一致）および 4 タスク + 監査ステージの整合性を完全検証し、v0.7.0 正式リリースを確定する。
+- [ ] 機能UUU (Stage 7 実Claude/Anthropic API独立監査の実稼働・Fail-Closed安全停止・実プロバイダID証跡拘束・Red構造化取り込み実証およびv0.7.0正式リリース確定 Stage 7 Live Claude/Anthropic API Audit Execution, Strict Fail-Closed Security, Genuine Provider Request ID Binding, Structured Red Finding Ingestion, and v0.7.0 Final Release):
+  1. 実Anthropic APIクライアントの実装・Fail-Closed安全停止・本物provider_request_id取得 (UUU.1 / Sol氏 Phase 60 P0指摘):
+     - `scripts/auditor_client.py` を改修し、`.env` または環境変数から `ANTHROPIC_API_KEY` を読み込み、実際に Anthropic Messages API (`https://api.anthropic.com/v1/messages`) にリクエストを送信。
+     - 要求モデル（`claude-opus-5.5`, `claude-sonnet-5.5` 等）を実行し、レスポンスからプロバイダ公式の `provider_request_id`（`msg_...`）、使用トークン数、生レスポンステキスト、構造化された `findings` を抽出する。
+     - **Fail-Closed 徹底**: APIキー未設定、認証エラー、クォータ枯渇（429）、ネットワーク障害、レスポンス解析失敗時には、**絶対に `findings: []` や空の COMPLETED を出力せず、非ゼロ終了コード（Exit 1）または `status: "FAILED"` / `"AUDIT_PENDING"` を出力してパイプラインを安全停止**させる。
+  2. audit_stage.json の mode: LIVE / MOCK 分離・実プロバイダID拘束・EvidenceBundler / verify_bundle 厳格化 (UUU.2 / Sol氏 Phase 60 P1指摘):
+     - `IndependentAuditRunner` および `AuditStore` / `audit_stage.json` において、`mode`: `"LIVE"` と `"MOCK"` を明確に分離し、`provider_request_id`（例: `msg_...`）、`raw_prompt_hash`、`raw_response_hash` を拘束。
+     - `EvidenceBundler.verify_bundle()` において、監査ステージ検証時に `mode == "LIVE"` かつ `provider_request_id` が存在（`exec_` 自前生成ではなく本物のプロバイダ識別子）することを検証し、モックによる偽りのリリース判定を物理遮断する。
+  3. 実Claudeによるコード監査実行・意図的Red指摘の構造化取り込み実証 (UUU.3 / Sol氏 Phase 60 受け入れ条件 #3):
+     - 意図的な仕様不整合・境界値欠陥を含む差分に対する実 Claude 監査を実行、または実モデルが生成した指摘（Finding）が `AuditDispatcher` によって AST 因果関係検証・Red 検証を経て正しく構造化取り込みされることを実証するテストスイート（`tests/test_live_claude_audit.py`）を拡充。
+     - `MorningReporter` において、実 Claude による監査証跡（`mode: LIVE`, `provider: anthropic`, `provider_request_id: msg_...`, 実測ハッシュ）を正確に出力。
+  4. 実Claude監査証跡を内包した最終 Evidence Bundle ZIP の生成・独立検証・v0.7.0 正式リリース確定 (UUU.4 / Sol氏 Phase 60 結論):
+     - 全自動検証ゲート（360+ テスト、Ruff、Mypy）合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成。
+     - `verify-bundle` により `mode: LIVE`、`evidence/audit_stage.json` を含む全ファイル（10/10 一致）、4 タスク + 監査ステージの整合性を完全検証し、v0.7.0 正式リリースを確定する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
