@@ -68,6 +68,7 @@ def _extract_findings_from_text(text: str) -> list[dict]:
     empty_block_found = False
     has_decode_error = False
     decode_error_msg = ""
+    collected_findings: list[dict] = []
     for m in all_code_blocks:
         content = m.group(2).strip()
         # Candidate findings must begin with a JSON structure character ('[' or '{')
@@ -78,21 +79,27 @@ def _extract_findings_from_text(text: str) -> list[dict]:
             if isinstance(parsed, list):
                 findings = [item for item in parsed if isinstance(item, dict)]
                 if findings:
-                    return findings
-                if len(parsed) == 0:
+                    collected_findings.extend(findings)
+                elif len(parsed) == 0:
                     empty_block_found = True
             elif isinstance(parsed, dict):
                 if "finding_id" in parsed:
-                    return [parsed]
-                if "findings" in parsed and isinstance(parsed["findings"], list):
+                    collected_findings.append(parsed)
+                elif "findings" in parsed and isinstance(parsed["findings"], list):
                     findings = [item for item in parsed["findings"] if isinstance(item, dict)]
                     if findings:
-                        return findings
-                    if len(parsed["findings"]) == 0:
+                        collected_findings.extend(findings)
+                    elif len(parsed["findings"]) == 0:
                         empty_block_found = True
         except json.JSONDecodeError as exc:
             has_decode_error = True
             decode_error_msg = str(exc)
+
+    if has_decode_error:
+        raise ValueError(f"Malformed JSON in audit response code block: {decode_error_msg}")
+
+    if collected_findings:
+        return collected_findings
 
     # 3. Check for raw findings in text outside code blocks (handles example code block + raw findings outside)
     text_outside = re.sub(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", "", clean_text, flags=re.DOTALL)

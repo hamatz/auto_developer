@@ -1399,6 +1399,53 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         result = auditor_client._extract_findings_from_text(text)
         self.assertEqual([r.get("finding_id") for r in result], ["AUD-A", "AUD-B"], "second finding silently discarded")
 
+    def test_findings_split_across_multiple_code_blocks_are_all_returned(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 22): 複数のコードブロックに分割された指摘が全て集約され欠落しないこと。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        f1 = {
+            "finding_id": "AUD-MB-001",
+            "severity": "P0",
+            "spec_reference": "VVV.1",
+            "location": "a.py:1",
+            "description": "bug 1",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        f2 = {
+            "finding_id": "AUD-MB-002",
+            "severity": "P1",
+            "spec_reference": "VVV.1",
+            "location": "a.py:2",
+            "description": "bug 2",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        text = (
+            "P0 findings:\n```json\n" + json.dumps([f1]) + "\n```\n\n"
+            "P1 findings:\n```json\n" + json.dumps([f2]) + "\n```"
+        )
+        findings = runner.parse_response(text)
+        ids = sorted(f.finding_id for f in findings)
+        self.assertEqual(ids, ["AUD-MB-001", "AUD-MB-002"])
+
+    def test_all_code_blocks_are_considered_in_auditor_client(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 22): auditor_client において複数コードブロックの指摘が全て集約され欠落しないこと。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+        f1 = {"finding_id": "AUD-MB-001", "severity": "P0", "description": "bug one"}
+        f2 = {"finding_id": "AUD-MB-002", "severity": "P1", "description": "bug two"}
+        text = (
+            "P0 findings:\n```json\n" + json.dumps([f1]) + "\n```\n\n"
+            "P1 findings:\n```json\n" + json.dumps([f2]) + "\n```"
+        )
+        result = auditor_client._extract_findings_from_text(text)
+        ids = sorted(r.get("finding_id") for r in result)
+        self.assertEqual(ids, ["AUD-MB-001", "AUD-MB-002"])
+
 
 if __name__ == "__main__":
     unittest.main()
