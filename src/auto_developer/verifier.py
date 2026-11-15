@@ -195,17 +195,41 @@ def _resolve_expr_origin(
         )
         if is_getattr and len(expr.args) >= 1:
             return _resolve_expr_origin(expr.args[0], imported_symbols, imported_modules, var_origins)
+        # 一般の関数・コンストラクタ呼出 (int("1"), str(x), pathlib.Path("."), etc.: AUD-401)
+        func_origin = _resolve_expr_origin(expr.func, imported_symbols, imported_modules, var_origins)
+        if func_origin:
+            return func_origin
         return None
     return None
 
 
-def _has_causal_dependency(node: ast.AST, dependent_vars: set[str]) -> bool:
-    """ノードが関数呼出（非アサーション）または関数呼出に依存する変数を含んでいるかを判定する。"""
+def _has_causal_dependency(
+    node: ast.AST,
+    dependent_vars: set[str],
+    imported_symbols: dict[str, str] | None = None,
+    imported_modules: dict[str, str] | None = None,
+    var_origins: dict[str, str] | None = None,
+) -> bool:
+    """ノードがプロダクト関数呼出または因果依存変数を含んでいるかを判定する (AUD-401)。"""
     for sub in ast.walk(node):
-        if isinstance(sub, ast.Call) and not _is_assert_call(sub):
-            return True
         if isinstance(sub, ast.Name) and sub.id in dependent_vars:
             return True
+        if isinstance(sub, ast.Call) and not _is_assert_call(sub):
+            origin = _resolve_expr_origin(
+                sub.func,
+                imported_symbols or {},
+                imported_modules or {},
+                var_origins or {},
+            )
+            # 呼出先が非プロダクト (builtins, stdlib, self, test_local_helper) でない場合はプロダクト呼出
+            if origin not in _NON_PRODUCT_ORIGINS:
+                return True
+            # 非プロダクト呼出であっても、引数に因果依存変数またはプロダクト呼出が含まれていれば依存あり
+            if any(
+                _has_causal_dependency(arg, dependent_vars, imported_symbols, imported_modules, var_origins)
+                for arg in sub.args
+            ):
+                return True
     return False
 
 
@@ -555,7 +579,7 @@ def _process_stmts_in_order(
             if origin:
                 for name in target_names:
                     var_origins[name] = origin
-            val_has_dep = _has_causal_dependency(rhs, dependent_vars)
+            val_has_dep = _has_causal_dependency(rhs, dependent_vars, imported_symbols, imported_modules, var_origins)
             if val_has_dep:
                 for name in target_names:
                     dependent_vars.add(name)
@@ -583,7 +607,7 @@ def _process_stmts_in_order(
             if origin:
                 for name in target_names:
                     var_origins[name] = origin
-            val_has_dep = _has_causal_dependency(rhs, dependent_vars)
+            val_has_dep = _has_causal_dependency(rhs, dependent_vars, imported_symbols, imported_modules, var_origins)
             if val_has_dep:
                 for name in target_names:
                     dependent_vars.add(name)

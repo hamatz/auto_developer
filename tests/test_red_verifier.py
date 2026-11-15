@@ -1545,6 +1545,26 @@ class T(unittest.TestCase):
         is_trivial, _msg = check_trivial_red_ast(code)
         self.assertTrue(is_trivial, "getattr-derived stdlib callable inside try was accepted as a product-call exception guard")
 
+    def test_method_on_builtin_call_result_in_try_is_trivial(self) -> None:
+        """AUD-401 (Sol Phase 62 / Cycle 40): x = int('1') 等の非プロダクト呼出結果に対するメソッド呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        x = int("1")
+        try:
+            x.bit_length()
+        except ValueError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "method call on a builtin-call result inside try was accepted as a product-call exception guard")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest
