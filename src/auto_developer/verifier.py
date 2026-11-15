@@ -1282,6 +1282,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 "--dev", "/dev",
                 "--proc", "/proc",
                 "--tmpfs", "/tmp",
+                "--dir", str(exec_resolved),
                 "--bind", str(exec_resolved), str(exec_resolved),
                 "--unshare-net",
                 "--die-with-parent",

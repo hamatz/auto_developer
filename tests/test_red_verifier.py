@@ -827,6 +827,47 @@ class PassTest(unittest.TestCase):
         home_str = str(Path.home().resolve())
         self.assertNotIn(home_str, ro_bind_targets, "Host home directory must NOT be ro-bound!")
 
+    def test_bwrap_command_includes_dir_before_bind_for_tmpfs_compatibility(self) -> None:
+        """機能VVV.2: Linux bwrap において --tmpfs /tmp 後に bind mount が失敗しないよう、
+        --dir <exec_resolved> が --bind より前に設定されること（Sol氏 Phase 61 P1指摘）。
+        """
+        from unittest.mock import MagicMock, patch
+
+        bwrap_cmd_captured = []
+        orig_popen = subprocess.Popen
+
+        def capturing_popen(*args: Any, **kwargs: Any) -> Any:
+            nonlocal bwrap_cmd_captured
+            cmd = args[0] if args else kwargs.get("args", [])
+            if cmd and "bwrap" in str(cmd[0]):
+                bwrap_cmd_captured = list(cmd)
+                mock_p = MagicMock()
+                mock_p.pid = 12345
+                mock_p.returncode = 0
+                mock_p.communicate.return_value = (
+                    '===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [], "errors": []}',
+                    "",
+                )
+                return mock_p
+            return orig_popen(*args, **kwargs)
+
+        code = """import unittest
+class PassTest(unittest.TestCase):
+    def test_ok(self):
+        self.assertEqual(1, 1)
+"""
+        with patch.object(self.verifier, "_get_sandbox_backend", return_value="bwrap"), \
+             patch("subprocess.Popen", side_effect=capturing_popen):
+            result = self.verifier.verify_candidate_test(code)
+            self.assertEqual(result.reason, "ALREADY_GREEN")
+
+        self.assertTrue(bwrap_cmd_captured, "bwrap command must be invoked")
+        # --dir が --bind の前に存在することを確認
+        self.assertIn("--dir", bwrap_cmd_captured)
+        dir_idx = bwrap_cmd_captured.index("--dir")
+        bind_idx = bwrap_cmd_captured.index("--bind")
+        self.assertLess(dir_idx, bind_idx, "--dir must precede --bind in bwrap command")
+
     def test_sandbox_blocks_reading_system_keychains_and_sensitive_etc(self) -> None:
         """機能LLL.2: macOS sandbox-exec においてホーム外の機密パス（/Library/Keychains 等）が
         明示的 deny され、候補テストから読み取れないこと（Sol氏 Phase 51 P1指摘）。
