@@ -1604,6 +1604,47 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         with self.assertRaises(ValueError):
             auditor_client._extract_findings_from_text(text)
 
+    def test_fenced_mixed_finding_array_must_fail_closed(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 28): auditor_client._extract_findings_from_text において、実指摘と非dict要素が混在する配列が渡された場合、非dict要素を黙殺して部分配列を返さず Fail-Closed（ValueError）で拒絶されること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+        finding = {"finding_id": "AUD-X", "severity": "P0", "description": "real bug"}
+        text = "```json\n" + json.dumps([finding, "P0: second defect reported as plain string"]) + "\n```"
+        with self.assertRaises(ValueError):
+            auditor_client._extract_findings_from_text(text)
+
+    def test_later_failed_envelope_block_must_be_rejected(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 28): 複数のEnvelopeブロックが存在し、後続のEnvelopeが非COMPLETED（FAILED等）である場合、先行Envelopeで成功偽装されず Fail-Closed（ValueError）で拒絶されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        ok_env = {
+            "mode": "LIVE",
+            "provider": "anthropic",
+            "provider_request_id": "msg_ok_1",
+            "execution_id": "msg_ok_1",
+            "status": "COMPLETED",
+            "stop_reason": "end_turn",
+            "findings": [],
+        }
+        failed_env = {
+            "mode": "LIVE",
+            "provider": "anthropic",
+            "provider_request_id": "msg_fail_2",
+            "execution_id": "msg_fail_2",
+            "status": "FAILED",
+            "stop_reason": "end_turn",
+            "findings": [],
+        }
+        text = (
+            "Attempt 1:\n```json\n" + json.dumps(ok_env) + "\n```\n\n"
+            "Attempt 2:\n```json\n" + json.dumps(failed_env) + "\n```"
+        )
+        with self.assertRaises(ValueError):
+            runner.parse_response(text)
+
 
 if __name__ == "__main__":
     unittest.main()

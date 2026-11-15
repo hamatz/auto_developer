@@ -57,9 +57,13 @@ def _extract_findings_from_text(text: str) -> list[dict]:
         try:
             parsed = json.loads(clean_text[start : end + 1])
             if isinstance(parsed, list):
-                findings = [item for item in parsed if isinstance(item, dict)]
-                if findings:
+                findings = [item for item in parsed if isinstance(item, dict) and "finding_id" in item]
+                if len(parsed) == 0:
+                    pass
+                elif len(findings) == len(parsed):
                     return findings
+                else:
+                    raise ValueError(f"JSON array contains non-finding items: {parsed}")
         except json.JSONDecodeError:
             pass
 

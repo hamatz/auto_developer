@@ -345,24 +345,44 @@ class IndependentAuditRunner:
                                 or parsed.get("stop_reason")
                             )
                             if is_prov:
+                                env_status = parsed.get("status")
+                                if env_status and env_status != "COMPLETED":
+                                    raise ValueError(
+                                        f"AUDIT_{env_status}: Live audit envelope returned non-completed status '{env_status}': {parsed.get('error') or ''}"
+                                    )
+                                env_mode = parsed.get("mode")
+                                env_stop = parsed.get("stop_reason")
+                                if (env_mode == "LIVE" or env_stop is not None) and (not env_stop or env_stop != "end_turn"):
+                                    raise ValueError(
+                                        f"AUDIT_INTERRUPTED: Live audit envelope has invalid stop_reason '{env_stop}' (expected 'end_turn')"
+                                    )
                                 if found_envelope is None:
                                     found_envelope = parsed
                                 if "findings" in parsed and isinstance(parsed["findings"], list):
-                                    findings = [item for item in parsed["findings"] if isinstance(item, dict)]
-                                    if findings:
-                                        collected_findings.extend(findings)
-                                    elif len(parsed["findings"]) == 0:
+                                    findings = [item for item in parsed["findings"] if isinstance(item, dict) and "finding_id" in item]
+                                    if len(parsed["findings"]) == 0:
                                         empty_block_found = True
+                                    elif len(findings) == len(parsed["findings"]):
+                                        collected_findings.extend(findings)
+                                    else:
+                                        has_decode_error = True
                             elif "finding_id" in parsed and "findings" not in parsed:
                                 collected_findings.append(parsed)
                             elif "findings" in parsed and isinstance(parsed["findings"], list):
+                                env_status = parsed.get("status")
+                                if env_status and env_status != "COMPLETED":
+                                    raise ValueError(
+                                        f"AUDIT_{env_status}: Live audit envelope returned non-completed status '{env_status}': {parsed.get('error') or ''}"
+                                    )
                                 if found_envelope is None:
                                     found_envelope = parsed
-                                findings = [item for item in parsed["findings"] if isinstance(item, dict)]
-                                if findings:
-                                    collected_findings.extend(findings)
-                                elif len(parsed["findings"]) == 0:
+                                findings = [item for item in parsed["findings"] if isinstance(item, dict) and "finding_id" in item]
+                                if len(parsed["findings"]) == 0:
                                     empty_block_found = True
+                                elif len(findings) == len(parsed["findings"]):
+                                    collected_findings.extend(findings)
+                                else:
+                                    has_decode_error = True
                             else:
                                 has_decode_error = True
                     except json.JSONDecodeError:
