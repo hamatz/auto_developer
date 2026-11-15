@@ -1794,6 +1794,43 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             if str(Path(__file__).parent.parent / "scripts") in sys.path:
                 sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
 
+    def test_spaced_json_fence_after_empty_example_runner(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 33): コードブロックフェンスが ``` json のようにスペースを含む場合でも、例示空ブロックで誤認・脱落せず正しく指摘が抽出されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        finding = {
+            "finding_id": "AUD-SP-001",
+            "severity": "P0",
+            "spec_reference": "VVV.1",
+            "location": "a.py:1",
+            "description": "real bug",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        text = (
+            "Example format: ```json\n[]\n```\n\n"
+            "Actual findings:\n``` json\n" + json.dumps([finding]) + "\n```"
+        )
+        findings = runner.parse_response(text)
+        self.assertEqual(len(findings), 1, "real findings silently converted to zero defects")
+        self.assertEqual(findings[0].finding_id, "AUD-SP-001")
+
+    def test_spaced_json_fence_after_empty_example_client(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 33): auditor_client においてコードブロックフェンスが ``` json のようにスペースを含む場合でも、例示空ブロックで誤認・脱落せず正しく指摘が抽出されること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+            finding = {"finding_id": "AUD-SP-002", "severity": "P0", "description": "real bug"}
+            text = (
+                "Example format: ```json\n[]\n```\n\n"
+                "Actual findings:\n``` json\n" + json.dumps([finding]) + "\n```"
+            )
+            result = auditor_client._extract_findings_from_text(text)
+            self.assertEqual(len(result), 1, "real findings silently converted to zero defects")
+            self.assertEqual(result[0]["finding_id"], "AUD-SP-002")
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
 
 
 

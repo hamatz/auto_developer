@@ -329,10 +329,14 @@ class IndependentAuditRunner:
                         raise ValueError(f"AUDIT_PARSE_ERROR: JSON findings array contains non-finding items: {parsed['findings']}")
         except json.JSONDecodeError:
             # 2. Markdown コードブロックの探索（複数ブロック走査＆全件集約）
-            all_code_blocks = list(re.finditer(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", clean_output, re.DOTALL))
+            all_code_blocks = list(re.finditer(r"```[ \t]*(?:[a-zA-Z0-9_-]+)?[ \t]*\n?(.*?)\n?```", clean_output, re.DOTALL))
             if all_code_blocks:
                 for m in all_code_blocks:
-                    content = m.group(2).strip()
+                    content = m.group(1).strip()
+                    if not content.startswith(("[", "{")):
+                        stripped = re.sub(r"^[a-zA-Z0-9_-]+[ \t]*\n?", "", content).strip()
+                        if stripped.startswith(("[", "{")):
+                            content = stripped
                     if not content.startswith(("[", "{")):
                         continue
                     try:
@@ -404,7 +408,7 @@ class IndependentAuditRunner:
                     raise ValueError("Malformed JSON in audit response code block")
 
             # 3. コードブロック外またはコードブロックが存在しない場合の生構造探索
-            text_outside = re.sub(r"```(?:[a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", "", clean_output, flags=re.DOTALL)
+            text_outside = re.sub(r"```[ \t]*(?:[a-zA-Z0-9_-]+)?[ \t]*\n?(.*?)\n?```", "", clean_output, flags=re.DOTALL)
             decoder = json.JSONDecoder()
 
             # プロバイダエンベロープ辞書およびエラー辞書を最優先で探索（ログ行混入時でも外側封筒を厳格評価）

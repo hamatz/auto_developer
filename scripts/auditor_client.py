@@ -68,14 +68,18 @@ def _extract_findings_from_text(text: str) -> list[dict]:
             pass
 
     # 2. Inspect ALL markdown code blocks ```json ... ```
-    all_code_blocks = list(re.finditer(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", clean_text, re.DOTALL))
+    all_code_blocks = list(re.finditer(r"```[ \t]*(?:[a-zA-Z0-9_-]+)?[ \t]*\n?(.*?)\n?```", clean_text, re.DOTALL))
     empty_block_found = False
     has_decode_error = False
     decode_error_msg = ""
     collected_findings: list[dict] = []
     for m in all_code_blocks:
-        content = m.group(2).strip()
+        content = m.group(1).strip()
         # Candidate findings must begin with a JSON structure character ('[' or '{')
+        if not content.startswith(("[", "{")):
+            stripped = re.sub(r"^[a-zA-Z0-9_-]+[ \t]*\n?", "", content).strip()
+            if stripped.startswith(("[", "{")):
+                content = stripped
         if not content.startswith(("[", "{")):
             continue
         try:
@@ -119,7 +123,7 @@ def _extract_findings_from_text(text: str) -> list[dict]:
         raise ValueError(f"Malformed JSON in audit response code block: {decode_error_msg}")
 
     # 3. Check for raw findings in text outside code blocks (handles example code block + raw findings outside)
-    text_outside = re.sub(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", "", clean_text, flags=re.DOTALL)
+    text_outside = re.sub(r"```[ \t]*(?:[a-zA-Z0-9_-]+)?[ \t]*\n?(.*?)\n?```", "", clean_text, flags=re.DOTALL)
     decoder = json.JSONDecoder()
     raw_collected_findings: list[dict] = []
     raw_has_decode_error = False

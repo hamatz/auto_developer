@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import contextlib
 import hashlib
 import json
@@ -108,6 +109,9 @@ def _is_assert_call(call: ast.Call) -> bool:
     return False
 
 
+_BUILTIN_NAMES: set[str] = set(dir(builtins))
+
+
 def _has_causal_dependency(node: ast.AST, dependent_vars: set[str]) -> bool:
     """ノードが関数呼出（非アサーション）または関数呼出に依存する変数を含んでいるかを判定する。"""
     for sub in ast.walk(node):
@@ -118,14 +122,31 @@ def _has_causal_dependency(node: ast.AST, dependent_vars: set[str]) -> bool:
     return False
 
 
-def _is_in_try_block_with_call(call_node: ast.AST, func_node: ast.AST) -> bool:
+def _is_product_or_causal_call(
+    call: ast.Call, dependent_vars: set[str] | None = None
+) -> bool:
+    """呼出がプロダクトコードまたは因果依存変数に紐づく有効な呼出かを判定する (機能OOO.2 / AUD-003 Cycle 33)。
+    アサーション呼出および因果依存のない孤立した Python 組み込み関数呼出 (int("1") など) は除外する。
+    """
+    if _is_assert_call(call):
+        return False
+    if isinstance(call.func, ast.Attribute):
+        return True
+    if isinstance(call.func, ast.Name) and call.func.id not in _BUILTIN_NAMES:
+        return True
+    return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
+
+
+def _is_in_try_block_with_call(
+    call_node: ast.AST, func_node: ast.AST, dependent_vars: set[str] | None = None
+) -> bool:
     """call_node が非アサーション呼出を含む try ブロックの body 内にあるか（例外検証テストの fail を救済）。"""
     for n in ast.walk(func_node):
         if isinstance(n, ast.Try):
             in_body = any(sub is call_node for item in n.body for sub in ast.walk(item))
             if in_body:
                 has_call = any(
-                    isinstance(sub, ast.Call) and not _is_assert_call(sub)
+                    isinstance(sub, ast.Call) and _is_product_or_causal_call(sub, dependent_vars)
                     for item in n.body
                     for sub in ast.walk(item)
                 )
@@ -152,8 +173,10 @@ def _handler_body_exits(stmts: list[ast.stmt]) -> bool:
     return False
 
 
-def _is_preceded_by_try_with_call(call_node: ast.AST, func_node: ast.AST) -> bool:
-    """call_node がプロダクト呼出を含む try-except ブロックの直後（例外発生期待の fail）にあるかを判定する (機能OOO.2)。"""
+def _is_preceded_by_try_with_call(
+    call_node: ast.AST, func_node: ast.AST, dependent_vars: set[str] | None = None
+) -> bool:
+    """call_node がプロダクト呼出を含む try-except ブロックの直後（例外発生期待の fail）にあるかを判定する (機能OOO.2 / AUD-003 Cycle 33)。"""
     for node in ast.walk(func_node):
         for attr in ("body", "orelse", "finalbody"):
             stmts = getattr(node, attr, None)
@@ -163,7 +186,7 @@ def _is_preceded_by_try_with_call(call_node: ast.AST, func_node: ast.AST) -> boo
                         for prev in stmts[:idx]:
                             if isinstance(prev, ast.Try):
                                 has_call = any(
-                                    isinstance(sub, ast.Call) and not _is_assert_call(sub)
+                                    isinstance(sub, ast.Call) and _is_product_or_causal_call(sub, dependent_vars)
                                     for item in prev.body
                                     for sub in ast.walk(item)
                                 )
@@ -206,9 +229,9 @@ def _check_assert_call(
 
     # self.fail() の検証 (例外ガードまたは条件分岐因果ガード下の fail を救済: 機能OOO.2)
     if attr == "fail":
-        is_in_try = _is_in_try_block_with_call(call, func_node)
+        is_in_try = _is_in_try_block_with_call(call, func_node, dependent_vars)
         is_in_guard = _is_in_guarded_branch_with_call(call, func_node, dependent_vars)
-        is_after_try = _is_preceded_by_try_with_call(call, func_node)
+        is_after_try = _is_preceded_by_try_with_call(call, func_node, dependent_vars)
         if not (is_in_try or is_in_guard or is_after_try):
             trivial_reasons.append("Unconditional self.fail() call without exception guard")
         return

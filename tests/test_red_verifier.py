@@ -1344,6 +1344,25 @@ class T(unittest.TestCase):
         is_trivial, _msg = check_trivial_red_ast(code)
         self.assertTrue(is_trivial, "dead branch return in except handler was falsely accepted as genuine exit")
 
+    def test_fail_after_try_with_builtin_call_is_trivial(self) -> None:
+        """機能MMM.3 / 機能NNN.2: try ブロック内に int("1") などの独立した組込呼出しかない場合、自己完結した無条件失敗(Trivial Red)として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            int("1")
+        except ValueError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "unconditional fail after try wrapping a non-product call was accepted as genuine")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest
