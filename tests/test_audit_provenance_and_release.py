@@ -295,10 +295,15 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         audit_file.write_text(
             json.dumps({
                 "status": "SUCCESS",
+                "mode": "LIVE",
+                "provider": "anthropic",
+                "provider_request_id": "msg_live_1234567890",
                 "audit_metadata": {
+                    "mode": "LIVE",
                     "provider": "anthropic",
                     "auditor_model": "claude-opus-5.5",
-                    "execution_id": "exec_1234567890",
+                    "provider_request_id": "msg_live_1234567890",
+                    "execution_id": "msg_live_1234567890",
                     "raw_prompt_hash": "a" * 64,
                     "raw_response_hash": "b" * 64,
                 },
@@ -398,6 +403,62 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         self.assertEqual(data.get("execution_id"), "msg_01XFDUDYJACGeCrJwHGQAngV")
         self.assertEqual(data.get("status"), "COMPLETED")
         self.assertEqual(data.get("findings"), [])
+
+    def test_bundler_verify_rejects_mock_audit_for_release_validation(self) -> None:
+        """UUU.2 / Sol氏 Phase 60 P1指摘: mode=MOCK または provider_request_id 欠落/モック時は audit_stage_verified=False とし、正式リリース判定を拒絶すること。"""
+        evidence_dir = self.repo_dir / ".git" / "nightly_evidence" / "records"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+
+        target_tree_res = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        target_tree = target_tree_res.stdout.strip()
+        import hashlib
+        spec_hash = hashlib.sha256((self.repo_dir / "SPEC.md").read_bytes()).hexdigest()
+
+        # 有効な task_1.json
+        (evidence_dir / "task_1.json").write_text(
+            json.dumps({
+                "task_id": "1",
+                "status": "COMPLETED",
+                "commit": self.target_sha,
+                "tree_sha": target_tree,
+                "spec_sha": spec_hash,
+                "checker": {"decision": "APPROVE"},
+            }),
+            encoding="utf-8",
+        )
+
+        # MOCK モードの audit_stage.json
+        audit_file = evidence_dir / "audit_stage.json"
+        audit_file.write_text(
+            json.dumps({
+                "status": "SUCCESS",
+                "mode": "MOCK",
+                "audit_metadata": {
+                    "mode": "MOCK",
+                    "provider": "anthropic",
+                    "auditor_model": "claude-opus-5.5",
+                    "execution_id": "mock_1234567890",
+                    "provider_request_id": None,
+                    "raw_prompt_hash": "a" * 64,
+                    "raw_response_hash": "b" * 64,
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        bundler = EvidenceBundler(repo_dir=self.repo_dir)
+        bundle_path = bundler.create_bundle(job_id="test_mock_job")
+        res = bundler.verify_bundle(bundle_path)
+
+        # MOCK モードは改ざん検証（is_valid）には通過しても、正式リリース監査（audit_stage_verified）としては False と判定されること
+        self.assertFalse(res.audit_stage_verified)
+        self.assertTrue(any("not live verified" in w or "MOCK" in w for w in res.warnings))
 
 
 if __name__ == "__main__":

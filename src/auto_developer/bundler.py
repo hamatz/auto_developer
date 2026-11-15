@@ -697,14 +697,36 @@ class EvidenceBundler:
                     except OSError:
                         pass
 
-            # 8. 独立監査ステージ検証 (evidence/audit_stage.json がある場合: TTT.2)
+            # 8. 独立監査ステージ検証 (evidence/audit_stage.json がある場合: TTT.2 / UUU.2)
             audit_stage_file = inspect_dir / "evidence" / "audit_stage.json"
             if audit_stage_file.exists():
                 try:
                     audit_stage_data = json.loads(audit_stage_file.read_text(encoding="utf-8"))
                     result.audit_stage_info = audit_stage_data
+                    audit_meta = audit_stage_data.get("audit_metadata", {})
+                    mode = audit_stage_data.get("mode") or audit_meta.get("mode") or "MOCK"
+                    prov_req_id = (
+                        audit_stage_data.get("provider_request_id")
+                        or audit_meta.get("provider_request_id")
+                        or audit_meta.get("execution_id")
+                    )
+
+                    # Sol氏 Phase 60 P1 指摘:
+                    # mode == LIVE かつ provider_request_id が本物（exec_ や mock_ ではなく msg_... 等の実リクエストID）であることを検証
                     if audit_stage_data.get("status") == "SUCCESS":
-                        result.audit_stage_verified = True
+                        is_mock_id = (
+                            not prov_req_id
+                            or str(prov_req_id).startswith("mock_")
+                            or str(prov_req_id).startswith("exec_")
+                        )
+                        if mode == "LIVE" and not is_mock_id:
+                            result.audit_stage_verified = True
+                        else:
+                            result.audit_stage_verified = False
+                            result.warnings.append(
+                                f"Audit stage is not live verified: mode='{mode}', provider_request_id='{prov_req_id}' "
+                                f"(Simulation/MOCK cannot be verified for release)"
+                            )
                 except (json.JSONDecodeError, OSError) as e:
                     result.warnings.append(f"Failed to parse evidence/audit_stage.json: {e}")
 
