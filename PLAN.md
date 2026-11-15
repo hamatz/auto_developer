@@ -36,7 +36,7 @@
 
 ## ステップ
 - [x] 1. 実外部異系統モデル独立監査パイプラインの構成とベースライン固定（Red-First）（QQQ.1）
-- [ ] 2. 外部監査役による未知欠陥探索と Auto Developer 防壁による自動選別実証（Red-First）（QQQ.2）
+- [x] 2. 外部監査役による未知欠陥探索と Auto Developer 防壁による自動選別実証（Red-First）（QQQ.2）
 - [ ] 3. 真正指摘の自律修正・After Green 検証・免疫昇格・教訓記録（Level 7 Closed Loop）完走実証（Red-First）（QQQ.3）
 - [ ] 4. 独立監査 Evidence Bundle 生成と v0.7.0 本格リリース確定（QQQ.4）
 

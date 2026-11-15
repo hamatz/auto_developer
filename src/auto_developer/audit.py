@@ -353,6 +353,32 @@ class IndependentAuditRunner:
             finding.baseline_commit = target_baseline
         return findings
 
+    def screen_and_dispatch_findings(
+        self,
+        findings: list[AuditFinding],
+        dispatcher: Any,
+        plan_path: Path | None = None,
+    ) -> dict[str, Any]:
+        """外部監査役から投入された指摘リストを多層防壁で選別し、真正な指摘のみを PLAN.md に登録する (QQQ.2)。"""
+        dispatched: list[AuditFinding] = []
+        rejected: list[tuple[AuditFinding, str]] = []
+
+        for finding in findings:
+            res_finding = dispatcher.dispatch_finding(finding, plan_path=plan_path)
+            if res_finding.status == "DISPATCHED":
+                dispatched.append(res_finding)
+            else:
+                reason = res_finding.red_verification_reason or "UNKNOWN_REJECTION"
+                rejected.append((res_finding, reason))
+
+        return {
+            "dispatched": dispatched,
+            "rejected": rejected,
+            "total_processed": len(findings),
+            "genuine_count": len(dispatched),
+            "rejected_count": len(rejected),
+        }
+
 
 class AuditResolutionManager:
     """AUDタスク解決時のBefore Red / After Green検証、Evidence拘束、および免疫テスト自動昇格を管理する (EEE.3)。"""

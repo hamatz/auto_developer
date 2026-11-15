@@ -515,5 +515,124 @@ class TestLiveExternalAuditPipelineBaseline(unittest.TestCase):
         self.assertEqual(loaded.baseline_commit, self.baseline_sha)
 
 
+class TestLiveExternalAuditDefenseScreening(unittest.TestCase):
+    """機能QQQ.2: 外部監査役による未知欠陥探索と Auto Developer 防壁による自動選別実証。"""
+
+    def setUp(self) -> None:
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.repo_dir = Path(self.tmp_dir.name)
+        import subprocess
+
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Audit Runner"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "audit@example.com"], cwd=self.repo_dir, check=True)
+
+        (self.repo_dir / "SPEC.md").write_text("# Spec QQQ.2\nMust compute add.\n", encoding="utf-8")
+        (self.repo_dir / "PLAN.md").write_text("# Plan\n- [x] Initial setup\n", encoding="utf-8")
+        src_dir = self.repo_dir / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        (src_dir / "calc.py").write_text("def add_vals(a: int, b: int) -> int:\n    return a + b + 10\n", encoding="utf-8")
+
+        tests_dir = self.repo_dir / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        (tests_dir / "test_existing.py").write_text("import unittest\nclass T(unittest.TestCase):\n    def test_pass(self):\n        self.assertTrue(True)\n", encoding="utf-8")
+
+        subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init calc"], cwd=self.repo_dir, check=True)
+
+    def tearDown(self) -> None:
+        self.tmp_dir.cleanup()
+
+    def test_screen_and_dispatch_findings_separates_genuine_from_adversarial(self) -> None:
+        """QQQ.2: 外部監査役から投入された指摘バッチ（真正Red、Trivial Red、機密読取、改ざん試行）を多層防壁で自動選別すること。"""
+        from auto_developer.audit import AuditFinding, IndependentAuditRunner
+        from auto_developer.dispatcher import AuditDispatcher
+        from auto_developer.verifier import RedTestVerifier
+
+        # 1. 真正な不具合指摘 (GENUINE_RED: add_vals(2, 3) が 15 を返すため失敗)
+        genuine_finding = AuditFinding(
+            finding_id="AUD-GENUINE-001",
+            severity="P1",
+            spec_reference="SPEC.md QQQ.2",
+            location="src/calc.py:2",
+            description="add_vals returns incorrect sum",
+            reproduction_test_code="""import unittest
+from calc import add_vals
+class TestAdd(unittest.TestCase):
+    def test_correct_addition(self):
+        self.assertEqual(add_vals(2, 3), 5)
+""",
+            status="REPORTED",
+            auditor_model="claude-opus-5.5",
+        )
+
+        # 2. 巧妙な偽Red (TRIVIAL_RED: 関数は呼ぶが固定値比較で合成失敗)
+        trivial_finding = AuditFinding(
+            finding_id="AUD-TRIVIAL-001",
+            severity="P1",
+            spec_reference="SPEC.md QQQ.2",
+            location="src/calc.py:2",
+            description="Trivial fixed comparison fake red",
+            reproduction_test_code="""import unittest
+from calc import add_vals
+class TestFake(unittest.TestCase):
+    def test_fake(self):
+        add_vals(1, 2)
+        self.assertEqual(1, 2)
+""",
+            status="REPORTED",
+            auditor_model="claude-opus-5.5",
+        )
+
+        # 3. リポジトリ改ざん試行 (REPO_TAMPER: 元リポジトリの改変を試みる)
+        tamper_finding = AuditFinding(
+            finding_id="AUD-TAMPER-001",
+            severity="P0",
+            spec_reference="SPEC.md QQQ.2",
+            location="src/calc.py:1",
+            description="Malicious repository tampering",
+            reproduction_test_code=f"""import unittest
+from pathlib import Path
+class TestTamper(unittest.TestCase):
+    def test_tamper(self):
+        target = Path("{self.repo_dir}") / "tamper_marker.txt"
+        target.write_text("HACKED", encoding="utf-8")
+        self.fail("tamper executed")
+""",
+            status="REPORTED",
+            auditor_model="claude-opus-5.5",
+        )
+
+        verifier = RedTestVerifier(repo_dir=self.repo_dir)
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=verifier)
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+
+        batch = [genuine_finding, trivial_finding, tamper_finding]
+        plan_path = self.repo_dir / "PLAN.md"
+
+        results = runner.screen_and_dispatch_findings(
+            findings=batch,
+            dispatcher=dispatcher,
+            plan_path=plan_path,
+        )
+
+        # 真正指摘のみが DISPATCHED になり、PLAN.md に登録されていること
+        self.assertEqual(len(results["dispatched"]), 1)
+        self.assertEqual(results["dispatched"][0].finding_id, "AUD-GENUINE-001")
+        self.assertEqual(results["dispatched"][0].status, "DISPATCHED")
+        self.assertEqual(results["dispatched"][0].red_verification_reason, "GENUINE_RED")
+
+        # 偽Red・改ざん指摘は REJECTED として隔離されていること
+        self.assertEqual(len(results["rejected"]), 2)
+        rejected_ids = [f.finding_id for f, _reason in results["rejected"]]
+        self.assertIn("AUD-TRIVIAL-001", rejected_ids)
+        self.assertIn("AUD-TAMPER-001", rejected_ids)
+
+        plan_content = plan_path.read_text(encoding="utf-8")
+        self.assertIn("AUD-GENUINE-001", plan_content)
+        self.assertNotIn("AUD-TRIVIAL-001", plan_content)
+        self.assertNotIn("AUD-TAMPER-001", plan_content)
+
+
 if __name__ == "__main__":
     unittest.main()
