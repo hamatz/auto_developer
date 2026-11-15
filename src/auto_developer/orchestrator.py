@@ -682,6 +682,7 @@ class NightlyOrchestrator:
                 auditor_cmd_template=self.auditor_cmd_template or "",
                 model_name=self.auditor_model or "claude-opus-5.5",
                 fallback_models=self.fallback_models,
+                maker_model=self.maker_model,
             )
 
         if not auditor:
@@ -713,10 +714,12 @@ class NightlyOrchestrator:
             }
         except (subprocess.SubprocessError, OSError, ValueError, RuntimeError, KeyError, TypeError) as e:
             # 外部監査役の失敗時にも通常開発成果物は破棄せず安全に保全する (Fail-Safe)
-            print(f"Warning: Independent audit stage failed: {e}", file=sys.stderr)
+            err_msg = str(e)
+            status = "AUDIT_PENDING" if "NO_INDEPENDENT_AUDITOR_AVAILABLE" in err_msg else "AUDIT_FAILED"
+            print(f"Warning: Independent audit stage {status.lower()}: {err_msg}", file=sys.stderr)
             return {
-                "status": "AUDIT_FAILED",
-                "error": str(e),
+                "status": status,
+                "error": err_msg,
                 "baseline_commit": baseline_commit,
                 "target_commit": target_commit,
                 "findings": [],

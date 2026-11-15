@@ -244,6 +244,7 @@ class IndependentAuditRunner:
         baseline_commit: str | None = None,
         fallback_models: list[str] | None = None,
         allow_emergency_fallback: bool = False,
+        maker_model: str | None = None,
     ) -> None:
         self.auditor_cmd_template = auditor_cmd_template
         self.model_name = model_name
@@ -252,6 +253,7 @@ class IndependentAuditRunner:
         self.baseline_commit = baseline_commit or (config.baseline_commit if config else None)
         self.fallback_models = list(fallback_models or [])
         self.allow_emergency_fallback = allow_emergency_fallback
+        self.maker_model = maker_model or (config.maker_model if config else "gemini-3.8-flash")
         self.audit_runner = AuditRunner()
 
     def build_audit_prompt(self, spec_content: str, git_diff: str) -> str:
@@ -308,38 +310,38 @@ class IndependentAuditRunner:
                 "No auditor_cmd_template configured for IndependentAuditRunner (Fail-Closed)"
             )
 
+        if self.config:
+            self.config.validate()
+            if self.config.auditor_model != self.model_name:
+                raise ValueError(
+                    f"INDEPENDENT_AUDIT_VIOLATION: Runner model '{self.model_name}' "
+                    f"does not match config.auditor_model '{self.config.auditor_model}'"
+                )
+
+        maker_m = self.config.maker_model if self.config else self.maker_model
         candidate_models = [self.model_name] + [m for m in self.fallback_models if m != self.model_name]
+
+        # SSS.3: モデル独立性を満たす候補のみを選別（同系統モデルの混入・バイパスを排除）
+        independent_candidates: list[str] = []
+        for cand in candidate_models:
+            ok, _ = verify_model_independence(
+                maker_model=maker_m,
+                auditor_model=cand,
+                strict=True,
+            )
+            if ok:
+                independent_candidates.append(cand)
+
+        if not independent_candidates:
+            raise RuntimeError(
+                f"NO_INDEPENDENT_AUDITOR_AVAILABLE: None of candidate models {candidate_models} "
+                f"satisfy model independence from maker_model '{maker_m}'"
+            )
+
         last_error: Exception | None = None
 
-        for candidate in candidate_models:
+        for candidate in independent_candidates:
             is_fallback = (candidate != self.model_name)
-            # 独立性ポリシーの検証
-            if self.config:
-                if not is_fallback:
-                    self.config.validate()
-                    if self.config.auditor_model != self.model_name:
-                        raise ValueError(
-                            f"INDEPENDENT_AUDIT_VIOLATION: Runner model '{self.model_name}' "
-                            f"does not match config.auditor_model '{self.config.auditor_model}'"
-                        )
-                elif not self.allow_emergency_fallback:
-                    ok, _ = verify_model_independence(
-                        maker_model=self.config.maker_model,
-                        auditor_model=candidate,
-                        allow_same_model_override=self.config.allow_same_model_override,
-                        strict=True,
-                    )
-                    if not ok:
-                        continue
-            else:
-                ok, _ = verify_model_independence(
-                    maker_model="gemini-3.8-flash",
-                    auditor_model=candidate,
-                    allow_same_model_override=self.allow_emergency_fallback,
-                    strict=not self.allow_emergency_fallback,
-                )
-                if not ok:
-                    continue
 
             cmd_str = self.auditor_cmd_template.replace("{model}", candidate)
             try:
@@ -373,9 +375,10 @@ class IndependentAuditRunner:
                 last_error = e
                 continue
 
-        if last_error:
-            raise last_error
-        raise RuntimeError("All candidate auditor models failed or were rejected by independence policy")
+        # すべての独立候補モデルがエラーとなった場合、NO_INDEPENDENT_AUDITOR_AVAILABLE として送出 (SSS.3)
+        raise RuntimeError(
+            f"NO_INDEPENDENT_AUDITOR_AVAILABLE: All candidate auditor models failed or were rejected by independence policy. Last error: {last_error}"
+        )
 
     def audit_repository(
         self,
