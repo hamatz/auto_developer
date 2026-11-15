@@ -255,6 +255,7 @@ class IndependentAuditRunner:
         self.allow_emergency_fallback = allow_emergency_fallback
         self.maker_model = maker_model or (config.maker_model if config else "gemini-3.8-flash")
         self.audit_runner = AuditRunner()
+        self.last_run_metadata: dict[str, Any] | None = None
 
     def build_audit_prompt(self, spec_content: str, git_diff: str) -> str:
         return (
@@ -370,6 +371,17 @@ class IndependentAuditRunner:
                     finding.raw_response_hash = raw_response_hash
                     if self.baseline_commit and not finding.baseline_commit:
                         finding.baseline_commit = self.baseline_commit
+
+                self.last_run_metadata = {
+                    "auditor_model": candidate,
+                    "fallback_occurred": is_fallback,
+                    "fallback_from": self.model_name if is_fallback else None,
+                    "maker_model": maker_m,
+                    "independence_verified": True,
+                    "raw_prompt_hash": raw_prompt_hash,
+                    "raw_response_hash": raw_response_hash,
+                    "findings_count": len(findings),
+                }
                 return findings
             except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as e:
                 last_error = e
@@ -467,6 +479,15 @@ class IndependentAuditRunner:
             finding.target_tree_sha = target_tree_sha
             finding.spec_sha256 = spec_sha256
             finding.diff_sha256 = diff_sha256
+
+        if self.last_run_metadata:
+            self.last_run_metadata.update({
+                "baseline_commit": target_baseline,
+                "target_commit": target_sha,
+                "target_tree_sha": target_tree_sha,
+                "spec_sha256": spec_sha256,
+                "diff_sha256": diff_sha256,
+            })
         return findings
 
     def screen_and_dispatch_findings(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import time
@@ -702,6 +703,28 @@ class NightlyOrchestrator:
                 dispatcher=dispatcher,
                 plan_path=self.plan_path,
             )
+            audit_metadata = getattr(auditor, "last_run_metadata", {}) or {}
+
+            # 監査証跡レコードの保存 (SSS.4)
+            audit_rec_dir = self.repo_dir / ".git" / "nightly_evidence" / "records"
+            if not audit_rec_dir.exists():
+                audit_rec_dir = self.repo_dir / ".dev" / "evidence" / "records"
+            try:
+                audit_rec_dir.mkdir(parents=True, exist_ok=True)
+                audit_stage_file = audit_rec_dir / "audit_stage.json"
+                audit_stage_file.write_text(
+                    json.dumps({
+                        "status": "SUCCESS",
+                        "audit_metadata": audit_metadata,
+                        "dispatched_count": len(screen_res["dispatched"]),
+                        "rejected_count": len(screen_res["rejected"]),
+                        "timestamp": time.time(),
+                    }, indent=2),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+
             return {
                 "status": "SUCCESS",
                 "dispatched": screen_res["dispatched"],
@@ -711,6 +734,7 @@ class NightlyOrchestrator:
                 "rejected_count": screen_res["rejected_count"],
                 "baseline_commit": baseline_commit,
                 "target_commit": target_commit,
+                "audit_metadata": audit_metadata,
             }
         except (subprocess.SubprocessError, OSError, ValueError, RuntimeError, KeyError, TypeError) as e:
             # 外部監査役の失敗時にも通常開発成果物は破棄せず安全に保全する (Fail-Safe)
