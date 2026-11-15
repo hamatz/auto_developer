@@ -1484,6 +1484,67 @@ class T(unittest.TestCase):
         is_trivial, _msg = check_trivial_red_ast(code)
         self.assertTrue(is_trivial, "stdlib module via local alias inside try was accepted as a product call guard")
 
+    def test_self_method_call_in_try_is_trivial(self) -> None:
+        """AUD-301 (Sol Phase 62 / Cycle 39): self.id() 等の TestCase 自身に対する呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            self.id()
+        except ValueError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "self.id() inside try was accepted as a product-call exception guard")
+
+    def test_local_helper_call_in_try_is_trivial(self) -> None:
+        """AUD-301 (Sol Phase 62 / Cycle 39): def helper() 等のテスト内ローカルヘルパー呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        def helper():
+            return 1
+        try:
+            helper()
+        except ValueError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "locally defined helper inside try was accepted as a product-call exception guard")
+
+    def test_getattr_stdlib_alias_call_in_try_is_trivial(self) -> None:
+        """AUD-301 (Sol Phase 62 / Cycle 39): f = getattr(os, 'getcwd') 等の getattr 経由標準ライブラリ呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import os
+import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        f = getattr(os, "getcwd")
+        try:
+            f()
+        except OSError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "getattr-derived stdlib callable inside try was accepted as a product-call exception guard")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest
