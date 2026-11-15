@@ -150,15 +150,21 @@ def _has_causal_dependency(node: ast.AST, dependent_vars: set[str]) -> bool:
 
 
 def _is_product_or_causal_call(
-    call: ast.Call, dependent_vars: set[str] | None = None
+    call: ast.Call,
+    dependent_vars: set[str] | None = None,
+    func_node: ast.AST | None = None,
 ) -> bool:
-    """呼出がプロダクトコードまたは因果依存変数に紐づく有効な呼出かを判定する (機能OOO.2 / AUD-003 Cycle 33 / AUD-002 Cycle 34 / AUD-020 Cycle 36)。
+    """呼出がプロダクトコードまたは因果依存変数に紐づく有効な呼出かを判定する (機能OOO.2 / AUD-003 Cycle 33 / AUD-002 Cycle 34 / AUD-020 Cycle 36 / AUD-101 Cycle 37)。
     アサーション呼出、因果依存のない孤立した Python 組み込み関数呼出 (int("1") など)、
     リテラル・定数に対するメソッド呼出 ("1".upper() など)、
-    および標準ライブラリモジュール呼出 (os.getcwd() など) は除外する。
+    および標準ライブラリモジュール呼出 (os.getcwd(), o.getcwd(), getcwd() など) は除外する。
     """
     if _is_assert_call(call):
         return False
+
+    imported_symbols: dict[str, str] = getattr(func_node, "_imported_symbols", {}) if func_node else {}
+    imported_modules: dict[str, str] = getattr(func_node, "_imported_modules", {}) if func_node else {}
+
     if isinstance(call.func, ast.Attribute):
         # builtins モジュール経由の呼出 (builtins.int(...) 等)
         if isinstance(call.func.value, ast.Name) and call.func.value.id in ("builtins", "__builtins__"):
@@ -171,13 +177,22 @@ def _is_product_or_causal_call(
         is_const, _ = _eval_constant_expr(call.func.value)
         if is_const:
             return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
-        # 標準ライブラリモジュール呼出 (os.getcwd(), os.path.join(), math.sqrt() 等)
+        # 標準ライブラリモジュール呼出 (os.getcwd(), os.path.join(), math.sqrt(), または別名 o.getcwd() 等: AUD-101)
         root_name = _get_root_name(call.func)
-        if root_name in _STDLIB_MODULE_NAMES:
+        orig_mod = imported_modules.get(root_name) if root_name else None
+        if root_name in _STDLIB_MODULE_NAMES or orig_mod in _STDLIB_MODULE_NAMES:
             return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
         return True
-    if isinstance(call.func, ast.Name) and call.func.id not in _BUILTIN_NAMES:
+
+    if isinstance(call.func, ast.Name):
+        if call.func.id in _BUILTIN_NAMES:
+            return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
+        # from os import getcwd などの標準ライブラリからの直接 import 関数の呼出 (AUD-101)
+        from_mod = imported_symbols.get(call.func.id)
+        if from_mod in _STDLIB_MODULE_NAMES:
+            return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
         return True
+
     return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
 
 
@@ -190,7 +205,7 @@ def _is_in_try_block_with_call(
             in_body = any(sub is call_node for item in n.body for sub in ast.walk(item))
             if in_body:
                 has_call = any(
-                    isinstance(sub, ast.Call) and _is_product_or_causal_call(sub, dependent_vars)
+                    isinstance(sub, ast.Call) and _is_product_or_causal_call(sub, dependent_vars, func_node)
                     for item in n.body
                     for sub in ast.walk(item)
                 )
@@ -230,7 +245,7 @@ def _is_preceded_by_try_with_call(
                         for prev in stmts[:idx]:
                             if isinstance(prev, ast.Try):
                                 has_call = any(
-                                    isinstance(sub, ast.Call) and _is_product_or_causal_call(sub, dependent_vars)
+                                    isinstance(sub, ast.Call) and _is_product_or_causal_call(sub, dependent_vars, func_node)
                                     for item in prev.body
                                     for sub in ast.walk(item)
                                 )
@@ -513,11 +528,29 @@ def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
     else:
         return False, ""
 
+    imported_symbols: dict[str, str] = {}
+    imported_modules: dict[str, str] = {}
+    for stmt in ast.walk(tree):
+        if isinstance(stmt, ast.Import):
+            for alias in stmt.names:
+                root_pkg = alias.name.split(".")[0]
+                alias_name = alias.asname or alias.name
+                imported_modules[alias_name] = root_pkg
+                imported_symbols[alias_name] = root_pkg
+        elif isinstance(stmt, ast.ImportFrom):
+            root_pkg = stmt.module.split(".")[0] if stmt.module else ""
+            for alias in stmt.names:
+                alias_name = alias.asname or alias.name
+                imported_symbols[alias_name] = root_pkg
+
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         if not node.name.startswith("test"):
             continue
+
+        node._imported_symbols = imported_symbols  # type: ignore[attr-defined,union-attr]
+        node._imported_modules = imported_modules  # type: ignore[attr-defined,union-attr]
 
         var_env: dict[str, Any] = {}
         dependent_vars: set[str] = set()
