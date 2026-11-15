@@ -116,6 +116,10 @@ class AuditFinding:
     target_tree_sha: str | None = None
     spec_sha256: str | None = None
     diff_sha256: str | None = None
+    raw_prompt_hash: str | None = None
+    raw_response_hash: str | None = None
+    fallback_occurred: bool = False
+    fallback_from: str | None = None
     # NOTE: auditor_model は監査ランナー設定で渡されたモデル識別子の記録値であり、
     # 外部プロバイダーの実行時同一性を暗号学的に証明するものではない (HHH.2)。
 
@@ -142,6 +146,10 @@ class AuditFinding:
             target_tree_sha=data.get("target_tree_sha"),
             spec_sha256=data.get("spec_sha256"),
             diff_sha256=data.get("diff_sha256"),
+            raw_prompt_hash=data.get("raw_prompt_hash"),
+            raw_response_hash=data.get("raw_response_hash"),
+            fallback_occurred=data.get("fallback_occurred", False),
+            fallback_from=data.get("fallback_from"),
         )
 
 
@@ -234,12 +242,16 @@ class IndependentAuditRunner:
         timeout_sec: int = 600,
         config: AuditConfig | None = None,
         baseline_commit: str | None = None,
+        fallback_models: list[str] | None = None,
+        allow_emergency_fallback: bool = False,
     ) -> None:
         self.auditor_cmd_template = auditor_cmd_template
         self.model_name = model_name
         self.timeout_sec = timeout_sec
         self.config = config
         self.baseline_commit = baseline_commit or (config.baseline_commit if config else None)
+        self.fallback_models = list(fallback_models or [])
+        self.allow_emergency_fallback = allow_emergency_fallback
         self.audit_runner = AuditRunner()
 
     def build_audit_prompt(self, spec_content: str, git_diff: str) -> str:
@@ -285,51 +297,85 @@ class IndependentAuditRunner:
         return self.audit_runner.parse_findings(data)
 
     def audit(self, spec_content: str, git_diff: str) -> list[AuditFinding]:
+        import hashlib
         import subprocess
 
-        # 独立性ポリシーの事前検証 (FFF.3, GGG.3)
-        if self.config:
-            self.config.validate()
-            if self.config.auditor_model != self.model_name:
-                raise ValueError(
-                    f"INDEPENDENT_AUDIT_VIOLATION: Runner model '{self.model_name}' "
-                    f"does not match config.auditor_model '{self.config.auditor_model}'"
-                )
-        else:
-            ok, reason = verify_model_independence(
-                maker_model="gemini-3.8-flash",
-                auditor_model=self.model_name,
-                strict=True,
-            )
-            if not ok:
-                raise ValueError(reason)
+        prompt = self.build_audit_prompt(spec_content, git_diff)
+        raw_prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
         if not self.auditor_cmd_template:
             raise RuntimeError(
                 "No auditor_cmd_template configured for IndependentAuditRunner (Fail-Closed)"
             )
 
-        prompt = self.build_audit_prompt(spec_content, git_diff)
-        cmd_str = self.auditor_cmd_template.replace("{model}", self.model_name)
-        proc = subprocess.run(
-            ["bash", "-c", cmd_str],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=self.timeout_sec,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"Auditor execution failed with exit {proc.returncode}:\n{proc.stdout}\n{proc.stderr}"
-            )
-        output = proc.stdout
-        findings = self.parse_response(output)
-        for finding in findings:
-            finding.auditor_model = self.model_name
-            if self.baseline_commit and not finding.baseline_commit:
-                finding.baseline_commit = self.baseline_commit
-        return findings
+        candidate_models = [self.model_name] + [m for m in self.fallback_models if m != self.model_name]
+        last_error: Exception | None = None
+
+        for candidate in candidate_models:
+            is_fallback = (candidate != self.model_name)
+            # 独立性ポリシーの検証
+            if self.config:
+                if not is_fallback:
+                    self.config.validate()
+                    if self.config.auditor_model != self.model_name:
+                        raise ValueError(
+                            f"INDEPENDENT_AUDIT_VIOLATION: Runner model '{self.model_name}' "
+                            f"does not match config.auditor_model '{self.config.auditor_model}'"
+                        )
+                elif not self.allow_emergency_fallback:
+                    ok, _ = verify_model_independence(
+                        maker_model=self.config.maker_model,
+                        auditor_model=candidate,
+                        allow_same_model_override=self.config.allow_same_model_override,
+                        strict=True,
+                    )
+                    if not ok:
+                        continue
+            else:
+                ok, _ = verify_model_independence(
+                    maker_model="gemini-3.8-flash",
+                    auditor_model=candidate,
+                    allow_same_model_override=self.allow_emergency_fallback,
+                    strict=not self.allow_emergency_fallback,
+                )
+                if not ok:
+                    continue
+
+            cmd_str = self.auditor_cmd_template.replace("{model}", candidate)
+            try:
+                proc = subprocess.run(
+                    ["bash", "-c", cmd_str],
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=self.timeout_sec,
+                )
+                if proc.returncode != 0:
+                    err_msg = f"Auditor '{candidate}' failed with exit {proc.returncode}:\n{proc.stdout}\n{proc.stderr}"
+                    last_error = RuntimeError(err_msg)
+                    continue
+
+                output = proc.stdout
+                raw_response_hash = hashlib.sha256(output.encode("utf-8")).hexdigest()
+                findings = self.parse_response(output)
+                for finding in findings:
+                    finding.auditor_model = candidate
+                    if is_fallback:
+                        finding.fallback_occurred = True
+                        finding.fallback_from = self.model_name
+                    finding.raw_prompt_hash = raw_prompt_hash
+                    finding.raw_response_hash = raw_response_hash
+                    if self.baseline_commit and not finding.baseline_commit:
+                        finding.baseline_commit = self.baseline_commit
+                return findings
+            except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as e:
+                last_error = e
+                continue
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("All candidate auditor models failed or were rejected by independence policy")
 
     def audit_repository(
         self,

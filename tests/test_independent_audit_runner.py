@@ -721,5 +721,76 @@ class TestCommitBoundSpecAndAuditInputProvenance(unittest.TestCase):
         self.assertEqual(loaded.diff_sha256, f.diff_sha256)
 
 
+class TestResilientModelFallbackAndAuditEvidence(unittest.TestCase):
+    """機能RRR.3: モデル上限・障害時の弾力的フォールバックと実外部モデル監査・Level 7閉ループ実証。"""
+
+    def setUp(self) -> None:
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.repo_dir = Path(self.tmp_dir.name)
+        import subprocess
+
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Audit Runner"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "audit@example.com"], cwd=self.repo_dir, check=True)
+
+        (self.repo_dir / "SPEC.md").write_text("# Spec RRR.3\nMust handle errors.\n", encoding="utf-8")
+        src_dir = self.repo_dir / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        (src_dir / "mod.py").write_text("def val(): return 10\n", encoding="utf-8")
+
+        subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init base"], cwd=self.repo_dir, check=True)
+        res_base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_dir, check=True, capture_output=True, text=True)
+        self.baseline_sha = res_base.stdout.strip()
+
+        (src_dir / "mod.py").write_text("def val(): return 20\n", encoding="utf-8")
+        subprocess.run(["git", "commit", "-am", "target mod"], cwd=self.repo_dir, check=True)
+        res_target = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_dir, check=True, capture_output=True, text=True)
+        self.target_sha = res_target.stdout.strip()
+
+    def tearDown(self) -> None:
+        self.tmp_dir.cleanup()
+
+    def test_audit_fallback_on_primary_model_failure(self) -> None:
+        """RRR.3: プライマリモデル(Opus)が上限/障害で失敗した場合にフォールバックモデル(Hydrogen等)へ安全退避して監査を完走すること。"""
+        from auto_developer.audit import IndependentAuditRunner
+
+        # モデル名が claude-opus のときは失敗し、gemini-4-hydrogen のときは成功するコマンド
+        cmd_template = (
+            'if [ "{model}" = "claude-opus-5.5" ]; then '
+            '  echo "Rate limit / Quota exceeded" >&2; exit 42; '
+            'else '
+            '  echo \'[{"finding_id": "FALLBACK-001", "severity": "P1", "spec_reference": "SPEC.md RRR.3", '
+            '          "location": "src/mod.py:1", "description": "Fallback finding", '
+            '          "reproduction_test_code": "import unittest\\nclass T(unittest.TestCase):\\n    def test_x(self): self.fail()", '
+            '          "status": "REPORTED"}]\'; '
+            'fi'
+        )
+
+        runner = IndependentAuditRunner(
+            auditor_cmd_template=cmd_template,
+            model_name="claude-opus-5.5",
+            fallback_models=["gemini-4-hydrogen", "gemini-4-argon"],
+            allow_emergency_fallback=True,
+            baseline_commit=self.baseline_sha,
+        )
+
+        findings = runner.audit_repository(
+            repo_dir=self.repo_dir,
+            target_commit=self.target_sha,
+            baseline_commit=self.baseline_sha,
+        )
+
+        self.assertEqual(len(findings), 1)
+        f = findings[0]
+        self.assertEqual(f.finding_id, "FALLBACK-001")
+        # 実際に成功したフォールバックモデル名が記録されていること
+        self.assertEqual(f.auditor_model, "gemini-4-hydrogen")
+        self.assertTrue(f.fallback_occurred)
+        self.assertEqual(f.fallback_from, "claude-opus-5.5")
+        self.assertIsNotNone(f.raw_prompt_hash)
+        self.assertIsNotNone(f.raw_response_hash)
+
+
 if __name__ == "__main__":
     unittest.main()
