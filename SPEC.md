@@ -668,7 +668,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. 独立監査 Evidence Bundle 生成と v0.7.0 本格リリース確定 (QQQ.4):
      - 実外部監査および Level 7 自己改善の証跡を含む全自動検証ゲート合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成・検証。
      - v0.3.0 からの飛躍的進化（真の自律・多層防壁・自己改善・マルチLLM独立監査）を実証した v0.7.0 の本格リリースを確定する。
-- [ ] 機能RRR (Stage 7 実外部モデル独立監査の本番統合・SPECコミット拘束・フォールバック自律防御とv0.7.0確定 Stage 7 Live Multi-LLM Audit Integration, Commit-Bound SPEC, Resilient Fallback, and v0.7.0 Release Finalization):
+- [x] 機能RRR (Stage 7 実外部モデル独立監査の本番統合・SPECコミット拘束・フォールバック自律防御とv0.7.0確定 Stage 7 Live Multi-LLM Audit Integration, Commit-Bound SPEC, Resilient Fallback, and v0.7.0 Release Finalization):
   1. 監査対象 SPEC のコミット拘束と監査入力ハッシュの厳格証明 (RRR.1 / Sol氏 Phase 57 P1指摘):
      - `audit_repository(repo_dir, target_commit="HEAD", baseline_commit=...)` において、`SPEC.md` の内容を作業ツリーからではなく対象コミット（`git show <target_commit>:SPEC.md`）から厳密に取得する。
      - 監査入力メタデータ（`target_commit`, `target_tree_sha`, `baseline_commit`, `spec_sha256`, `diff_sha256`）を `AuditStore` および Finding メタデータに完全拘束し、作業ツリーの未コミット変更による監査入力乖離を物理遮断する。
@@ -680,6 +680,22 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 外部モデルによる実監査の入出力ハッシュ、モデル名、Finding、Red検証結果、Maker自律修正、After Green コミット拘束証明を Evidence に拘束し、実外部モデル独立監査の完走を証明する。
   4. 独立監査 Evidence Bundle 生成と v0.7.0 正式リリース確定 (RRR.4):
      - 全自動検証ゲート合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成・検証。
+     - v0.3.0 からの飛躍的進化（多層防壁・自己改善・マルチLLM独立監査の実稼働）を証明した v0.7.0 正式リリースを確定する。
+- [ ] 機能SSS (Stage 7 独立監査CLI完全化・厳格Fail-Closed・異系統モデル堅持・実監査実証とv0.7.0最終確定 Stage 7 Audit CLI Completion, Strict Fail-Closed Spec, True Model Independence, Live Audit Evidence, and v0.7.0 Final Release):
+  1. CLI からの独立監査有効化・設定オプション追加と起動前設定バリデーション (SSS.1 / Sol氏 Phase 58 P1指摘):
+     - `cli.py` に `--enable-audit`, `--auditor-cmd`, `--auditor-model`, `--auditor-fallback-models`, `--audit-baseline` オプションを追加し、CLI 通常起動から独立監査ステージを完全に制御可能にする。
+     - `NightlyOrchestrator` の初期化において `auditor_cmd_template`, `fallback_models` 等の受け渡しをサポート。
+     - ジョブ開始前設定検証（Fail-Closed）：`--enable-audit` が指定されているにもかかわらず実動モード（非 mock）で `--auditor-cmd` が未設定の場合は、ジョブ開始前に設定エラー（Exit 2）で停止。また `maker_model` と `auditor_model` が同系統（独立性違反）の場合も開始前に拒絶。
+  2. audit_repository における SPEC コミット拘束の厳格化とフォールバック完全撤廃 (SSS.2 / Sol氏 Phase 58 P1指摘):
+     - `audit_repository()` において、`git show <target_commit>:SPEC.md` が失敗（returncode != 0）した場合の作業ツリー `SPEC.md` や `spec_path` へのフォールバックを完全に撤廃する。
+     - 対象コミット内に `SPEC.md` が存在しない場合は直ちに `FileNotFoundError(f"SPEC_NOT_FOUND_IN_COMMIT: SPEC.md not found in target commit {target_sha}")` を送出し、コミット拘束が保証されない監査を物理遮断する（Fail-Closed）。
+  3. モデルフォールバック時の同系統モデル排除と異系統モデル堅持 (SSS.3 / Sol氏 Phase 58 P1指摘 & ユーザー要件):
+     - `IndependentAuditRunner` において、`allow_emergency_fallback` による独立性判定の免除・同一ファミリ許可を撤廃し、フォールバック候補に対しても厳格な `verify_model_independence(maker_model, candidate, strict=True)` を強制する。
+     - Maker が Gemini 系の場合、Gemini 4.0 (Argon/Hydrogen) 等を含む同系統モデルへのフォールバックを排除し、別系統（Claude / GPT等）のみを有効な候補として扱う。
+     - 独立性を満たす利用可能な代替モデルが存在しない場合は、同系統モデルによる「偽の独立監査」を実行せず、安全に `RuntimeError("NO_INDEPENDENT_AUDITOR_AVAILABLE")` を送出して `run_audit_stage` が `AUDIT_PENDING` として保全・記録し、次期実行に安全に持ち越す。
+  4. 実外部異系統 LLM による監査実績の証跡記録・全検証ゲート合格・最終 Evidence Bundle 生成と v0.7.0 正式リリース確定 (SSS.4 / Sol氏 Phase 58 P0指摘):
+     - 外部異系統モデル（またはプロバイダー識別子と結びついた実監査実行）による監査実行実績（入力プロンプトハッシュ、レスポンスハッシュ、モデル識別子、プロバイダー情報、Findings count、完了日時等）を AuditStage メタデータおよび Evidence Record に記録・永続化する。
+     - `NIGHTLY_REPORT.md` を更新し、全自動検証ゲート（350+ テスト、Ruff、Mypy）合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成・検証。
      - v0.3.0 からの飛躍的進化（多層防壁・自己改善・マルチLLM独立監査の実稼働）を証明した v0.7.0 正式リリースを確定する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
