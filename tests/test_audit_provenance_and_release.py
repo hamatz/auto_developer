@@ -1446,6 +1446,63 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         ids = sorted(r.get("finding_id") for r in result)
         self.assertEqual(ids, ["AUD-MB-001", "AUD-MB-002"])
 
+    def test_truncated_envelope_block_followed_by_findings_block_is_rejected(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 23): エンベロープブロックが stop_reason: max_tokens の場合、後続ブロックに指摘配列があっても envelope validation により AUDIT_INTERRUPTED で拒絶されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        env = {
+            "mode": "LIVE",
+            "provider": "anthropic",
+            "status": "COMPLETED",
+            "stop_reason": "max_tokens",
+            "execution_id": "msg_trunc_123",
+            "provider_request_id": "msg_trunc_123",
+        }
+        f1 = {
+            "finding_id": "AUD-TRUNC-001",
+            "severity": "P1",
+            "spec_reference": "VVV.1",
+            "location": "src/a.py:10",
+            "description": "bug description",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        text = (
+            "Envelope:\n```json\n" + json.dumps(env) + "\n```\n\n"
+            "Findings:\n```json\n" + json.dumps([f1]) + "\n```"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            runner.parse_response(text)
+        self.assertIn("AUDIT_INTERRUPTED", str(ctx.exception))
+
+    def test_failed_envelope_block_followed_by_findings_block_is_rejected(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 23): エンベロープブロックが status: FAILED の場合、後続ブロックに指摘があっても envelope validation により AUDIT_FAILED で拒絶されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        env = {
+            "mode": "LIVE",
+            "provider": "anthropic",
+            "status": "FAILED",
+            "error": "Rate limit exceeded",
+            "stop_reason": "end_turn",
+            "execution_id": "msg_fail_123",
+            "provider_request_id": "msg_fail_123",
+        }
+        f1 = {
+            "finding_id": "AUD-FAIL-001",
+            "severity": "P1",
+            "spec_reference": "VVV.1",
+            "location": "src/a.py:10",
+            "description": "bug description",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        text = (
+            "Envelope:\n```json\n" + json.dumps(env) + "\n```\n\n"
+            "Findings:\n```json\n" + json.dumps([f1]) + "\n```"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            runner.parse_response(text)
+        self.assertIn("AUDIT_FAILED", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

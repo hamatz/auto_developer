@@ -270,192 +270,234 @@ class IndependentAuditRunner:
         import re
 
         clean_output = output.strip()
-        data: Any = None
-        # 1. まず output 全体が有効な JSON（Envelope や JSON 配列）であるかを直接試行
-        try:
-            data = json.loads(clean_output)
-        except json.JSONDecodeError:
-            pass
-
-        # 2. Markdown コードブロックの探索（複数ブロック走査＆全件集約）
-        all_code_blocks = list(re.finditer(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", clean_output, re.DOTALL))
+        found_envelope: dict[str, Any] | None = None
+        collected_findings: list[dict[str, Any]] = []
         empty_block_found = False
         has_decode_error = False
         empty_envelope: dict[str, Any] | None = None
 
-        if data is None and all_code_blocks:
-            collected_findings: list[dict[str, Any]] = []
-            for m in all_code_blocks:
-                content = m.group(2).strip()
-                if not content.startswith(("[", "{")):
-                    continue
-                try:
-                    parsed = json.loads(content)
-                    if isinstance(parsed, list):
-                        findings = [item for item in parsed if isinstance(item, dict)]
+        # 1. まず output 全体が有効な JSON（Envelope や JSON 配列）であるかを直接試行
+        try:
+            parsed = json.loads(clean_output)
+            if isinstance(parsed, list):
+                findings = [item for item in parsed if isinstance(item, dict)]
+                if findings:
+                    collected_findings.extend(findings)
+                elif len(parsed) == 0:
+                    empty_block_found = True
+            elif isinstance(parsed, dict):
+                is_prov = bool(
+                    parsed.get("mode")
+                    or parsed.get("execution_id")
+                    or parsed.get("provider_request_id")
+                    or parsed.get("provider")
+                    or ("status" in parsed and "finding_id" not in parsed and "severity" not in parsed)
+                    or parsed.get("stop_reason")
+                )
+                if is_prov:
+                    found_envelope = parsed
+                    if "findings" in parsed and isinstance(parsed["findings"], list):
+                        findings = [item for item in parsed["findings"] if isinstance(item, dict)]
                         if findings:
                             collected_findings.extend(findings)
-                        elif len(parsed) == 0:
+                        elif len(parsed["findings"]) == 0:
                             empty_block_found = True
-                    elif isinstance(parsed, dict):
-                        is_prov = bool(
-                            parsed.get("mode")
-                            or parsed.get("execution_id")
-                            or parsed.get("provider_request_id")
-                            or parsed.get("provider")
-                            or ("status" in parsed and "finding_id" not in parsed and "severity" not in parsed)
-                            or parsed.get("stop_reason")
-                        )
-                        if is_prov:
-                            if data is None:
-                                data = parsed
-                        elif "finding_id" in parsed:
-                            collected_findings.append(parsed)
-                        elif "findings" in parsed and isinstance(parsed["findings"], list):
-                            findings = [item for item in parsed["findings"] if isinstance(item, dict)]
+                elif "finding_id" in parsed and "findings" not in parsed:
+                    collected_findings.append(parsed)
+                elif "findings" in parsed and isinstance(parsed["findings"], list):
+                    found_envelope = parsed
+                    findings = [item for item in parsed["findings"] if isinstance(item, dict)]
+                    if findings:
+                        collected_findings.extend(findings)
+                    elif len(parsed["findings"]) == 0:
+                        empty_block_found = True
+                else:
+                    found_envelope = parsed
+        except json.JSONDecodeError:
+            # 2. Markdown コードブロックの探索（複数ブロック走査＆全件集約）
+            all_code_blocks = list(re.finditer(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", clean_output, re.DOTALL))
+            if all_code_blocks:
+                for m in all_code_blocks:
+                    content = m.group(2).strip()
+                    if not content.startswith(("[", "{")):
+                        continue
+                    try:
+                        parsed = json.loads(content)
+                        if isinstance(parsed, list):
+                            findings = [item for item in parsed if isinstance(item, dict)]
                             if findings:
                                 collected_findings.extend(findings)
-                            elif len(parsed["findings"]) == 0:
+                            elif len(parsed) == 0:
                                 empty_block_found = True
-                except json.JSONDecodeError:
+                        elif isinstance(parsed, dict):
+                            is_prov = bool(
+                                parsed.get("mode")
+                                or parsed.get("execution_id")
+                                or parsed.get("provider_request_id")
+                                or parsed.get("provider")
+                                or ("status" in parsed and "finding_id" not in parsed and "severity" not in parsed)
+                                or parsed.get("stop_reason")
+                            )
+                            if is_prov:
+                                if found_envelope is None:
+                                    found_envelope = parsed
+                                if "findings" in parsed and isinstance(parsed["findings"], list):
+                                    findings = [item for item in parsed["findings"] if isinstance(item, dict)]
+                                    if findings:
+                                        collected_findings.extend(findings)
+                                    elif len(parsed["findings"]) == 0:
+                                        empty_block_found = True
+                            elif "finding_id" in parsed and "findings" not in parsed:
+                                collected_findings.append(parsed)
+                            elif "findings" in parsed and isinstance(parsed["findings"], list):
+                                if found_envelope is None:
+                                    found_envelope = parsed
+                                findings = [item for item in parsed["findings"] if isinstance(item, dict)]
+                                if findings:
+                                    collected_findings.extend(findings)
+                                elif len(parsed["findings"]) == 0:
+                                    empty_block_found = True
+                    except json.JSONDecodeError:
+                        has_decode_error = True
+
+                if has_decode_error:
+                    raise ValueError("Malformed JSON in audit response code block")
+
+            # 3. コードブロック外またはコードブロックが存在しない場合の生構造探索
+            if found_envelope is None or not collected_findings:
+                text_outside = re.sub(r"```(?:[a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", "", clean_output, flags=re.DOTALL)
+                decoder = json.JSONDecoder()
+
+                # プロバイダエンベロープ辞書を最優先で探索（ログ行混入時でも外側封筒を厳格評価）
+                if found_envelope is None:
+                    for m_brace in re.finditer(r"\{", text_outside):
+                        s_idx = m_brace.start()
+                        try:
+                            parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
+                            if isinstance(parsed_out, dict):
+                                is_prov = bool(
+                                    parsed_out.get("mode")
+                                    or parsed_out.get("execution_id")
+                                    or parsed_out.get("provider_request_id")
+                                    or parsed_out.get("provider")
+                                    or ("status" in parsed_out and "finding_id" not in parsed_out and "severity" not in parsed_out)
+                                    or parsed_out.get("stop_reason")
+                                )
+                                if is_prov:
+                                    found_envelope = parsed_out
+                                    if "findings" in parsed_out and isinstance(parsed_out["findings"], list):
+                                        findings = [item for item in parsed_out["findings"] if isinstance(item, dict)]
+                                        if findings and not collected_findings:
+                                            collected_findings.extend(findings)
+                                        elif len(parsed_out["findings"]) == 0:
+                                            empty_block_found = True
+                                    break
+                        except json.JSONDecodeError:
+                            pass
+
+                # 配列構造の探索
+                if not collected_findings:
+                    for m_bracket in re.finditer(r"\[", text_outside):
+                        s_idx = m_bracket.start()
+                        try:
+                            parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
+                            if isinstance(parsed_out, list):
+                                findings = [item for item in parsed_out if isinstance(item, dict)]
+                                if findings:
+                                    collected_findings.extend(findings)
+                                    break
+                        except json.JSONDecodeError:
+                            pass
+
+                # 非プロバイダ辞書（{"findings": [...]} または単一指摘）の探索
+                if not collected_findings:
+                    for m_brace in re.finditer(r"\{", text_outside):
+                        s_idx = m_brace.start()
+                        try:
+                            parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
+                            if isinstance(parsed_out, dict):
+                                findings_fld = parsed_out.get("findings")
+                                if isinstance(findings_fld, list) and len(findings_fld) > 0:
+                                    if found_envelope is None:
+                                        found_envelope = parsed_out
+                                    collected_findings.extend([item for item in findings_fld if isinstance(item, dict)])
+                                    break
+                                elif isinstance(findings_fld, list) and len(findings_fld) == 0:
+                                    if found_envelope is None:
+                                        found_envelope = parsed_out
+                                    if empty_envelope is None:
+                                        empty_envelope = parsed_out
+                                elif "finding_id" in parsed_out:
+                                    collected_findings.append(parsed_out)
+                                    break
+                        except json.JSONDecodeError:
+                            pass
+
+                if not collected_findings and re.search(
+                    r"(?:\[\s*\{|\{\s*[\"'](?:finding_id|findings)[\"'])", text_outside
+                ):
                     has_decode_error = True
 
-            if has_decode_error:
-                raise ValueError("Malformed JSON in audit response code block")
+            if has_decode_error and not collected_findings:
+                raise ValueError("Malformed JSON in audit response")
 
-            if collected_findings:
-                data = collected_findings
+            if not collected_findings and not empty_block_found and found_envelope is None and empty_envelope is not None:
+                found_envelope = empty_envelope
 
-        # 3. コードブロック外またはコードブロックが存在しない場合の生構造探索
-        if data is None:
-            text_outside = re.sub(r"```(?:[a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", "", clean_output, flags=re.DOTALL)
-            decoder = json.JSONDecoder()
+            if not collected_findings and not empty_block_found and found_envelope is None and re.fullmatch(r"(?:```(?:json)?\s*)?\[\s*\](?:\s*```)?", clean_output):
+                empty_block_found = True
 
-            # プロバイダエンベロープ辞書を最優先で探索（ログ行混入時でも外側封筒を厳格評価）
-            for m_brace in re.finditer(r"\{", text_outside):
-                s_idx = m_brace.start()
-                try:
-                    parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
-                    if isinstance(parsed_out, dict):
-                        is_prov = bool(
-                            parsed_out.get("mode")
-                            or parsed_out.get("execution_id")
-                            or parsed_out.get("provider_request_id")
-                            or parsed_out.get("provider")
-                            or ("status" in parsed_out and "finding_id" not in parsed_out and "severity" not in parsed_out)
-                            or parsed_out.get("stop_reason")
-                        )
-                        if is_prov:
-                            data = parsed_out
-                            break
-                except json.JSONDecodeError:
-                    pass
+            if not collected_findings and not empty_block_found and found_envelope is None:
+                raise ValueError(f"Could not parse valid JSON from audit response: {output[:200]}")
 
-            # 配列構造の探索
-            if data is None:
-                for m_bracket in re.finditer(r"\[", text_outside):
-                    s_idx = m_bracket.start()
-                    try:
-                        parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
-                        if isinstance(parsed_out, list):
-                            findings = [item for item in parsed_out if isinstance(item, dict)]
-                            if findings:
-                                data = findings
-                                break
-                    except json.JSONDecodeError:
-                        pass
+        # Envelope メタデータ検証と保持（指摘配列とは独立して常に検証）
+        if found_envelope is not None:
+            exec_id = found_envelope.get("execution_id") or found_envelope.get("id")
+            prov_req_id = found_envelope.get("provider_request_id") or found_envelope.get("id")
+            raw_mode = found_envelope.get("mode")
+            status = found_envelope.get("status")
+            stop_reason = found_envelope.get("stop_reason")
+            has_prov_metadata = bool(raw_mode or exec_id or prov_req_id or found_envelope.get("provider") or status or stop_reason)
 
-            # 非プロバイダ辞書（{"findings": [...]} または単一指摘）の探索
-            if data is None:
-                for m_brace in re.finditer(r"\{", text_outside):
-                    s_idx = m_brace.start()
-                    try:
-                        parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
-                        if isinstance(parsed_out, dict):
-                            findings_fld = parsed_out.get("findings")
-                            if isinstance(findings_fld, list) and len(findings_fld) > 0:
-                                data = parsed_out
-                                break
-                            elif isinstance(findings_fld, list) and len(findings_fld) == 0:
-                                if empty_envelope is None:
-                                    empty_envelope = parsed_out
-                            elif "finding_id" in parsed_out:
-                                data = parsed_out
-                                break
-                    except json.JSONDecodeError:
-                        pass
+            # AUD-002 (Sol Phase 62 / Cycle 11 & 12): Envelope status validation (Fail-Closed: reject non-COMPLETED status)
+            if status and status != "COMPLETED":
+                raise ValueError(
+                    f"AUDIT_{status}: Live audit envelope returned non-completed status '{status}': {found_envelope.get('error') or ''}"
+                )
 
-            if data is None and re.search(r"(?:\[\s*\{|\{\s*[\"'](?:finding_id|findings)[\"'])", text_outside):
-                has_decode_error = True
+            if has_prov_metadata:
+                mode = raw_mode or ("MOCK" if (exec_id and str(exec_id).startswith("mock_")) else "LIVE")
 
-        if has_decode_error and data is None:
-            raise ValueError("Malformed JSON in audit response")
-
-        if data is None and empty_envelope is not None:
-            data = empty_envelope
-
-        if data is None and empty_block_found:
-            data = []
-
-        # 4. 厳格な単一コードブロックまたは空配列
-        if data is None and re.fullmatch(r"(?:```(?:json)?\s*)?\[\s*\](?:\s*```)?", clean_output):
-            data = []
-
-        if data is None:
-            raise ValueError(f"Could not parse valid JSON from audit response: {output[:200]}")
-
-        if isinstance(data, dict):
-            # If the dict is a single finding object (has finding_id and not findings), wrap it directly
-            if "finding_id" in data and "findings" not in data:
-                self._last_envelope_metadata = None
-                data = [data]
-            else:
-                # TTT.1 / UUU.1: エンベロープメタデータ（mode, provider, execution_id, provider_request_id, status 等）の抽出・保持
-                exec_id = data.get("execution_id") or data.get("id")
-                prov_req_id = data.get("provider_request_id") or data.get("id")
-                raw_mode = data.get("mode")
-                status = data.get("status")
-                stop_reason = data.get("stop_reason")
-                has_prov_metadata = bool(raw_mode or exec_id or prov_req_id or data.get("provider") or status or stop_reason)
-
-                # AUD-002 (Sol Phase 62 / Cycle 11 & 12): Envelope status validation (Fail-Closed: reject non-COMPLETED status)
-                if status and status != "COMPLETED":
+                # AUD-001 / AUD-002 / VVV.1 / Sol Phase 61 P1: mode: LIVE 時の stop_reason 厳格検証（Fail-Closed allow-list）
+                if (mode == "LIVE" or stop_reason is not None) and (not stop_reason or stop_reason != "end_turn"):
                     raise ValueError(
-                        f"AUDIT_{status}: Live audit envelope returned non-completed status '{status}': {data.get('error') or ''}"
+                        f"AUDIT_INTERRUPTED: Live audit envelope has invalid stop_reason '{stop_reason}' (expected 'end_turn')"
                     )
 
-                if has_prov_metadata:
-                    mode = raw_mode or ("MOCK" if (exec_id and str(exec_id).startswith("mock_")) else "LIVE")
-
-                    # AUD-001 / AUD-002 / VVV.1 / Sol Phase 61 P1: mode: LIVE 時の stop_reason 厳格検証（Fail-Closed allow-list）
-                    if (mode == "LIVE" or stop_reason is not None) and (not stop_reason or stop_reason != "end_turn"):
-                        raise ValueError(
-                            f"AUDIT_INTERRUPTED: Live audit envelope has invalid stop_reason '{stop_reason}' (expected 'end_turn')"
-                        )
-
-                    self._last_envelope_metadata = {
-                        "mode": mode,
-                        "provider": data.get("provider"),
-                        "execution_id": exec_id,
-                        "provider_request_id": prov_req_id,
-                        "model": data.get("model"),
-                        "resolved_model": data.get("resolved_model") or data.get("model"),
-                        "status": status,
-                        "stop_reason": stop_reason,
-                        "usage": data.get("usage"),
-                    }
-                else:
-                    self._last_envelope_metadata = None
-
-                if "findings" in data and isinstance(data["findings"], list):
-                    data = data["findings"]
-                elif "finding_id" in data:
-                    data = [data]
+                self._last_envelope_metadata = {
+                    "mode": mode,
+                    "provider": found_envelope.get("provider"),
+                    "execution_id": exec_id,
+                    "provider_request_id": prov_req_id,
+                    "model": found_envelope.get("model"),
+                    "resolved_model": found_envelope.get("resolved_model") or found_envelope.get("model"),
+                    "status": status,
+                    "stop_reason": stop_reason,
+                    "usage": found_envelope.get("usage"),
+                }
+            else:
+                self._last_envelope_metadata = None
         else:
             self._last_envelope_metadata = None
 
-        if not isinstance(data, list):
-            raise TypeError(f"Expected a list of findings, got {type(data).__name__}")
+        if collected_findings:
+            data = collected_findings
+        elif found_envelope is not None and "findings" in found_envelope and isinstance(found_envelope["findings"], list):
+            data = found_envelope["findings"]
+        elif empty_block_found:
+            data = []
+        else:
+            data = []
 
         if not data:
             return []
