@@ -285,19 +285,37 @@ class IndependentAuditRunner:
             end_bracket = clean_output.rfind("]")
 
             # 辞書 {...} のパースをまず試みる（外側に辞書構造が存在する場合）
-            if start_brace != -1 and end_brace != -1 and end_brace > start_brace:
-                try:
-                    parsed_dict = json.loads(clean_output[start_brace : end_brace + 1])
-                    if isinstance(parsed_dict, dict) and (
-                        "findings" in parsed_dict
-                        or "finding_id" in parsed_dict
-                        or "status" in parsed_dict
-                        or "mode" in parsed_dict
-                        or "provider" in parsed_dict
-                    ):
-                        data = parsed_dict
-                except json.JSONDecodeError:
-                    pass
+            if start_brace != -1:
+                decoder = json.JSONDecoder()
+                for m_brace in re.finditer(r"\{", clean_output):
+                    s_idx = m_brace.start()
+                    try:
+                        parsed_dict, _ = decoder.raw_decode(clean_output, s_idx)
+                        if isinstance(parsed_dict, dict) and (
+                            "findings" in parsed_dict
+                            or "finding_id" in parsed_dict
+                            or "status" in parsed_dict
+                            or "mode" in parsed_dict
+                            or "provider" in parsed_dict
+                        ):
+                            data = parsed_dict
+                            break
+                    except json.JSONDecodeError:
+                        pass
+                    if end_brace != -1 and end_brace > s_idx:
+                        try:
+                            parsed_dict = json.loads(clean_output[s_idx : end_brace + 1])
+                            if isinstance(parsed_dict, dict) and (
+                                "findings" in parsed_dict
+                                or "finding_id" in parsed_dict
+                                or "status" in parsed_dict
+                                or "mode" in parsed_dict
+                                or "provider" in parsed_dict
+                            ):
+                                data = parsed_dict
+                                break
+                        except json.JSONDecodeError:
+                            pass
 
             # 辞書として抽出されなかった場合、生配列 [...] のパースを試みる
             if data is None and start_bracket != -1 and end_bracket != -1 and end_bracket > start_bracket:
@@ -355,19 +373,37 @@ class IndependentAuditRunner:
                 text_outside = re.sub(r"```(?:[a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", "", clean_output, flags=re.DOTALL)
                 start_out_brace = text_outside.find("{")
                 end_out_brace = text_outside.rfind("}")
-                if start_out_brace != -1 and end_out_brace != -1 and end_out_brace > start_out_brace:
-                    try:
-                        parsed_out_dict = json.loads(text_outside[start_out_brace : end_out_brace + 1])
-                        if isinstance(parsed_out_dict, dict) and (
-                            "findings" in parsed_out_dict
-                            or "finding_id" in parsed_out_dict
-                            or "status" in parsed_out_dict
-                            or "mode" in parsed_out_dict
-                            or "provider" in parsed_out_dict
-                        ):
-                            data = parsed_out_dict
-                    except json.JSONDecodeError:
-                        pass
+                if start_out_brace != -1:
+                    decoder = json.JSONDecoder()
+                    for m_brace in re.finditer(r"\{", text_outside):
+                        s_idx = m_brace.start()
+                        try:
+                            parsed_out_dict, _ = decoder.raw_decode(text_outside, s_idx)
+                            if isinstance(parsed_out_dict, dict) and (
+                                "findings" in parsed_out_dict
+                                or "finding_id" in parsed_out_dict
+                                or "status" in parsed_out_dict
+                                or "mode" in parsed_out_dict
+                                or "provider" in parsed_out_dict
+                            ):
+                                data = parsed_out_dict
+                                break
+                        except json.JSONDecodeError:
+                            pass
+                        if end_out_brace != -1 and end_out_brace > s_idx:
+                            try:
+                                parsed_out_dict = json.loads(text_outside[s_idx : end_out_brace + 1])
+                                if isinstance(parsed_out_dict, dict) and (
+                                    "findings" in parsed_out_dict
+                                    or "finding_id" in parsed_out_dict
+                                    or "status" in parsed_out_dict
+                                    or "mode" in parsed_out_dict
+                                    or "provider" in parsed_out_dict
+                                ):
+                                    data = parsed_out_dict
+                                    break
+                            except json.JSONDecodeError:
+                                pass
 
                 if data is None:
                     end_out = text_outside.rfind("]")

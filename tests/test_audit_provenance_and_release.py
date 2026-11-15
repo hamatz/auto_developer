@@ -1213,6 +1213,77 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         self.assertEqual(len(findings), 1, f"real finding silently discarded as zero defects: {findings!r}")
         self.assertEqual(findings[0].finding_id, "AUD-OBJ-001")
 
+    def test_failed_envelope_after_brace_log_line_is_rejected(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 18): 中括弧を含む先行ログ行が存在しても、status: FAILED エンベロープが確実に棄却されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        envelope = {
+            "mode": "LIVE",
+            "provider": "anthropic",
+            "provider_request_id": "msg_01FAIL",
+            "status": "FAILED",
+            "error": "UNPARSEABLE",
+            "stop_reason": "end_turn",
+            "findings": [{
+                "finding_id": "AUD-T-001",
+                "severity": "P1",
+                "spec_reference": "VVV.1",
+                "location": "a.py:1",
+                "description": "partial finding",
+                "reproduction_test_code": "import unittest",
+                "status": "REPORTED",
+            }],
+        }
+        output = "auditor: retry {attempt=2}\n" + json.dumps(envelope)
+        with self.assertRaises(ValueError):
+            runner.parse_response(output)
+
+    def test_truncated_envelope_after_brace_log_line_is_rejected(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 18): 中括弧を含む先行ログ行が存在しても、stop_reason: max_tokens エンベロープが確実に棄却されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        envelope = {
+            "mode": "LIVE",
+            "provider": "anthropic",
+            "provider_request_id": "msg_01TRUNC",
+            "execution_id": "msg_01TRUNC",
+            "status": "COMPLETED",
+            "stop_reason": "max_tokens",
+            "findings": [{
+                "finding_id": "AUD-T-001",
+                "severity": "P1",
+                "spec_reference": "VVV.1",
+                "location": "a.py:1",
+                "description": "partial finding",
+                "reproduction_test_code": "import unittest",
+                "status": "REPORTED",
+            }],
+        }
+        output = "auditor: retry {attempt=2}\n" + json.dumps(envelope)
+        with self.assertRaises(ValueError):
+            runner.parse_response(output)
+
+    def test_auditor_client_single_object_block_after_empty_example_not_discarded(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 18): auditor_client._extract_findings_from_text において例示空配列の後の単一指摘オブジェクトが抽出されること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+        finding = {
+            "finding_id": "AUD-OBJ-001",
+            "severity": "P0",
+            "description": "real bug",
+            "status": "REPORTED",
+        }
+        text = (
+            "Example format: ```json\n[]\n```\n\n"
+            "Actual finding:\n```json\n" + json.dumps(finding) + "\n```"
+        )
+        result = auditor_client._extract_findings_from_text(text)
+        self.assertNotEqual(result, [], "real finding silently converted to zero defects")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].get("finding_id"), "AUD-OBJ-001")
+
 
 if __name__ == "__main__":
     unittest.main()
