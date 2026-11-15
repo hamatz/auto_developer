@@ -720,7 +720,35 @@ class EvidenceBundler:
                             or str(prov_req_id).startswith("exec_")
                         )
                         if mode == "LIVE" and not is_mock_id:
-                            result.audit_stage_verified = True
+                            # VVV.3 / Sol氏 Phase 61 考察: ポスト監査差分検査 (Post-Audit Diff Integrity)
+                            # 監査対象コミット以降にプロダクトコード（src/**, scripts/** 等）が変更されていないかを検証
+                            target_commit = audit_meta.get("target_commit") or audit_stage_data.get("target_commit")
+                            has_outdated_changes = False
+                            if target_commit and actual_head_commit and clone_dir.exists():
+                                target_c = str(target_commit).strip()
+                                if target_c != actual_head_commit:
+                                    diff_res = subprocess.run(
+                                        ["git", "diff", "--name-only", target_c, actual_head_commit],
+                                        cwd=clone_dir,
+                                        capture_output=True,
+                                        text=True,
+                                        check=False,
+                                    )
+                                    if diff_res.returncode == 0:
+                                        modified_files = [f.strip() for f in diff_res.stdout.splitlines() if f.strip()]
+                                        unverified_code = [
+                                            f for f in modified_files
+                                            if f.startswith(("src/", "scripts/")) or (f.endswith(".py") and not f.startswith("tests/"))
+                                        ]
+                                        if unverified_code:
+                                            has_outdated_changes = True
+                                            result.audit_stage_verified = False
+                                            result.warnings.append(
+                                                f"AUDIT_OUTDATED: Implementation code was modified after audit target commit '{target_c[:7]}' without re-audit. "
+                                                f"Unverified modified files: {unverified_code}"
+                                            )
+                            if not has_outdated_changes:
+                                result.audit_stage_verified = True
                         else:
                             result.audit_stage_verified = False
                             result.warnings.append(
