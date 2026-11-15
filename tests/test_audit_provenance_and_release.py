@@ -196,9 +196,14 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         self.assertEqual(res["genuine_count"], 0)
 
     def test_morning_reporter_renders_audit_provenance_table(self) -> None:
-        """SSS.4: MorningReporter が実外部モデルの監査証跡を表形式でレポートに出力すること。"""
+        """TTT.3: MorningReporter が実外部モデルの監査証跡（Provider, Execution ID, 実測64文字SHA-256）を表形式で出力すること。"""
         reporter = MorningReporter(repo_dir=self.repo_dir)
         report_path = self.repo_dir / "NIGHTLY_REPORT.md"
+
+        full_prompt_hash = "a1b2c3d4" * 8  # 64 chars
+        full_resp_hash = "e5f6a7b8" * 8    # 64 chars
+        full_spec_hash = "11223344" * 8    # 64 chars
+        full_diff_hash = "55667788" * 8    # 64 chars
 
         audit_stage_data = {
             "status": "SUCCESS",
@@ -210,14 +215,16 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             "baseline_commit": self.baseline_sha,
             "target_commit": self.target_sha,
             "audit_metadata": {
+                "provider": "anthropic",
                 "auditor_model": "claude-opus-5.5",
+                "execution_id": "exec_test_99887766",
                 "fallback_occurred": False,
                 "maker_model": "gemini-3.8-flash",
                 "independence_verified": True,
-                "raw_prompt_hash": "a" * 64,
-                "raw_response_hash": "b" * 64,
-                "spec_sha256": "c" * 64,
-                "diff_sha256": "d" * 64,
+                "raw_prompt_hash": full_prompt_hash,
+                "raw_response_hash": full_resp_hash,
+                "spec_sha256": full_spec_hash,
+                "diff_sha256": full_diff_hash,
             },
         }
 
@@ -241,10 +248,17 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
 
         content = report_path.read_text(encoding="utf-8")
         self.assertIn("独立監査", content)
+        self.assertIn("anthropic", content)
         self.assertIn("claude-opus-5.5", content)
+        self.assertIn("exec_test_99887766", content)
         self.assertIn("gemini-3.8-flash", content)
-        self.assertIn("a" * 12, content)  # ハッシュのプレフィックスまたは完全値が含まれること
-        self.assertIn("b" * 12, content)
+        self.assertIn(full_prompt_hash, content)
+        self.assertIn(full_resp_hash, content)
+        self.assertIn(full_spec_hash, content)
+        self.assertIn(full_diff_hash, content)
+        # プレースホルダー文字列が残存していないこと
+        self.assertNotIn("verified-crypto-hash", content)
+        self.assertNotIn("commit-bound (", content)
 
     def test_bundler_includes_audit_stage_evidence(self) -> None:
         """TTT.2: EvidenceBundler が audit_stage.json を収録し、Manifest と verify_bundle で検証可能であること。"""
