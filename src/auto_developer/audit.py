@@ -284,7 +284,8 @@ class IndependentAuditRunner:
             start_bracket = clean_output.find("[")
             end_bracket = clean_output.rfind("]")
 
-            # 辞書 {...} のパースをまず試みる（外側に辞書構造が存在する場合）
+            # エンベロープ辞書 {...} のパースをまず試みる（外側にエンベロープ構造が存在する場合）
+            # 注: 個別指摘オブジェクト（finding_id/severity等）はエンベロープではないため配列抽出より優先して消費しない
             if start_brace != -1:
                 decoder = json.JSONDecoder()
                 for m_brace in re.finditer(r"\{", clean_output):
@@ -293,10 +294,9 @@ class IndependentAuditRunner:
                         parsed_dict, _ = decoder.raw_decode(clean_output, s_idx)
                         if isinstance(parsed_dict, dict) and (
                             "findings" in parsed_dict
-                            or "finding_id" in parsed_dict
-                            or "status" in parsed_dict
                             or "mode" in parsed_dict
                             or "provider" in parsed_dict
+                            or ("status" in parsed_dict and "finding_id" not in parsed_dict and "severity" not in parsed_dict)
                         ):
                             data = parsed_dict
                             break
@@ -307,10 +307,9 @@ class IndependentAuditRunner:
                             parsed_dict = json.loads(clean_output[s_idx : end_brace + 1])
                             if isinstance(parsed_dict, dict) and (
                                 "findings" in parsed_dict
-                                or "finding_id" in parsed_dict
-                                or "status" in parsed_dict
                                 or "mode" in parsed_dict
                                 or "provider" in parsed_dict
+                                or ("status" in parsed_dict and "finding_id" not in parsed_dict and "severity" not in parsed_dict)
                             ):
                                 data = parsed_dict
                                 break
@@ -381,10 +380,9 @@ class IndependentAuditRunner:
                             parsed_out_dict, _ = decoder.raw_decode(text_outside, s_idx)
                             if isinstance(parsed_out_dict, dict) and (
                                 "findings" in parsed_out_dict
-                                or "finding_id" in parsed_out_dict
-                                or "status" in parsed_out_dict
                                 or "mode" in parsed_out_dict
                                 or "provider" in parsed_out_dict
+                                or ("status" in parsed_out_dict and "finding_id" not in parsed_out_dict and "severity" not in parsed_out_dict)
                             ):
                                 data = parsed_out_dict
                                 break
@@ -395,10 +393,9 @@ class IndependentAuditRunner:
                                 parsed_out_dict = json.loads(text_outside[s_idx : end_out_brace + 1])
                                 if isinstance(parsed_out_dict, dict) and (
                                     "findings" in parsed_out_dict
-                                    or "finding_id" in parsed_out_dict
-                                    or "status" in parsed_out_dict
                                     or "mode" in parsed_out_dict
                                     or "provider" in parsed_out_dict
+                                    or ("status" in parsed_out_dict and "finding_id" not in parsed_out_dict and "severity" not in parsed_out_dict)
                                 ):
                                     data = parsed_out_dict
                                     break

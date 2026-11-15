@@ -1284,6 +1284,56 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].get("finding_id"), "AUD-OBJ-001")
 
+    def test_fenced_multi_finding_array_returns_all_findings(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 19): コードブロックで囲まれた複数要素の指摘配列において全件抽出され、第2要素以降が欠落しないこと。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        finding1 = {
+            "finding_id": "AUD-M-001",
+            "severity": "P1",
+            "spec_reference": "VVV.1",
+            "location": "a.py:1",
+            "description": "bug 1",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        finding2 = {
+            "finding_id": "AUD-M-002",
+            "severity": "P1",
+            "spec_reference": "VVV.1",
+            "location": "a.py:2",
+            "description": "bug 2",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        text = "```json\n" + json.dumps([finding1, finding2]) + "\n```"
+        findings = runner.parse_response(text)
+        self.assertEqual([f.finding_id for f in findings], ["AUD-M-001", "AUD-M-002"], "second finding silently discarded")
+
+    def test_prose_prefixed_multi_finding_array_returns_all_findings(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 19): 散文が先行する複数要素の指摘配列において全件抽出され、第2要素以降が欠落しないこと。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        finding3 = {
+            "finding_id": "AUD-M-003",
+            "severity": "P1",
+            "spec_reference": "VVV.1",
+            "location": "a.py:3",
+            "description": "bug 3",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        finding4 = {
+            "finding_id": "AUD-M-004",
+            "severity": "P1",
+            "spec_reference": "VVV.1",
+            "location": "a.py:4",
+            "description": "bug 4",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        text = "Here are the findings:\n" + json.dumps([finding3, finding4])
+        findings = runner.parse_response(text)
+        self.assertEqual([f.finding_id for f in findings], ["AUD-M-003", "AUD-M-004"], "second finding silently discarded")
+
 
 if __name__ == "__main__":
     unittest.main()
