@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -324,6 +325,79 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         self.assertTrue(res.is_valid)
         self.assertTrue(getattr(res, "audit_stage_verified", False))
         self.assertIsNotNone(getattr(res, "audit_stage_info", None))
+
+    def test_auditor_client_fails_closed_when_api_key_missing(self) -> None:
+        """UUU.1 / Sol氏 P0指摘: APIキー未設定時に findings: [] で成功偽装せず、Fail-Closed (Exit != 0 または status=FAILED) で安全停止すること。"""
+        import os
+        env = dict(os.environ)
+        env.pop("ANTHROPIC_API_KEY", None)
+        env.pop("OPENAI_API_KEY", None)
+
+        proc = subprocess.run(
+            ["python3", "scripts/auditor_client.py", "--model", "claude-opus-5.5", "--prompt", "Audit this impossible bug"],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        # 終了コード非ゼロ、または JSON 出力時の status が FAILED / AUDIT_PENDING であること
+        if proc.returncode == 0:
+            data = json.loads(proc.stdout)
+            self.assertIn(data.get("status"), ["FAILED", "AUDIT_PENDING"])
+            self.assertNotEqual(data.get("status"), "COMPLETED")
+        else:
+            self.assertNotEqual(proc.returncode, 0)
+
+    def test_auditor_client_mock_mode_distinction(self) -> None:
+        """UUU.1 / Sol氏 P1指摘: --mock 指定時は mode=MOCK かつ provider_request_id が null または mock_ 接頭辞であること。"""
+        proc = subprocess.run(
+            ["python3", "scripts/auditor_client.py", "--model", "claude-opus-5.5", "--prompt", "Dummy prompt", "--mock"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(proc.stdout)
+        self.assertEqual(data.get("mode"), "MOCK")
+        self.assertEqual(data.get("status"), "COMPLETED")
+        self.assertTrue(str(data.get("execution_id", "")).startswith("mock_"))
+        self.assertIsNone(data.get("provider_request_id"))
+
+    def test_auditor_client_live_api_success_provenance(self) -> None:
+        """UUU.1: Anthropic API 成功時に mode=LIVE, 本物 provider_request_id (msg_...), execution_id が拘束されること。"""
+        import io
+        from unittest.mock import MagicMock, patch
+
+        fake_api_response = {
+            "id": "msg_01XFDUDYJACGeCrJwHGQAngV",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3-opus-20240229",
+            "content": [{"type": "text", "text": "```json\n[]\n```"}],
+            "usage": {"input_tokens": 120, "output_tokens": 15},
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(fake_api_response).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.__exit__.return_value = None
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            from scripts.auditor_client import main as auditor_main
+            old_stdout = sys.stdout
+            sys.stdout = buffer = io.StringIO()
+            try:
+                code = auditor_main(["--model", "claude-opus-5.5", "--prompt", "Audit spec", "--api-key", "test-key-1234"])
+            finally:
+                sys.stdout = old_stdout
+
+        self.assertEqual(code, 0)
+        data = json.loads(buffer.getvalue())
+        self.assertEqual(data.get("mode"), "LIVE")
+        self.assertEqual(data.get("provider"), "anthropic")
+        self.assertEqual(data.get("provider_request_id"), "msg_01XFDUDYJACGeCrJwHGQAngV")
+        self.assertEqual(data.get("execution_id"), "msg_01XFDUDYJACGeCrJwHGQAngV")
+        self.assertEqual(data.get("status"), "COMPLETED")
+        self.assertEqual(data.get("findings"), [])
 
 
 if __name__ == "__main__":
