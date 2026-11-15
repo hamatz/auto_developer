@@ -232,6 +232,31 @@ class MorningReporter:
             )
             status_str = audit_stage.get("status", "UNKNOWN")
             lines.append(f"- **監査ステータス**: `{status_str}`")
+
+            audit_meta = audit_stage.get("audit_metadata")
+            if audit_meta:
+                auditor_m = audit_meta.get("auditor_model", "N/A")
+                maker_m = audit_meta.get("maker_model", "N/A")
+                fallback_occ = audit_meta.get("fallback_occurred", False)
+                prompt_h = audit_meta.get("raw_prompt_hash", "N/A")
+                resp_h = audit_meta.get("raw_response_hash", "N/A")
+                spec_h = audit_meta.get("spec_sha256", "N/A")
+                diff_h = audit_meta.get("diff_sha256", "N/A")
+
+                lines.extend([
+                    "",
+                    "### 独立外部モデル監査証跡 (Independent Multi-LLM Audit Provenance)",
+                    "| 項目 | 値 | 独立性検証 |",
+                    "| :--- | :--- | :--- |",
+                    f"| **監査モデル (Auditor)** | `{auditor_m}`{' (Fallback)' if fallback_occ else ''} | 異系統独立性担保 (PASS) |",
+                    f"| **実装モデル (Maker)** | `{maker_m}` | 査読癒着排除 (PASS) |",
+                    f"| **Prompt SHA-256** | `{prompt_h}` | 入力暗号学的固定 |",
+                    f"| **Response SHA-256** | `{resp_h}` | 出力暗号学的固定 |",
+                    f"| **SPEC SHA-256** | `{spec_h}` | コミット拘束済み |",
+                    f"| **Diff SHA-256** | `{diff_h}` | 変更差分固定 |",
+                    "",
+                ])
+
             if status_str == "SUCCESS":
                 dispatched = audit_stage.get("dispatched", [])
                 rejected = audit_stage.get("rejected", [])

@@ -720,6 +720,34 @@ class TestCommitBoundSpecAndAuditInputProvenance(unittest.TestCase):
         self.assertEqual(loaded.spec_sha256, expected_spec_sha)
         self.assertEqual(loaded.diff_sha256, f.diff_sha256)
 
+    def test_audit_repository_fails_closed_when_spec_missing_in_target_commit(self) -> None:
+        """SSS.2 / Sol氏 Phase 58 P1: target_commit に SPEC.md がない場合、作業ツリーへフォールバックせず Fail-Closed で拒絶すること。"""
+        import subprocess
+
+        from auto_developer.audit import IndependentAuditRunner
+
+        # SPEC.md を削除した新しいコミットを作成
+        subprocess.run(["git", "rm", "-f", "SPEC.md"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "commit without SPEC"], cwd=self.repo_dir, check=True)
+        res_no_spec = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_dir, check=True, capture_output=True, text=True)
+        commit_no_spec = res_no_spec.stdout.strip()
+
+        # 作業ツリーに SPEC.md を再配置（フォールバック抜けテスト）
+        (self.repo_dir / "SPEC.md").write_text("# Spec in working tree\n", encoding="utf-8")
+
+        runner = IndependentAuditRunner(
+            auditor_cmd_template="echo '[]'",
+            model_name="claude-opus-5.5",
+        )
+
+        with self.assertRaises(FileNotFoundError) as cm:
+            runner.audit_repository(
+                repo_dir=self.repo_dir,
+                target_commit=commit_no_spec,
+                baseline_commit=self.baseline_sha,
+            )
+        self.assertIn("SPEC_NOT_FOUND_IN_COMMIT", str(cm.exception))
+
 
 class TestResilientModelFallbackAndAuditEvidence(unittest.TestCase):
     """機能RRR.3: モデル上限・障害時の弾力的フォールバックと実外部モデル監査・Level 7閉ループ実証。"""
@@ -752,26 +780,34 @@ class TestResilientModelFallbackAndAuditEvidence(unittest.TestCase):
         self.tmp_dir.cleanup()
 
     def test_audit_fallback_on_primary_model_failure(self) -> None:
-        """RRR.3: プライマリモデル(Opus)が上限/障害で失敗した場合にフォールバックモデル(Hydrogen等)へ安全退避して監査を完走すること。"""
-        from auto_developer.audit import IndependentAuditRunner
+        """SSS.3: プライマリモデル(Opus)障害時に同系統(Gemini)は排除され、異系統モデル(GPT-4o)へ安全退避して監査を完走すること。"""
+        from auto_developer.audit import AuditConfig, IndependentAuditRunner
 
-        # モデル名が claude-opus のときは失敗し、gemini-4-hydrogen のときは成功するコマンド
+        # モデル名が claude-opus のときは失敗し、gpt-4o のときは成功するコマンド
         cmd_template = (
             'if [ "{model}" = "claude-opus-5.5" ]; then '
             '  echo "Rate limit / Quota exceeded" >&2; exit 42; '
-            'else '
+            'elif [ "{model}" = "gpt-4o" ]; then '
             '  echo \'[{"finding_id": "FALLBACK-001", "severity": "P1", "spec_reference": "SPEC.md RRR.3", '
             '          "location": "src/mod.py:1", "description": "Fallback finding", '
             '          "reproduction_test_code": "import unittest\\nclass T(unittest.TestCase):\\n    def test_x(self): self.fail()", '
             '          "status": "REPORTED"}]\'; '
+            'else '
+            '  echo "Unexpected model {model}" >&2; exit 1; '
             'fi'
+        )
+
+        config = AuditConfig(
+            maker_model="gemini-3.8-flash",
+            auditor_model="claude-opus-5.5",
+            baseline_commit=self.baseline_sha,
         )
 
         runner = IndependentAuditRunner(
             auditor_cmd_template=cmd_template,
             model_name="claude-opus-5.5",
-            fallback_models=["gemini-4-hydrogen", "gemini-4-argon"],
-            allow_emergency_fallback=True,
+            fallback_models=["gemini-4-hydrogen", "gpt-4o"],
+            config=config,
             baseline_commit=self.baseline_sha,
         )
 
@@ -784,12 +820,79 @@ class TestResilientModelFallbackAndAuditEvidence(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         f = findings[0]
         self.assertEqual(f.finding_id, "FALLBACK-001")
-        # 実際に成功したフォールバックモデル名が記録されていること
-        self.assertEqual(f.auditor_model, "gemini-4-hydrogen")
+        # 同系統 gemini-4-hydrogen はスキップされ、異系統 gpt-4o が選択されていること
+        self.assertEqual(f.auditor_model, "gpt-4o")
         self.assertTrue(f.fallback_occurred)
         self.assertEqual(f.fallback_from, "claude-opus-5.5")
         self.assertIsNotNone(f.raw_prompt_hash)
         self.assertIsNotNone(f.raw_response_hash)
+
+    def test_audit_fallback_rejects_same_family_raises_no_independent_auditor(self) -> None:
+        """SSS.3 / Sol氏 Phase 58 P1: 異系統の代替モデルが存在しない場合、同系統での監査を拒絶し NO_INDEPENDENT_AUDITOR_AVAILABLE で停止すること。"""
+        from auto_developer.audit import AuditConfig, IndependentAuditRunner
+
+        cmd_template = (
+            'if [ "{model}" = "claude-opus-5.5" ]; then '
+            '  echo "Rate limit / Quota exceeded" >&2; exit 42; '
+            'else '
+            '  echo \'[{"finding_id": "REJECT-001", "severity": "P1", "spec_reference": "SPEC.md", '
+            '          "location": "src/mod.py:1", "description": "Same family finding", '
+            '          "reproduction_test_code": "import unittest\\nclass T(unittest.TestCase):\\n    def test_x(self): self.fail()", '
+            '          "status": "REPORTED"}]\'; '
+            'fi'
+        )
+
+        config = AuditConfig(
+            maker_model="gemini-3.8-flash",
+            auditor_model="claude-opus-5.5",
+            baseline_commit=self.baseline_sha,
+        )
+
+        # フォールバック候補が Gemini 系（同系統）しかない場合
+        runner = IndependentAuditRunner(
+            auditor_cmd_template=cmd_template,
+            model_name="claude-opus-5.5",
+            fallback_models=["gemini-4-hydrogen", "gemini-4-argon"],
+            config=config,
+            baseline_commit=self.baseline_sha,
+        )
+
+        with self.assertRaises(RuntimeError) as cm:
+            runner.audit_repository(
+                repo_dir=self.repo_dir,
+                target_commit=self.target_sha,
+                baseline_commit=self.baseline_sha,
+            )
+        self.assertIn("NO_INDEPENDENT_AUDITOR_AVAILABLE", str(cm.exception))
+
+    def test_orchestrator_audit_stage_records_audit_pending_when_no_independent_auditor(self) -> None:
+        """SSS.3: 独立監査役が利用できない場合、通常成果物を壊さず AUDIT_PENDING として安全退避・保全すること。"""
+        from auto_developer.audit import AuditConfig, IndependentAuditRunner
+        from auto_developer.orchestrator import NightlyOrchestrator
+
+        config = AuditConfig(
+            maker_model="gemini-3.8-flash",
+            auditor_model="claude-opus-5.5",
+            baseline_commit=self.baseline_sha,
+        )
+        runner = IndependentAuditRunner(
+            auditor_cmd_template='echo "Quota exceeded" >&2; exit 42',
+            model_name="claude-opus-5.5",
+            fallback_models=["gemini-4-hydrogen"],
+            config=config,
+            baseline_commit=self.baseline_sha,
+        )
+
+        orch = NightlyOrchestrator(
+            repo_dir=self.repo_dir,
+            enable_audit_stage=True,
+            auditor_runner=runner,
+            maker_model="gemini-3.8-flash",
+        )
+
+        res = orch.run_audit_stage(baseline_commit=self.baseline_sha, target_commit=self.target_sha)
+        self.assertEqual(res["status"], "AUDIT_PENDING")
+        self.assertIn("NO_INDEPENDENT_AUDITOR_AVAILABLE", res["error"])
 
 
 if __name__ == "__main__":

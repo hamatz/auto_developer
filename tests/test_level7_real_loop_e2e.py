@@ -792,7 +792,10 @@ class TestUntrackedTamper(unittest.TestCase):
             ["git", "rev-parse", "HEAD"], cwd=self.repo_dir, capture_output=True, text=True, check=True
         ).stdout.strip()
 
-        # 2. 追加のシード変更（製品コードのバグ追加）
+        # 2. 追加のシード変更（SPEC.md と製品コードのバグ追加）
+        spec_path = self.repo_dir / "SPEC.md"
+        spec_path.write_text("# Spec QQQ.3\ncalc_div must raise ZeroDivisionError on b == 0.\n", encoding="utf-8")
+        subprocess.run(["git", "add", "SPEC.md"], cwd=self.repo_dir, check=True)
         (self.src_dir / "calc.py").write_text(
             "def calc_div(a: int, b: int) -> int:\n"
             "    if b == 0:\n"
@@ -818,8 +821,6 @@ class TestUntrackedTamper(unittest.TestCase):
             '"reproduction_test_code": "import unittest\\nfrom calc import calc_div\\nclass T(unittest.TestCase):\\n    def test_div_zero(self):\\n        with self.assertRaises(ZeroDivisionError):\\n            calc_div(10, 0)", '
             '"status": "REPORTED"}]\''
         )
-        spec_path = self.repo_dir / "SPEC.md"
-        spec_path.write_text("# Spec QQQ.3\ncalc_div must raise ZeroDivisionError on b == 0.\n", encoding="utf-8")
 
         audit_runner = IndependentAuditRunner(
             auditor_cmd_template=cmd_template,

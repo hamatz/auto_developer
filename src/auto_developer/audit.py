@@ -244,6 +244,7 @@ class IndependentAuditRunner:
         baseline_commit: str | None = None,
         fallback_models: list[str] | None = None,
         allow_emergency_fallback: bool = False,
+        maker_model: str | None = None,
     ) -> None:
         self.auditor_cmd_template = auditor_cmd_template
         self.model_name = model_name
@@ -252,7 +253,9 @@ class IndependentAuditRunner:
         self.baseline_commit = baseline_commit or (config.baseline_commit if config else None)
         self.fallback_models = list(fallback_models or [])
         self.allow_emergency_fallback = allow_emergency_fallback
+        self.maker_model = maker_model or (config.maker_model if config else "gemini-3.8-flash")
         self.audit_runner = AuditRunner()
+        self.last_run_metadata: dict[str, Any] | None = None
 
     def build_audit_prompt(self, spec_content: str, git_diff: str) -> str:
         return (
@@ -308,38 +311,38 @@ class IndependentAuditRunner:
                 "No auditor_cmd_template configured for IndependentAuditRunner (Fail-Closed)"
             )
 
+        if self.config:
+            self.config.validate()
+            if self.config.auditor_model != self.model_name:
+                raise ValueError(
+                    f"INDEPENDENT_AUDIT_VIOLATION: Runner model '{self.model_name}' "
+                    f"does not match config.auditor_model '{self.config.auditor_model}'"
+                )
+
+        maker_m = self.config.maker_model if self.config else self.maker_model
         candidate_models = [self.model_name] + [m for m in self.fallback_models if m != self.model_name]
+
+        # SSS.3: モデル独立性を満たす候補のみを選別（同系統モデルの混入・バイパスを排除）
+        independent_candidates: list[str] = []
+        for cand in candidate_models:
+            ok, _ = verify_model_independence(
+                maker_model=maker_m,
+                auditor_model=cand,
+                strict=True,
+            )
+            if ok:
+                independent_candidates.append(cand)
+
+        if not independent_candidates:
+            raise RuntimeError(
+                f"NO_INDEPENDENT_AUDITOR_AVAILABLE: None of candidate models {candidate_models} "
+                f"satisfy model independence from maker_model '{maker_m}'"
+            )
+
         last_error: Exception | None = None
 
-        for candidate in candidate_models:
+        for candidate in independent_candidates:
             is_fallback = (candidate != self.model_name)
-            # 独立性ポリシーの検証
-            if self.config:
-                if not is_fallback:
-                    self.config.validate()
-                    if self.config.auditor_model != self.model_name:
-                        raise ValueError(
-                            f"INDEPENDENT_AUDIT_VIOLATION: Runner model '{self.model_name}' "
-                            f"does not match config.auditor_model '{self.config.auditor_model}'"
-                        )
-                elif not self.allow_emergency_fallback:
-                    ok, _ = verify_model_independence(
-                        maker_model=self.config.maker_model,
-                        auditor_model=candidate,
-                        allow_same_model_override=self.config.allow_same_model_override,
-                        strict=True,
-                    )
-                    if not ok:
-                        continue
-            else:
-                ok, _ = verify_model_independence(
-                    maker_model="gemini-3.8-flash",
-                    auditor_model=candidate,
-                    allow_same_model_override=self.allow_emergency_fallback,
-                    strict=not self.allow_emergency_fallback,
-                )
-                if not ok:
-                    continue
 
             cmd_str = self.auditor_cmd_template.replace("{model}", candidate)
             try:
@@ -368,14 +371,26 @@ class IndependentAuditRunner:
                     finding.raw_response_hash = raw_response_hash
                     if self.baseline_commit and not finding.baseline_commit:
                         finding.baseline_commit = self.baseline_commit
+
+                self.last_run_metadata = {
+                    "auditor_model": candidate,
+                    "fallback_occurred": is_fallback,
+                    "fallback_from": self.model_name if is_fallback else None,
+                    "maker_model": maker_m,
+                    "independence_verified": True,
+                    "raw_prompt_hash": raw_prompt_hash,
+                    "raw_response_hash": raw_response_hash,
+                    "findings_count": len(findings),
+                }
                 return findings
             except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as e:
                 last_error = e
                 continue
 
-        if last_error:
-            raise last_error
-        raise RuntimeError("All candidate auditor models failed or were rejected by independence policy")
+        # すべての独立候補モデルがエラーとなった場合、NO_INDEPENDENT_AUDITOR_AVAILABLE として送出 (SSS.3)
+        raise RuntimeError(
+            f"NO_INDEPENDENT_AUDITOR_AVAILABLE: All candidate auditor models failed or were rejected by independence policy. Last error: {last_error}"
+        )
 
     def audit_repository(
         self,
@@ -428,29 +443,31 @@ class IndependentAuditRunner:
         )
         git_diff = diff_res.stdout
 
-        # SPEC.md の内容を target_commit から厳密に抽出 (RRR.1 / Sol氏 P1指摘)
-        # 作業ツリーの未コミットSPECによる監査入力乖離を防止
-        spec_content: str | None = None
+        # SPEC.md の内容を target_commit から厳密に抽出 (SSS.2 / Sol氏 Phase 58 P1指摘)
+        # 作業ツリーへのフォールバックを完全撤廃し、コミット内に存在しない場合は Fail-Closed で即座に拒絶
+        spec_git_path = "SPEC.md"
+        if spec_path is not None:
+            p = Path(spec_path)
+            if p.is_absolute():
+                try:
+                    spec_git_path = str(p.relative_to(repo_dir))
+                except ValueError:
+                    spec_git_path = p.name
+            else:
+                spec_git_path = str(p)
+
         show_spec = subprocess.run(
-            ["git", "show", f"{target_sha}:SPEC.md"],
+            ["git", "show", f"{target_sha}:{spec_git_path}"],
             cwd=repo_dir,
             capture_output=True,
             text=True,
             check=False,
         )
-        if show_spec.returncode == 0 and show_spec.stdout:
-            spec_content = show_spec.stdout
-        elif spec_path is not None:
-            p = Path(spec_path)
-            if not p.is_absolute():
-                p = repo_dir / p
-            if p.exists():
-                spec_content = p.read_text(encoding="utf-8")
-        elif (repo_dir / "SPEC.md").exists():
-            spec_content = (repo_dir / "SPEC.md").read_text(encoding="utf-8")
-
-        if spec_content is None:
-            raise FileNotFoundError(f"SPEC.md not found in commit {target_sha} or repository {repo_dir}")
+        if show_spec.returncode != 0 or not show_spec.stdout:
+            raise FileNotFoundError(
+                f"SPEC_NOT_FOUND_IN_COMMIT: {spec_git_path} not found in target commit {target_sha}"
+            )
+        spec_content = show_spec.stdout
 
         spec_sha256 = hashlib.sha256(spec_content.encode("utf-8")).hexdigest()
         diff_sha256 = hashlib.sha256(git_diff.encode("utf-8")).hexdigest()
@@ -462,6 +479,15 @@ class IndependentAuditRunner:
             finding.target_tree_sha = target_tree_sha
             finding.spec_sha256 = spec_sha256
             finding.diff_sha256 = diff_sha256
+
+        if self.last_run_metadata:
+            self.last_run_metadata.update({
+                "baseline_commit": target_baseline,
+                "target_commit": target_sha,
+                "target_tree_sha": target_tree_sha,
+                "spec_sha256": spec_sha256,
+                "diff_sha256": diff_sha256,
+            })
         return findings
 
     def screen_and_dispatch_findings(

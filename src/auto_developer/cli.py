@@ -224,6 +224,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--checker-cmd", type=str, default="", help="Command template to execute Checker"
     )
+    parser.add_argument(
+        "--maker-model", type=str, default="gemini-3.8-flash", help="Model identifier for Maker"
+    )
+    parser.add_argument(
+        "--checker-model", type=str, default="claude-opus-5.5", help="Model identifier for Checker"
+    )
+    parser.add_argument(
+        "--enable-audit", action="store_true", help="Enable independent repository audit stage on completion"
+    )
+    parser.add_argument(
+        "--auditor-cmd", type=str, default="", help="Command template to execute independent auditor"
+    )
+    parser.add_argument(
+        "--auditor-model", type=str, default="claude-opus-5.5", help="Model identifier for Independent Auditor"
+    )
+    parser.add_argument(
+        "--auditor-fallback-models", type=str, default="", help="Comma-separated fallback models for independent auditor"
+    )
+    parser.add_argument(
+        "--audit-baseline", type=str, default=None, help="Baseline commit hash for independent audit comparison"
+    )
 
     subparsers = parser.add_subparsers(dest="subcommand", help="Subcommand actions")
 
@@ -235,8 +256,16 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--dry-run", action="store_true", help="Simulate execution without modifying git or state")
     run_parser.add_argument("--timeout", type=int, default=None, help="Max verification timeout in seconds")
     run_parser.add_argument("--resume", action="store_true", help="Resume interrupted job from state file")
+    run_parser.add_argument("--mock", action="store_true", help="Run with simulated mock agents (for testing only)")
     run_parser.add_argument("--maker-cmd", type=str, default="", help="Command template to execute Maker")
     run_parser.add_argument("--checker-cmd", type=str, default="", help="Command template to execute Checker")
+    run_parser.add_argument("--maker-model", type=str, default="gemini-3.8-flash", help="Model identifier for Maker")
+    run_parser.add_argument("--checker-model", type=str, default="claude-opus-5.5", help="Model identifier for Checker")
+    run_parser.add_argument("--enable-audit", action="store_true", help="Enable independent repository audit stage on completion")
+    run_parser.add_argument("--auditor-cmd", type=str, default="", help="Command template to execute independent auditor")
+    run_parser.add_argument("--auditor-model", type=str, default="claude-opus-5.5", help="Model identifier for Independent Auditor")
+    run_parser.add_argument("--auditor-fallback-models", type=str, default="", help="Comma-separated fallback models for independent auditor")
+    run_parser.add_argument("--audit-baseline", type=str, default=None, help="Baseline commit hash for independent audit comparison")
 
     # Subcommand: brief
     subparsers.add_parser("brief", help="Display morning brief of recent execution")
@@ -577,9 +606,29 @@ def main(argv: list[str] | None = None) -> int:
     is_mock = getattr(args, "mock", False)
     maker_cmd = getattr(args, "maker_cmd", "")
     checker_cmd = getattr(args, "checker_cmd", "")
+    maker_model = getattr(args, "maker_model", "gemini-3.8-flash")
+    checker_model = getattr(args, "checker_model", "claude-opus-5.5")
+    enable_audit = getattr(args, "enable_audit", False)
+    auditor_cmd = getattr(args, "auditor_cmd", "")
+    auditor_model = getattr(args, "auditor_model", "claude-opus-5.5")
+    auditor_fallback_str = getattr(args, "auditor_fallback_models", "")
+    fallback_models = (
+        [m.strip() for m in auditor_fallback_str.split(",") if m.strip()]
+        if auditor_fallback_str
+        else []
+    )
+    audit_baseline = getattr(args, "audit_baseline", None)
     dry_run = getattr(args, "dry_run", False)
     resume = getattr(args, "resume", False)
     timeout = getattr(args, "timeout", None) or 300
+
+    if enable_audit and not is_mock and not auditor_cmd:
+        print(
+            "CONFIG ERROR: In production mode, when independent audit stage is enabled (--enable-audit), --auditor-cmd must be configured.\n"
+            "Use --mock if you want to execute with simulated mock agents for testing.",
+            file=sys.stderr,
+        )
+        return 2
 
     if is_mock:
         runner: RunnerAdapter = MockRunnerAdapter()
@@ -608,6 +657,13 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=dry_run,
         timeout_sec=timeout,
         resume=resume,
+        maker_model=maker_model,
+        checker_model=checker_model,
+        enable_audit_stage=enable_audit,
+        auditor_cmd_template=auditor_cmd,
+        auditor_model=auditor_model,
+        fallback_models=fallback_models,
+        audit_baseline_commit=audit_baseline,
     )
     return orchestrator.run()
 

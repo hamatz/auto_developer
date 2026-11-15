@@ -193,39 +193,42 @@ class EvidenceBundler:
             for rec_dir in candidate_dirs:
                 if not rec_dir.exists() or not rec_dir.is_dir():
                     continue
-                for rec_file in sorted(rec_dir.glob("task_*.json")):
-                    if rec_file.name in collected_rec_names:
-                        continue
-                    if self.is_sanitized_out(rec_file.name):
-                        continue
-                    try:
-                        data = json.loads(rec_file.read_text(encoding="utf-8"))
-                        commit_val = data.get("commit", "")
-                        if isinstance(commit_val, dict):
-                            commit_str = str(
-                                commit_val.get(
-                                    "sha",
-                                    commit_val.get("hash", commit_val.get("commit_sha", "")),
-                                )
-                            ).strip()
-                        else:
-                            commit_str = str(commit_val or "").strip()
+                # task_*.json および audit_*.json を収集 (SSS.4)
+                for pat in ["task_*.json", "audit_*.json"]:
+                    for rec_file in sorted(rec_dir.glob(pat)):
+                        if rec_file.name in collected_rec_names:
+                            continue
+                        if self.is_sanitized_out(rec_file.name):
+                            continue
+                        try:
+                            data = json.loads(rec_file.read_text(encoding="utf-8"))
+                            if rec_file.name.startswith("task_"):
+                                commit_val = data.get("commit", "")
+                                if isinstance(commit_val, dict):
+                                    commit_str = str(
+                                        commit_val.get(
+                                            "sha",
+                                            commit_val.get("hash", commit_val.get("commit_sha", "")),
+                                        )
+                                    ).strip()
+                                else:
+                                    commit_str = str(commit_val or "").strip()
 
-                        tasks_manifest.append({
-                            "task_id": str(data.get("task_id", "")),
-                            "commit": commit_str,
-                            "tree_sha": data.get("tree_sha", ""),
-                            "spec_sha": data.get("spec_sha", ""),
-                            "checker": data.get("checker", {}),
-                            "checker_decision": data.get("checker", {}).get("decision", "UNSPECIFIED")
-                            if isinstance(data.get("checker"), dict)
-                            else str(data.get("checker", "")),
-                            "status": data.get("status", ""),
-                        })
-                        items_to_zip.append((rec_file, f"evidence/{rec_file.name}"))
-                        collected_rec_names.add(rec_file.name)
-                    except (json.JSONDecodeError, OSError):
-                        pass
+                                tasks_manifest.append({
+                                    "task_id": str(data.get("task_id", "")),
+                                    "commit": commit_str,
+                                    "tree_sha": data.get("tree_sha", ""),
+                                    "spec_sha": data.get("spec_sha", ""),
+                                    "checker": data.get("checker", {}),
+                                    "checker_decision": data.get("checker", {}).get("decision", "UNSPECIFIED")
+                                    if isinstance(data.get("checker"), dict)
+                                    else str(data.get("checker", "")),
+                                    "status": data.get("status", ""),
+                                })
+                            items_to_zip.append((rec_file, f"evidence/{rec_file.name}"))
+                            collected_rec_names.add(rec_file.name)
+                        except (json.JSONDecodeError, OSError):
+                            pass
 
             # (D) JobState 収集
             job_state_file = self.repo_dir / ".dev" / "job_state.json"

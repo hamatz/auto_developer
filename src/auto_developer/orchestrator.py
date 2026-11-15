@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import time
@@ -39,6 +40,8 @@ class NightlyOrchestrator:
         allow_same_model_override: bool = False,
         auditor_runner: Any | None = None,
         auditor_model: str | None = None,
+        auditor_cmd_template: str | None = None,
+        fallback_models: list[str] | None = None,
         enable_audit_stage: bool = False,
         audit_baseline_commit: str | None = None,
     ) -> None:
@@ -59,6 +62,8 @@ class NightlyOrchestrator:
         self.allow_same_model_override = allow_same_model_override
         self.auditor_runner = auditor_runner
         self.auditor_model = auditor_model
+        self.auditor_cmd_template = auditor_cmd_template
+        self.fallback_models = list(fallback_models or [])
         self.enable_audit_stage = enable_audit_stage
         self.audit_baseline_commit = audit_baseline_commit
 
@@ -80,6 +85,31 @@ class NightlyOrchestrator:
             if not ok:
                 print(f"PRE-FLIGHT MODEL POLICY ERROR: {reason}", file=sys.stderr)
                 return 2
+
+        if self.enable_audit_stage:
+            from auto_developer.audit import verify_model_independence
+            from auto_developer.runner import MockRunnerAdapter
+
+            if (
+                not self.auditor_runner
+                and not self.auditor_cmd_template
+                and not isinstance(self.runner_adapter, MockRunnerAdapter)
+            ):
+                print(
+                    "PRE-FLIGHT CONFIG ERROR: In production mode with independent audit enabled, auditor_cmd_template must be provided.",
+                    file=sys.stderr,
+                )
+                return 2
+
+            if self.maker_model and self.auditor_model:
+                ok, reason = verify_model_independence(
+                    self.maker_model,
+                    self.auditor_model,
+                    self.allow_same_model_override,
+                )
+                if not ok:
+                    print(f"PRE-FLIGHT AUDIT POLICY ERROR: {reason}", file=sys.stderr)
+                    return 2
 
         if not self.plan_path.exists():
             print(f"PRE-FLIGHT ERROR: Plan file not found: {self.plan_path}", file=sys.stderr)
@@ -648,8 +678,13 @@ class NightlyOrchestrator:
         from auto_developer.verifier import RedTestVerifier
 
         auditor = auditor_runner or self.auditor_runner
-        if not auditor and self.auditor_model:
-            auditor = IndependentAuditRunner(model_name=self.auditor_model)
+        if not auditor and (self.auditor_model or self.auditor_cmd_template):
+            auditor = IndependentAuditRunner(
+                auditor_cmd_template=self.auditor_cmd_template or "",
+                model_name=self.auditor_model or "claude-opus-5.5",
+                fallback_models=self.fallback_models,
+                maker_model=self.maker_model,
+            )
 
         if not auditor:
             return {"status": "SKIPPED", "reason": "No auditor configured"}
@@ -668,6 +703,28 @@ class NightlyOrchestrator:
                 dispatcher=dispatcher,
                 plan_path=self.plan_path,
             )
+            audit_metadata = getattr(auditor, "last_run_metadata", {}) or {}
+
+            # 監査証跡レコードの保存 (SSS.4)
+            audit_rec_dir = self.repo_dir / ".git" / "nightly_evidence" / "records"
+            if not audit_rec_dir.exists():
+                audit_rec_dir = self.repo_dir / ".dev" / "evidence" / "records"
+            try:
+                audit_rec_dir.mkdir(parents=True, exist_ok=True)
+                audit_stage_file = audit_rec_dir / "audit_stage.json"
+                audit_stage_file.write_text(
+                    json.dumps({
+                        "status": "SUCCESS",
+                        "audit_metadata": audit_metadata,
+                        "dispatched_count": len(screen_res["dispatched"]),
+                        "rejected_count": len(screen_res["rejected"]),
+                        "timestamp": time.time(),
+                    }, indent=2),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+
             return {
                 "status": "SUCCESS",
                 "dispatched": screen_res["dispatched"],
@@ -677,13 +734,16 @@ class NightlyOrchestrator:
                 "rejected_count": screen_res["rejected_count"],
                 "baseline_commit": baseline_commit,
                 "target_commit": target_commit,
+                "audit_metadata": audit_metadata,
             }
         except (subprocess.SubprocessError, OSError, ValueError, RuntimeError, KeyError, TypeError) as e:
             # 外部監査役の失敗時にも通常開発成果物は破棄せず安全に保全する (Fail-Safe)
-            print(f"Warning: Independent audit stage failed: {e}", file=sys.stderr)
+            err_msg = str(e)
+            status = "AUDIT_PENDING" if "NO_INDEPENDENT_AUDITOR_AVAILABLE" in err_msg else "AUDIT_FAILED"
+            print(f"Warning: Independent audit stage {status.lower()}: {err_msg}", file=sys.stderr)
             return {
-                "status": "AUDIT_FAILED",
-                "error": str(e),
+                "status": status,
+                "error": err_msg,
                 "baseline_commit": baseline_commit,
                 "target_commit": target_commit,
                 "findings": [],
