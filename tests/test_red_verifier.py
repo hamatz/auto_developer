@@ -1382,6 +1382,26 @@ class T(unittest.TestCase):
         is_trivial, _msg = check_trivial_red_ast(code)
         self.assertTrue(is_trivial, "unconditional fail after try wrapping a literal method call was accepted as genuine")
 
+    def test_fail_after_try_with_stdlib_module_call_is_trivial(self) -> None:
+        """AUD-020 (Sol Phase 62 / Cycle 36): try ブロック内に os.getcwd() などの標準ライブラリモジュール呼出しかない場合、自己完結した無条件失敗(Trivial Red)として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import os
+import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            os.getcwd()
+        except OSError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "unconditional fail after try wrapping a stdlib (non-product) call was accepted as genuine")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest

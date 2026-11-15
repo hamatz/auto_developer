@@ -110,6 +110,33 @@ def _is_assert_call(call: ast.Call) -> bool:
 
 
 _BUILTIN_NAMES: set[str] = set(dir(builtins))
+_STDLIB_MODULE_NAMES: set[str] = set(getattr(sys, "stdlib_module_names", ())) | {
+    "ast",
+    "contextlib",
+    "hashlib",
+    "json",
+    "math",
+    "os",
+    "pathlib",
+    "re",
+    "shutil",
+    "signal",
+    "stat",
+    "subprocess",
+    "sys",
+    "tempfile",
+    "time",
+    "unittest",
+}
+
+
+def _get_root_name(node: ast.AST) -> str | None:
+    curr = node
+    while isinstance(curr, ast.Attribute):
+        curr = curr.value
+    if isinstance(curr, ast.Name):
+        return curr.id
+    return None
 
 
 def _has_causal_dependency(node: ast.AST, dependent_vars: set[str]) -> bool:
@@ -125,9 +152,10 @@ def _has_causal_dependency(node: ast.AST, dependent_vars: set[str]) -> bool:
 def _is_product_or_causal_call(
     call: ast.Call, dependent_vars: set[str] | None = None
 ) -> bool:
-    """呼出がプロダクトコードまたは因果依存変数に紐づく有効な呼出かを判定する (機能OOO.2 / AUD-003 Cycle 33 / AUD-002 Cycle 34)。
+    """呼出がプロダクトコードまたは因果依存変数に紐づく有効な呼出かを判定する (機能OOO.2 / AUD-003 Cycle 33 / AUD-002 Cycle 34 / AUD-020 Cycle 36)。
     アサーション呼出、因果依存のない孤立した Python 組み込み関数呼出 (int("1") など)、
-    およびリテラル・定数に対するメソッド呼出 ("1".upper() など) は除外する。
+    リテラル・定数に対するメソッド呼出 ("1".upper() など)、
+    および標準ライブラリモジュール呼出 (os.getcwd() など) は除外する。
     """
     if _is_assert_call(call):
         return False
@@ -142,6 +170,10 @@ def _is_product_or_causal_call(
             return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
         is_const, _ = _eval_constant_expr(call.func.value)
         if is_const:
+            return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
+        # 標準ライブラリモジュール呼出 (os.getcwd(), os.path.join(), math.sqrt() 等)
+        root_name = _get_root_name(call.func)
+        if root_name in _STDLIB_MODULE_NAMES:
             return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
         return True
     if isinstance(call.func, ast.Name) and call.func.id not in _BUILTIN_NAMES:
