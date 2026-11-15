@@ -292,26 +292,33 @@ class IndependentAuditRunner:
             # TTT.1 / UUU.1: エンベロープメタデータ（mode, provider, execution_id, provider_request_id, status 等）の抽出・保持
             exec_id = data.get("execution_id") or data.get("id")
             prov_req_id = data.get("provider_request_id") or data.get("id")
-            mode = data.get("mode") or ("MOCK" if str(exec_id).startswith("mock_") else "LIVE")
-            stop_reason = data.get("stop_reason")
+            raw_mode = data.get("mode")
+            has_prov_metadata = bool(raw_mode or exec_id or prov_req_id or data.get("provider"))
 
-            # AUD-002 / VVV.1 / Sol Phase 61 P1: mode: LIVE 時の stop_reason 厳格検証（Fail-Closed allow-list）
-            if data.get("mode") == "LIVE" and (not stop_reason or stop_reason != "end_turn"):
-                raise ValueError(
-                    f"AUDIT_INTERRUPTED: Live audit envelope has invalid stop_reason '{stop_reason}' (expected 'end_turn')"
-                )
+            if has_prov_metadata:
+                mode = raw_mode or ("MOCK" if (exec_id and str(exec_id).startswith("mock_")) else "LIVE")
+                stop_reason = data.get("stop_reason")
 
-            self._last_envelope_metadata = {
-                "mode": mode,
-                "provider": data.get("provider"),
-                "execution_id": exec_id,
-                "provider_request_id": prov_req_id,
-                "model": data.get("model"),
-                "resolved_model": data.get("resolved_model") or data.get("model"),
-                "status": data.get("status"),
-                "stop_reason": stop_reason,
-                "usage": data.get("usage"),
-            }
+                # AUD-001 / AUD-002 / VVV.1 / Sol Phase 61 P1: mode: LIVE 時の stop_reason 厳格検証（Fail-Closed allow-list）
+                if mode == "LIVE" and (not stop_reason or stop_reason != "end_turn"):
+                    raise ValueError(
+                        f"AUDIT_INTERRUPTED: Live audit envelope has invalid stop_reason '{stop_reason}' (expected 'end_turn')"
+                    )
+
+                self._last_envelope_metadata = {
+                    "mode": mode,
+                    "provider": data.get("provider"),
+                    "execution_id": exec_id,
+                    "provider_request_id": prov_req_id,
+                    "model": data.get("model"),
+                    "resolved_model": data.get("resolved_model") or data.get("model"),
+                    "status": data.get("status"),
+                    "stop_reason": stop_reason,
+                    "usage": data.get("usage"),
+                }
+            else:
+                self._last_envelope_metadata = None
+
             if "findings" in data and isinstance(data["findings"], list):
                 data = data["findings"]
             else:

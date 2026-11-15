@@ -41,26 +41,35 @@ def _load_env_file(repo_dir: Path) -> dict[str, str]:
 def _extract_findings_from_text(text: str) -> list[dict]:
     """Extract finding dictionaries from LLM response text.
 
-    Fail-Closed (VVV.1 / Sol Phase 61 P1 / AUD-001):
+    Fail-Closed (VVV.1 / Sol Phase 61 P1 / AUD-001 / AUD-002):
     If text does not contain a valid JSON array or explicit '[]', raise ValueError.
     Do NOT convert unparseable text or arbitrary prose into '[]' (which would fake zero defects).
     If multiple code blocks exist (e.g. format example followed by actual findings), prioritize non-empty findings.
+    If any JSON code block fails to decode, fail closed instead of masking behind an empty example block.
     """
     clean_text = text.strip()
     # 1. Inspect ALL markdown code blocks ```json ... ```
     all_code_blocks = list(re.finditer(r"```(?:json)?\s*\n?(.*?)\n?```", clean_text, re.DOTALL))
     empty_block_found = False
+    has_decode_error = False
+    decode_error_msg = ""
     for m in all_code_blocks:
+        content = m.group(1).strip()
         try:
-            parsed = json.loads(m.group(1).strip())
+            parsed = json.loads(content)
             if isinstance(parsed, list):
                 findings = [item for item in parsed if isinstance(item, dict)]
                 if findings:
                     return findings
                 if len(parsed) == 0:
                     empty_block_found = True
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as exc:
+            if content.startswith(("[", "{")) or "```json" in clean_text:
+                has_decode_error = True
+                decode_error_msg = str(exc)
+
+    if has_decode_error:
+        raise ValueError(f"Malformed JSON in audit response code block: {decode_error_msg}")
 
     # If any block had non-empty findings, it was returned above.
     # If a block was explicitly empty [] and no block had non-empty findings:

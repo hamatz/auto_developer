@@ -824,6 +824,42 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             runner.parse_response(output)
         self.assertIn("AUDIT_INTERRUPTED", str(cm.exception))
 
+    def test_runner_parse_response_rejects_truncated_live_envelope_without_explicit_mode_key(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 8): エンベロープに 'mode': 'LIVE' キーが明示されていない場合でも、provider/execution_id から LIVE と判定された場合は stop_reason 検証をスキップせず Fail-Closed で拒絶すること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        envelope = {
+            "provider": "anthropic",
+            "model": "claude-opus-5.5",
+            "provider_request_id": "msg_01TRUNCATED",
+            "execution_id": "msg_01TRUNCATED",
+            "status": "COMPLETED",
+            "stop_reason": "max_tokens",  # truncated!
+            "findings": [],
+        }
+        output = json.dumps(envelope)
+        with self.assertRaises(ValueError) as cm:
+            runner.parse_response(output)
+        self.assertIn("AUDIT_INTERRUPTED", str(cm.exception))
+
+    def test_extract_findings_fails_closed_when_codeblock_has_malformed_json_despite_preceding_empty_block(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 8): 応答文中に例示空配列コードブロックが存在しても、後続の指摘コードブロックが構文不正（JSONDecodeError）の場合は空配列（欠陥ゼロ）にフォールバックせず Fail-Closed（ValueError）とすること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        text = (
+            "Example format:\n```json\n[]\n```\n\n"
+            "Actual findings:\n```json\n"
+            '[{"finding_id": "AUD-001", "severity": "P0", "description": "broken JSON",}]\n'
+            "```"
+        )
+        with self.assertRaises(ValueError) as cm:
+            auditor_client._extract_findings_from_text(text)
+        self.assertIn("Malformed JSON", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
