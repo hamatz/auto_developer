@@ -416,5 +416,104 @@ class BranchMergeTest(unittest.TestCase):
         self.assertIn("GENUINE-BRANCH-MERGE-001", plan_file.read_text(encoding="utf-8"))
 
 
+class TestLiveExternalAuditPipelineBaseline(unittest.TestCase):
+    """機能QQQ.1: 実外部異系統モデル独立監査パイプラインの構成とベースライン固定。"""
+
+    def setUp(self) -> None:
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.repo_dir = Path(self.tmp_dir.name)
+        import subprocess
+
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Audit Runner"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "audit@example.com"], cwd=self.repo_dir, check=True)
+
+        (self.repo_dir / "SPEC.md").write_text("# Spec QQQ\nMust compute square.\n", encoding="utf-8")
+        src_dir = self.repo_dir / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        (src_dir / "math_mod.py").write_text("def square(x: int) -> int:\n    return x + 2\n", encoding="utf-8")
+
+        subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "base commit"], cwd=self.repo_dir, check=True)
+        res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_dir, check=True, capture_output=True, text=True)
+        self.baseline_sha = res.stdout.strip()
+
+        # 追加コミットを作成
+        (src_dir / "math_mod.py").write_text("def square(x: int) -> int:\n    return x * 3\n", encoding="utf-8")
+        subprocess.run(["git", "commit", "-am", "second commit"], cwd=self.repo_dir, check=True)
+        res_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_dir, check=True, capture_output=True, text=True)
+        self.head_sha = res_head.stdout.strip()
+
+    def tearDown(self) -> None:
+        self.tmp_dir.cleanup()
+
+    def test_audit_config_and_runner_baseline_binding(self) -> None:
+        """QQQ.1: AuditConfig と IndependentAuditRunner が baseline_commit を保持・検証すること。"""
+        from auto_developer.audit import AuditConfig
+
+        config = AuditConfig(
+            maker_model="gemini-3.8-flash",
+            auditor_model="claude-opus-5.5",
+            baseline_commit=self.baseline_sha,
+        )
+        self.assertEqual(config.baseline_commit, self.baseline_sha)
+        self.assertTrue(config.validate())
+
+        runner = IndependentAuditRunner(
+            model_name="claude-opus-5.5",
+            config=config,
+            baseline_commit=self.baseline_sha,
+        )
+        self.assertEqual(runner.baseline_commit, self.baseline_sha)
+
+    def test_audit_repository_extracts_baseline_diff_and_executes(self) -> None:
+        """QQQ.1: audit_repository が baseline_commit からの diff を抽出して独立プロンプトで実行すること。"""
+        cmd_template = (
+            'echo \'[{"finding_id": "FIND-QQQ-001", "severity": "P1", '
+            '"spec_reference": "SPEC.md QQQ", "location": "src/math_mod.py:2", '
+            '"description": "Square implementation is incorrect", '
+            '"reproduction_test_code": "import unittest\\nfrom math_mod import square\\nclass T(unittest.TestCase):\\n    def test_sq(self): self.assertEqual(square(3), 9)", '
+            '"status": "REPORTED"}]\''
+        )
+        runner = IndependentAuditRunner(
+            auditor_cmd_template=cmd_template,
+            model_name="claude-opus-5.5",
+            baseline_commit=self.baseline_sha,
+        )
+        findings = runner.audit_repository(
+            repo_dir=self.repo_dir,
+            spec_path=self.repo_dir / "SPEC.md",
+            baseline_commit=self.baseline_sha,
+            head_commit=self.head_sha,
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].finding_id, "FIND-QQQ-001")
+        self.assertEqual(findings[0].baseline_commit, self.baseline_sha)
+        self.assertEqual(findings[0].auditor_model, "claude-opus-5.5")
+
+    def test_audit_store_persists_baseline_commit(self) -> None:
+        """QQQ.1: AuditFinding の baseline_commit が AuditStore で永続化・復元されること。"""
+        from auto_developer.audit import AuditFinding
+        from auto_developer.audit_store import AuditStore
+
+        finding = AuditFinding(
+            finding_id="STORE-BASELINE-001",
+            severity="P0",
+            spec_reference="SPEC.md QQQ",
+            location="src/test.py:1",
+            description="Baseline store test",
+            reproduction_test_code="import unittest\nclass T(unittest.TestCase):\n    def test_x(self): self.fail()",
+            status="REPORTED",
+            baseline_commit=self.baseline_sha,
+            auditor_model="claude-opus-5.5",
+        )
+        store = AuditStore(repo_dir=self.repo_dir)
+        store.save_finding(finding)
+        loaded = store.get_finding("STORE-BASELINE-001")
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded.baseline_commit, self.baseline_sha)
+
+
 if __name__ == "__main__":
     unittest.main()
