@@ -633,7 +633,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 独立第三者監査の受入基準（実行隔離、偽陽性耐性、Evidence、複数ワーカー、Multi-LLM、継続運用）を網羅する体系的監査スイートを整備し、Fail-Closed に判定する。
   4. 独立監査完走・Evidence Bundle 生成と v0.7.0 リリース準備 (NNN.4):
      - Level 7 E2E 完走を確認し、6大受入条件を満たした独立監査 Evidence Bundle を生成、v0.7.0 リリースを確定する。
-- [ ] 機能OOO (Stage 7 AST 因果解析の厳密化と独立監査受入ハーネス確定 Stage 7 AST Causal Order and Guarded Failure Refinement):
+- [x] 機能OOO (Stage 7 AST 因果解析の厳密化と独立監査受入ハーネス確定 Stage 7 AST Causal Order and Guarded Failure Refinement):
   1. AST 解析の文実行順序化（Program Order）による後続代入汚染の完全排除 (OOO.1 / Sol氏 Phase 54 P1指摘):
      - `check_trivial_red_ast` において、代入文とアサーションをメソッド内の実行順（Program Order）に沿って順次走査・評価する。
      - アサーション実行時点の変数状態・因果関係スナップショットのみを参照し、アサーションより後の再代入（例: `x = compute_val(1); self.assertEqual(x, 2); x = 999`）が直前のアサーション判定に逆流しないことを単体テストで実証する。
@@ -644,6 +644,17 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `tests/test_level7_real_loop_e2e.py` および `tests/test_independent_audit_runner.py` において、後続再代入を含む正常テストや条件付き `self.fail()` を含む正常テストが安全にパスし、偽 Red のみが確実に排除されることを実証する。
   4. 報告書の正確化（受入ハーネス実証）・Evidence Bundle 生成と v0.7.0 リリース準備 (OOO.4):
      - `NIGHTLY_REPORT.md` およびドキュメントの表現を「独立第三者監査に向けた受入ハーネスの整備・実証」として正確に是正し、全テスト通過・改ざん検知・独立 Checker 承認済みの Evidence Bundle を生成して v0.7.0 を確定する。
+- [ ] 機能PPP (Stage 7 制御フロー変数合流の不確定性保護・安全側フォールスルーと受入ハーネス確定 Stage 7 Control Flow Merge, Uncertainty Protection, and Acceptance Finalization):
+  1. 条件分岐（`if`/`while`）における変数合流（Merge）と不確定性保護 (PPP.1 / Sol氏 Phase 55 P1指摘):
+     - `_process_stmts_in_order` において、条件分岐（`body` / `orelse`）内で再代入・変更された変数について、分岐後に静的確定できない場合（両ブランチで異なる値、または条件式が動的な場合）は、分岐前の古い固定値を破棄し `var_env` から除去して `dependent_vars`（不確定 / 動的依存）へ昇格させる。
+     - 分岐前の固定値が分岐後のアサーション判定に誤って使われないようにし、`x = 1; if compute_val(1) == 2: x = 2; self.assertEqual(x, 2)` のような正常なテストが固定値不一致（`1 == 2`）として誤拒絶（TRIVIAL_RED）されず、安全に受容されることを単体テストで実証する。
+  2. 静的到達不能コード（`if False:` 等）の判定抑止と不確実性の安全側判定 (PPP.2 / Sol氏 Phase 55 提言):
+     - 静的に到達不能な分岐（例: `if False: self.assertEqual(1, 2)`）に含まれるアサーションを偽 Red の検出根拠としない。
+     - 静的解析で真正性を確定できない（確信できない）ケースは無理に `TRIVIAL_RED` と決めつけず、安全側に倒す（フォールスルーまたは実動実行結果との組み合わせに委ねる）。
+  3. 判定の不確実性保護・受入ハーネスと Level 7 E2E 完走確認 (PPP.3):
+     - `tests/test_independent_audit_runner.py` および `tests/test_level7_real_loop_e2e.py` において、条件分岐後の変数合流を伴う正常テストが安全にパスし、真のバグのみが受理・自律修復されることを実証する。
+  4. 最終 Evidence Bundle 生成・受入ハーネス確定と正式独立第三者監査移行準備 (PPP.4):
+     - 全テスト通過・改ざん検知・独立 Checker 承認済みの Evidence Bundle を生成し、受入ハーネスの整備を完了して v0.7.0 リリースを確定、次フェーズでの実外部モデル独立監査への移行準備を完了する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
