@@ -36,7 +36,7 @@
 
 ## ステップ
 - [x] 1. 外部監査役実行による監査完走とプロバイダ実行メタデータの完全取得（Red-First）（TTT.1）
-- [ ] 2. audit_stage.json の確実な永続化と EvidenceBundler による Bundle 包含・Manifest ハッシュ登録（Red-First）（TTT.2）
+- [x] 2. audit_stage.json の確実な永続化と EvidenceBundler による Bundle 包含・Manifest ハッシュ登録（Red-First）（TTT.2）
 - [ ] 3. NIGHTLY_REPORT.md のプレースホルダー完全排除と実測 64文字 SHA-256 の自動展開（Red-First）（TTT.3）
 - [ ] 4. 実監査証跡（evidence/audit_stage.json）を含む最終 Evidence Bundle ZIP の生成・独立検証（10/10 整合性）および v0.7.0 正式リリース確定（TTT.4）
 

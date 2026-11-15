@@ -287,11 +287,12 @@ class IndependentAuditRunner:
             raise ValueError(f"Could not parse valid JSON from audit response: {output[:200]}")
 
         if isinstance(data, dict):
-            # TTT.1: エンベロープメタデータ（provider, execution_id 等）の抽出・保持
+            # TTT.1: エンベロープメタデータ（provider, execution_id, status 等）の抽出・保持
             self._last_envelope_metadata = {
                 "provider": data.get("provider"),
                 "execution_id": data.get("execution_id") or data.get("id"),
                 "model": data.get("model"),
+                "status": data.get("status"),
             }
             if "findings" in data and isinstance(data["findings"], list):
                 data = data["findings"]
@@ -401,6 +402,7 @@ class IndependentAuditRunner:
                     "provider": provider,
                     "auditor_model": candidate,
                     "execution_id": execution_id,
+                    "status": envelope_meta.get("status") or "COMPLETED",
                     "fallback_occurred": is_fallback,
                     "fallback_from": self.model_name if is_fallback else None,
                     "maker_model": maker_m,

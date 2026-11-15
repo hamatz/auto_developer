@@ -587,6 +587,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f" Head Commit:    {res.head_commit or 'Unknown'}")
             print(f" Verified Files: {len(res.file_hashes)}")
             print(f" Tasks Audited:  {len(res.tasks)}")
+            if getattr(res, "audit_stage_verified", False):
+                info = getattr(res, "audit_stage_info", {}) or {}
+                meta = info.get("audit_metadata", {}) or {}
+                prov = meta.get("provider", "independent")
+                m_name = meta.get("auditor_model", "N/A")
+                print(f" Audit Stage:    VERIFIED (Provider: {prov}, Model: {m_name})")
             if res.errors:
                 print(" Errors:")
                 for err in res.errors:

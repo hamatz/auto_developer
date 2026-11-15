@@ -109,9 +109,10 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         self.assertIsNotNone(meta.get("diff_sha256"))
         self.assertEqual(meta.get("target_commit"), self.target_sha)
         self.assertEqual(meta.get("baseline_commit"), self.baseline_sha)
-        # TTT.1: プロバイダ名および実行識別子の拘束
+        # TTT.1: プロバイダ名、実行識別子、ステータスの拘束
         self.assertEqual(meta.get("provider"), "anthropic")
         self.assertIsNotNone(meta.get("execution_id"))
+        self.assertEqual(meta.get("status"), "COMPLETED")
 
     def test_audit_runner_extracts_envelope_provider_metadata(self) -> None:
         """TTT.1: プロバイダからのエンベロープレスポンス（実行ID・プロバイダ名入り）を正しく解析・抽出できること。"""
@@ -119,6 +120,7 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             "provider": "anthropic",
             "model": "claude-opus-5.5",
             "execution_id": "msg_01X9Z8A7B6C5D4E3",
+            "status": "COMPLETED",
             "findings": [
                 {
                     "finding_id": "PROV-ENV-001",
@@ -157,6 +159,7 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         assert meta is not None
         self.assertEqual(meta.get("provider"), "anthropic")
         self.assertEqual(meta.get("execution_id"), "msg_01X9Z8A7B6C5D4E3")
+        self.assertEqual(meta.get("status"), "COMPLETED")
 
     def test_orchestrator_audit_stage_includes_provenance_metadata(self) -> None:
         """SSS.4: Orchestrator の run_audit_stage が監査証跡メタデータを含んで結果を返すこと。"""
@@ -244,16 +247,48 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         self.assertIn("b" * 12, content)
 
     def test_bundler_includes_audit_stage_evidence(self) -> None:
-        """SSS.4: EvidenceBundler が独立監査証跡ファイル（audit_stage.json 等）を bundle に収録すること。"""
+        """TTT.2: EvidenceBundler が audit_stage.json を収録し、Manifest と verify_bundle で検証可能であること。"""
+        import hashlib
         evidence_dir = self.repo_dir / ".git" / "nightly_evidence" / "records"
         evidence_dir.mkdir(parents=True, exist_ok=True)
+
+        tree_res = subprocess.run(
+            ["git", "rev-parse", f"{self.target_sha}^{{tree}}"],
+            cwd=self.repo_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        target_tree = tree_res.stdout.strip()
+        spec_hash = hashlib.sha256((self.repo_dir / "SPEC.md").read_bytes()).hexdigest()
+
+        # タスク証跡 task_1.json
+        task_file = evidence_dir / "task_1.json"
+        task_file.write_text(
+            json.dumps({
+                "task_id": "1",
+                "status": "COMPLETED",
+                "commit": self.target_sha,
+                "tree_sha": target_tree,
+                "spec_sha": spec_hash,
+                "checker": {"decision": "APPROVE"},
+            }),
+            encoding="utf-8",
+        )
+
         audit_file = evidence_dir / "audit_stage.json"
         audit_file.write_text(
             json.dumps({
-                "auditor_model": "claude-opus-5.5",
                 "status": "SUCCESS",
-                "prompt_hash": "dummy_prompt",
-                "response_hash": "dummy_response",
+                "audit_metadata": {
+                    "provider": "anthropic",
+                    "auditor_model": "claude-opus-5.5",
+                    "execution_id": "exec_1234567890",
+                    "raw_prompt_hash": "a" * 64,
+                    "raw_response_hash": "b" * 64,
+                },
+                "dispatched_count": 0,
+                "rejected_count": 0,
             }),
             encoding="utf-8",
         )
@@ -265,6 +300,16 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         with zipfile.ZipFile(bundle_path, "r") as z:
             names = z.namelist()
             self.assertIn("evidence/audit_stage.json", names)
+            manifest = json.loads(z.read("bundle_manifest.json").decode("utf-8"))
+            self.assertIn("evidence/audit_stage.json", manifest.get("file_hashes", {}))
+            self.assertIn("audit_stage", manifest)
+            self.assertEqual(manifest["audit_stage"].get("status"), "SUCCESS")
+
+        # verify_bundle での監査ステージ検証
+        res = bundler.verify_bundle(bundle_path)
+        self.assertTrue(res.is_valid)
+        self.assertTrue(getattr(res, "audit_stage_verified", False))
+        self.assertIsNotNone(getattr(res, "audit_stage_info", None))
 
 
 if __name__ == "__main__":
