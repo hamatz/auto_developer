@@ -313,6 +313,34 @@ class NewDefectTest(unittest.TestCase):
         self.assertIn("Brand new defect in target_pkg", content)
         self.assertTrue(any(line.startswith("- [ ]") and "Brand new defect in target_pkg" in line for line in content.splitlines()))
 
+    def test_distinct_finding_with_substring_description_is_registered(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 35): description が既存の未着手タスク行の部分文字列であっても、異なる finding_id の真正指摘が重複扱いされず登録されること。"""
+        self.plan_path.write_text(
+            "# PLAN.md\n\n## ステップ\n- [ ] AUD-AUD-001. Fix: [AUD-001] Parser drops real bug in audit module (Severity: P1, Loc: a.py:1)\n",
+            encoding="utf-8",
+        )
+
+        finding = AuditFinding(
+            finding_id="AUD-099",
+            severity="P0",
+            spec_reference="SPEC.md VVV.3",
+            location="src/target_pkg.py:1",
+            description="real bug",
+            reproduction_test_code="""import unittest
+from target_pkg import target_fn
+
+class T(unittest.TestCase):
+    def test_x(self):
+        self.assertTrue(target_fn())
+""",
+            status="REPORTED",
+        )
+
+        res = self.dispatcher.dispatch_finding(finding, plan_path=self.plan_path)
+        content = self.plan_path.read_text(encoding="utf-8")
+        self.assertEqual(res.status, "DISPATCHED")
+        self.assertIn("[AUD-099]", content, "genuine finding was marked DISPATCHED but never written to PLAN.md")
+
 
 if __name__ == "__main__":
     unittest.main()

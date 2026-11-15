@@ -57,5 +57,6 @@
 - [x] AUD-AUD-016. Fix: [AUD-001 Cycle 34] _extract_findings_from_text() rejects failed/error envelopes before slicing array findings to prevent silent fail-open (Severity: P1, Loc: scripts/auditor_client.py:54)
 - [x] AUD-AUD-017. Fix: [AUD-002 Cycle 34] _is_product_or_causal_call() rejects method calls on literals/constants (e.g. "1".upper()) in exception guards (Severity: P2, Loc: src/auto_developer/verifier.py:133)
 - [x] AUD-AUD-018. Fix: [AUD-003 Cycle 34] dispatch_finding() idempotency check does not falsely collide with completed tasks (- [x]) from earlier audit cycles (Severity: P2, Loc: src/auto_developer/dispatcher.py:157)
+- [x] AUD-AUD-019. Fix: [AUD-001 Cycle 35] dispatch_finding() restricts open task idempotency to finding_id token to prevent substring description collisions (Severity: P1, Loc: src/auto_developer/dispatcher.py:164)
 ## 止まっていること・判断待ち
 - なし。Sol 氏の Phase 61 レビュー指摘（P1: stop_reason 検証・max_tokens打ち切り検知・JSON解析失敗のFail-Closed化、P1: test_live_claude_audit.py の環境差異解消と Linux bwrap 修正、考察: 監査対象コミットと最終HEADの差分整合性拘束）に対応する Phase 62（機能VVV）の準備完了。

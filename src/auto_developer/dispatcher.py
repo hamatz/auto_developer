@@ -159,9 +159,9 @@ class AuditDispatcher:
         lines = content.splitlines()
 
         # 2. 二重登録防止 (Idempotency)
-        # 既に未着手 (- [ ]) の同一指摘または同一コードハッシュが存在する場合は二重追加を防ぐ
+        # 既に未着手 (- [ ]) の同一指摘トークンが存在する場合は二重追加を防ぐ (AUD-019)
         is_already_open = any(
-            line.strip().startswith("- [ ]") and (f"[{finding.finding_id}]" in line or finding.description in line)
+            line.strip().startswith("- [ ]") and f"[{finding.finding_id}]" in line
             for line in lines
         )
         if is_already_open:
