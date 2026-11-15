@@ -38,7 +38,7 @@
 - [x] 1. 監査対象 SPEC のコミット拘束と監査入力ハッシュの厳格証明（Red-First）（RRR.1）
 - [x] 2. NightlyOrchestrator への独立監査ステージの本番自動組み込み（Red-First）（RRR.2）
 - [x] 3. モデル上限・障害時の弾力的フォールバックと実外部モデル監査・Level 7閉ループ実証（Red-First）（RRR.3）
-- [ ] 4. 独立監査 Evidence Bundle 生成と v0.7.0 正式リリース確定（RRR.4）
+- [x] 4. 独立監査 Evidence Bundle 生成と v0.7.0 正式リリース確定（RRR.4）
 
 ## 止まっていること・判断待ち
 - なし。Sol 氏の Phase 57 レビュー指摘（P0: 実モデル監査 Evidence 証明、P1: Orchestrator への本番組み込み、P1: SPEC コミット拘束）およびユーザーのフォールバック考慮要件に対応する Phase 58（機能RRR）の準備完了。
