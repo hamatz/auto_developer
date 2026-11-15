@@ -109,6 +109,54 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         self.assertIsNotNone(meta.get("diff_sha256"))
         self.assertEqual(meta.get("target_commit"), self.target_sha)
         self.assertEqual(meta.get("baseline_commit"), self.baseline_sha)
+        # TTT.1: プロバイダ名および実行識別子の拘束
+        self.assertEqual(meta.get("provider"), "anthropic")
+        self.assertIsNotNone(meta.get("execution_id"))
+
+    def test_audit_runner_extracts_envelope_provider_metadata(self) -> None:
+        """TTT.1: プロバイダからのエンベロープレスポンス（実行ID・プロバイダ名入り）を正しく解析・抽出できること。"""
+        envelope_json = json.dumps({
+            "provider": "anthropic",
+            "model": "claude-opus-5.5",
+            "execution_id": "msg_01X9Z8A7B6C5D4E3",
+            "findings": [
+                {
+                    "finding_id": "PROV-ENV-001",
+                    "severity": "P1",
+                    "spec_reference": "SPEC.md",
+                    "location": "src/app.py:1",
+                    "description": "Envelope finding",
+                    "reproduction_test_code": "import unittest\nclass T(unittest.TestCase):\n    def test_t(self): self.fail()",
+                    "status": "REPORTED",
+                }
+            ],
+        })
+        cmd_template = f"echo '{envelope_json}'"
+        config = AuditConfig(
+            maker_model="gemini-3.8-flash",
+            auditor_model="claude-opus-5.5",
+            baseline_commit=self.baseline_sha,
+        )
+        runner = IndependentAuditRunner(
+            auditor_cmd_template=cmd_template,
+            model_name="claude-opus-5.5",
+            config=config,
+            baseline_commit=self.baseline_sha,
+        )
+
+        findings = runner.audit_repository(
+            repo_dir=self.repo_dir,
+            target_commit=self.target_sha,
+            baseline_commit=self.baseline_sha,
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].finding_id, "PROV-ENV-001")
+
+        meta = runner.last_run_metadata
+        self.assertIsNotNone(meta)
+        assert meta is not None
+        self.assertEqual(meta.get("provider"), "anthropic")
+        self.assertEqual(meta.get("execution_id"), "msg_01X9Z8A7B6C5D4E3")
 
     def test_orchestrator_audit_stage_includes_provenance_metadata(self) -> None:
         """SSS.4: Orchestrator の run_audit_stage が監査証跡メタデータを含んで結果を返すこと。"""
