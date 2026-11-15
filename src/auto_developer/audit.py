@@ -286,6 +286,8 @@ class IndependentAuditRunner:
                 elif len(parsed) == 0:
                     empty_block_found = True
             elif isinstance(parsed, dict):
+                if parsed.get("error"):
+                    raise ValueError(f"AUDIT_FAILED: Auditor response contains error: {parsed.get('error')}")
                 is_prov = bool(
                     parsed.get("mode")
                     or parsed.get("execution_id")
@@ -311,8 +313,6 @@ class IndependentAuditRunner:
                         collected_findings.extend(findings)
                     elif len(parsed["findings"]) == 0:
                         empty_block_found = True
-                elif "error" in parsed:
-                    raise ValueError(f"AUDIT_FAILED: Auditor response contains error: {parsed.get('error')}")
         except json.JSONDecodeError:
             # 2. Markdown コードブロックの探索（複数ブロック走査＆全件集約）
             all_code_blocks = list(re.finditer(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", clean_output, re.DOTALL))
@@ -330,6 +330,8 @@ class IndependentAuditRunner:
                             elif len(parsed) == 0:
                                 empty_block_found = True
                         elif isinstance(parsed, dict):
+                            if parsed.get("error"):
+                                raise ValueError(f"AUDIT_FAILED: Auditor response contains error: {parsed.get('error')}")
                             is_prov = bool(
                                 parsed.get("mode")
                                 or parsed.get("execution_id")
@@ -357,6 +359,8 @@ class IndependentAuditRunner:
                                     collected_findings.extend(findings)
                                 elif len(parsed["findings"]) == 0:
                                     empty_block_found = True
+                            else:
+                                has_decode_error = True
                     except json.JSONDecodeError:
                         has_decode_error = True
 

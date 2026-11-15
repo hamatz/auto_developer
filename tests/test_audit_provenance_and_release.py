@@ -1512,6 +1512,38 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.parse_response('{"findings": "none"}')
 
+    def test_error_envelope_with_empty_findings_is_rejected(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 25): error キーを持つエンベロープは、空の findings 配列を含んでいてもゼロ欠陥として扱われず Fail-Closed（ValueError）で拒絶されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        output = '{"error": "Rate limit exceeded", "findings": []}'
+        with self.assertRaises(ValueError):
+            runner.parse_response(output)
+
+    def test_fenced_error_object_after_empty_example_is_rejected(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 25): 例示空コードブロックの後に error オブジェクトのコードブロックが続く場合、例示空配列でゼロ欠陥偽装されず Fail-Closed（ValueError）で拒絶されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        text = (
+            "Example format: ```json\n[]\n```\n"
+            "Result:\n```json\n{\"error\": \"Rate limit exceeded\"}\n```"
+        )
+        with self.assertRaises(ValueError):
+            runner.parse_response(text)
+
+    def test_auditor_client_fenced_error_object_after_empty_example_is_rejected(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 25): auditor_client において例示空コードブロックの後に error オブジェクトのコードブロックが続く場合、Fail-Closed（ValueError）で拒絶されること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+        text = (
+            "Example format: ```json\n[]\n```\n"
+            "Result:\n```json\n{\"error\": \"Rate limit exceeded\"}\n```"
+        )
+        with self.assertRaises(ValueError):
+            auditor_client._extract_findings_from_text(text)
+
 
 if __name__ == "__main__":
     unittest.main()

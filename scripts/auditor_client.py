@@ -83,7 +83,9 @@ def _extract_findings_from_text(text: str) -> list[dict]:
                 elif len(parsed) == 0:
                     empty_block_found = True
             elif isinstance(parsed, dict):
-                if "finding_id" in parsed:
+                if parsed.get("error"):
+                    raise ValueError(f"AUDIT_FAILED: Auditor response contains error: {parsed.get('error')}")
+                elif "finding_id" in parsed:
                     collected_findings.append(parsed)
                 elif "findings" in parsed and isinstance(parsed["findings"], list):
                     findings = [item for item in parsed["findings"] if isinstance(item, dict)]
@@ -91,6 +93,9 @@ def _extract_findings_from_text(text: str) -> list[dict]:
                         collected_findings.extend(findings)
                     elif len(parsed["findings"]) == 0:
                         empty_block_found = True
+                else:
+                    has_decode_error = True
+                    decode_error_msg = f"Unrecognised JSON object in code block: {list(parsed.keys())}"
         except json.JSONDecodeError as exc:
             has_decode_error = True
             decode_error_msg = str(exc)
