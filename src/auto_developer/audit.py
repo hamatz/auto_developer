@@ -82,6 +82,7 @@ class AuditConfig:
     maker_model: str
     auditor_model: str
     allow_same_model_override: bool = False
+    baseline_commit: str | None = None
 
     def validate(self) -> bool:
         ok, reason = verify_model_independence(
@@ -110,6 +111,7 @@ class AuditFinding:
     before_commit_sha: str | None = None
     code_hash: str | None = None
     auditor_model: str | None = None
+    baseline_commit: str | None = None
     # NOTE: auditor_model は監査ランナー設定で渡されたモデル識別子の記録値であり、
     # 外部プロバイダーの実行時同一性を暗号学的に証明するものではない (HHH.2)。
 
@@ -131,6 +133,7 @@ class AuditFinding:
             before_commit_sha=data.get("before_commit_sha"),
             code_hash=data.get("code_hash"),
             auditor_model=data.get("auditor_model"),
+            baseline_commit=data.get("baseline_commit"),
         )
 
 
@@ -222,11 +225,13 @@ class IndependentAuditRunner:
         model_name: str = "claude-opus-5.5",
         timeout_sec: int = 600,
         config: AuditConfig | None = None,
+        baseline_commit: str | None = None,
     ) -> None:
         self.auditor_cmd_template = auditor_cmd_template
         self.model_name = model_name
         self.timeout_sec = timeout_sec
         self.config = config
+        self.baseline_commit = baseline_commit or (config.baseline_commit if config else None)
         self.audit_runner = AuditRunner()
 
     def build_audit_prompt(self, spec_content: str, git_diff: str) -> str:
@@ -314,7 +319,65 @@ class IndependentAuditRunner:
         findings = self.parse_response(output)
         for finding in findings:
             finding.auditor_model = self.model_name
+            if self.baseline_commit and not finding.baseline_commit:
+                finding.baseline_commit = self.baseline_commit
         return findings
+
+    def audit_repository(
+        self,
+        repo_dir: Path,
+        spec_path: Path,
+        baseline_commit: str | None = None,
+        head_commit: str = "HEAD",
+    ) -> list[AuditFinding]:
+        """指定されたベースラインコミットからの diff を抽出し、独立プロンプトで外部監査を実行する (QQQ.1)。"""
+        import subprocess
+
+        target_baseline = baseline_commit or self.baseline_commit
+        if not target_baseline:
+            raise ValueError("baseline_commit must be specified for repository audit")
+
+        # baseline から target までの git diff を厳格に抽出
+        diff_res = subprocess.run(
+            ["git", "diff", target_baseline, head_commit],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        git_diff = diff_res.stdout
+        spec_content = spec_path.read_text(encoding="utf-8")
+
+        findings = self.audit(spec_content=spec_content, git_diff=git_diff)
+        for finding in findings:
+            finding.baseline_commit = target_baseline
+        return findings
+
+    def screen_and_dispatch_findings(
+        self,
+        findings: list[AuditFinding],
+        dispatcher: Any,
+        plan_path: Path | None = None,
+    ) -> dict[str, Any]:
+        """外部監査役から投入された指摘リストを多層防壁で選別し、真正な指摘のみを PLAN.md に登録する (QQQ.2)。"""
+        dispatched: list[AuditFinding] = []
+        rejected: list[tuple[AuditFinding, str]] = []
+
+        for finding in findings:
+            res_finding = dispatcher.dispatch_finding(finding, plan_path=plan_path)
+            if res_finding.status == "DISPATCHED":
+                dispatched.append(res_finding)
+            else:
+                reason = res_finding.red_verification_reason or "UNKNOWN_REJECTION"
+                rejected.append((res_finding, reason))
+
+        return {
+            "dispatched": dispatched,
+            "rejected": rejected,
+            "total_processed": len(findings),
+            "genuine_count": len(dispatched),
+            "rejected_count": len(rejected),
+        }
 
 
 class AuditResolutionManager:
@@ -816,3 +879,14 @@ class LessonInjector:
                 lines.append(f"- Immunity Test: {entry.immunity_test}")
             lines.append("")
         return "\n".join(lines).strip()
+
+    def get_lessons_for_task(
+        self,
+        task_title: str,
+        task_description: str = "",
+        max_results: int = 5,
+    ) -> str:
+        """タスクのタイトルと説明から関連する教訓を検索し、注入用テキストを返す (QQQ.3 / FFF.4)。"""
+        query = f"{task_title} {task_description}".strip()
+        entries = self.find_relevant_lessons(query=query, max_results=max_results)
+        return self.format_injection(entries)
