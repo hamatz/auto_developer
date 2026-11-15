@@ -1544,6 +1544,41 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         with self.assertRaises(ValueError):
             auditor_client._extract_findings_from_text(text)
 
+    def test_auditor_client_rejects_unrendered_prompt_file_placeholder(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 26): auditor_client に未置換の {prompt_file} または {prompt} が渡された場合、空プロンプトとして Fail-Closed（終了コード 1）で拒絶されること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        ret = auditor_client.main(["--model", "claude-opus-5.5", "--prompt", "{prompt_file}", "--mock"])
+        self.assertEqual(ret, 1)
+
+    def test_auditor_runner_substitutes_prompt_file_template(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 26): IndependentAuditRunner は auditor_cmd_template 中の {prompt_file} を実在する一時ファイルパスに置換して実行し、実行後に安全に削除すること。"""
+        cmd_template = (
+            "test -f {prompt_file} && python3 scripts/auditor_client.py --model {model} --prompt {prompt_file} --mock"
+        )
+        config = AuditConfig(
+            maker_model="gemini-3.8-flash",
+            auditor_model="claude-opus-5.5",
+            baseline_commit=self.baseline_sha,
+        )
+        runner = IndependentAuditRunner(
+            auditor_cmd_template=cmd_template,
+            model_name="claude-opus-5.5",
+            config=config,
+            baseline_commit=self.baseline_sha,
+        )
+        findings = runner.audit_repository(
+            repo_dir=self.repo_dir,
+            target_commit=self.target_sha,
+            baseline_commit=self.baseline_sha,
+        )
+        self.assertEqual(findings, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -170,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     file_env = _load_env_file(repo_path)
 
     prompt_content = ""
-    if args.prompt and args.prompt != "{prompt}":
+    if args.prompt and args.prompt not in ("{prompt}", "{prompt_file}"):
         if len(args.prompt) < 1024 and "\n" not in args.prompt:
             try:
                 p_path = Path(args.prompt)
@@ -198,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
         provider = "independent"
 
     # AUD-001 / Fail-Closed: 空白または未置換テンプレートによる内容皆無の監査実行を遮断
-    if not prompt_content or not prompt_content.strip():
+    if not prompt_content or not prompt_content.strip() or prompt_content.strip() in ("{prompt}", "{prompt_file}"):
         err_envelope = {
             "mode": "MOCK" if args.mock else "LIVE",
             "provider": provider,

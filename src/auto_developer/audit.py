@@ -510,7 +510,9 @@ class IndependentAuditRunner:
 
     def audit(self, spec_content: str, git_diff: str) -> list[AuditFinding]:
         import hashlib
+        import os
         import subprocess
+        import tempfile
 
         prompt = self.build_audit_prompt(spec_content, git_diff)
         raw_prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -553,8 +555,15 @@ class IndependentAuditRunner:
         for candidate in independent_candidates:
             is_fallback = (candidate != self.model_name)
 
-            cmd_str = self.auditor_cmd_template.replace("{model}", candidate)
+            temp_prompt_file: str | None = None
             try:
+                cmd_str = self.auditor_cmd_template.replace("{model}", candidate)
+                if "{prompt_file}" in cmd_str:
+                    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".txt") as tfile:
+                        tfile.write(prompt)
+                        temp_prompt_file = tfile.name
+                    cmd_str = cmd_str.replace("{prompt_file}", temp_prompt_file)
+
                 proc = subprocess.run(
                     ["bash", "-c", cmd_str],
                     input=prompt,
@@ -621,6 +630,12 @@ class IndependentAuditRunner:
             except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as e:
                 last_error = e
                 continue
+            finally:
+                if temp_prompt_file and os.path.exists(temp_prompt_file):
+                    try:
+                        os.unlink(temp_prompt_file)
+                    except OSError:
+                        pass
 
         # すべての独立候補モデルがエラーとなった場合、NO_INDEPENDENT_AUDITOR_AVAILABLE として送出 (SSS.3)
         raise RuntimeError(
