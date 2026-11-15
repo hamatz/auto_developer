@@ -774,6 +774,19 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             ])
             self.assertEqual(exit_code, 1)
 
+    def test_extract_findings_from_text_accepts_empty_array_in_codeblock_with_prose(self) -> None:
+        """AUD-001 / VVV.1: レビュー本文に前置きテキストが存在する場合でも、```json\n[]\n``` が含まれていれば正常に 0件の指摘（[]）として抽出されること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        text = "I have completed the review.\n\n```json\n[]\n```\n\nNo issues found."
+        findings = auditor_client._extract_findings_from_text(text)
+        self.assertEqual(findings, [])
+
 
 if __name__ == "__main__":
     unittest.main()

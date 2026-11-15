@@ -52,6 +52,8 @@ def _extract_findings_from_text(text: str) -> list[dict]:
         try:
             parsed = json.loads(m.group(1).strip())
             if isinstance(parsed, list):
+                if len(parsed) == 0:
+                    return []
                 findings = [item for item in parsed if isinstance(item, dict)]
                 if findings:
                     return findings
