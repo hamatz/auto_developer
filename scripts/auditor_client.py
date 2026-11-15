@@ -90,14 +90,15 @@ def _extract_findings_from_text(text: str) -> list[dict]:
     start_out = text_outside.find("[")
     end_out = text_outside.rfind("]")
     if start_out != -1 and end_out != -1 and end_out > start_out:
+        candidate_outside = text_outside[start_out : end_out + 1].strip()
         try:
-            parsed = json.loads(text_outside[start_out : end_out + 1])
+            parsed = json.loads(candidate_outside)
             if isinstance(parsed, list):
                 findings = [item for item in parsed if isinstance(item, dict)]
                 if findings:
                     return findings
         except json.JSONDecodeError as exc:
-            if not empty_block_found:
+            if re.match(r"^\[\s*\{", candidate_outside) or not empty_block_found:
                 has_decode_error = True
                 decode_error_msg = str(exc)
 

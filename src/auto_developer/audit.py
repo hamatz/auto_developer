@@ -297,6 +297,7 @@ class IndependentAuditRunner:
         if data is None:
             all_code_blocks = list(re.finditer(r"```(?:json)?\s*\n?(.*?)\n?```", clean_output, re.DOTALL))
             empty_block_found = False
+            has_decode_error = False
             for m in all_code_blocks:
                 content = m.group(1).strip()
                 if not content.startswith(("[", "{")):
@@ -314,7 +315,10 @@ class IndependentAuditRunner:
                         data = parsed
                         break
                 except json.JSONDecodeError:
-                    pass
+                    has_decode_error = True
+
+            if has_decode_error and data is None:
+                raise ValueError("Malformed JSON in audit response code block")
 
             if data is None and empty_block_found:
                 data = []

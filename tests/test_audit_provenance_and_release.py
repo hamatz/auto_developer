@@ -962,6 +962,35 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         findings = auditor_client._extract_findings_from_text(text)
         self.assertEqual(findings, [])
 
+    def test_parse_response_malformed_findings_block_after_empty_example_fails_closed(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 13): parse_response は例示空配列コードブロックが存在しても、後続の指摘コードブロックが構文不正の場合は欠陥ゼロにフォールバックせず Fail-Closed（ValueError）とすること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        text = (
+            "Example format:\n```json\n[]\n```\n\n"
+            "Actual findings:\n```json\n"
+            '[{"finding_id": "AUD-001", "severity": "P0", "description": "broken",}]\n'
+            "```"
+        )
+        with self.assertRaises(ValueError):
+            runner.parse_response(text)
+
+    def test_malformed_raw_findings_after_empty_example_block_fails_closed(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 13): auditor_client は例示空配列コードブロックが存在しても、後続のブロック外生の指摘JSON（[{...}]）が構文不正の場合は欠陥ゼロにフォールバックせず Fail-Closed（ValueError）とすること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        text = (
+            "Example format: ```json\n[]\n```\n"
+            "Findings:\n"
+            '[{"finding_id": "AUD-001", "severity": "P0", "description": "real bug",}]'
+        )
+        with self.assertRaises(ValueError):
+            auditor_client._extract_findings_from_text(text)
+
 
 if __name__ == "__main__":
     unittest.main()
