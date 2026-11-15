@@ -339,7 +339,16 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         env.pop("OPENAI_API_KEY", None)
 
         proc = subprocess.run(
-            ["python3", "scripts/auditor_client.py", "--model", "claude-opus-5.5", "--prompt", "Audit this impossible bug"],
+            [
+                "python3",
+                "scripts/auditor_client.py",
+                "--repo-dir",
+                str(self.repo_dir),
+                "--model",
+                "claude-opus-5.5",
+                "--prompt",
+                "Audit this impossible bug",
+            ],
             check=False,
             capture_output=True,
             text=True,

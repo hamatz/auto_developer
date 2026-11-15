@@ -22,20 +22,19 @@ from pathlib import Path
 def _load_env_file(repo_dir: Path) -> dict[str, str]:
     """Load key-value pairs from .env file if it exists."""
     env_vars: dict[str, str] = {}
-    for candidate in [repo_dir / ".env", Path(".env")]:
-        if candidate.is_file():
-            try:
-                for line in candidate.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if line and not line.startswith("#") and "=" in line:
-                        k, v = line.split("=", 1)
-                        k = k.strip()
-                        v = v.strip().strip("'\"")
-                        if k and v:
-                            env_vars[k] = v
-            except OSError:
-                pass
-            break
+    candidate = repo_dir / ".env"
+    if candidate.is_file():
+        try:
+            for line in candidate.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("'\"")
+                    if k and v:
+                        env_vars[k] = v
+        except OSError:
+            pass
     return env_vars
 
 
@@ -83,9 +82,15 @@ def main(argv: list[str] | None = None) -> int:
 
     prompt_content = ""
     if args.prompt:
-        p_path = Path(args.prompt)
-        if p_path.is_file():
-            prompt_content = p_path.read_text(encoding="utf-8")
+        if len(args.prompt) < 1024 and "\n" not in args.prompt:
+            try:
+                p_path = Path(args.prompt)
+                if p_path.is_file():
+                    prompt_content = p_path.read_text(encoding="utf-8")
+                else:
+                    prompt_content = args.prompt
+            except OSError:
+                prompt_content = args.prompt
         else:
             prompt_content = args.prompt
     else:
@@ -142,14 +147,15 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         # Model mapping for Anthropic Messages API
+        clean_model = args.model.replace(".", "-")
         if "opus" in model_lower:
-            api_model = "claude-3-opus-20240229"
+            api_model = "claude-opus-5-5" if "5" in model_lower else clean_model
         elif "sonnet" in model_lower:
-            api_model = "claude-3-5-sonnet-20241022"
+            api_model = "claude-sonnet-5-5" if "5" in model_lower else clean_model
         elif "haiku" in model_lower:
-            api_model = "claude-3-5-haiku-20241022"
+            api_model = "claude-haiku-5-5" if "5" in model_lower else clean_model
         else:
-            api_model = args.model
+            api_model = clean_model
 
         system_instruction = (
             "You are an independent third-party technical auditor verifying software specifications "
