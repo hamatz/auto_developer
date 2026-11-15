@@ -39,6 +39,8 @@ class NightlyOrchestrator:
         allow_same_model_override: bool = False,
         auditor_runner: Any | None = None,
         auditor_model: str | None = None,
+        auditor_cmd_template: str | None = None,
+        fallback_models: list[str] | None = None,
         enable_audit_stage: bool = False,
         audit_baseline_commit: str | None = None,
     ) -> None:
@@ -59,6 +61,8 @@ class NightlyOrchestrator:
         self.allow_same_model_override = allow_same_model_override
         self.auditor_runner = auditor_runner
         self.auditor_model = auditor_model
+        self.auditor_cmd_template = auditor_cmd_template
+        self.fallback_models = list(fallback_models or [])
         self.enable_audit_stage = enable_audit_stage
         self.audit_baseline_commit = audit_baseline_commit
 
@@ -80,6 +84,31 @@ class NightlyOrchestrator:
             if not ok:
                 print(f"PRE-FLIGHT MODEL POLICY ERROR: {reason}", file=sys.stderr)
                 return 2
+
+        if self.enable_audit_stage:
+            from auto_developer.audit import verify_model_independence
+            from auto_developer.runner import MockRunnerAdapter
+
+            if (
+                not self.auditor_runner
+                and not self.auditor_cmd_template
+                and not isinstance(self.runner_adapter, MockRunnerAdapter)
+            ):
+                print(
+                    "PRE-FLIGHT CONFIG ERROR: In production mode with independent audit enabled, auditor_cmd_template must be provided.",
+                    file=sys.stderr,
+                )
+                return 2
+
+            if self.maker_model and self.auditor_model:
+                ok, reason = verify_model_independence(
+                    self.maker_model,
+                    self.auditor_model,
+                    self.allow_same_model_override,
+                )
+                if not ok:
+                    print(f"PRE-FLIGHT AUDIT POLICY ERROR: {reason}", file=sys.stderr)
+                    return 2
 
         if not self.plan_path.exists():
             print(f"PRE-FLIGHT ERROR: Plan file not found: {self.plan_path}", file=sys.stderr)
@@ -648,8 +677,12 @@ class NightlyOrchestrator:
         from auto_developer.verifier import RedTestVerifier
 
         auditor = auditor_runner or self.auditor_runner
-        if not auditor and self.auditor_model:
-            auditor = IndependentAuditRunner(model_name=self.auditor_model)
+        if not auditor and (self.auditor_model or self.auditor_cmd_template):
+            auditor = IndependentAuditRunner(
+                auditor_cmd_template=self.auditor_cmd_template or "",
+                model_name=self.auditor_model or "claude-opus-5.5",
+                fallback_models=self.fallback_models,
+            )
 
         if not auditor:
             return {"status": "SKIPPED", "reason": "No auditor configured"}
