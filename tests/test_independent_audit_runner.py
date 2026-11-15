@@ -391,6 +391,30 @@ class GuardedFailTest(unittest.TestCase):
         self.assertEqual(dispatched_guard.red_verification_reason, "GENUINE_RED")
         self.assertIn("GENUINE-GUARD-FAIL-001", plan_file.read_text(encoding="utf-8"))
 
+        # 5. 条件分岐後の変数合流を伴う真正Red指摘のディスパッチ (機能PPP.3: Merge & Uncertainty Protection の受入保証)
+        branch_merge_finding = AuditFinding(
+            finding_id="GENUINE-BRANCH-MERGE-001",
+            severity="P1",
+            spec_reference="SPEC.md PPP.1",
+            location="src/sample_module.py:2",
+            description="Branch merge variable evaluation bug",
+            reproduction_test_code="""import unittest
+from sample_module import compute_val
+class BranchMergeTest(unittest.TestCase):
+    def test_merge(self):
+        x = 1
+        if compute_val(2) == 999:
+            x = 2
+        self.assertEqual(x, 999)
+""",
+            status="REPORTED",
+            auditor_model="claude-opus-5.5",
+        )
+        dispatched_merge = dispatcher.dispatch_finding(branch_merge_finding, plan_path=plan_file)
+        self.assertEqual(dispatched_merge.status, "DISPATCHED")
+        self.assertEqual(dispatched_merge.red_verification_reason, "GENUINE_RED")
+        self.assertIn("GENUINE-BRANCH-MERGE-001", plan_file.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
