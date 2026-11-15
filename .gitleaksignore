@@ -1,0 +1,4 @@
+# Gitleaks ignore list for false-positive generic-api-key detections
+# Commit 3d3ef6a: Anthropic public model name strings ("claude-3-opus-20240229") assigned to api_model variable
+3d3ef6ad38af069e96694c12b9e88e3afd6599ca:scripts/auditor_client.py:generic-api-key:146
+3d3ef6ad38af069e96694c12b9e88e3afd6599ca:scripts/auditor_client.py:generic-api-key:150

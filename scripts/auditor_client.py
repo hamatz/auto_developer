@@ -149,13 +149,13 @@ def main(argv: list[str] | None = None) -> int:
         # Model mapping for Anthropic Messages API
         clean_model = args.model.replace(".", "-")
         if "opus" in model_lower:
-            api_model = "claude-opus-5-5" if "5" in model_lower else clean_model
+            anthropic_model = "claude-opus-5-5" if "5" in model_lower else clean_model
         elif "sonnet" in model_lower:
-            api_model = "claude-sonnet-5-5" if "5" in model_lower else clean_model
+            anthropic_model = "claude-sonnet-5-5" if "5" in model_lower else clean_model
         elif "haiku" in model_lower:
-            api_model = "claude-haiku-5-5" if "5" in model_lower else clean_model
+            anthropic_model = "claude-haiku-5-5" if "5" in model_lower else clean_model
         else:
-            api_model = clean_model
+            anthropic_model = clean_model
 
         system_instruction = (
             "You are an independent third-party technical auditor verifying software specifications "
@@ -178,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         payload = {
-            "model": api_model,
+            "model": anthropic_model,
             "max_tokens": 4096,
             "system": system_instruction,
             "messages": [
@@ -240,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
             "mode": "LIVE",
             "provider": "anthropic",
             "model": args.model,
-            "resolved_model": resp_json.get("model", api_model),
+            "resolved_model": resp_json.get("model", anthropic_model),
             "provider_request_id": provider_req_id,
             "execution_id": provider_req_id,
             "status": "COMPLETED",
