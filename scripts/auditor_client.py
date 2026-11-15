@@ -54,10 +54,9 @@ def _extract_findings_from_text(text: str) -> list[dict]:
     has_decode_error = False
     decode_error_msg = ""
     for m in all_code_blocks:
-        lang = m.group(1).lower().strip()
         content = m.group(2).strip()
-        is_json = (lang == "json") or (not lang and content.startswith(("[", "{")))
-        if not is_json:
+        # Candidate findings must begin with a JSON structure character ('[' or '{')
+        if not content.startswith(("[", "{")):
             continue
         try:
             parsed = json.loads(content)

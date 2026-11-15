@@ -876,6 +876,22 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         findings = auditor_client._extract_findings_from_text(text)
         self.assertEqual(findings, [])
 
+    def test_extract_findings_handles_quoted_instructions_with_ellipsis_codeblock_and_empty_findings(self) -> None:
+        """AUD-004 (Sol Phase 62 / Cycle 10): 指示引用文等に含まれる ```json ... ``` のような非JSONコードブロックが存在しても、後続の正当な ```json [] ``` を正しく抽出し、誤判定を防ぐこと。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        text = (
+            "I will output only the JSON array in ```json ... ``` as instructed.\n\n"
+            "```json\n[]\n```"
+        )
+        findings = auditor_client._extract_findings_from_text(text)
+        self.assertEqual(findings, [])
+
 
 if __name__ == "__main__":
     unittest.main()
