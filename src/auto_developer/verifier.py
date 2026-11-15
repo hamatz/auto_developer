@@ -139,6 +139,43 @@ def _get_root_name(node: ast.AST) -> str | None:
     return None
 
 
+def _resolve_expr_origin(
+    expr: ast.AST,
+    imported_symbols: dict[str, str],
+    imported_modules: dict[str, str],
+    var_origins: dict[str, str],
+) -> str | None:
+    """式 (Name / Attribute) の解決元パッケージ・モジュール名または 'builtins' を特定する (AUD-202)。"""
+    if isinstance(expr, ast.Name):
+        if expr.id in var_origins:
+            return var_origins[expr.id]
+        if expr.id in imported_symbols:
+            return imported_symbols[expr.id]
+        if expr.id in imported_modules:
+            return imported_modules[expr.id]
+        if expr.id in _BUILTIN_NAMES:
+            return "builtins"
+        if expr.id in _STDLIB_MODULE_NAMES:
+            return expr.id
+        return None
+    if isinstance(expr, ast.Attribute):
+        val_origin = _resolve_expr_origin(expr.value, imported_symbols, imported_modules, var_origins)
+        if val_origin:
+            return val_origin
+        root_name = _get_root_name(expr)
+        if root_name:
+            if root_name in var_origins:
+                return var_origins[root_name]
+            if root_name in imported_modules:
+                return imported_modules[root_name]
+            if root_name in imported_symbols:
+                return imported_symbols[root_name]
+            if root_name in _STDLIB_MODULE_NAMES:
+                return root_name
+        return None
+    return None
+
+
 def _has_causal_dependency(node: ast.AST, dependent_vars: set[str]) -> bool:
     """ノードが関数呼出（非アサーション）または関数呼出に依存する変数を含んでいるかを判定する。"""
     for sub in ast.walk(node):
@@ -154,16 +191,17 @@ def _is_product_or_causal_call(
     dependent_vars: set[str] | None = None,
     func_node: ast.AST | None = None,
 ) -> bool:
-    """呼出がプロダクトコードまたは因果依存変数に紐づく有効な呼出かを判定する (機能OOO.2 / AUD-003 Cycle 33 / AUD-002 Cycle 34 / AUD-020 Cycle 36 / AUD-101 Cycle 37)。
+    """呼出がプロダクトコードまたは因果依存変数に紐づく有効な呼出かを判定する (機能OOO.2 / AUD-003 Cycle 33 / AUD-002 Cycle 34 / AUD-020 Cycle 36 / AUD-101 Cycle 37 / AUD-202 Cycle 38)。
     アサーション呼出、因果依存のない孤立した Python 組み込み関数呼出 (int("1") など)、
     リテラル・定数に対するメソッド呼出 ("1".upper() など)、
-    および標準ライブラリモジュール呼出 (os.getcwd(), o.getcwd(), getcwd() など) は除外する。
+    および標準ライブラリモジュール呼出 (os.getcwd(), o.getcwd(), getcwd(), cwd() など) は除外する。
     """
     if _is_assert_call(call):
         return False
 
     imported_symbols: dict[str, str] = getattr(func_node, "_imported_symbols", {}) if func_node else {}
     imported_modules: dict[str, str] = getattr(func_node, "_imported_modules", {}) if func_node else {}
+    var_origins: dict[str, str] = getattr(func_node, "_var_origins", {}) if func_node else {}
 
     if isinstance(call.func, ast.Attribute):
         # builtins モジュール経由の呼出 (builtins.int(...) 等)
@@ -177,10 +215,22 @@ def _is_product_or_causal_call(
         is_const, _ = _eval_constant_expr(call.func.value)
         if is_const:
             return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
-        # 標準ライブラリモジュール呼出 (os.getcwd(), os.path.join(), math.sqrt(), または別名 o.getcwd() 等: AUD-101)
+        # 標準ライブラリモジュール呼出 (os.getcwd(), os.path.join(), math.sqrt(), 別名 o.getcwd(), またはローカル別名 p.exists() 等: AUD-020 / AUD-101 / AUD-202)
         root_name = _get_root_name(call.func)
         orig_mod = imported_modules.get(root_name) if root_name else None
-        if root_name in _STDLIB_MODULE_NAMES or orig_mod in _STDLIB_MODULE_NAMES:
+        from_mod = imported_symbols.get(root_name) if root_name else None
+        root_origin = var_origins.get(root_name) if root_name else None
+        val_origin = _resolve_expr_origin(call.func.value, imported_symbols, imported_modules, var_origins)
+
+        if (
+            root_name in _STDLIB_MODULE_NAMES
+            or orig_mod in _STDLIB_MODULE_NAMES
+            or from_mod in _STDLIB_MODULE_NAMES
+            or root_origin in _STDLIB_MODULE_NAMES
+            or val_origin in _STDLIB_MODULE_NAMES
+            or root_origin == "builtins"
+            or val_origin == "builtins"
+        ):
             return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
         return True
 
@@ -190,6 +240,10 @@ def _is_product_or_causal_call(
         # from os import getcwd などの標準ライブラリからの直接 import 関数の呼出 (AUD-101)
         from_mod = imported_symbols.get(call.func.id)
         if from_mod in _STDLIB_MODULE_NAMES:
+            return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
+        # cwd = os.getcwd などのローカル別名関数の呼出 (AUD-202)
+        func_origin = var_origins.get(call.func.id)
+        if func_origin in _STDLIB_MODULE_NAMES or func_origin == "builtins":
             return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
         return True
 
@@ -338,6 +392,10 @@ def _process_stmts_in_order(
     trivial_reasons: list[str],
 ) -> None:
     """文を実行順序 (Program Order) に沿って走査し、変数の最新状態を維持しながらアサーションを順次検証する (機能OOO.1 / PPP.1 / PPP.2)。"""
+    imported_symbols: dict[str, str] = getattr(func_node, "_imported_symbols", {})
+    imported_modules: dict[str, str] = getattr(func_node, "_imported_modules", {})
+    var_origins: dict[str, str] = getattr(func_node, "_var_origins", {})
+
     for stmt in stmts:
         # 1. 複合文の再帰走査
         if isinstance(stmt, ast.If):
@@ -466,8 +524,12 @@ def _process_stmts_in_order(
         # 3. 代入文 (Assign, AnnAssign, AugAssign) による環境の更新
         if isinstance(stmt, ast.Assign):
             rhs = stmt.value
-            val_has_dep = _has_causal_dependency(rhs, dependent_vars)
             target_names = [n.id for t in stmt.targets for n in ast.walk(t) if isinstance(n, ast.Name)]
+            origin = _resolve_expr_origin(rhs, imported_symbols, imported_modules, var_origins)
+            if origin:
+                for name in target_names:
+                    var_origins[name] = origin
+            val_has_dep = _has_causal_dependency(rhs, dependent_vars)
             if val_has_dep:
                 for name in target_names:
                     dependent_vars.add(name)
@@ -479,14 +541,23 @@ def _process_stmts_in_order(
                         var_env[name] = const_val
                         dependent_vars.discard(name)
                 else:
-                    for name in target_names:
-                        dependent_vars.add(name)
-                        var_env.pop(name, None)
+                    if origin and (origin in _STDLIB_MODULE_NAMES or origin == "builtins"):
+                        for name in target_names:
+                            dependent_vars.discard(name)
+                            var_env.pop(name, None)
+                    else:
+                        for name in target_names:
+                            dependent_vars.add(name)
+                            var_env.pop(name, None)
 
         elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
             rhs = stmt.value
-            val_has_dep = _has_causal_dependency(rhs, dependent_vars)
             target_names = [n.id for n in ast.walk(stmt.target) if isinstance(n, ast.Name)]
+            origin = _resolve_expr_origin(rhs, imported_symbols, imported_modules, var_origins)
+            if origin:
+                for name in target_names:
+                    var_origins[name] = origin
+            val_has_dep = _has_causal_dependency(rhs, dependent_vars)
             if val_has_dep:
                 for name in target_names:
                     dependent_vars.add(name)
@@ -498,9 +569,14 @@ def _process_stmts_in_order(
                         var_env[name] = const_val
                         dependent_vars.discard(name)
                 else:
-                    for name in target_names:
-                        dependent_vars.add(name)
-                        var_env.pop(name, None)
+                    if origin and (origin in _STDLIB_MODULE_NAMES or origin == "builtins"):
+                        for name in target_names:
+                            dependent_vars.discard(name)
+                            var_env.pop(name, None)
+                    else:
+                        for name in target_names:
+                            dependent_vars.add(name)
+                            var_env.pop(name, None)
 
         elif isinstance(stmt, ast.AugAssign):
             target_names = [n.id for n in ast.walk(stmt.target) if isinstance(n, ast.Name)]
@@ -542,6 +618,23 @@ def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
             for alias in stmt.names:
                 alias_name = alias.asname or alias.name
                 imported_symbols[alias_name] = root_pkg
+                imported_modules[alias_name] = root_pkg
+
+    module_var_origins: dict[str, str] = {}
+    for stmt in ast.iter_child_nodes(tree):
+        if isinstance(stmt, ast.Assign):
+            origin = _resolve_expr_origin(stmt.value, imported_symbols, imported_modules, module_var_origins)
+            if origin:
+                for t in stmt.targets:
+                    for n in ast.walk(t):
+                        if isinstance(n, ast.Name):
+                            module_var_origins[n.id] = origin
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            origin = _resolve_expr_origin(stmt.value, imported_symbols, imported_modules, module_var_origins)
+            if origin:
+                for n in ast.walk(stmt.target):
+                    if isinstance(n, ast.Name):
+                        module_var_origins[n.id] = origin
 
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -549,8 +642,30 @@ def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
         if not node.name.startswith("test"):
             continue
 
+        var_origins: dict[str, str] = dict(module_var_origins)
+        changed = True
+        while changed:
+            changed = False
+            for sub_stmt in ast.walk(node):
+                if isinstance(sub_stmt, ast.Assign):
+                    origin = _resolve_expr_origin(sub_stmt.value, imported_symbols, imported_modules, var_origins)
+                    if origin:
+                        for t in sub_stmt.targets:
+                            for n in ast.walk(t):
+                                if isinstance(n, ast.Name) and var_origins.get(n.id) != origin:
+                                    var_origins[n.id] = origin
+                                    changed = True
+                elif isinstance(sub_stmt, ast.AnnAssign) and sub_stmt.value is not None:
+                    origin = _resolve_expr_origin(sub_stmt.value, imported_symbols, imported_modules, var_origins)
+                    if origin:
+                        for n in ast.walk(sub_stmt.target):
+                            if isinstance(n, ast.Name) and var_origins.get(n.id) != origin:
+                                var_origins[n.id] = origin
+                                changed = True
+
         node._imported_symbols = imported_symbols  # type: ignore[attr-defined,union-attr]
         node._imported_modules = imported_modules  # type: ignore[attr-defined,union-attr]
+        node._var_origins = var_origins  # type: ignore[attr-defined,union-attr]
 
         var_env: dict[str, Any] = {}
         dependent_vars: set[str] = set()

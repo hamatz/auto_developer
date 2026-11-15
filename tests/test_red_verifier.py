@@ -1442,6 +1442,48 @@ class T(unittest.TestCase):
         is_trivial, _msg = check_trivial_red_ast(code)
         self.assertTrue(is_trivial, "aliased stdlib module call inside try was accepted as a product call guard")
 
+    def test_local_alias_of_stdlib_function_is_trivial(self) -> None:
+        """AUD-202 (Sol Phase 62 / Cycle 38): cwd = os.getcwd のようにローカル変数に退避された標準ライブラリ関数呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import os
+import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        cwd = os.getcwd
+        try:
+            cwd()
+        except OSError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "stdlib call via local alias inside try was accepted as a product call guard")
+
+    def test_local_alias_of_stdlib_module_is_trivial(self) -> None:
+        """AUD-202 (Sol Phase 62 / Cycle 38): p = os.path のようにローカル変数に退避された標準ライブラリモジュール経由呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import os
+import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        p = os.path
+        try:
+            p.exists(".")
+        except OSError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "stdlib module via local alias inside try was accepted as a product call guard")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest
