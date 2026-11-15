@@ -278,20 +278,14 @@ class IndependentAuditRunner:
             pass
 
         # 2. 直接パースできない場合、エンベロープ辞書（{...}）または生配列（[...]）の抽出試行
-        # エンベロープ辞書が外側にある場合（start_brace < start_bracket）、エンベロープ検証をバイパスさせないよう辞書を優先抽出する
         if data is None:
             start_brace = clean_output.find("{")
             end_brace = clean_output.rfind("}")
             start_bracket = clean_output.find("[")
             end_bracket = clean_output.rfind("]")
 
-            # 辞書が外側に先行する場合、まず {...} のパースを試みる
-            if (
-                start_brace != -1
-                and end_brace != -1
-                and end_brace > start_brace
-                and (start_bracket == -1 or start_brace < start_bracket)
-            ):
+            # 辞書 {...} のパースをまず試みる（外側に辞書構造が存在する場合）
+            if start_brace != -1 and end_brace != -1 and end_brace > start_brace:
                 try:
                     parsed_dict = json.loads(clean_output[start_brace : end_brace + 1])
                     if isinstance(parsed_dict, dict) and (
@@ -299,6 +293,7 @@ class IndependentAuditRunner:
                         or "finding_id" in parsed_dict
                         or "status" in parsed_dict
                         or "mode" in parsed_dict
+                        or "provider" in parsed_dict
                     ):
                         data = parsed_dict
                 except json.JSONDecodeError:
@@ -306,16 +301,22 @@ class IndependentAuditRunner:
 
             # 辞書として抽出されなかった場合、生配列 [...] のパースを試みる
             if data is None and start_bracket != -1 and end_bracket != -1 and end_bracket > start_bracket:
-                try:
-                    parsed_list = json.loads(clean_output[start_bracket : end_bracket + 1])
-                    if isinstance(parsed_list, list):
-                        findings = [item for item in parsed_list if isinstance(item, dict)]
-                        if findings:
-                            data = findings
-                    elif isinstance(parsed_list, dict) and ("findings" in parsed_list or "finding_id" in parsed_list):
-                        data = parsed_list
-                except json.JSONDecodeError:
-                    pass
+                for m_b in re.finditer(r"\[", clean_output):
+                    s_idx = m_b.start()
+                    if s_idx >= end_bracket:
+                        break
+                    try:
+                        parsed_list = json.loads(clean_output[s_idx : end_bracket + 1])
+                        if isinstance(parsed_list, list):
+                            findings = [item for item in parsed_list if isinstance(item, dict)]
+                            if findings:
+                                data = findings
+                                break
+                        elif isinstance(parsed_list, dict) and ("findings" in parsed_list or "finding_id" in parsed_list):
+                            data = parsed_list
+                            break
+                    except json.JSONDecodeError:
+                        pass
 
         # 3. Markdown コードブロックの探索（複数ブロック走査＆非空指摘の優先）
         if data is None:
@@ -335,7 +336,12 @@ class IndependentAuditRunner:
                             break
                         if len(parsed) == 0:
                             empty_block_found = True
-                    elif isinstance(parsed, dict) and "findings" in parsed:
+                    elif isinstance(parsed, dict) and (
+                        "findings" in parsed
+                        or "finding_id" in parsed
+                        or "mode" in parsed
+                        or "status" in parsed
+                    ):
                         data = parsed
                         break
                 except json.JSONDecodeError:
@@ -347,25 +353,42 @@ class IndependentAuditRunner:
             # 3.5. コードブロック外の生指摘（例示空コードブロック＋生指摘外出し）の探索
             if data is None:
                 text_outside = re.sub(r"```(?:[a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", "", clean_output, flags=re.DOTALL)
-                end_out = text_outside.rfind("]")
-                if end_out != -1:
-                    for m_bracket in re.finditer(r"\[", text_outside):
-                        start_out = m_bracket.start()
-                        if start_out >= end_out:
-                            break
-                        candidate_outside = text_outside[start_out : end_out + 1].strip()
-                        try:
-                            parsed = json.loads(candidate_outside)
-                            if isinstance(parsed, list):
-                                findings = [item for item in parsed if isinstance(item, dict)]
-                                if findings:
-                                    data = findings
-                                    break
-                            elif isinstance(parsed, dict) and ("findings" in parsed or "finding_id" in parsed):
-                                data = parsed
+                start_out_brace = text_outside.find("{")
+                end_out_brace = text_outside.rfind("}")
+                if start_out_brace != -1 and end_out_brace != -1 and end_out_brace > start_out_brace:
+                    try:
+                        parsed_out_dict = json.loads(text_outside[start_out_brace : end_out_brace + 1])
+                        if isinstance(parsed_out_dict, dict) and (
+                            "findings" in parsed_out_dict
+                            or "finding_id" in parsed_out_dict
+                            or "status" in parsed_out_dict
+                            or "mode" in parsed_out_dict
+                            or "provider" in parsed_out_dict
+                        ):
+                            data = parsed_out_dict
+                    except json.JSONDecodeError:
+                        pass
+
+                if data is None:
+                    end_out = text_outside.rfind("]")
+                    if end_out != -1:
+                        for m_bracket in re.finditer(r"\[", text_outside):
+                            start_out = m_bracket.start()
+                            if start_out >= end_out:
                                 break
-                        except json.JSONDecodeError:
-                            pass
+                            candidate_outside = text_outside[start_out : end_out + 1].strip()
+                            try:
+                                parsed = json.loads(candidate_outside)
+                                if isinstance(parsed, list):
+                                    findings = [item for item in parsed if isinstance(item, dict)]
+                                    if findings:
+                                        data = findings
+                                        break
+                                elif isinstance(parsed, dict) and ("findings" in parsed or "finding_id" in parsed):
+                                    data = parsed
+                                    break
+                            except json.JSONDecodeError:
+                                pass
 
                 if data is None and re.search(r"\[\s*\{", text_outside):
                     has_decode_error = True
