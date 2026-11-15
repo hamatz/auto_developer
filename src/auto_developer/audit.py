@@ -278,6 +278,7 @@ class IndependentAuditRunner:
             pass
 
         # 2. 直接パースできない場合、エンベロープ辞書（{...}）または生配列（[...]）の抽出試行
+        empty_envelope: dict[str, Any] | None = None
         if data is None:
             start_brace = clean_output.find("{")
             end_brace = clean_output.rfind("}")
@@ -286,33 +287,40 @@ class IndependentAuditRunner:
 
             # エンベロープ辞書 {...} のパースをまず試みる（外側にエンベロープ構造が存在する場合）
             # 注: 個別指摘オブジェクト（finding_id/severity等）はエンベロープではないため配列抽出より優先して消費しない
+            # 空指摘エンベロープ（{"findings": []}）は例示形式の可能性があるため、実指摘の探索を妨げないよう記録のみ留める
             if start_brace != -1:
                 decoder = json.JSONDecoder()
                 for m_brace in re.finditer(r"\{", clean_output):
                     s_idx = m_brace.start()
                     try:
                         parsed_dict, _ = decoder.raw_decode(clean_output, s_idx)
-                        if isinstance(parsed_dict, dict) and (
-                            "findings" in parsed_dict
-                            or "mode" in parsed_dict
-                            or "provider" in parsed_dict
-                            or ("status" in parsed_dict and "finding_id" not in parsed_dict and "severity" not in parsed_dict)
-                        ):
-                            data = parsed_dict
-                            break
+                        if isinstance(parsed_dict, dict):
+                            findings_fld = parsed_dict.get("findings")
+                            if isinstance(findings_fld, list) and len(findings_fld) > 0:
+                                data = parsed_dict
+                                break
+                            elif isinstance(findings_fld, list) and len(findings_fld) == 0:
+                                if empty_envelope is None:
+                                    empty_envelope = parsed_dict
+                            elif "mode" in parsed_dict or "provider" in parsed_dict or ("status" in parsed_dict and "finding_id" not in parsed_dict and "severity" not in parsed_dict):
+                                data = parsed_dict
+                                break
                     except json.JSONDecodeError:
                         pass
                     if end_brace != -1 and end_brace > s_idx:
                         try:
                             parsed_dict = json.loads(clean_output[s_idx : end_brace + 1])
-                            if isinstance(parsed_dict, dict) and (
-                                "findings" in parsed_dict
-                                or "mode" in parsed_dict
-                                or "provider" in parsed_dict
-                                or ("status" in parsed_dict and "finding_id" not in parsed_dict and "severity" not in parsed_dict)
-                            ):
-                                data = parsed_dict
-                                break
+                            if isinstance(parsed_dict, dict):
+                                findings_fld = parsed_dict.get("findings")
+                                if isinstance(findings_fld, list) and len(findings_fld) > 0:
+                                    data = parsed_dict
+                                    break
+                                elif isinstance(findings_fld, list) and len(findings_fld) == 0:
+                                    if empty_envelope is None:
+                                        empty_envelope = parsed_dict
+                                elif "mode" in parsed_dict or "provider" in parsed_dict or ("status" in parsed_dict and "finding_id" not in parsed_dict and "severity" not in parsed_dict):
+                                    data = parsed_dict
+                                    break
                         except json.JSONDecodeError:
                             pass
 
@@ -328,9 +336,11 @@ class IndependentAuditRunner:
                             findings = [item for item in parsed_list if isinstance(item, dict)]
                             if findings:
                                 data = findings
+                                empty_envelope = None
                                 break
                         elif isinstance(parsed_list, dict) and ("findings" in parsed_list or "finding_id" in parsed_list):
                             data = parsed_list
+                            empty_envelope = None
                             break
                     except json.JSONDecodeError:
                         pass
@@ -370,56 +380,77 @@ class IndependentAuditRunner:
             # 3.5. コードブロック外の生指摘（例示空コードブロック＋生指摘外出し）の探索
             if data is None:
                 text_outside = re.sub(r"```(?:[a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", "", clean_output, flags=re.DOTALL)
+                end_out = text_outside.rfind("]")
+                if end_out != -1:
+                    for m_bracket in re.finditer(r"\[", text_outside):
+                        start_out = m_bracket.start()
+                        if start_out >= end_out:
+                            break
+                        candidate_outside = text_outside[start_out : end_out + 1].strip()
+                        try:
+                            parsed = json.loads(candidate_outside)
+                            if isinstance(parsed, list):
+                                findings = [item for item in parsed if isinstance(item, dict)]
+                                if findings:
+                                    data = findings
+                                    empty_envelope = None
+                                    break
+                            elif isinstance(parsed, dict) and ("findings" in parsed or "finding_id" in parsed):
+                                data = parsed
+                                empty_envelope = None
+                                break
+                        except json.JSONDecodeError:
+                            pass
+
                 start_out_brace = text_outside.find("{")
                 end_out_brace = text_outside.rfind("}")
-                if start_out_brace != -1:
+                if data is None and start_out_brace != -1:
                     decoder = json.JSONDecoder()
                     for m_brace in re.finditer(r"\{", text_outside):
                         s_idx = m_brace.start()
                         try:
                             parsed_out_dict, _ = decoder.raw_decode(text_outside, s_idx)
-                            if isinstance(parsed_out_dict, dict) and (
-                                "findings" in parsed_out_dict
-                                or "mode" in parsed_out_dict
-                                or "provider" in parsed_out_dict
-                                or ("status" in parsed_out_dict and "finding_id" not in parsed_out_dict and "severity" not in parsed_out_dict)
-                            ):
-                                data = parsed_out_dict
-                                break
+                            if isinstance(parsed_out_dict, dict):
+                                findings_fld = parsed_out_dict.get("findings")
+                                if isinstance(findings_fld, list) and len(findings_fld) > 0:
+                                    data = parsed_out_dict
+                                    empty_envelope = None
+                                    break
+                                elif isinstance(findings_fld, list) and len(findings_fld) == 0:
+                                    if empty_envelope is None:
+                                        empty_envelope = parsed_out_dict
+                                elif (
+                                    "mode" in parsed_out_dict
+                                    or "provider" in parsed_out_dict
+                                    or ("status" in parsed_out_dict and "finding_id" not in parsed_out_dict and "severity" not in parsed_out_dict)
+                                    or "finding_id" in parsed_out_dict
+                                ):
+                                    data = parsed_out_dict
+                                    empty_envelope = None
+                                    break
                         except json.JSONDecodeError:
                             pass
                         if end_out_brace != -1 and end_out_brace > s_idx:
                             try:
                                 parsed_out_dict = json.loads(text_outside[s_idx : end_out_brace + 1])
-                                if isinstance(parsed_out_dict, dict) and (
-                                    "findings" in parsed_out_dict
-                                    or "mode" in parsed_out_dict
-                                    or "provider" in parsed_out_dict
-                                    or ("status" in parsed_out_dict and "finding_id" not in parsed_out_dict and "severity" not in parsed_out_dict)
-                                ):
-                                    data = parsed_out_dict
-                                    break
-                            except json.JSONDecodeError:
-                                pass
-
-                if data is None:
-                    end_out = text_outside.rfind("]")
-                    if end_out != -1:
-                        for m_bracket in re.finditer(r"\[", text_outside):
-                            start_out = m_bracket.start()
-                            if start_out >= end_out:
-                                break
-                            candidate_outside = text_outside[start_out : end_out + 1].strip()
-                            try:
-                                parsed = json.loads(candidate_outside)
-                                if isinstance(parsed, list):
-                                    findings = [item for item in parsed if isinstance(item, dict)]
-                                    if findings:
-                                        data = findings
+                                if isinstance(parsed_out_dict, dict):
+                                    findings_fld = parsed_out_dict.get("findings")
+                                    if isinstance(findings_fld, list) and len(findings_fld) > 0:
+                                        data = parsed_out_dict
+                                        empty_envelope = None
                                         break
-                                elif isinstance(parsed, dict) and ("findings" in parsed or "finding_id" in parsed):
-                                    data = parsed
-                                    break
+                                    elif isinstance(findings_fld, list) and len(findings_fld) == 0:
+                                        if empty_envelope is None:
+                                            empty_envelope = parsed_out_dict
+                                    elif (
+                                        "mode" in parsed_out_dict
+                                        or "provider" in parsed_out_dict
+                                        or ("status" in parsed_out_dict and "finding_id" not in parsed_out_dict and "severity" not in parsed_out_dict)
+                                        or "finding_id" in parsed_out_dict
+                                    ):
+                                        data = parsed_out_dict
+                                        empty_envelope = None
+                                        break
                             except json.JSONDecodeError:
                                 pass
 
@@ -428,6 +459,9 @@ class IndependentAuditRunner:
 
             if has_decode_error and data is None:
                 raise ValueError("Malformed JSON in audit response code block")
+
+            if data is None and empty_envelope is not None:
+                data = empty_envelope
 
             if data is None and empty_block_found:
                 data = []

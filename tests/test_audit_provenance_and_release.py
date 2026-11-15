@@ -1368,6 +1368,37 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.parse_response(json.dumps(envelope))
 
+    def test_example_findings_dict_does_not_mask_real_findings(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 21): 例示形式辞書 {"findings": []} が実指摘配列の前に存在しても、実指摘がゼロ件偽装されず抽出されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        finding = {
+            "finding_id": "AUD-EX-001",
+            "severity": "P0",
+            "spec_reference": "VVV.1",
+            "location": "a.py:1",
+            "description": "real bug",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        text = 'Expected format: {"findings": []}\nActual result:\n' + json.dumps([finding])
+        findings = runner.parse_response(text)
+        self.assertEqual(len(findings), 1, f"real findings silently discarded as zero defects: {findings!r}")
+        self.assertEqual(findings[0].finding_id, "AUD-EX-001")
+
+    def test_all_raw_findings_after_empty_example_block_are_returned(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 21): auditor_client において例示空コードブロックに続く生JSON配列の全指摘が抽出されること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+        f1 = {"finding_id": "AUD-A", "severity": "P0", "description": "bug a"}
+        f2 = {"finding_id": "AUD-B", "severity": "P1", "description": "bug b"}
+        text = "Example format: ```json\n[]\n```\nFindings:\n" + json.dumps([f1, f2])
+        result = auditor_client._extract_findings_from_text(text)
+        self.assertEqual([r.get("finding_id") for r in result], ["AUD-A", "AUD-B"], "second finding silently discarded")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -97,20 +97,6 @@ def _extract_findings_from_text(text: str) -> list[dict]:
     # 3. Check for raw findings in text outside code blocks (handles example code block + raw findings outside)
     text_outside = re.sub(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", "", clean_text, flags=re.DOTALL)
     decoder = json.JSONDecoder()
-    for m_brace in re.finditer(r"\{", text_outside):
-        s_idx = m_brace.start()
-        try:
-            parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
-            if isinstance(parsed_out, dict):
-                if "finding_id" in parsed_out:
-                    return [parsed_out]
-                if "findings" in parsed_out and isinstance(parsed_out["findings"], list):
-                    findings = [item for item in parsed_out["findings"] if isinstance(item, dict)]
-                    if findings:
-                        return findings
-        except json.JSONDecodeError:
-            pass
-
     for m_bracket in re.finditer(r"\[", text_outside):
         s_idx = m_bracket.start()
         try:
@@ -119,6 +105,20 @@ def _extract_findings_from_text(text: str) -> list[dict]:
                 findings = [item for item in parsed_out if isinstance(item, dict)]
                 if findings:
                     return findings
+        except json.JSONDecodeError:
+            pass
+
+    for m_brace in re.finditer(r"\{", text_outside):
+        s_idx = m_brace.start()
+        try:
+            parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
+            if isinstance(parsed_out, dict):
+                if "findings" in parsed_out and isinstance(parsed_out["findings"], list):
+                    findings = [item for item in parsed_out["findings"] if isinstance(item, dict)]
+                    if findings:
+                        return findings
+                elif "finding_id" in parsed_out:
+                    return [parsed_out]
         except json.JSONDecodeError:
             pass
 
