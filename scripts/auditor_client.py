@@ -52,7 +52,9 @@ def _extract_findings_from_text(text: str) -> list[dict]:
         try:
             parsed = json.loads(m.group(1))
             if isinstance(parsed, list):
-                return [item for item in parsed if isinstance(item, dict)]
+                findings = [item for item in parsed if isinstance(item, dict)]
+                if findings:
+                    return findings
         except json.JSONDecodeError:
             pass
 
@@ -62,12 +64,15 @@ def _extract_findings_from_text(text: str) -> list[dict]:
         try:
             parsed = json.loads(m_raw.group(1))
             if isinstance(parsed, list):
-                return [item for item in parsed if isinstance(item, dict)]
+                findings = [item for item in parsed if isinstance(item, dict)]
+                if findings:
+                    return findings
         except json.JSONDecodeError:
             pass
 
-    # 3. Explicit empty array
-    if re.search(r"\[\s*\]", clean_text):
+    # 3. Explicit empty array: must strictly match [] alone or inside single markdown code block
+    stripped = clean_text.strip()
+    if re.fullmatch(r"(?:```(?:json)?\s*)?\[\s*\](?:\s*```)?", stripped):
         return []
 
     # Fail-Closed: unparseable text must NOT be treated as zero defects
@@ -90,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     file_env = _load_env_file(repo_path)
 
     prompt_content = ""
-    if args.prompt:
+    if args.prompt and args.prompt != "{prompt}":
         if len(args.prompt) < 1024 and "\n" not in args.prompt:
             try:
                 p_path = Path(args.prompt)
@@ -235,7 +240,19 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(err_envelope, ensure_ascii=False, indent=2), file=sys.stderr)
             return 1
 
-        stop_reason = resp_json.get("stop_reason") or "end_turn"
+        stop_reason = resp_json.get("stop_reason")
+        if not stop_reason:
+            err_envelope = {
+                "mode": "LIVE",
+                "provider": "anthropic",
+                "model": args.model,
+                "status": "AUDIT_PENDING",
+                "error": "MISSING_STOP_REASON: Provider response did not include a valid stop_reason",
+                "findings": [],
+            }
+            print(json.dumps(err_envelope, ensure_ascii=False, indent=2), file=sys.stderr)
+            return 1
+
         # VVV.1 / Sol Phase 61 P1: 途中打ち切り（max_tokens到達）は監査完了とみなさず AUDIT_PENDING で安全停止
         if stop_reason == "max_tokens":
             err_envelope = {

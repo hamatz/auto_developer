@@ -655,6 +655,65 @@ class TestEvidenceBundler(unittest.TestCase):
         self.assertFalse(res.audit_stage_verified)
         self.assertTrue(any("AUDIT_OUTDATED" in w for w in res.warnings))
 
+    def test_verify_bundle_rejects_missing_or_invalid_audit_target_commit(self):
+        """AUD-002: Live 監査記録の target_commit が欠落または無効な場合、Fail-Closed で audit_stage_verified=False とすること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+
+        evidence_dir = self.repo / ".git" / "nightly_evidence" / "records"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        (evidence_dir / "audit_stage.json").write_text(
+            json.dumps({
+                "status": "SUCCESS",
+                "mode": "LIVE",
+                "provider": "anthropic",
+                "provider_request_id": "msg_live_valid_12345",
+                "audit_metadata": {
+                    "mode": "LIVE",
+                    "provider": "anthropic",
+                    "provider_request_id": "msg_live_valid_12345",
+                    "auditor_model": "claude-opus-5.5",
+                    # target_commit is completely missing
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        bundle_zip = self.repo / "missing_target_commit_bundle.zip"
+        bundler.create_bundle(dest_path=bundle_zip)
+        res = bundler.verify_bundle(bundle_zip)
+        self.assertFalse(res.audit_stage_verified)
+        self.assertTrue(any("AUDIT_TARGET_COMMIT_MISSING" in w for w in res.warnings))
+
+    def test_verify_bundle_rejects_when_post_audit_git_diff_fails(self):
+        """AUD-002: target_commit が存在しないコミットハッシュの場合、git diff 失敗を検知して audit_stage_verified=False とすること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+
+        evidence_dir = self.repo / ".git" / "nightly_evidence" / "records"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        (evidence_dir / "audit_stage.json").write_text(
+            json.dumps({
+                "status": "SUCCESS",
+                "mode": "LIVE",
+                "provider": "anthropic",
+                "provider_request_id": "msg_live_valid_12345",
+                "audit_metadata": {
+                    "mode": "LIVE",
+                    "provider": "anthropic",
+                    "provider_request_id": "msg_live_valid_12345",
+                    "auditor_model": "claude-opus-5.5",
+                    "target_commit": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        bundle_zip = self.repo / "bad_diff_target_commit_bundle.zip"
+        bundler.create_bundle(dest_path=bundle_zip)
+        res = bundler.verify_bundle(bundle_zip)
+        self.assertFalse(res.audit_stage_verified)
+        self.assertTrue(any("AUDIT_DIFF_FAILED" in w for w in res.warnings))
+
+
 
 if __name__ == "__main__":
     unittest.main()

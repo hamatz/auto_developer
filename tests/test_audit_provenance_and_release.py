@@ -304,6 +304,7 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
                     "auditor_model": "claude-opus-5.5",
                     "provider_request_id": "msg_live_1234567890",
                     "execution_id": "msg_live_1234567890",
+                    "target_commit": self.target_sha,
                     "raw_prompt_hash": "a" * 64,
                     "raw_response_hash": "b" * 64,
                 },
@@ -386,6 +387,7 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             "type": "message",
             "role": "assistant",
             "model": "claude-3-opus-20240229",
+            "stop_reason": "end_turn",
             "content": [{"type": "text", "text": "```json\n[]\n```"}],
             "usage": {"input_tokens": 120, "output_tokens": 15},
         }
@@ -568,6 +570,64 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             output_json = json.loads(stdout_capture.getvalue())
             self.assertEqual(output_json.get("stop_reason"), "end_turn")
             self.assertEqual(output_json.get("status"), "COMPLETED")
+
+    def test_extract_findings_rejects_embedded_empty_list_in_prose(self) -> None:
+        """AUD-001: clean_text の途中に [] が含まれるだけの散文応答はゼロ指摘とみなさず ValueError を送出すること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        # Prose containing [] must NOT return []
+        prose_with_brackets = "Review summary: failed to inspect modules with [] due to syntax errors"
+        with self.assertRaises(ValueError):
+            auditor_client._extract_findings_from_text(prose_with_brackets)
+
+        # Strictly [] or ```json [] ``` must return []
+        self.assertEqual(auditor_client._extract_findings_from_text("[]"), [])
+        self.assertEqual(auditor_client._extract_findings_from_text("```json\n[]\n```"), [])
+
+    def test_auditor_client_fails_closed_when_stop_reason_missing(self) -> None:
+        """AUD-003: プロバイダ応答に stop_reason が含まれていない場合、fabricateせず AUDIT_PENDING で終了すること。"""
+        import io
+        from unittest import mock
+
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        mock_resp_body = json.dumps({
+            "id": "msg_success_12345",
+            "model": "claude-opus-5-5",
+            # stop_reason is omitted/null
+            "content": [{"type": "text", "text": "[]"}],
+            "usage": {"input_tokens": 1000, "output_tokens": 10},
+        }).encode("utf-8")
+
+        mock_resp = mock.MagicMock()
+        mock_resp.read.return_value = mock_resp_body
+        mock_resp.__enter__.return_value = mock_resp
+
+        env_file = self.repo_dir / ".env"
+        env_file.write_text("ANTHROPIC_API_KEY=test_key\n", encoding="utf-8")
+
+        stderr_capture = io.StringIO()
+        with mock.patch("urllib.request.urlopen", return_value=mock_resp), mock.patch("sys.stderr", stderr_capture):
+            exit_code = auditor_client.main([
+                "--model", "claude-opus-5.5",
+                "--prompt", "test prompt",
+                "--repo-dir", str(self.repo_dir),
+            ])
+            self.assertEqual(exit_code, 1)
+            err_output = json.loads(stderr_capture.getvalue())
+            self.assertEqual(err_output.get("status"), "AUDIT_PENDING")
+            self.assertIn("MISSING_STOP_REASON", err_output.get("error", ""))
+
 
 
 if __name__ == "__main__":
