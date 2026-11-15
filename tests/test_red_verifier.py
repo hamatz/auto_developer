@@ -1284,6 +1284,25 @@ class T(unittest.TestCase):
         self.assertFalse(is_trivial)
         self.assertEqual(msg, "")
 
+    def test_fail_after_swallowing_try_is_trivial_red(self) -> None:
+        """機能OOO.2: 例外を握り潰す(pass) try-except ブロックの直後にある self.fail() は無条件失敗(Trivial Red)として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            runner.parse_response("[]")
+        except Exception:
+            pass
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "unconditional self.fail() after an exception-swallowing try was accepted as genuine")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest

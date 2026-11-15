@@ -149,7 +149,14 @@ def _is_preceded_by_try_with_call(call_node: ast.AST, func_node: ast.AST) -> boo
                                     for item in prev.body
                                     for sub in ast.walk(item)
                                 )
-                                if has_call:
+                                all_handlers_exit = (
+                                    len(prev.handlers) > 0
+                                    and all(
+                                        any(isinstance(sub, (ast.Return, ast.Raise)) for sub in ast.walk(h))
+                                        for h in prev.handlers
+                                    )
+                                )
+                                if has_call and all_handlers_exit:
                                     return True
     return False
 

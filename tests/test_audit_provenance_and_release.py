@@ -1765,6 +1765,36 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             if str(Path(__file__).parent.parent / "scripts") in sys.path:
                 sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
 
+    def test_malformed_findings_after_prose_empty_brackets_fail_closed_runner(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 31): 散文中に空角括弧 [] が存在しても、後続の不正生指摘配列がゼロ欠陥に偽装されず Fail-Closed（ValueError）で拒絶されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        text = (
+            "Example format: ```json\n[]\n```\n"
+            "If there were no defects I would write [] here.\n"
+            "Findings:\n"
+            '[{"finding_id": "AUD-X", "severity": "P0", "description": "real bug",}]'
+        )
+        with self.assertRaises(ValueError):
+            runner.parse_response(text)
+
+    def test_malformed_findings_after_prose_empty_brackets_fail_closed_client(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 31): auditor_client において散文中に空角括弧 [] が存在しても、後続の不正生指摘配列がゼロ欠陥に偽装されず Fail-Closed（ValueError）で拒絶されること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+            text = (
+                "Example format: ```json\n[]\n```\n"
+                "If there were no defects I would write [] here.\n"
+                "Findings:\n"
+                '[{"finding_id": "AUD-X", "severity": "P0", "description": "real bug",}]'
+            )
+            with self.assertRaises(ValueError):
+                auditor_client._extract_findings_from_text(text)
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+
 
 
 if __name__ == "__main__":

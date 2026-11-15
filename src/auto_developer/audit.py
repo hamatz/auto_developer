@@ -454,11 +454,11 @@ class IndependentAuditRunner:
                 try:
                     parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
                     if isinstance(parsed_out, list):
-                        parsed_raw_bracket = True
                         findings = [item for item in parsed_out if isinstance(item, dict) and "finding_id" in item]
                         if len(parsed_out) == 0:
                             pass
                         elif len(findings) == len(parsed_out):
+                            parsed_raw_bracket = True
                             if not collected_findings:
                                 collected_findings.extend(findings)
                             break
@@ -497,6 +497,22 @@ class IndependentAuditRunner:
                             break
                 except json.JSONDecodeError:
                     pass
+
+            for m in re.finditer(r"\[\s*\{", text_outside):
+                try:
+                    p_candidate, _ = decoder.raw_decode(text_outside, m.start())
+                    if not isinstance(p_candidate, list):
+                        has_decode_error = True
+                except json.JSONDecodeError:
+                    has_decode_error = True
+
+            for m in re.finditer(r"\{\s*[\"'](?:finding_id|findings)[\"']", text_outside):
+                try:
+                    p_candidate, _ = decoder.raw_decode(text_outside, m.start())
+                    if not isinstance(p_candidate, dict):
+                        has_decode_error = True
+                except json.JSONDecodeError:
+                    has_decode_error = True
 
             if not parsed_raw_bracket and re.search(
                 r"(?:\[\s*\{|\{\s*[\"'](?:finding_id|findings)[\"'])", text_outside

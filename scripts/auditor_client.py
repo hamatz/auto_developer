@@ -131,11 +131,11 @@ def _extract_findings_from_text(text: str) -> list[dict]:
         try:
             parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
             if isinstance(parsed_out, list):
-                parsed_raw_bracket = True
                 findings = [item for item in parsed_out if isinstance(item, dict) and "finding_id" in item]
                 if len(parsed_out) == 0:
                     pass
                 elif len(findings) == len(parsed_out):
+                    parsed_raw_bracket = True
                     raw_collected_findings.extend(findings)
                     break
                 else:
@@ -169,6 +169,26 @@ def _extract_findings_from_text(text: str) -> list[dict]:
                     break
         except json.JSONDecodeError:
             pass
+
+    for m in re.finditer(r"\[\s*\{", text_outside):
+        try:
+            p_candidate, _ = decoder.raw_decode(text_outside, m.start())
+            if not isinstance(p_candidate, list):
+                raw_has_decode_error = True
+                raw_decode_error_msg = f"Candidate array did not decode to list: {p_candidate}"
+        except json.JSONDecodeError as exc:
+            raw_has_decode_error = True
+            raw_decode_error_msg = str(exc)
+
+    for m in re.finditer(r"\{\s*[\"'](?:finding_id|findings)[\"']", text_outside):
+        try:
+            p_candidate, _ = decoder.raw_decode(text_outside, m.start())
+            if not isinstance(p_candidate, dict):
+                raw_has_decode_error = True
+                raw_decode_error_msg = f"Candidate dict did not decode to dict: {p_candidate}"
+        except json.JSONDecodeError as exc:
+            raw_has_decode_error = True
+            raw_decode_error_msg = str(exc)
 
     if not parsed_raw_bracket and re.search(r"(?:\[\s*\{|\{\s*[\"'](?:finding_id|findings)[\"'])", text_outside):
         raw_has_decode_error = True

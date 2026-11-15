@@ -46,5 +46,8 @@
 - [x] AUD-AUD-005. Fix: [AUD-001] Step 3 non-provider dict scan and provider scan fail open on error objects preceded by log line (e.g. {"error": "...", "findings": []} returns []) in audit.py and auditor_client.py (Severity: P1, Loc: src/auto_developer/audit.py:430)
 - [x] AUD-AUD-006. Fix: [AUD-002] parse_response() and _extract_findings_from_text() drop malformed raw JSON findings when valid code block exists (Severity: P2, Loc: src/auto_developer/audit.py:455)
 - [x] AUD-AUD-007. Fix: [AUD-003] check_trivial_red_ast() in verifier.py flags self.fail() preceded by try-except with product call as unconditional fail without exception guard (Severity: P2, Loc: src/auto_developer/verifier.py:166)
+- [x] AUD-AUD-008. Fix: [AUD-001 Cycle 31] parse_response() fails closed when malformed findings array follows harmless empty [] in prose (Severity: P1, Loc: src/auto_developer/audit.py:466)
+- [x] AUD-AUD-009. Fix: [AUD-002 Cycle 31] _extract_findings_from_text() fails closed when malformed findings array follows harmless empty [] in prose (Severity: P1, Loc: scripts/auditor_client.py:160)
+- [x] AUD-AUD-010. Fix: [AUD-003 Cycle 31] _is_preceded_by_try_with_call() enforces that except handlers exit via return/raise, rejecting exception-swallowing pass (Severity: P2, Loc: src/auto_developer/verifier.py:137)
 ## 止まっていること・判断待ち
 - なし。Sol 氏の Phase 61 レビュー指摘（P1: stop_reason 検証・max_tokens打ち切り検知・JSON解析失敗のFail-Closed化、P1: test_live_claude_audit.py の環境差異解消と Linux bwrap 修正、考察: 監査対象コミットと最終HEADの差分整合性拘束）に対応する Phase 62（機能VVV）の準備完了。
