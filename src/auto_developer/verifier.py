@@ -134,6 +134,26 @@ def _is_in_try_block_with_call(call_node: ast.AST, func_node: ast.AST) -> bool:
     return False
 
 
+def _is_preceded_by_try_with_call(call_node: ast.AST, func_node: ast.AST) -> bool:
+    """call_node がプロダクト呼出を含む try-except ブロックの直後（例外発生期待の fail）にあるかを判定する (機能OOO.2)。"""
+    for node in ast.walk(func_node):
+        for attr in ("body", "orelse", "finalbody"):
+            stmts = getattr(node, attr, None)
+            if isinstance(stmts, list):
+                for idx, stmt in enumerate(stmts):
+                    if any(sub is call_node for sub in ast.walk(stmt)):
+                        for prev in stmts[:idx]:
+                            if isinstance(prev, ast.Try):
+                                has_call = any(
+                                    isinstance(sub, ast.Call) and not _is_assert_call(sub)
+                                    for item in prev.body
+                                    for sub in ast.walk(item)
+                                )
+                                if has_call:
+                                    return True
+    return False
+
+
 def _is_in_guarded_branch_with_call(
     call_node: ast.AST,
     func_node: ast.AST,
@@ -166,7 +186,8 @@ def _check_assert_call(
     if attr == "fail":
         is_in_try = _is_in_try_block_with_call(call, func_node)
         is_in_guard = _is_in_guarded_branch_with_call(call, func_node, dependent_vars)
-        if not (is_in_try or is_in_guard):
+        is_after_try = _is_preceded_by_try_with_call(call, func_node)
+        if not (is_in_try or is_in_guard or is_after_try):
             trivial_reasons.append("Unconditional self.fail() call without exception guard")
         return
 

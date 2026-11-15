@@ -1264,6 +1264,26 @@ class T(unittest.TestCase):
         self.assertFalse(is_trivial)
         self.assertEqual(msg, "")
 
+    def test_ast_accepts_fail_preceded_by_try_except_with_product_call(self) -> None:
+        """機能OOO.2: プロダクト呼出を含む try-except ブロックの直後にある self.fail() は例外発生検証として許容されること（Trivial Red と判定されないこと）。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = """import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            runner.parse_response("broken")
+        except ValueError:
+            return
+        self.fail("expected ValueError was not raised")
+"""
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial)
+        self.assertEqual(msg, "")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest

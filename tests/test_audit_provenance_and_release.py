@@ -1720,6 +1720,52 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.parse_response(json.dumps(env))
 
+    def test_error_object_after_log_line_fails_closed(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 30): ログ行等に続いて出力された error オブジェクトはゼロ欠陥（[]）として扱われず Fail-Closed（ValueError）で拒絶されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        output = 'auditor: warning: retrying request\n{"error": "Rate limit exceeded", "findings": []}'
+        with self.assertRaises(ValueError):
+            runner.parse_response(output)
+
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+            with self.assertRaises(ValueError):
+                auditor_client._extract_findings_from_text(output)
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+    def test_malformed_raw_findings_after_valid_block_fails_closed(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 30): 有効なコードブロック指摘の後に構文不正な生指摘配列が存在する場合、先行ブロックのみを返して黙殺せず Fail-Closed（ValueError）で拒絶されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        finding = {
+            "finding_id": "AUD-A",
+            "severity": "P1",
+            "spec_reference": "VVV.1",
+            "location": "a.py:1",
+            "description": "bug a",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        output = (
+            "```json\n" + json.dumps([finding]) + "\n```\n"
+            "Additional findings:\n"
+            '[{"finding_id": "AUD-B", "severity": "P0", "description": "bug b",}]'
+        )
+        with self.assertRaises(ValueError):
+            runner.parse_response(output)
+
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+            with self.assertRaises(ValueError):
+                auditor_client._extract_findings_from_text(output)
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+
 
 if __name__ == "__main__":
     unittest.main()

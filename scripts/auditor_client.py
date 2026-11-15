@@ -118,22 +118,26 @@ def _extract_findings_from_text(text: str) -> list[dict]:
     if has_decode_error:
         raise ValueError(f"Malformed JSON in audit response code block: {decode_error_msg}")
 
-    if collected_findings:
-        return collected_findings
-
     # 3. Check for raw findings in text outside code blocks (handles example code block + raw findings outside)
     text_outside = re.sub(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", "", clean_text, flags=re.DOTALL)
     decoder = json.JSONDecoder()
+    raw_collected_findings: list[dict] = []
+    raw_has_decode_error = False
+    raw_decode_error_msg = ""
+    parsed_raw_bracket = False
+
     for m_bracket in re.finditer(r"\[", text_outside):
         s_idx = m_bracket.start()
         try:
             parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
             if isinstance(parsed_out, list):
+                parsed_raw_bracket = True
                 findings = [item for item in parsed_out if isinstance(item, dict) and "finding_id" in item]
                 if len(parsed_out) == 0:
                     pass
                 elif len(findings) == len(parsed_out):
-                    return findings
+                    raw_collected_findings.extend(findings)
+                    break
                 else:
                     raise ValueError(f"JSON array contains non-finding items: {parsed_out}")
         except json.JSONDecodeError:
@@ -154,20 +158,30 @@ def _extract_findings_from_text(text: str) -> list[dict]:
                     if len(parsed_out["findings"]) == 0:
                         pass
                     elif len(findings) == len(parsed_out["findings"]):
-                        return findings
+                        if not raw_collected_findings:
+                            raw_collected_findings.extend(findings)
+                        break
                     else:
                         raise ValueError(f"JSON findings array contains non-finding items: {parsed_out['findings']}")
                 elif "finding_id" in parsed_out:
-                    return [parsed_out]
+                    if not raw_collected_findings:
+                        raw_collected_findings.append(parsed_out)
+                    break
         except json.JSONDecodeError:
             pass
 
-    if re.search(r"(?:\[\s*\{|\{\s*[\"'](?:finding_id|findings)[\"'])", text_outside):
-        has_decode_error = True
-        decode_error_msg = "Invalid JSON structure outside code block"
+    if not parsed_raw_bracket and re.search(r"(?:\[\s*\{|\{\s*[\"'](?:finding_id|findings)[\"'])", text_outside):
+        raw_has_decode_error = True
+        raw_decode_error_msg = "Invalid JSON structure outside code block"
 
-    if has_decode_error:
-        raise ValueError(f"Malformed JSON in audit response code block: {decode_error_msg}")
+    if raw_has_decode_error:
+        raise ValueError(f"Malformed JSON in audit response outside code blocks: {raw_decode_error_msg}")
+
+    if collected_findings:
+        return collected_findings
+
+    if raw_collected_findings:
+        return raw_collected_findings
 
     # If any block had non-empty findings, it was returned above.
     # If a block was explicitly empty [] and no block had non-empty findings:
