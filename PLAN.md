@@ -49,5 +49,7 @@
 - [x] AUD-AUD-008. Fix: [AUD-001 Cycle 31] parse_response() fails closed when malformed findings array follows harmless empty [] in prose (Severity: P1, Loc: src/auto_developer/audit.py:466)
 - [x] AUD-AUD-009. Fix: [AUD-002 Cycle 31] _extract_findings_from_text() fails closed when malformed findings array follows harmless empty [] in prose (Severity: P1, Loc: scripts/auditor_client.py:160)
 - [x] AUD-AUD-010. Fix: [AUD-003 Cycle 31] _is_preceded_by_try_with_call() enforces that except handlers exit via return/raise, rejecting exception-swallowing pass (Severity: P2, Loc: src/auto_developer/verifier.py:137)
+- [x] AUD-AUD-011. Fix: [AUD-001 Cycle 32] Increase max_tokens default to 16384 in auditor_client.py and strengthen JSON-only directive to prevent thinking-token max_tokens cutoff (Severity: P1, Loc: scripts/auditor_client.py:227)
+- [x] AUD-AUD-012. Fix: [AUD-002 Cycle 32] In verifier.py _is_preceded_by_try_with_call(), replace shallow walk with _handler_body_exits() to reject nested def/lambda returns and dead branches (Severity: P2, Loc: src/auto_developer/verifier.py:137)
 ## 止まっていること・判断待ち
 - なし。Sol 氏の Phase 61 レビュー指摘（P1: stop_reason 検証・max_tokens打ち切り検知・JSON解析失敗のFail-Closed化、P1: test_live_claude_audit.py の環境差異解消と Linux bwrap 修正、考察: 監査対象コミットと最終HEADの差分整合性拘束）に対応する Phase 62（機能VVV）の準備完了。

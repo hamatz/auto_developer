@@ -134,6 +134,24 @@ def _is_in_try_block_with_call(call_node: ast.AST, func_node: ast.AST) -> bool:
     return False
 
 
+def _handler_body_exits(stmts: list[ast.stmt]) -> bool:
+    """except ハンドラの直接の文列が脱出 (return/raise) するかを判定する (機能OOO.2 / AUD-003 Cycle 32)。
+    nested def/lambda 内の return や dead branch (if False: return) による偽装脱出を排除する。
+    """
+    for stmt in stmts:
+        if isinstance(stmt, (ast.Return, ast.Raise)):
+            return True
+        if isinstance(stmt, ast.If):
+            is_const, val = _eval_constant_expr(stmt.test)
+            if is_const:
+                branch = stmt.body if bool(val) else stmt.orelse
+                if _handler_body_exits(branch):
+                    return True
+            elif _handler_body_exits(stmt.body) and _handler_body_exits(stmt.orelse):
+                return True
+    return False
+
+
 def _is_preceded_by_try_with_call(call_node: ast.AST, func_node: ast.AST) -> bool:
     """call_node がプロダクト呼出を含む try-except ブロックの直後（例外発生期待の fail）にあるかを判定する (機能OOO.2)。"""
     for node in ast.walk(func_node):
@@ -151,10 +169,7 @@ def _is_preceded_by_try_with_call(call_node: ast.AST, func_node: ast.AST) -> boo
                                 )
                                 all_handlers_exit = (
                                     len(prev.handlers) > 0
-                                    and all(
-                                        any(isinstance(sub, (ast.Return, ast.Raise)) for sub in ast.walk(h))
-                                        for h in prev.handlers
-                                    )
+                                    and all(_handler_body_exits(h.body) for h in prev.handlers)
                                 )
                                 if has_call and all_handlers_exit:
                                     return True

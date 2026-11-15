@@ -1303,6 +1303,47 @@ class T(unittest.TestCase):
         is_trivial, _msg = check_trivial_red_ast(code)
         self.assertTrue(is_trivial, "unconditional self.fail() after an exception-swallowing try was accepted as genuine")
 
+    def test_nested_def_return_in_except_handler_is_trivial_red(self) -> None:
+        """機能OOO.2: except ハンドラ内で nested def/lambda が return していてもハンドラ自体が脱出しない場合、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            runner.parse_response("[]")
+        except Exception:
+            def helper():
+                return 1
+            pass
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "nested def return in except handler was falsely accepted as genuine exit")
+
+    def test_dead_branch_return_in_except_handler_is_trivial_red(self) -> None:
+        """機能OOO.2: except ハンドラ内で if False: return などのデッドブランチで脱出を偽装した場合、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            runner.parse_response("[]")
+        except Exception:
+            if False:
+                return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "dead branch return in except handler was falsely accepted as genuine exit")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest

@@ -232,7 +232,9 @@ class IndependentAuditRunner:
         '    "status": "REPORTED"\n'
         "  }\n"
         "]\n"
-        'If no issues are found, return an empty array `[]` or `{"findings": []}`.'
+        'If no issues are found, return an empty array `[]` or `{"findings": []}`.\n'
+        "CRITICAL: Do NOT output conversational prose, explanations, markdown headings, or commentary outside the JSON array.\n"
+        "Your output must be strictly the JSON array (or ```json [...] ```) so token budget is not wasted and max_tokens is never exceeded."
     )
 
     def __init__(
