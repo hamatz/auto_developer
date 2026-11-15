@@ -655,6 +655,25 @@ class TestUntrackedTamper(unittest.TestCase):
                 ),
                 auditor_model="claude-opus-5.5",
             ),
+            # 9. 条件分岐後の変数合流を伴う真正バグ指摘 (機能PPP.3: Merge & Uncertainty Protection の受入実証)
+            AuditFinding(
+                finding_id="BATCH-GENUINE-BRANCH-MERGE-009",
+                severity="P1",
+                spec_reference="SPEC.md PPP.1",
+                location="src/calc.py:2",
+                description="Zero division bug evaluated after conditional branch assignment",
+                reproduction_test_code=(
+                    "import unittest\n"
+                    "from calc import calc_div\n"
+                    "class BranchMergeTest(unittest.TestCase):\n"
+                    "    def test_merge(self):\n"
+                    "        ans = 1\n"
+                    "        if calc_div(10, 0) == -999:\n"
+                    "            ans = -999\n"
+                    "        self.assertEqual(ans, 0)\n"
+                ),
+                auditor_model="claude-opus-5.5",
+            ),
         ]
 
         audit_store = AuditStore(repo_dir=self.repo_dir)
@@ -663,12 +682,13 @@ class TestUntrackedTamper(unittest.TestCase):
         # 1. バッチ処理による選別
         dispatched_list = dispatcher.process_findings(batch_findings, plan_path=self.plan_path)
 
-        # 真正な指摘（通常、後続代入、条件付きfailの3件）のみが受領されること (機能OOO.3)
-        self.assertEqual(len(dispatched_list), 3)
+        # 真正な指摘（通常、後続代入、条件付きfail、分岐後合流の4件）のみが受領されること (機能PPP.3)
+        self.assertEqual(len(dispatched_list), 4)
         dispatched_ids = [d.finding_id for d in dispatched_list]
         self.assertIn("BATCH-GENUINE-004", dispatched_ids)
         self.assertIn("BATCH-GENUINE-REASSIGN-007", dispatched_ids)
         self.assertIn("BATCH-GENUINE-GUARD-FAIL-008", dispatched_ids)
+        self.assertIn("BATCH-GENUINE-BRANCH-MERGE-009", dispatched_ids)
         for d in dispatched_list:
             self.assertEqual(d.status, "DISPATCHED")
 
@@ -705,6 +725,7 @@ class TestUntrackedTamper(unittest.TestCase):
         self.assertIn("BATCH-GENUINE-004", plan_content)
         self.assertIn("BATCH-GENUINE-REASSIGN-007", plan_content)
         self.assertIn("BATCH-GENUINE-GUARD-FAIL-008", plan_content)
+        self.assertIn("BATCH-GENUINE-BRANCH-MERGE-009", plan_content)
         self.assertNotIn("BATCH-ERR-001", plan_content)
         self.assertNotIn("BATCH-PASS-002", plan_content)
         self.assertNotIn("BATCH-SECRET-003", plan_content)

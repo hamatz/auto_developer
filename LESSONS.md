@@ -21,6 +21,14 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-15] 条件分岐後の変数環境合流における不確定性の無視と静的解析の底なし沼化 (Ignoring Uncertainty in Control Flow Variable Merging and Static Analysis Scope Creep)
+- Context: `src/auto_developer/verifier.py` (`_process_stmts_in_order`, `check_trivial_red_ast`)
+- Trap: 分岐（`if`）内で再代入された変数（例: `x = 1; if compute_val(1) == 2: x = 2; self.assertEqual(x, 2)`）が、分岐後に合流（Merge）されず分岐前の古い固定値 `x = 1` のまま残っていたため、正常なテストを固定値不一致（`1 == 2`）の `TRIVIAL_RED` として誤拒絶した（Sol氏 Phase 55 P1指摘）。
+- Rule: Python の動的制御フローを静的に 100% 解析しようとする過剰設計（Scope Creep）を戒める。分岐内で変更された変数や条件式が動的な場合、静的に確信できない変数は「不確定（Unknown / Dependent）」として `var_env` から除去し、**「不確定な値」を根拠に決して TRIVIAL_RED と断定しない（安全側に倒す）**。静的解析で判断できない不確実なケースは、動的実行結果との組み合わせや追加監査に委ねる。
+- Rung: 作り（抽象解釈における合流演算・不確定性の安全側扱い） & 検査
+- Immunity Test: `tests/test_red_verifier.py`（Phase 56 PPP.1 で追加予定）
+- Proof: `x = 1; if compute_val(1) == 2: x = 2; self.assertEqual(x, 2)` が `TRIVIAL_RED` として誤判定されず、正常に受理されることを実証。
+
 ### [2026-11-15] AST 静的解析における文の実行順序（Program Order）の無視による正常テストの誤判定 (Disregarding Program Execution Order in AST Causal Analysis)
 - Context: `src/auto_developer/verifier.py` (`check_trivial_red_ast`, 因果依存性解析)
 - Trap: テストメソッド内の代入文をまとめて先に処理して最終的な変数環境（`var_env`）を構築した後にアサーションを検証したため、アサーション実行後の再代入（例: `x = compute_val(1); self.assertEqual(x, 2); x = 999`）が過去のアサーション時点の評価に逆流し、正常なテストを固定値比較（`999 == 2`）の `TRIVIAL_RED` として誤判定した（Sol氏 Phase 54 P1指摘）。

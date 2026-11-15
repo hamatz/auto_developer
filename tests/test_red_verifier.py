@@ -1138,6 +1138,91 @@ class T(unittest.TestCase):
         self.assertTrue(is_trivial)
         self.assertIn("fail() call without exception guard", msg)
 
+    def test_ast_does_not_reject_assertion_after_conditional_reassignment(self) -> None:
+        """機能PPP.1: 条件分岐（if）内で再代入された変数について、分岐前の固定値が残存して
+        後続のアサーションが固定値不一致（1 == 2）として TRIVIAL_RED 誤判定されないこと（Sol氏 Phase 55 P1指摘再現）。
+        """
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = """import unittest
+from sample_module import compute_val
+
+class T(unittest.TestCase):
+    def test_case(self):
+        x = 1
+        if compute_val(1) == 2:
+            x = 2
+        self.assertEqual(x, 2)
+"""
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial)
+        self.assertEqual(msg, "")
+
+    def test_accepts_genuine_red_with_conditional_reassignment(self) -> None:
+        """機能PPP.1: 条件分岐後の変数評価を含む真正な不具合テストが GENUINE_RED として受理されること。"""
+        code = """import unittest
+from sample_module import compute_val
+
+class GenuineBranchTest(unittest.TestCase):
+    def test_case(self):
+        x = 1
+        if compute_val(1) == 2:
+            x = 2
+        self.assertEqual(x, 999)
+"""
+        result = self.verifier.verify_candidate_test(code)
+        self.assertTrue(result.is_reproduced)
+        self.assertEqual(result.reason, "GENUINE_RED")
+
+    def test_ast_does_not_reject_unreachable_assertion_in_false_if(self) -> None:
+        """機能PPP.2: if False: のように静的に到達不能な分岐内にあるアサーションが
+        偽 Red (TRIVIAL_RED) の根拠として誤検出されないこと（Sol氏 Phase 55 指摘再現）。
+        """
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = """import unittest
+
+class T(unittest.TestCase):
+    def test_case(self):
+        if False:
+            self.assertEqual(1, 2)
+"""
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial)
+        self.assertEqual(msg, "")
+
+    def test_ast_does_not_reject_unreachable_assertion_in_false_while(self) -> None:
+        """機能PPP.2: while False: / while 0: のように到達不能なループ内にあるアサーションが誤検出されないこと。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = """import unittest
+
+class T(unittest.TestCase):
+    def test_case(self):
+        while False:
+            self.assertEqual(1, 2)
+"""
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial)
+        self.assertEqual(msg, "")
+
+    def test_ast_does_not_reject_unreachable_assertion_in_dead_else(self) -> None:
+        """機能PPP.2: if True: のデッドブランチ (else) 内にあるアサーションが誤検出されないこと。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = """import unittest
+
+class T(unittest.TestCase):
+    def test_case(self):
+        if True:
+            pass
+        else:
+            self.assertEqual(1, 2)
+"""
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial)
+        self.assertEqual(msg, "")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest
