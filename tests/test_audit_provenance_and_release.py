@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -294,10 +295,15 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         audit_file.write_text(
             json.dumps({
                 "status": "SUCCESS",
+                "mode": "LIVE",
+                "provider": "anthropic",
+                "provider_request_id": "msg_live_1234567890",
                 "audit_metadata": {
+                    "mode": "LIVE",
                     "provider": "anthropic",
                     "auditor_model": "claude-opus-5.5",
-                    "execution_id": "exec_1234567890",
+                    "provider_request_id": "msg_live_1234567890",
+                    "execution_id": "msg_live_1234567890",
                     "raw_prompt_hash": "a" * 64,
                     "raw_response_hash": "b" * 64,
                 },
@@ -324,6 +330,144 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         self.assertTrue(res.is_valid)
         self.assertTrue(getattr(res, "audit_stage_verified", False))
         self.assertIsNotNone(getattr(res, "audit_stage_info", None))
+
+    def test_auditor_client_fails_closed_when_api_key_missing(self) -> None:
+        """UUU.1 / Sol氏 P0指摘: APIキー未設定時に findings: [] で成功偽装せず、Fail-Closed (Exit != 0 または status=FAILED) で安全停止すること。"""
+        import os
+        env = dict(os.environ)
+        env.pop("ANTHROPIC_API_KEY", None)
+        env.pop("OPENAI_API_KEY", None)
+
+        proc = subprocess.run(
+            [
+                "python3",
+                "scripts/auditor_client.py",
+                "--repo-dir",
+                str(self.repo_dir),
+                "--model",
+                "claude-opus-5.5",
+                "--prompt",
+                "Audit this impossible bug",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        # 終了コード非ゼロ、または JSON 出力時の status が FAILED / AUDIT_PENDING であること
+        if proc.returncode == 0:
+            data = json.loads(proc.stdout)
+            self.assertIn(data.get("status"), ["FAILED", "AUDIT_PENDING"])
+            self.assertNotEqual(data.get("status"), "COMPLETED")
+        else:
+            self.assertNotEqual(proc.returncode, 0)
+
+    def test_auditor_client_mock_mode_distinction(self) -> None:
+        """UUU.1 / Sol氏 P1指摘: --mock 指定時は mode=MOCK かつ provider_request_id が null または mock_ 接頭辞であること。"""
+        proc = subprocess.run(
+            ["python3", "scripts/auditor_client.py", "--model", "claude-opus-5.5", "--prompt", "Dummy prompt", "--mock"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(proc.stdout)
+        self.assertEqual(data.get("mode"), "MOCK")
+        self.assertEqual(data.get("status"), "COMPLETED")
+        self.assertTrue(str(data.get("execution_id", "")).startswith("mock_"))
+        self.assertIsNone(data.get("provider_request_id"))
+
+    def test_auditor_client_live_api_success_provenance(self) -> None:
+        """UUU.1: Anthropic API 成功時に mode=LIVE, 本物 provider_request_id (msg_...), execution_id が拘束されること。"""
+        import io
+        from unittest.mock import MagicMock, patch
+
+        fake_api_response = {
+            "id": "msg_01XFDUDYJACGeCrJwHGQAngV",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3-opus-20240229",
+            "content": [{"type": "text", "text": "```json\n[]\n```"}],
+            "usage": {"input_tokens": 120, "output_tokens": 15},
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(fake_api_response).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.__exit__.return_value = None
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            from scripts.auditor_client import main as auditor_main
+            old_stdout = sys.stdout
+            sys.stdout = buffer = io.StringIO()
+            try:
+                code = auditor_main(["--model", "claude-opus-5.5", "--prompt", "Audit spec", "--api-key", "test-key-1234"])
+            finally:
+                sys.stdout = old_stdout
+
+        self.assertEqual(code, 0)
+        data = json.loads(buffer.getvalue())
+        self.assertEqual(data.get("mode"), "LIVE")
+        self.assertEqual(data.get("provider"), "anthropic")
+        self.assertEqual(data.get("provider_request_id"), "msg_01XFDUDYJACGeCrJwHGQAngV")
+        self.assertEqual(data.get("execution_id"), "msg_01XFDUDYJACGeCrJwHGQAngV")
+        self.assertEqual(data.get("status"), "COMPLETED")
+        self.assertEqual(data.get("findings"), [])
+
+    def test_bundler_verify_rejects_mock_audit_for_release_validation(self) -> None:
+        """UUU.2 / Sol氏 Phase 60 P1指摘: mode=MOCK または provider_request_id 欠落/モック時は audit_stage_verified=False とし、正式リリース判定を拒絶すること。"""
+        evidence_dir = self.repo_dir / ".git" / "nightly_evidence" / "records"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+
+        target_tree_res = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        target_tree = target_tree_res.stdout.strip()
+        import hashlib
+        spec_hash = hashlib.sha256((self.repo_dir / "SPEC.md").read_bytes()).hexdigest()
+
+        # 有効な task_1.json
+        (evidence_dir / "task_1.json").write_text(
+            json.dumps({
+                "task_id": "1",
+                "status": "COMPLETED",
+                "commit": self.target_sha,
+                "tree_sha": target_tree,
+                "spec_sha": spec_hash,
+                "checker": {"decision": "APPROVE"},
+            }),
+            encoding="utf-8",
+        )
+
+        # MOCK モードの audit_stage.json
+        audit_file = evidence_dir / "audit_stage.json"
+        audit_file.write_text(
+            json.dumps({
+                "status": "SUCCESS",
+                "mode": "MOCK",
+                "audit_metadata": {
+                    "mode": "MOCK",
+                    "provider": "anthropic",
+                    "auditor_model": "claude-opus-5.5",
+                    "execution_id": "mock_1234567890",
+                    "provider_request_id": None,
+                    "raw_prompt_hash": "a" * 64,
+                    "raw_response_hash": "b" * 64,
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        bundler = EvidenceBundler(repo_dir=self.repo_dir)
+        bundle_path = bundler.create_bundle(job_id="test_mock_job")
+        res = bundler.verify_bundle(bundle_path)
+
+        # MOCK モードは改ざん検証（is_valid）には通過しても、正式リリース監査（audit_stage_verified）としては False と判定されること
+        self.assertFalse(res.audit_stage_verified)
+        self.assertTrue(any("not live verified" in w or "MOCK" in w for w in res.warnings))
 
 
 if __name__ == "__main__":

@@ -287,12 +287,19 @@ class IndependentAuditRunner:
             raise ValueError(f"Could not parse valid JSON from audit response: {output[:200]}")
 
         if isinstance(data, dict):
-            # TTT.1: エンベロープメタデータ（provider, execution_id, status 等）の抽出・保持
+            # TTT.1 / UUU.1: エンベロープメタデータ（mode, provider, execution_id, provider_request_id, status 等）の抽出・保持
+            exec_id = data.get("execution_id") or data.get("id")
+            prov_req_id = data.get("provider_request_id") or data.get("id")
+            mode = data.get("mode") or ("MOCK" if str(exec_id).startswith("mock_") else "LIVE")
             self._last_envelope_metadata = {
+                "mode": mode,
                 "provider": data.get("provider"),
-                "execution_id": data.get("execution_id") or data.get("id"),
+                "execution_id": exec_id,
+                "provider_request_id": prov_req_id,
                 "model": data.get("model"),
+                "resolved_model": data.get("resolved_model") or data.get("model"),
                 "status": data.get("status"),
+                "usage": data.get("usage"),
             }
             if "findings" in data and isinstance(data["findings"], list):
                 data = data["findings"]
@@ -397,10 +404,15 @@ class IndependentAuditRunner:
                         provider = "independent"
 
                 execution_id = envelope_meta.get("execution_id") or f"exec-{raw_response_hash[:16]}"
+                provider_req_id = envelope_meta.get("provider_request_id") or execution_id
+                mode = envelope_meta.get("mode") or ("MOCK" if str(execution_id).startswith("mock_") else "LIVE")
 
                 self.last_run_metadata = {
+                    "mode": mode,
                     "provider": provider,
+                    "provider_request_id": provider_req_id,
                     "auditor_model": candidate,
+                    "resolved_model": envelope_meta.get("resolved_model") or candidate,
                     "execution_id": execution_id,
                     "status": envelope_meta.get("status") or "COMPLETED",
                     "fallback_occurred": is_fallback,
@@ -410,6 +422,7 @@ class IndependentAuditRunner:
                     "raw_prompt_hash": raw_prompt_hash,
                     "raw_response_hash": raw_response_hash,
                     "findings_count": len(findings),
+                    "usage": envelope_meta.get("usage"),
                 }
                 return findings
             except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as e:

@@ -715,6 +715,9 @@ class NightlyOrchestrator:
                 audit_stage_file.write_text(
                     json.dumps({
                         "status": "SUCCESS",
+                        "mode": audit_metadata.get("mode", "LIVE"),
+                        "provider": audit_metadata.get("provider"),
+                        "provider_request_id": audit_metadata.get("provider_request_id"),
                         "audit_metadata": audit_metadata,
                         "dispatched_count": len(screen_res["dispatched"]),
                         "rejected_count": len(screen_res["rejected"]),
@@ -741,6 +744,24 @@ class NightlyOrchestrator:
             err_msg = str(e)
             status = "AUDIT_PENDING" if "NO_INDEPENDENT_AUDITOR_AVAILABLE" in err_msg else "AUDIT_FAILED"
             print(f"Warning: Independent audit stage {status.lower()}: {err_msg}", file=sys.stderr)
+            audit_rec_dir = self.repo_dir / ".git" / "nightly_evidence" / "records"
+            if not audit_rec_dir.exists():
+                audit_rec_dir = self.repo_dir / ".dev" / "evidence" / "records"
+            try:
+                audit_rec_dir.mkdir(parents=True, exist_ok=True)
+                (audit_rec_dir / "audit_stage.json").write_text(
+                    json.dumps({
+                        "status": status,
+                        "mode": "LIVE",
+                        "error": err_msg,
+                        "baseline_commit": baseline_commit,
+                        "target_commit": target_commit,
+                        "timestamp": time.time(),
+                    }, indent=2),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
             return {
                 "status": status,
                 "error": err_msg,
