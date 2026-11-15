@@ -109,6 +109,57 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         self.assertIsNotNone(meta.get("diff_sha256"))
         self.assertEqual(meta.get("target_commit"), self.target_sha)
         self.assertEqual(meta.get("baseline_commit"), self.baseline_sha)
+        # TTT.1: プロバイダ名、実行識別子、ステータスの拘束
+        self.assertEqual(meta.get("provider"), "anthropic")
+        self.assertIsNotNone(meta.get("execution_id"))
+        self.assertEqual(meta.get("status"), "COMPLETED")
+
+    def test_audit_runner_extracts_envelope_provider_metadata(self) -> None:
+        """TTT.1: プロバイダからのエンベロープレスポンス（実行ID・プロバイダ名入り）を正しく解析・抽出できること。"""
+        envelope_json = json.dumps({
+            "provider": "anthropic",
+            "model": "claude-opus-5.5",
+            "execution_id": "msg_01X9Z8A7B6C5D4E3",
+            "status": "COMPLETED",
+            "findings": [
+                {
+                    "finding_id": "PROV-ENV-001",
+                    "severity": "P1",
+                    "spec_reference": "SPEC.md",
+                    "location": "src/app.py:1",
+                    "description": "Envelope finding",
+                    "reproduction_test_code": "import unittest\nclass T(unittest.TestCase):\n    def test_t(self): self.fail()",
+                    "status": "REPORTED",
+                }
+            ],
+        })
+        cmd_template = f"echo '{envelope_json}'"
+        config = AuditConfig(
+            maker_model="gemini-3.8-flash",
+            auditor_model="claude-opus-5.5",
+            baseline_commit=self.baseline_sha,
+        )
+        runner = IndependentAuditRunner(
+            auditor_cmd_template=cmd_template,
+            model_name="claude-opus-5.5",
+            config=config,
+            baseline_commit=self.baseline_sha,
+        )
+
+        findings = runner.audit_repository(
+            repo_dir=self.repo_dir,
+            target_commit=self.target_sha,
+            baseline_commit=self.baseline_sha,
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].finding_id, "PROV-ENV-001")
+
+        meta = runner.last_run_metadata
+        self.assertIsNotNone(meta)
+        assert meta is not None
+        self.assertEqual(meta.get("provider"), "anthropic")
+        self.assertEqual(meta.get("execution_id"), "msg_01X9Z8A7B6C5D4E3")
+        self.assertEqual(meta.get("status"), "COMPLETED")
 
     def test_orchestrator_audit_stage_includes_provenance_metadata(self) -> None:
         """SSS.4: Orchestrator の run_audit_stage が監査証跡メタデータを含んで結果を返すこと。"""
@@ -145,9 +196,14 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         self.assertEqual(res["genuine_count"], 0)
 
     def test_morning_reporter_renders_audit_provenance_table(self) -> None:
-        """SSS.4: MorningReporter が実外部モデルの監査証跡を表形式でレポートに出力すること。"""
+        """TTT.3: MorningReporter が実外部モデルの監査証跡（Provider, Execution ID, 実測64文字SHA-256）を表形式で出力すること。"""
         reporter = MorningReporter(repo_dir=self.repo_dir)
         report_path = self.repo_dir / "NIGHTLY_REPORT.md"
+
+        full_prompt_hash = "a1b2c3d4" * 8  # 64 chars
+        full_resp_hash = "e5f6a7b8" * 8    # 64 chars
+        full_spec_hash = "11223344" * 8    # 64 chars
+        full_diff_hash = "55667788" * 8    # 64 chars
 
         audit_stage_data = {
             "status": "SUCCESS",
@@ -159,14 +215,16 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             "baseline_commit": self.baseline_sha,
             "target_commit": self.target_sha,
             "audit_metadata": {
+                "provider": "anthropic",
                 "auditor_model": "claude-opus-5.5",
+                "execution_id": "exec_test_99887766",
                 "fallback_occurred": False,
                 "maker_model": "gemini-3.8-flash",
                 "independence_verified": True,
-                "raw_prompt_hash": "a" * 64,
-                "raw_response_hash": "b" * 64,
-                "spec_sha256": "c" * 64,
-                "diff_sha256": "d" * 64,
+                "raw_prompt_hash": full_prompt_hash,
+                "raw_response_hash": full_resp_hash,
+                "spec_sha256": full_spec_hash,
+                "diff_sha256": full_diff_hash,
             },
         }
 
@@ -190,22 +248,61 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
 
         content = report_path.read_text(encoding="utf-8")
         self.assertIn("独立監査", content)
+        self.assertIn("anthropic", content)
         self.assertIn("claude-opus-5.5", content)
+        self.assertIn("exec_test_99887766", content)
         self.assertIn("gemini-3.8-flash", content)
-        self.assertIn("a" * 12, content)  # ハッシュのプレフィックスまたは完全値が含まれること
-        self.assertIn("b" * 12, content)
+        self.assertIn(full_prompt_hash, content)
+        self.assertIn(full_resp_hash, content)
+        self.assertIn(full_spec_hash, content)
+        self.assertIn(full_diff_hash, content)
+        # プレースホルダー文字列が残存していないこと
+        self.assertNotIn("verified-crypto-hash", content)
+        self.assertNotIn("commit-bound (", content)
 
     def test_bundler_includes_audit_stage_evidence(self) -> None:
-        """SSS.4: EvidenceBundler が独立監査証跡ファイル（audit_stage.json 等）を bundle に収録すること。"""
+        """TTT.2: EvidenceBundler が audit_stage.json を収録し、Manifest と verify_bundle で検証可能であること。"""
+        import hashlib
         evidence_dir = self.repo_dir / ".git" / "nightly_evidence" / "records"
         evidence_dir.mkdir(parents=True, exist_ok=True)
+
+        tree_res = subprocess.run(
+            ["git", "rev-parse", f"{self.target_sha}^{{tree}}"],
+            cwd=self.repo_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        target_tree = tree_res.stdout.strip()
+        spec_hash = hashlib.sha256((self.repo_dir / "SPEC.md").read_bytes()).hexdigest()
+
+        # タスク証跡 task_1.json
+        task_file = evidence_dir / "task_1.json"
+        task_file.write_text(
+            json.dumps({
+                "task_id": "1",
+                "status": "COMPLETED",
+                "commit": self.target_sha,
+                "tree_sha": target_tree,
+                "spec_sha": spec_hash,
+                "checker": {"decision": "APPROVE"},
+            }),
+            encoding="utf-8",
+        )
+
         audit_file = evidence_dir / "audit_stage.json"
         audit_file.write_text(
             json.dumps({
-                "auditor_model": "claude-opus-5.5",
                 "status": "SUCCESS",
-                "prompt_hash": "dummy_prompt",
-                "response_hash": "dummy_response",
+                "audit_metadata": {
+                    "provider": "anthropic",
+                    "auditor_model": "claude-opus-5.5",
+                    "execution_id": "exec_1234567890",
+                    "raw_prompt_hash": "a" * 64,
+                    "raw_response_hash": "b" * 64,
+                },
+                "dispatched_count": 0,
+                "rejected_count": 0,
             }),
             encoding="utf-8",
         )
@@ -217,6 +314,16 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         with zipfile.ZipFile(bundle_path, "r") as z:
             names = z.namelist()
             self.assertIn("evidence/audit_stage.json", names)
+            manifest = json.loads(z.read("bundle_manifest.json").decode("utf-8"))
+            self.assertIn("evidence/audit_stage.json", manifest.get("file_hashes", {}))
+            self.assertIn("audit_stage", manifest)
+            self.assertEqual(manifest["audit_stage"].get("status"), "SUCCESS")
+
+        # verify_bundle での監査ステージ検証
+        res = bundler.verify_bundle(bundle_path)
+        self.assertTrue(res.is_valid)
+        self.assertTrue(getattr(res, "audit_stage_verified", False))
+        self.assertIsNotNone(getattr(res, "audit_stage_info", None))
 
 
 if __name__ == "__main__":

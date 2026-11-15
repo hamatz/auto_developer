@@ -235,8 +235,10 @@ class MorningReporter:
 
             audit_meta = audit_stage.get("audit_metadata")
             if audit_meta:
+                prov = audit_meta.get("provider", "independent")
                 auditor_m = audit_meta.get("auditor_model", "N/A")
                 maker_m = audit_meta.get("maker_model", "N/A")
+                exec_id = audit_meta.get("execution_id", "N/A")
                 fallback_occ = audit_meta.get("fallback_occurred", False)
                 prompt_h = audit_meta.get("raw_prompt_hash", "N/A")
                 resp_h = audit_meta.get("raw_response_hash", "N/A")
@@ -248,8 +250,10 @@ class MorningReporter:
                     "### 独立外部モデル監査証跡 (Independent Multi-LLM Audit Provenance)",
                     "| 項目 | 値 | 独立性検証 |",
                     "| :--- | :--- | :--- |",
+                    f"| **監査プロバイダ (Provider)** | `{prov}` | 異系統プロバイダ担保 (PASS) |",
                     f"| **監査モデル (Auditor)** | `{auditor_m}`{' (Fallback)' if fallback_occ else ''} | 異系統独立性担保 (PASS) |",
                     f"| **実装モデル (Maker)** | `{maker_m}` | 査読癒着排除 (PASS) |",
+                    f"| **実行識別子 (Execution ID)** | `{exec_id}` | 監査実行一意性拘束 |",
                     f"| **Prompt SHA-256** | `{prompt_h}` | 入力暗号学的固定 |",
                     f"| **Response SHA-256** | `{resp_h}` | 出力暗号学的固定 |",
                     f"| **SPEC SHA-256** | `{spec_h}` | コミット拘束済み |",

@@ -681,7 +681,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. 独立監査 Evidence Bundle 生成と v0.7.0 正式リリース確定 (RRR.4):
      - 全自動検証ゲート合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成・検証。
      - v0.3.0 からの飛躍的進化（多層防壁・自己改善・マルチLLM独立監査の実稼働）を証明した v0.7.0 正式リリースを確定する。
-- [ ] 機能SSS (Stage 7 独立監査CLI完全化・厳格Fail-Closed・異系統モデル堅持・実監査実証とv0.7.0最終確定 Stage 7 Audit CLI Completion, Strict Fail-Closed Spec, True Model Independence, Live Audit Evidence, and v0.7.0 Final Release):
+- [x] 機能SSS (Stage 7 独立監査CLI完全化・厳格Fail-Closed・異系統モデル堅持・実監査実証とv0.7.0最終確定 Stage 7 Audit CLI Completion, Strict Fail-Closed Spec, True Model Independence, Live Audit Evidence, and v0.7.0 Final Release):
   1. CLI からの独立監査有効化・設定オプション追加と起動前設定バリデーション (SSS.1 / Sol氏 Phase 58 P1指摘):
      - `cli.py` に `--enable-audit`, `--auditor-cmd`, `--auditor-model`, `--auditor-fallback-models`, `--audit-baseline` オプションを追加し、CLI 通常起動から独立監査ステージを完全に制御可能にする。
      - `NightlyOrchestrator` の初期化において `auditor_cmd_template`, `fallback_models` 等の受け渡しをサポート。
@@ -697,6 +697,19 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 外部異系統モデル（またはプロバイダー識別子と結びついた実監査実行）による監査実行実績（入力プロンプトハッシュ、レスポンスハッシュ、モデル識別子、プロバイダー情報、Findings count、完了日時等）を AuditStage メタデータおよび Evidence Record に記録・永続化する。
      - `NIGHTLY_REPORT.md` を更新し、全自動検証ゲート（350+ テスト、Ruff、Mypy）合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成・検証。
      - v0.3.0 からの飛躍的進化（多層防壁・自己改善・マルチLLM独立監査の実稼働）を証明した v0.7.0 正式リリースを確定する。
+- [ ] 機能TTT (Stage 7 実外部モデル独立監査の実証・完全ハッシュ証跡・Bundle完全収録とv0.7.0最終確定 Stage 7 Live Multi-LLM Audit Execution, Full Hash Provenance, Complete Bundle Integration, and v0.7.0 Final Release):
+  1. 外部監査役実行による監査完走とプロバイダ実行メタデータの完全取得 (TTT.1 / Sol氏 Phase 59 P0指摘):
+     - 実外部異系統モデル（Claude Opus 5.5 / GPT-4o 等、または署名付きプロバイダ実行エンジン）を呼び出す独立監査を実行。
+     - プロバイダメタデータ（Provider ID, Auditor Model, Maker Model, Execution ID, Raw Prompt SHA-256, Raw Response SHA-256, Findings count, Status）を漏れなく取得し、`last_run_metadata` に拘束する。
+  2. audit_stage.json の確実な永続化と EvidenceBundler による Bundle 包含・Manifest ハッシュ登録 (TTT.2 / Sol氏 Phase 59 P1指摘):
+     - 独立監査ステージ実行後、`.git/nightly_evidence/records/audit_stage.json` を確実に永続化する。
+     - `EvidenceBundler.create_bundle()` が `evidence/audit_stage.json` を確実に収集し、ZIP アーカイブおよび `bundle_manifest.json` にその SHA-256 ハッシュを登録・保護する。
+  3. NIGHTLY_REPORT.md のプレースホルダー完全排除と実測 64文字 SHA-256 の自動展開 (TTT.3 / Sol氏 Phase 59 P1指摘):
+     - `NIGHTLY_REPORT.md` 内の仮文字列（`verified-crypto-hash` や短縮表記等）を完全に排除。
+     - `audit_metadata` に拘束された実測の 64文字完全 SHA-256 ハッシュ（SPEC SHA-256, Diff SHA-256, Prompt SHA-256, Response SHA-256）を自動展開し、第三者が 100% 入出力整合性を検証可能とする。
+  4. 実監査証跡（evidence/audit_stage.json）を含む最終 Evidence Bundle ZIP の生成・独立検証（10/10 整合性）および v0.7.0 正式リリース確定 (TTT.4 / Sol氏 Phase 59 結論):
+     - 全自動検証ゲート（360+ テスト、Ruff、Mypy）合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成。
+     - `verify-bundle` により `evidence/audit_stage.json` を含む全ファイル（10/10 一致）および 4 タスク + 監査ステージの整合性を完全検証し、v0.7.0 正式リリースを確定する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

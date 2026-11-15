@@ -22,6 +22,8 @@ class BundleVerificationResult:
     warnings: list[str] = field(default_factory=list)
     tasks: list[dict[str, Any]] = field(default_factory=list)
     file_hashes: dict[str, str] = field(default_factory=dict)
+    audit_stage_verified: bool = False
+    audit_stage_info: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -33,6 +35,8 @@ class BundleVerificationResult:
             "warnings": self.warnings,
             "tasks": self.tasks,
             "file_hashes": self.file_hashes,
+            "audit_stage_verified": self.audit_stage_verified,
+            "audit_stage_info": self.audit_stage_info,
         }
 
 
@@ -188,12 +192,13 @@ class EvidenceBundler:
                 pass
 
             tasks_manifest: list[dict[str, Any]] = []
+            audit_stage_manifest: dict[str, Any] | None = None
             collected_rec_names: set[str] = set()
 
             for rec_dir in candidate_dirs:
                 if not rec_dir.exists() or not rec_dir.is_dir():
                     continue
-                # task_*.json および audit_*.json を収集 (SSS.4)
+                # task_*.json および audit_*.json を収集 (SSS.4, TTT.2)
                 for pat in ["task_*.json", "audit_*.json"]:
                     for rec_file in sorted(rec_dir.glob(pat)):
                         if rec_file.name in collected_rec_names:
@@ -225,6 +230,9 @@ class EvidenceBundler:
                                     else str(data.get("checker", "")),
                                     "status": data.get("status", ""),
                                 })
+                            elif rec_file.name == "audit_stage.json":
+                                audit_stage_manifest = data
+
                             items_to_zip.append((rec_file, f"evidence/{rec_file.name}"))
                             collected_rec_names.add(rec_file.name)
                         except (json.JSONDecodeError, OSError):
@@ -269,7 +277,7 @@ class EvidenceBundler:
             for file_path, arcname in items_to_zip:
                 file_hashes[arcname] = self._calc_sha256(file_path)
 
-            manifest_data = {
+            manifest_data: dict[str, Any] = {
                 "bundle_version": "1.0",
                 "generated_at": time.time(),
                 "job_id": actual_job_id,
@@ -278,6 +286,8 @@ class EvidenceBundler:
                 "tasks": tasks_manifest,
                 "file_hashes": file_hashes,
             }
+            if audit_stage_manifest is not None:
+                manifest_data["audit_stage"] = audit_stage_manifest
             manifest_path = staging_dir / "bundle_manifest.json"
             manifest_path.write_text(
                 json.dumps(manifest_data, ensure_ascii=False, indent=2),
@@ -686,6 +696,17 @@ class EvidenceBundler:
                             )
                     except OSError:
                         pass
+
+            # 8. 独立監査ステージ検証 (evidence/audit_stage.json がある場合: TTT.2)
+            audit_stage_file = inspect_dir / "evidence" / "audit_stage.json"
+            if audit_stage_file.exists():
+                try:
+                    audit_stage_data = json.loads(audit_stage_file.read_text(encoding="utf-8"))
+                    result.audit_stage_info = audit_stage_data
+                    if audit_stage_data.get("status") == "SUCCESS":
+                        result.audit_stage_verified = True
+                except (json.JSONDecodeError, OSError) as e:
+                    result.warnings.append(f"Failed to parse evidence/audit_stage.json: {e}")
 
         if result.errors:
             result.status = "INVALID"

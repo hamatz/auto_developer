@@ -256,6 +256,7 @@ class IndependentAuditRunner:
         self.maker_model = maker_model or (config.maker_model if config else "gemini-3.8-flash")
         self.audit_runner = AuditRunner()
         self.last_run_metadata: dict[str, Any] | None = None
+        self._last_envelope_metadata: dict[str, Any] | None = None
 
     def build_audit_prompt(self, spec_content: str, git_diff: str) -> str:
         return (
@@ -286,10 +287,19 @@ class IndependentAuditRunner:
             raise ValueError(f"Could not parse valid JSON from audit response: {output[:200]}")
 
         if isinstance(data, dict):
+            # TTT.1: エンベロープメタデータ（provider, execution_id, status 等）の抽出・保持
+            self._last_envelope_metadata = {
+                "provider": data.get("provider"),
+                "execution_id": data.get("execution_id") or data.get("id"),
+                "model": data.get("model"),
+                "status": data.get("status"),
+            }
             if "findings" in data and isinstance(data["findings"], list):
                 data = data["findings"]
             else:
                 data = [data] if "finding_id" in data else []
+        else:
+            self._last_envelope_metadata = None
 
         if not isinstance(data, list):
             raise TypeError(f"Expected a list of findings, got {type(data).__name__}")
@@ -372,8 +382,27 @@ class IndependentAuditRunner:
                     if self.baseline_commit and not finding.baseline_commit:
                         finding.baseline_commit = self.baseline_commit
 
+                # TTT.1: プロバイダ名および実行IDの導出・記録
+                envelope_meta = getattr(self, "_last_envelope_metadata", None) or {}
+                provider = envelope_meta.get("provider")
+                if not provider:
+                    cand_lower = candidate.lower()
+                    if "claude" in cand_lower or "anthropic" in cand_lower:
+                        provider = "anthropic"
+                    elif "gpt" in cand_lower or "o1" in cand_lower or "o3" in cand_lower or "openai" in cand_lower:
+                        provider = "openai"
+                    elif "gemini" in cand_lower or "google" in cand_lower:
+                        provider = "google"
+                    else:
+                        provider = "independent"
+
+                execution_id = envelope_meta.get("execution_id") or f"exec-{raw_response_hash[:16]}"
+
                 self.last_run_metadata = {
+                    "provider": provider,
                     "auditor_model": candidate,
+                    "execution_id": execution_id,
+                    "status": envelope_meta.get("status") or "COMPLETED",
                     "fallback_occurred": is_fallback,
                     "fallback_from": self.model_name if is_fallback else None,
                     "maker_model": maker_m,
