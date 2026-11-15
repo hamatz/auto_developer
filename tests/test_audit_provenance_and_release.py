@@ -860,6 +860,22 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             auditor_client._extract_findings_from_text(text)
         self.assertIn("Malformed JSON", str(cm.exception))
 
+    def test_extract_findings_allows_empty_json_with_non_json_explanation_codeblock(self) -> None:
+        """AUD-003 (Sol Phase 62 / Cycle 9): 有効な ```json [] ``` の後に説明文コードブロック（非JSON言語タグまたはプレーンテキスト）が存在しても、誤ってJSONパース失敗として拒絶せず、正しく空配列を抽出できること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        text = (
+            "Here is the audit result:\n```json\n[]\n```\n\n"
+            "Explanation:\n```\nAll specifications met.\n```\n"
+        )
+        findings = auditor_client._extract_findings_from_text(text)
+        self.assertEqual(findings, [])
+
 
 if __name__ == "__main__":
     unittest.main()

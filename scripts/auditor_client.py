@@ -49,12 +49,16 @@ def _extract_findings_from_text(text: str) -> list[dict]:
     """
     clean_text = text.strip()
     # 1. Inspect ALL markdown code blocks ```json ... ```
-    all_code_blocks = list(re.finditer(r"```(?:json)?\s*\n?(.*?)\n?```", clean_text, re.DOTALL))
+    all_code_blocks = list(re.finditer(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", clean_text, re.DOTALL))
     empty_block_found = False
     has_decode_error = False
     decode_error_msg = ""
     for m in all_code_blocks:
-        content = m.group(1).strip()
+        lang = m.group(1).lower().strip()
+        content = m.group(2).strip()
+        is_json = (lang == "json") or (not lang and content.startswith(("[", "{")))
+        if not is_json:
+            continue
         try:
             parsed = json.loads(content)
             if isinstance(parsed, list):
@@ -64,9 +68,8 @@ def _extract_findings_from_text(text: str) -> list[dict]:
                 if len(parsed) == 0:
                     empty_block_found = True
         except json.JSONDecodeError as exc:
-            if content.startswith(("[", "{")) or "```json" in clean_text:
-                has_decode_error = True
-                decode_error_msg = str(exc)
+            has_decode_error = True
+            decode_error_msg = str(exc)
 
     if has_decode_error:
         raise ValueError(f"Malformed JSON in audit response code block: {decode_error_msg}")
