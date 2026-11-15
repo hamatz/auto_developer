@@ -39,9 +39,15 @@ def _load_env_file(repo_dir: Path) -> dict[str, str]:
 
 
 def _extract_findings_from_text(text: str) -> list[dict]:
-    """Extract finding dictionaries from LLM response text."""
+    """Extract finding dictionaries from LLM response text.
+
+    Fail-Closed (VVV.1 / Sol Phase 61 P1):
+    If text does not contain a valid JSON array or explicit '[]', raise ValueError.
+    Do NOT convert unparseable text or arbitrary prose into '[]' (which would fake zero defects).
+    """
+    clean_text = text.strip()
     # 1. Try markdown code block ```json ... ```
-    m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
+    m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", clean_text, re.DOTALL)
     if m:
         try:
             parsed = json.loads(m.group(1))
@@ -51,7 +57,7 @@ def _extract_findings_from_text(text: str) -> list[dict]:
             pass
 
     # 2. Try raw JSON list [ ... ]
-    m_raw = re.search(r"(\[\s*\{.*?\}\s*\])", text, re.DOTALL)
+    m_raw = re.search(r"(\[\s*\{.*?\}\s*\])", clean_text, re.DOTALL)
     if m_raw:
         try:
             parsed = json.loads(m_raw.group(1))
@@ -60,12 +66,14 @@ def _extract_findings_from_text(text: str) -> list[dict]:
         except json.JSONDecodeError:
             pass
 
-    # 3. If single JSON object or empty array
-    m_empty = re.search(r"\[\s*\]", text)
-    if m_empty:
+    # 3. Explicit empty array
+    if re.search(r"\[\s*\]", clean_text):
         return []
 
-    return []
+    # Fail-Closed: unparseable text must NOT be treated as zero defects
+    raise ValueError(
+        f"UNPARSEABLE_AUDIT_RESPONSE: No valid JSON array found in auditor response (preview: {clean_text[:120]!r})"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -74,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prompt", help="Prompt text or path to prompt file")
     parser.add_argument("--repo-dir", default=".", help="Repository root directory")
     parser.add_argument("--api-key", help="API key for LLM provider")
+    parser.add_argument("--max-tokens", type=int, default=8192, help="Max tokens for LLM completion")
     parser.add_argument("--mock", action="store_true", help="Explicit mock mode for offline test fixtures only")
     args = parser.parse_args(argv)
 
@@ -174,12 +183,12 @@ def main(argv: list[str] | None = None) -> int:
             "  }\n"
             "]\n"
             "If the code completely and correctly satisfies SPEC.md with no defects, return an empty array `[]`.\n"
-            "Respond ONLY with the JSON array enclosed in ```json ... ```."
+            "CRITICAL: Output ONLY the JSON array enclosed in ```json ... ``` without any additional markdown text, introductions, or explanations."
         )
 
         payload = {
             "model": anthropic_model,
-            "max_tokens": 4096,
+            "max_tokens": args.max_tokens,
             "system": system_instruction,
             "messages": [
                 {"role": "user", "content": prompt_content or "Audit repository diff against SPEC.md"}
@@ -226,6 +235,21 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(err_envelope, ensure_ascii=False, indent=2), file=sys.stderr)
             return 1
 
+        stop_reason = resp_json.get("stop_reason") or "end_turn"
+        # VVV.1 / Sol Phase 61 P1: 途中打ち切り（max_tokens到達）は監査完了とみなさず AUDIT_PENDING で安全停止
+        if stop_reason == "max_tokens":
+            err_envelope = {
+                "mode": "LIVE",
+                "provider": "anthropic",
+                "model": args.model,
+                "status": "AUDIT_PENDING",
+                "error": f"OUTPUT_TRUNCATED_MAX_TOKENS: Output was truncated before completion (stop_reason={stop_reason})",
+                "stop_reason": stop_reason,
+                "findings": [],
+            }
+            print(json.dumps(err_envelope, ensure_ascii=False, indent=2), file=sys.stderr)
+            return 1
+
         provider_req_id = resp_json.get("id") or f"msg_unknown_{timestamp}"
         raw_text = ""
         content_items = resp_json.get("content", [])
@@ -234,7 +258,20 @@ def main(argv: list[str] | None = None) -> int:
                 if isinstance(block, dict) and block.get("type") == "text":
                     raw_text += block.get("text", "")
 
-        findings = _extract_findings_from_text(raw_text)
+        try:
+            findings = _extract_findings_from_text(raw_text)
+        except ValueError as e:
+            err_envelope = {
+                "mode": "LIVE",
+                "provider": "anthropic",
+                "model": args.model,
+                "status": "FAILED",
+                "error": str(e),
+                "stop_reason": stop_reason,
+                "findings": [],
+            }
+            print(json.dumps(err_envelope, ensure_ascii=False, indent=2), file=sys.stderr)
+            return 1
 
         envelope = {
             "mode": "LIVE",
@@ -244,6 +281,7 @@ def main(argv: list[str] | None = None) -> int:
             "provider_request_id": provider_req_id,
             "execution_id": provider_req_id,
             "status": "COMPLETED",
+            "stop_reason": stop_reason,
             "timestamp": timestamp,
             "prompt_sha256": prompt_hash,
             "response_sha256": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),

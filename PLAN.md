@@ -35,7 +35,7 @@
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [ ] 1. 監査応答の終了理由検証 (stop_reason)・max_tokens打ち切り検知およびJSON解析失敗のFail-Closed化（Red-First）（VVV.1）
+- [x] 1. 監査応答の終了理由検証 (stop_reason)・max_tokens打ち切り検知およびJSON解析失敗のFail-Closed化（Red-First）（VVV.1）
 - [ ] 2. `test_live_claude_audit.py` の環境差異解消および Linux bwrap パス修正（Red-First）（VVV.2）
 - [ ] 3. 監査対象コミット拘束およびポスト監査差分検査 (Post-Audit Diff Integrity)（Red-First）（VVV.3）
 - [ ] 4. 最新HEADに対する実Claude Opus 5.5再監査・完全性検証済みEvidence Bundle ZIP生成・v0.7.0正式リリース確定（VVV.4）

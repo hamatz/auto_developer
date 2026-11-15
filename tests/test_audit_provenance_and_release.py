@@ -469,6 +469,106 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         self.assertFalse(res.audit_stage_verified)
         self.assertTrue(any("not live verified" in w or "MOCK" in w for w in res.warnings))
 
+    def test_extract_findings_fails_closed_on_unparseable_or_prose_text(self) -> None:
+        """VVV.1: 有効なJSON配列を含まないテキストや不完全なJSONに対し、[]（欠陥ゼロ偽装）ではなく例外を送出してFail-Closed化すること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            from auditor_client import _extract_findings_from_text
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        # 1. 散文のみでJSONなし（Sol氏指摘ケース）
+        with self.assertRaises(ValueError):
+            _extract_findings_from_text("I found a critical bug but could not fit JSON")
+
+        # 2. 途中で途切れた不完全なJSON（max_tokens打ち切り等）
+        with self.assertRaises(ValueError):
+            _extract_findings_from_text('[{"finding_id": "AUD-001", "description": "truncated')
+
+        # 3. 正常な空配列（欠陥なし）は [] を返すこと
+        self.assertEqual(_extract_findings_from_text("```json\n[]\n```"), [])
+        self.assertEqual(_extract_findings_from_text("[]"), [])
+
+        # 4. 正常な指摘配列は正しくパースされること
+        valid_json = '[{"finding_id": "AUD-001", "severity": "P0", "description": "test"}]'
+        findings = _extract_findings_from_text(f"```json\n{valid_json}\n```")
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["finding_id"], "AUD-001")
+
+    def test_auditor_client_handles_max_tokens_stop_reason_as_pending(self) -> None:
+        """VVV.1: Anthropic API の stop_reason が max_tokens の場合、AUDIT_PENDING となり安全停止（Exit 1）すること。"""
+        from unittest import mock
+
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        mock_resp_body = json.dumps({
+            "id": "msg_truncated_12345",
+            "model": "claude-opus-5-5",
+            "stop_reason": "max_tokens",
+            "content": [{"type": "text", "text": '[{"finding_id": "AUD-001"'}],
+            "usage": {"input_tokens": 15000, "output_tokens": 4096},
+        }).encode("utf-8")
+
+        mock_resp = mock.MagicMock()
+        mock_resp.read.return_value = mock_resp_body
+        mock_resp.__enter__.return_value = mock_resp
+
+        env_file = self.repo_dir / ".env"
+        env_file.write_text("ANTHROPIC_API_KEY=test_key\n", encoding="utf-8")
+
+        with mock.patch("urllib.request.urlopen", return_value=mock_resp), mock.patch("sys.stderr"):
+            exit_code = auditor_client.main([
+                "--model", "claude-opus-5.5",
+                "--prompt", "test prompt",
+                "--repo-dir", str(self.repo_dir),
+            ])
+            self.assertEqual(exit_code, 1)
+
+    def test_auditor_client_records_stop_reason_in_envelope(self) -> None:
+        """VVV.1: 正常完了時（stop_reason=end_turn）、envelope に stop_reason が記録されること。"""
+        import io
+        from unittest import mock
+
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        mock_resp_body = json.dumps({
+            "id": "msg_success_12345",
+            "model": "claude-opus-5-5",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "[]"}],
+            "usage": {"input_tokens": 1000, "output_tokens": 10},
+        }).encode("utf-8")
+
+        mock_resp = mock.MagicMock()
+        mock_resp.read.return_value = mock_resp_body
+        mock_resp.__enter__.return_value = mock_resp
+
+        env_file = self.repo_dir / ".env"
+        env_file.write_text("ANTHROPIC_API_KEY=test_key\n", encoding="utf-8")
+
+        stdout_capture = io.StringIO()
+        with mock.patch("urllib.request.urlopen", return_value=mock_resp), mock.patch("sys.stdout", stdout_capture):
+            exit_code = auditor_client.main([
+                "--model", "claude-opus-5.5",
+                "--prompt", "test prompt",
+                "--repo-dir", str(self.repo_dir),
+            ])
+            self.assertEqual(exit_code, 0)
+            output_json = json.loads(stdout_capture.getvalue())
+            self.assertEqual(output_json.get("stop_reason"), "end_turn")
+            self.assertEqual(output_json.get("status"), "COMPLETED")
+
 
 if __name__ == "__main__":
     unittest.main()

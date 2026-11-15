@@ -299,6 +299,7 @@ class IndependentAuditRunner:
                 "model": data.get("model"),
                 "resolved_model": data.get("resolved_model") or data.get("model"),
                 "status": data.get("status"),
+                "stop_reason": data.get("stop_reason"),
                 "usage": data.get("usage"),
             }
             if "findings" in data and isinstance(data["findings"], list):
@@ -415,6 +416,7 @@ class IndependentAuditRunner:
                     "resolved_model": envelope_meta.get("resolved_model") or candidate,
                     "execution_id": execution_id,
                     "status": envelope_meta.get("status") or "COMPLETED",
+                    "stop_reason": envelope_meta.get("stop_reason"),
                     "fallback_occurred": is_fallback,
                     "fallback_from": self.model_name if is_fallback else None,
                     "maker_model": maker_m,
