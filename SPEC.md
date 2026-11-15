@@ -644,7 +644,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `tests/test_level7_real_loop_e2e.py` および `tests/test_independent_audit_runner.py` において、後続再代入を含む正常テストや条件付き `self.fail()` を含む正常テストが安全にパスし、偽 Red のみが確実に排除されることを実証する。
   4. 報告書の正確化（受入ハーネス実証）・Evidence Bundle 生成と v0.7.0 リリース準備 (OOO.4):
      - `NIGHTLY_REPORT.md` およびドキュメントの表現を「独立第三者監査に向けた受入ハーネスの整備・実証」として正確に是正し、全テスト通過・改ざん検知・独立 Checker 承認済みの Evidence Bundle を生成して v0.7.0 を確定する。
-- [ ] 機能PPP (Stage 7 制御フロー変数合流の不確定性保護・安全側フォールスルーと受入ハーネス確定 Stage 7 Control Flow Merge, Uncertainty Protection, and Acceptance Finalization):
+- [x] 機能PPP (Stage 7 制御フロー変数合流の不確定性保護・安全側フォールスルーと受入ハーネス確定 Stage 7 Control Flow Merge, Uncertainty Protection, and Acceptance Finalization):
   1. 条件分岐（`if`/`while`）における変数合流（Merge）と不確定性保護 (PPP.1 / Sol氏 Phase 55 P1指摘):
      - `_process_stmts_in_order` において、条件分岐（`body` / `orelse`）内で再代入・変更された変数について、分岐後に静的確定できない場合（両ブランチで異なる値、または条件式が動的な場合）は、分岐前の古い固定値を破棄し `var_env` から除去して `dependent_vars`（不確定 / 動的依存）へ昇格させる。
      - 分岐前の固定値が分岐後のアサーション判定に誤って使われないようにし、`x = 1; if compute_val(1) == 2: x = 2; self.assertEqual(x, 2)` のような正常なテストが固定値不一致（`1 == 2`）として誤拒絶（TRIVIAL_RED）されず、安全に受容されることを単体テストで実証する。
@@ -655,6 +655,19 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `tests/test_independent_audit_runner.py` および `tests/test_level7_real_loop_e2e.py` において、条件分岐後の変数合流を伴う正常テストが安全にパスし、真のバグのみが受理・自律修復されることを実証する。
   4. 最終 Evidence Bundle 生成・受入ハーネス確定と正式独立第三者監査移行準備 (PPP.4):
      - 全テスト通過・改ざん検知・独立 Checker 承認済みの Evidence Bundle を生成し、受入ハーネスの整備を完了して v0.7.0 リリースを確定、次フェーズでの実外部モデル独立監査への移行準備を完了する。
+- [ ] 機能QQQ (Stage 7 実外部モデルによる独立第三者監査の実稼働と Level 7 完全自己改善実証 Stage 7 Live External Multi-LLM Independent Audit and Level 7 Self-Refinement Real Execution):
+  1. 実外部異系統モデル独立監査パイプラインの構成とベースライン固定 (QQQ.1):
+     - `IndependentAuditRunner` および `AuditConfig` において、実動環境における外部異系統モデル（例: Maker=Gemini Flash vs Auditor=Claude 3.7 / Opus / GPT 4o/o1 / 異系統モデル）の実行インターフェースおよびベースラインコミット（`98c213a`）を固定。
+     - 外部監査役が直接リポジトリ内部のプロンプトや思考ログを参照できない独立入力境界（SPEC.md と git diff のみ）を機械的に担保する。
+  2. 外部監査役による未知欠陥探索と Auto Developer 防壁による自動選別実証 (QQQ.2):
+     - 実外部モデルまたは敵対的入力生成による未知のエッジケース・仕様違反・境界値指摘を投入。
+     - Auto Developer の防壁（OSサンドボックス隔離、AST因果関係解析、トレーサー、不干渉検証）が、形骸的な偽Red（Trivial Red）やホスト機密読み取り・リポジトリ改ざんを自動遮断し、真の欠陥（GENUINE_RED）のみを `PLAN.md` に登録することを実証する。
+  3. 真正指摘の自律修正・After Green 検証・免疫昇格・教訓記録（Level 7 Closed Loop）完走実証 (QQQ.3):
+     - 登録された AUD タスクに対して Maker が自律的に修正コードを適用し、Git コミットを作成。
+     - `resolve_task()` により Before Red / After Green 証跡（Commit Bound Proof）が厳格に検証され、再現テストが `tests/immunity/` 配下に非破壊昇格し、`LESSONS.md` に永続化され、次回 Maker に教訓が注入される完全自己改善ループを実証する。
+  4. 独立監査 Evidence Bundle 生成と v0.7.0 本格リリース確定 (QQQ.4):
+     - 実外部監査および Level 7 自己改善の証跡を含む全自動検証ゲート合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成・検証。
+     - v0.3.0 からの飛躍的進化（真の自律・多層防壁・自己改善・マルチLLM独立監査）を実証した v0.7.0 の本格リリースを確定する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

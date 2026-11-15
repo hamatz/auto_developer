@@ -7,17 +7,17 @@
 -->
 
 ## 現在の目標
-- Phase 56: Stage 7 — 制御フロー変数合流の不確定性保護・安全側フォールスルーと受入ハーネス確定（SPEC.md 機能PPP）
-  - 条件分岐（`if`/`while`）における変数合流（Merge）と不確定性保護（機能PPP.1 / Sol氏 Phase 55 P1指摘）
-  - 静的到達不能コード（`if False:` 等）の判定抑止と不確実性の安全側判定（機能PPP.2 / Sol氏 Phase 55 提言）
-  - 判定の不確実性保護・受入ハーネスと Level 7 E2E 完走確認（機能PPP.3）
-  - 最終 Evidence Bundle 生成・受入ハーネス確定と正式独立第三者監査移行準備（機能PPP.4）
-- スコープ外（Phase 57 以降）: 実際の異系統実外部LLM API（Anthropic Claude Opus / OpenAI GPT）との本番接続による未知の欠陥探索・自律修正サイクル。
+- Phase 57: Stage 7 — 実外部モデルによる独立第三者監査の実稼働と Level 7 完全自己改善実証（SPEC.md 機能QQQ）
+  - 実外部異系統モデル独立監査パイプラインの構成とベースライン固定（機能QQQ.1）
+  - 外部監査役による未知欠陥探索と Auto Developer 防壁による自動選別実証（機能QQQ.2）
+  - 真正指摘の自律修正・After Green 検証・免疫昇格・教訓記録（Level 7 Closed Loop）完走実証（機能QQQ.3）
+  - 独立監査 Evidence Bundle 生成と v0.7.0 本格リリース確定（機能QQQ.4）
+- スコープ外: 複数Workerの同時並行Git編集、SPEC.md の自律書き換え、クラウド分散実行。
 
-## 作業手順（Phase 56 から更新・LESSONS.md 2026-11-15 の教訓に基づく）
+## 作業手順（Phase 57 から更新・LESSONS.md 2026-11-15 の教訓に基づく）
 - Maker と Checker は別系統のモデルにする（AGENTS.md Rule 6）。Maker が Gemini 系のとき、Checker サブエージェントは `Model: "pro"` を明示指定する。`inherit` は使わない。commit-step の `--checker-reason` に Checker のモデル指定を書く。
 - Checker への入力は要約・再構成しない。以下をファイルに書き出し、Checker にはそのパスを渡して直接読ませる:
-  1. `awk '/^- \[ \] 機能PPP/,/^## 3\./' SPEC.md > .dev/checker/spec_ppp.md`
+  1. `awk '/^- \[ \] 機能QQQ/,/^## 3\./' SPEC.md > .dev/checker/spec_qqq.md`
   2. `git add -N . && git diff <checkpoint> > .dev/checker/diff_task<n>.patch`（未追跡ファイルも差分に含める）
 - verify-step の前に `git status --porcelain` を確認し、意図しないファイル（実験の生成物など）がないことを確かめる。実験・挙動確認は必ず `mktemp -d` で作った一時ディレクトリで行い、リポジトリ直下で実行しない。
 - Evidence Record は手書きしない。各ステップで以下の正規経路のみを使う:
@@ -28,17 +28,17 @@
 - Bundle 生成後に SPEC.md や追跡ファイルを変更しない（Evidence の spec_sha と不一致になる）。SPEC の完了マークは次フェーズの準備コミットで付ける。
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- PPP.1: `tests/test_red_verifier.py` に条件分岐（`if`/`while`）後に変数を評価するテスト（`x = 1; if compute_val(1) == 2: x = 2; self.assertEqual(x, 2)`）が TRIVIAL_RED として誤拒絶されない単体テストを追加。
-- PPP.2: `tests/test_red_verifier.py` に静的到達不能な分岐（`if False:` 等）のアサーションが TRIVIAL_RED の誤判定根拠にならない単体テストを追加。
-- PPP.3: `tests/test_level7_real_loop_e2e.py` および `tests/test_independent_audit_runner.py` に不確定性が安全側に倒され、受入ハーネスおよび実ループが完走する受入テストを追加。
-- PPP.4: `NIGHTLY_REPORT.md` を更新し、v0.7.0 受入ハーネス確定と実外部モデル移行準備を記載。
+- QQQ.1: `tests/test_independent_audit_runner.py` に実外部モデル独立監査のパイプライン構成とベースラインコミット固定（`98c213a`）を検証するテストを追加。
+- QQQ.2: `tests/test_independent_audit_runner.py` および `tests/test_red_verifier.py` に未知のエッジケース・境界値・敵対的指摘の投入と防壁による自動選別（Trivial Red/機密読み取りの遮断、GENUINE_RED の受理）を実証するテストを追加。
+- QQQ.3: `tests/test_level7_real_loop_e2e.py` に真正指摘に対する自律修正、After Green 検証、非破壊免疫昇格、LESSONS 記録、次回教訓注入までの Level 7 クローズドループ完走テストを追加。
+- QQQ.4: `NIGHTLY_REPORT.md` を更新し、実外部独立監査完了および v0.7.0 本格リリース確定を記録。
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [x] 1. 条件分岐（`if`/`while`）における変数合流（Merge）と不確定性保護（Red-First）（PPP.1）
-- [x] 2. 静的到達不能コード（`if False:` 等）の判定抑止と不確実性の安全側判定（Red-First）（PPP.2）
-- [x] 3. 判定の不確実性保護・受入ハーネスと Level 7 E2E 完走確認（Red-First）（PPP.3）
-- [x] 4. 最終 Evidence Bundle 生成・受入ハーネス確定と正式独立第三者監査移行準備（PPP.4）
+- [ ] 1. 実外部異系統モデル独立監査パイプラインの構成とベースライン固定（Red-First）（QQQ.1）
+- [ ] 2. 外部監査役による未知欠陥探索と Auto Developer 防壁による自動選別実証（Red-First）（QQQ.2）
+- [ ] 3. 真正指摘の自律修正・After Green 検証・免疫昇格・教訓記録（Level 7 Closed Loop）完走実証（Red-First）（QQQ.3）
+- [ ] 4. 独立監査 Evidence Bundle 生成と v0.7.0 本格リリース確定（QQQ.4）
 
 ## 止まっていること・判断待ち
-- なし。Sol 氏の指摘（条件分岐後の変数合流不備、静的確定できない不確定性の安全側扱い）に対応する Phase 56（機能PPP）に着手可能。
+- なし。Sol 氏の Phase 56 PASS レビューおよびユーザー承認を受け、実外部モデル独立監査の実稼働と v0.7.0 本格リリース確定を行う Phase 57（機能QQQ）の準備完了。
