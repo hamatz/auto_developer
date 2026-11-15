@@ -991,6 +991,75 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         with self.assertRaises(ValueError):
             auditor_client._extract_findings_from_text(text)
 
+    def test_raw_findings_outside_empty_example_block_not_discarded(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 14): IndependentAuditRunner.parse_response は、例示空配列コードブロックが存在しても、ブロック外の生JSON指摘を破棄せず抽出すること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        finding = {
+            "finding_id": "AUD-RAW-001",
+            "severity": "P0",
+            "spec_reference": "VVV.1",
+            "location": "a.py:1",
+            "description": "real bug",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        text = (
+            "If there were no defects I would reply ```json\n[]\n```.\n"
+            "However I found the following defects:\n" + json.dumps([finding])
+        )
+        findings = runner.parse_response(text)
+        self.assertEqual(len(findings), 1, "real findings were discarded as zero defects")
+        self.assertEqual(findings[0].finding_id, "AUD-RAW-001")
+
+    def test_findings_after_bracketed_prose_and_empty_example_not_discarded(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 14): auditor_client は、例示空配列コードブロックの後に角括弧散文（[src/a.py]）が先行しても、後続の生JSON指摘を破棄せず抽出すること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        finding = {"finding_id": "AUD-BR-001", "severity": "P0", "description": "real bug"}
+        text = (
+            "Example format: ```json\n[]\n```\n"
+            "I inspected [src/a.py] and found:\n" + json.dumps([finding])
+        )
+        findings = auditor_client._extract_findings_from_text(text)
+        self.assertEqual(len(findings), 1, f"real findings silently discarded: {findings!r}")
+        self.assertEqual(findings[0]["finding_id"], "AUD-BR-001")
+
+    def test_parse_response_with_bracketed_prose_and_raw_findings_not_discarded(self) -> None:
+        """AUD-001/AUD-002: parse_response は、例示空配列コードブロック＋角括弧散文（[src/a.py]）＋生JSON指摘の組み合わせでも指摘を正しく抽出すること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        finding = {
+            "finding_id": "AUD-BR-002",
+            "severity": "P0",
+            "spec_reference": "VVV.1",
+            "location": "b.py:1",
+            "description": "bug",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        text = (
+            "Example format: ```json\n[]\n```\n"
+            "I checked [src/b.py] and found:\n" + json.dumps([finding])
+        )
+        findings = runner.parse_response(text)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].finding_id, "AUD-BR-002")
+
+    def test_parse_response_malformed_raw_findings_after_bracketed_prose_fails_closed(self) -> None:
+        """AUD-001/AUD-002: parse_response は、例示空配列コードブロック＋角括弧散文＋構文不正生JSONの場合、Fail-Closedで例外を送出すること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        text = (
+            "Example format: ```json\n[]\n```\n"
+            "I checked [src/b.py] and found:\n"
+            '[{"finding_id": "AUD-BR-002", "severity": "P0", "description": "broken",}]'
+        )
+        with self.assertRaises(ValueError):
+            runner.parse_response(text)
+
 
 if __name__ == "__main__":
     unittest.main()

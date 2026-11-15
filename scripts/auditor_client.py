@@ -87,20 +87,25 @@ def _extract_findings_from_text(text: str) -> list[dict]:
 
     # 3. Check for raw findings in text outside code blocks (handles example code block + raw findings outside)
     text_outside = re.sub(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", "", clean_text, flags=re.DOTALL)
-    start_out = text_outside.find("[")
     end_out = text_outside.rfind("]")
-    if start_out != -1 and end_out != -1 and end_out > start_out:
-        candidate_outside = text_outside[start_out : end_out + 1].strip()
-        try:
-            parsed = json.loads(candidate_outside)
-            if isinstance(parsed, list):
-                findings = [item for item in parsed if isinstance(item, dict)]
-                if findings:
-                    return findings
-        except json.JSONDecodeError as exc:
-            if re.match(r"^\[\s*\{", candidate_outside) or not empty_block_found:
-                has_decode_error = True
-                decode_error_msg = str(exc)
+    if end_out != -1:
+        for m_bracket in re.finditer(r"\[", text_outside):
+            start_out = m_bracket.start()
+            if start_out >= end_out:
+                break
+            candidate_outside = text_outside[start_out : end_out + 1].strip()
+            try:
+                parsed = json.loads(candidate_outside)
+                if isinstance(parsed, list):
+                    findings = [item for item in parsed if isinstance(item, dict)]
+                    if findings:
+                        return findings
+            except json.JSONDecodeError:
+                pass
+
+        if re.search(r"\[\s*\{", text_outside):
+            has_decode_error = True
+            decode_error_msg = "Invalid JSON array of findings outside code block"
 
     if has_decode_error:
         raise ValueError(f"Malformed JSON in audit response code block: {decode_error_msg}")

@@ -320,6 +320,35 @@ class IndependentAuditRunner:
             if has_decode_error and data is None:
                 raise ValueError("Malformed JSON in audit response code block")
 
+            # 3.5. コードブロック外の生指摘（例示空コードブロック＋生指摘外出し）の探索
+            if data is None:
+                text_outside = re.sub(r"```(?:[a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", "", clean_output, flags=re.DOTALL)
+                end_out = text_outside.rfind("]")
+                if end_out != -1:
+                    for m_bracket in re.finditer(r"\[", text_outside):
+                        start_out = m_bracket.start()
+                        if start_out >= end_out:
+                            break
+                        candidate_outside = text_outside[start_out : end_out + 1].strip()
+                        try:
+                            parsed = json.loads(candidate_outside)
+                            if isinstance(parsed, list):
+                                findings = [item for item in parsed if isinstance(item, dict)]
+                                if findings:
+                                    data = findings
+                                    break
+                            elif isinstance(parsed, dict) and ("findings" in parsed or "finding_id" in parsed):
+                                data = parsed
+                                break
+                        except json.JSONDecodeError:
+                            pass
+
+                if data is None and re.search(r"\[\s*\{", text_outside):
+                    has_decode_error = True
+
+            if has_decode_error and data is None:
+                raise ValueError("Malformed JSON in audit response code block")
+
             if data is None and empty_block_found:
                 data = []
 
