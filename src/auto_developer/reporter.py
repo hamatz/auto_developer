@@ -222,6 +222,30 @@ class MorningReporter:
             for lim in known_limitations:
                 lines.append(f"- {lim}")
 
+        audit_stage = summary_data.get("audit_stage")
+        if audit_stage:
+            lines.extend(
+                [
+                    "",
+                    "## 独立監査ステージ実行結果 (Independent Audit Stage)",
+                ]
+            )
+            status_str = audit_stage.get("status", "UNKNOWN")
+            lines.append(f"- **監査ステータス**: `{status_str}`")
+            if status_str == "SUCCESS":
+                dispatched = audit_stage.get("dispatched", [])
+                rejected = audit_stage.get("rejected", [])
+                lines.append(f"- **真正指摘登録数**: {len(dispatched)} 件（次期 PLAN.md に自律登録）")
+                lines.append(f"- **不正/偽Red排除数**: {len(rejected)} 件（多層防壁により遮断）")
+                for f in dispatched:
+                    fid = getattr(f, "finding_id", str(f))
+                    sev = getattr(f, "severity", "P1")
+                    desc = getattr(f, "description", "")
+                    loc = getattr(f, "location", "")
+                    lines.append(f"  - `[{sev}] {fid}`: {desc} ({loc})")
+            elif status_str in ("AUDIT_FAILED", "AUDIT_PENDING"):
+                lines.append(f"- **保留/エラー理由**: {audit_stage.get('error', 'Unknown')}")
+
         lines.extend(["", "## 要確認・隔離事項 (Quarantined Work)"])
         quarantined = summary_data.get("quarantined_task")
         if quarantined:

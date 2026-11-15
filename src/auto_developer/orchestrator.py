@@ -37,6 +37,10 @@ class NightlyOrchestrator:
         maker_model: str | None = None,
         checker_model: str | None = None,
         allow_same_model_override: bool = False,
+        auditor_runner: Any | None = None,
+        auditor_model: str | None = None,
+        enable_audit_stage: bool = False,
+        audit_baseline_commit: str | None = None,
     ) -> None:
         self.repo_dir = repo_dir or Path.cwd()
         self.plan_path = plan_path or (self.repo_dir / "PLAN.md")
@@ -53,6 +57,10 @@ class NightlyOrchestrator:
         self.maker_model = maker_model
         self.checker_model = checker_model
         self.allow_same_model_override = allow_same_model_override
+        self.auditor_runner = auditor_runner
+        self.auditor_model = auditor_model
+        self.enable_audit_stage = enable_audit_stage
+        self.audit_baseline_commit = audit_baseline_commit
 
         self.git_guard = GitGuard(repo_dir=self.repo_dir)
         self.dispatcher = TaskDispatcher()
@@ -589,6 +597,13 @@ class NightlyOrchestrator:
 
             current_head = self.git_guard.get_current_checkpoint()
 
+            # 独立監査ステージの自動実行 (RRR.2 / Sol氏 Phase 57 P1指摘)
+            audit_stage_result: dict[str, Any] | None = None
+            if self.enable_audit_stage and (self.auditor_runner or self.auditor_model):
+                base_c = self.audit_baseline_commit or initial_checkpoint
+                print(f"\n[Independent Audit Stage] Running repository audit against baseline {base_c[:7]}...")
+                audit_stage_result = self.run_audit_stage(baseline_commit=base_c, target_commit=current_head)
+
             bundle_rel_path = None
             try:
                 bundler = EvidenceBundler(repo_dir=self.repo_dir)
@@ -613,12 +628,66 @@ class NightlyOrchestrator:
                     "run_command": run_cmd,
                     "verify_command": verify_cmd,
                     "bundle_path": bundle_rel_path,
+                    "audit_stage": audit_stage_result,
                 },
             )
             print(f"\nExecution complete! Report written to {self.report_path}")
         else:
             print(f"\n[DRY-RUN] Execution simulation complete. {len(succeeded_tasks)} tasks simulated. Report was not modified.")
         return 0
+
+    def run_audit_stage(
+        self,
+        baseline_commit: str,
+        target_commit: str = "HEAD",
+        auditor_runner: Any | None = None,
+    ) -> dict[str, Any]:
+        """ジョブ完了時に外部独立監査役を起動し、多層防壁で選別した真正指摘を次期 PLAN.md に登録する (RRR.2)。"""
+        from auto_developer.audit import IndependentAuditRunner
+        from auto_developer.dispatcher import AuditDispatcher
+        from auto_developer.verifier import RedTestVerifier
+
+        auditor = auditor_runner or self.auditor_runner
+        if not auditor and self.auditor_model:
+            auditor = IndependentAuditRunner(model_name=self.auditor_model)
+
+        if not auditor:
+            return {"status": "SKIPPED", "reason": "No auditor configured"}
+
+        try:
+            verifier = RedTestVerifier(repo_dir=self.repo_dir)
+            dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=verifier)
+
+            findings = auditor.audit_repository(
+                repo_dir=self.repo_dir,
+                target_commit=target_commit,
+                baseline_commit=baseline_commit,
+            )
+            screen_res = auditor.screen_and_dispatch_findings(
+                findings=findings,
+                dispatcher=dispatcher,
+                plan_path=self.plan_path,
+            )
+            return {
+                "status": "SUCCESS",
+                "dispatched": screen_res["dispatched"],
+                "rejected": screen_res["rejected"],
+                "total_processed": screen_res["total_processed"],
+                "genuine_count": screen_res["genuine_count"],
+                "rejected_count": screen_res["rejected_count"],
+                "baseline_commit": baseline_commit,
+                "target_commit": target_commit,
+            }
+        except (subprocess.SubprocessError, OSError, ValueError, RuntimeError, KeyError, TypeError) as e:
+            # 外部監査役の失敗時にも通常開発成果物は破棄せず安全に保全する (Fail-Safe)
+            print(f"Warning: Independent audit stage failed: {e}", file=sys.stderr)
+            return {
+                "status": "AUDIT_FAILED",
+                "error": str(e),
+                "baseline_commit": baseline_commit,
+                "target_commit": target_commit,
+                "findings": [],
+            }
 
     def _check_boundary(self, checkpoint: str) -> list[str]:
         """チーム所有スコープ（owns）が指定されている場合、領空侵犯を検査し違反ファイルリストを返す。"""
