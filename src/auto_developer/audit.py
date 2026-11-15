@@ -319,11 +319,11 @@ class IndependentAuditRunner:
 
         # 3. Markdown コードブロックの探索（複数ブロック走査＆非空指摘の優先）
         if data is None:
-            all_code_blocks = list(re.finditer(r"```(?:json)?\s*\n?(.*?)\n?```", clean_output, re.DOTALL))
+            all_code_blocks = list(re.finditer(r"```([a-zA-Z0-9_-]*)\s*\n?(.*?)\n?```", clean_output, re.DOTALL))
             empty_block_found = False
             has_decode_error = False
             for m in all_code_blocks:
-                content = m.group(1).strip()
+                content = m.group(2).strip()
                 if not content.startswith(("[", "{")):
                     continue
                 try:
@@ -384,47 +384,52 @@ class IndependentAuditRunner:
             raise ValueError(f"Could not parse valid JSON from audit response: {output[:200]}")
 
         if isinstance(data, dict):
-            # TTT.1 / UUU.1: エンベロープメタデータ（mode, provider, execution_id, provider_request_id, status 等）の抽出・保持
-            exec_id = data.get("execution_id") or data.get("id")
-            prov_req_id = data.get("provider_request_id") or data.get("id")
-            raw_mode = data.get("mode")
-            status = data.get("status")
-            has_prov_metadata = bool(raw_mode or exec_id or prov_req_id or data.get("provider") or status)
+            # If the dict is a single finding object (has finding_id and not findings), wrap it directly
+            if "finding_id" in data and "findings" not in data:
+                self._last_envelope_metadata = None
+                data = [data]
+            else:
+                # TTT.1 / UUU.1: エンベロープメタデータ（mode, provider, execution_id, provider_request_id, status 等）の抽出・保持
+                exec_id = data.get("execution_id") or data.get("id")
+                prov_req_id = data.get("provider_request_id") or data.get("id")
+                raw_mode = data.get("mode")
+                status = data.get("status")
+                has_prov_metadata = bool(raw_mode or exec_id or prov_req_id or data.get("provider") or status)
 
-            # AUD-002 (Sol Phase 62 / Cycle 11 & 12): Envelope status validation (Fail-Closed: reject non-COMPLETED status)
-            if status and status != "COMPLETED":
-                raise ValueError(
-                    f"AUDIT_{status}: Live audit envelope returned non-completed status '{status}': {data.get('error') or ''}"
-                )
-
-            if has_prov_metadata:
-                mode = raw_mode or ("MOCK" if (exec_id and str(exec_id).startswith("mock_")) else "LIVE")
-                stop_reason = data.get("stop_reason")
-
-                # AUD-001 / AUD-002 / VVV.1 / Sol Phase 61 P1: mode: LIVE 時の stop_reason 厳格検証（Fail-Closed allow-list）
-                if mode == "LIVE" and (not stop_reason or stop_reason != "end_turn"):
+                # AUD-002 (Sol Phase 62 / Cycle 11 & 12): Envelope status validation (Fail-Closed: reject non-COMPLETED status)
+                if status and status != "COMPLETED":
                     raise ValueError(
-                        f"AUDIT_INTERRUPTED: Live audit envelope has invalid stop_reason '{stop_reason}' (expected 'end_turn')"
+                        f"AUDIT_{status}: Live audit envelope returned non-completed status '{status}': {data.get('error') or ''}"
                     )
 
-                self._last_envelope_metadata = {
-                    "mode": mode,
-                    "provider": data.get("provider"),
-                    "execution_id": exec_id,
-                    "provider_request_id": prov_req_id,
-                    "model": data.get("model"),
-                    "resolved_model": data.get("resolved_model") or data.get("model"),
-                    "status": status,
-                    "stop_reason": stop_reason,
-                    "usage": data.get("usage"),
-                }
-            else:
-                self._last_envelope_metadata = None
+                if has_prov_metadata:
+                    mode = raw_mode or ("MOCK" if (exec_id and str(exec_id).startswith("mock_")) else "LIVE")
+                    stop_reason = data.get("stop_reason")
 
-            if "findings" in data and isinstance(data["findings"], list):
-                data = data["findings"]
-            else:
-                data = [data] if "finding_id" in data else []
+                    # AUD-001 / AUD-002 / VVV.1 / Sol Phase 61 P1: mode: LIVE 時の stop_reason 厳格検証（Fail-Closed allow-list）
+                    if mode == "LIVE" and (not stop_reason or stop_reason != "end_turn"):
+                        raise ValueError(
+                            f"AUDIT_INTERRUPTED: Live audit envelope has invalid stop_reason '{stop_reason}' (expected 'end_turn')"
+                        )
+
+                    self._last_envelope_metadata = {
+                        "mode": mode,
+                        "provider": data.get("provider"),
+                        "execution_id": exec_id,
+                        "provider_request_id": prov_req_id,
+                        "model": data.get("model"),
+                        "resolved_model": data.get("resolved_model") or data.get("model"),
+                        "status": status,
+                        "stop_reason": stop_reason,
+                        "usage": data.get("usage"),
+                    }
+                else:
+                    self._last_envelope_metadata = None
+
+                if "findings" in data and isinstance(data["findings"], list):
+                    data = data["findings"]
+                elif "finding_id" in data:
+                    data = [data]
         else:
             self._last_envelope_metadata = None
 

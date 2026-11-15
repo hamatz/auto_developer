@@ -1109,6 +1109,42 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.parse_response(output)
 
+    def test_uppercase_json_fence_after_empty_example_not_discarded(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 16): 大文字 ```JSON フェンス内の指摘が Step 3 でスキップされゼロ指摘に偽装されないこと。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        finding = {
+            "finding_id": "AUD-UP-001",
+            "severity": "P0",
+            "spec_reference": "VVV.1",
+            "location": "a.py:1",
+            "description": "real bug",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        text = (
+            "Example format: ```json\n[]\n```\n\n"
+            "Actual findings:\n```JSON\n" + json.dumps([finding]) + "\n```"
+        )
+        findings = runner.parse_response(text)
+        self.assertEqual(len(findings), 1, f"real findings silently discarded as zero defects: {findings!r}")
+        self.assertEqual(findings[0].finding_id, "AUD-UP-001")
+
+    def test_single_finding_object_with_reported_status_is_accepted(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 16): 単一の finding オブジェクト（status: REPORTED）が envelope status と誤認されて拒絶されず、正常に受理されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        finding = {
+            "finding_id": "AUD-SINGLE-001",
+            "severity": "P1",
+            "spec_reference": "VVV.1",
+            "location": "a.py:1",
+            "description": "single finding object",
+            "reproduction_test_code": "import unittest",
+            "status": "REPORTED",
+        }
+        findings = runner.parse_response(json.dumps(finding))
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].finding_id, "AUD-SINGLE-001")
+
 
 if __name__ == "__main__":
     unittest.main()
