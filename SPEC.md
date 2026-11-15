@@ -655,7 +655,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - `tests/test_independent_audit_runner.py` および `tests/test_level7_real_loop_e2e.py` において、条件分岐後の変数合流を伴う正常テストが安全にパスし、真のバグのみが受理・自律修復されることを実証する。
   4. 最終 Evidence Bundle 生成・受入ハーネス確定と正式独立第三者監査移行準備 (PPP.4):
      - 全テスト通過・改ざん検知・独立 Checker 承認済みの Evidence Bundle を生成し、受入ハーネスの整備を完了して v0.7.0 リリースを確定、次フェーズでの実外部モデル独立監査への移行準備を完了する。
-- [ ] 機能QQQ (Stage 7 実外部モデルによる独立第三者監査の実稼働と Level 7 完全自己改善実証 Stage 7 Live External Multi-LLM Independent Audit and Level 7 Self-Refinement Real Execution):
+- [x] 機能QQQ (Stage 7 実外部モデルによる独立第三者監査の実稼働と Level 7 完全自己改善実証 Stage 7 Live External Multi-LLM Independent Audit and Level 7 Self-Refinement Real Execution):
   1. 実外部異系統モデル独立監査パイプラインの構成とベースライン固定 (QQQ.1):
      - `IndependentAuditRunner` および `AuditConfig` において、実動環境における外部異系統モデル（例: Maker=Gemini Flash vs Auditor=Claude 3.7 / Opus / GPT 4o/o1 / 異系統モデル）の実行インターフェースおよびベースラインコミット（`98c213a`）を固定。
      - 外部監査役が直接リポジトリ内部のプロンプトや思考ログを参照できない独立入力境界（SPEC.md と git diff のみ）を機械的に担保する。
@@ -668,6 +668,19 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   4. 独立監査 Evidence Bundle 生成と v0.7.0 本格リリース確定 (QQQ.4):
      - 実外部監査および Level 7 自己改善の証跡を含む全自動検証ゲート合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成・検証。
      - v0.3.0 からの飛躍的進化（真の自律・多層防壁・自己改善・マルチLLM独立監査）を実証した v0.7.0 の本格リリースを確定する。
+- [ ] 機能RRR (Stage 7 実外部モデル独立監査の本番統合・SPECコミット拘束・フォールバック自律防御とv0.7.0確定 Stage 7 Live Multi-LLM Audit Integration, Commit-Bound SPEC, Resilient Fallback, and v0.7.0 Release Finalization):
+  1. 監査対象 SPEC のコミット拘束と監査入力ハッシュの厳格証明 (RRR.1 / Sol氏 Phase 57 P1指摘):
+     - `audit_repository(repo_dir, target_commit="HEAD", baseline_commit=...)` において、`SPEC.md` の内容を作業ツリーからではなく対象コミット（`git show <target_commit>:SPEC.md`）から厳密に取得する。
+     - 監査入力メタデータ（`target_commit`, `target_tree_sha`, `baseline_commit`, `spec_sha256`, `diff_sha256`）を `AuditStore` および Finding メタデータに完全拘束し、作業ツリーの未コミット変更による監査入力乖離を物理遮断する。
+  2. NightlyOrchestrator への独立監査ステージの本番自動組み込み (RRR.2 / Sol氏 Phase 57 P1指摘):
+     - `NightlyOrchestrator` のジョブ完了時（または独立監査フェーズ実行時）に、自動的に `audit_repository()` および `screen_and_dispatch_findings()` を呼び出す本番監査ステージ（`run_audit_stage`）を実装。
+     - 監査ステージでエラーが発生した場合でも、通常開発成果物をロールバック・破壊せず `AUDIT_PENDING` / `AUDIT_FAILED` として保全・記録し、次期実行時に再試行できる安全停止（Fail-Safe）設計。真正 Finding のみが次期 PLAN.md に自律登録される。
+  3. モデル上限・障害時の弾力的フォールバックと実外部モデル監査・Level 7閉ループ実証 (RRR.3 / Sol氏 Phase 57 P0指摘 & ユーザー要件):
+     - 外部モデル（Claude Opus等）の上限・レートリミット・障害時にパイプラインが停止しないよう、モデルフォールバックチェーン（例: 設定された代替異系統モデルへのフォールバック、または独立性ポリシーに抵触しない安全退避）をサポート。
+     - 外部モデルによる実監査の入出力ハッシュ、モデル名、Finding、Red検証結果、Maker自律修正、After Green コミット拘束証明を Evidence に拘束し、実外部モデル独立監査の完走を証明する。
+  4. 独立監査 Evidence Bundle 生成と v0.7.0 正式リリース確定 (RRR.4):
+     - 全自動検証ゲート合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成・検証。
+     - v0.3.0 からの飛躍的進化（多層防壁・自己改善・マルチLLM独立監査の実稼働）を証明した v0.7.0 正式リリースを確定する。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->

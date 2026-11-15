@@ -2121,6 +2121,129 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertNotEqual(attempt_2_section.strip(), "(none)")
 
 
+class TestNightlyOrchestratorAuditStage(unittest.TestCase):
+    """機能RRR.2: NightlyOrchestrator への独立監査ステージの本番自動組み込み。"""
+
+    def setUp(self) -> None:
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.repo_dir = Path(self.tmp_dir.name)
+
+        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Tester"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=self.repo_dir, check=True)
+
+        (self.repo_dir / "SPEC.md").write_text("# Spec RRR.2\nMust return 42.\n", encoding="utf-8")
+        (self.repo_dir / "PLAN.md").write_text("# Plan\n- [ ] 1. Base task\n", encoding="utf-8")
+        src_dir = self.repo_dir / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        (src_dir / "app.py").write_text("def run(): return 40\n", encoding="utf-8")
+
+        verify_sh = self.repo_dir / "scripts" / "verify_local.sh"
+        verify_sh.parent.mkdir(parents=True, exist_ok=True)
+        verify_sh.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        verify_sh.chmod(0o755)
+
+        (self.repo_dir / ".gitignore").write_text(".dev/\n", encoding="utf-8")
+
+        subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "init commit"], cwd=self.repo_dir, check=True)
+
+    def tearDown(self) -> None:
+        self.tmp_dir.cleanup()
+
+    def test_run_audit_stage_success_registers_genuine_finding_and_updates_report(self) -> None:
+        """RRR.2: ジョブ完了時に独立監査ステージが走り、真正指摘が次期PLANに自動登録されレポートに反映されること。"""
+        from auto_developer.audit import IndependentAuditRunner
+
+        cmd_template = (
+            'echo \'[{"finding_id": "AUD-RRR2-001", "severity": "P1", '
+            '"spec_reference": "SPEC.md RRR.2", "location": "src/app.py:1", '
+            '"description": "Return mismatch in app.py", '
+            '"reproduction_test_code": "import unittest\\nfrom app import run\\nclass T(unittest.TestCase):\\n    def test_r(self): self.assertEqual(run(), 42)", '
+            '"status": "REPORTED"}]\''
+        )
+        runner = IndependentAuditRunner(
+            auditor_cmd_template=cmd_template,
+            model_name="claude-opus-5.5",
+        )
+
+        class SimpleSuccessMaker(CommandRunnerAdapter):
+            def run_maker(self, task, context):
+                (self.repo_dir / "src" / "app.py").write_text("def run(): return 41\n", encoding="utf-8")
+                return 0, "fixed"
+
+            def run_checker(self, task, diff, spec_content):
+                return True, "APPROVE"
+
+        maker = SimpleSuccessMaker()
+        maker.repo_dir = self.repo_dir  # type: ignore[attr-defined]
+
+        orchestrator = NightlyOrchestrator(
+            repo_dir=self.repo_dir,
+            plan_path=self.repo_dir / "PLAN.md",
+            spec_path=self.repo_dir / "SPEC.md",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+            report_path=self.repo_dir / "NIGHTLY_REPORT.md",
+            runner_adapter=maker,
+            auditor_runner=runner,
+            enable_audit_stage=True,
+        )
+
+        exit_code = orchestrator.run()
+        self.assertEqual(exit_code, 0)
+
+        # 1. 監査ステージにより真正指摘が次期 PLAN.md に自律登録されていること
+        plan_text = (self.repo_dir / "PLAN.md").read_text(encoding="utf-8")
+        self.assertIn("AUD-AUD-RRR2-001", plan_text)
+
+        # 2. レポートに独立監査ステージの実行結果が反映されていること
+        report_text = (self.repo_dir / "NIGHTLY_REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("独立監査", report_text)
+        self.assertIn("AUD-RRR2-001", report_text)
+
+    def test_run_audit_stage_failure_preserves_work_and_records_pending(self) -> None:
+        """RRR.2: 監査ステージが失敗しても通常開発コミットは破棄されず、AUDIT_FAILEDとして安全に記録されること (Fail-Safe)。"""
+        from auto_developer.audit import IndependentAuditRunner
+
+        # 意図的に失敗する外部監査コマンド
+        failing_runner = IndependentAuditRunner(
+            auditor_cmd_template="exit 1",
+            model_name="claude-opus-5.5",
+        )
+
+        class SimpleSuccessMaker(CommandRunnerAdapter):
+            def run_maker(self, task, context):
+                (self.repo_dir / "src" / "app.py").write_text("def run(): return 42\n", encoding="utf-8")
+                return 0, "fixed"
+
+            def run_checker(self, task, diff, spec_content):
+                return True, "APPROVE"
+
+        maker = SimpleSuccessMaker()
+        maker.repo_dir = self.repo_dir  # type: ignore[attr-defined]
+
+        orchestrator = NightlyOrchestrator(
+            repo_dir=self.repo_dir,
+            plan_path=self.repo_dir / "PLAN.md",
+            spec_path=self.repo_dir / "SPEC.md",
+            verify_script=self.repo_dir / "scripts" / "verify_local.sh",
+            report_path=self.repo_dir / "NIGHTLY_REPORT.md",
+            runner_adapter=maker,
+            auditor_runner=failing_runner,
+            enable_audit_stage=True,
+        )
+
+        # オーケストレーターは開発成功（Exit 0）で終了し、通常成果物を維持する
+        exit_code = orchestrator.run()
+        self.assertEqual(exit_code, 0)
+
+        # 成果物が破棄されていないこと
+        self.assertEqual((self.repo_dir / "src" / "app.py").read_text(encoding="utf-8"), "def run(): return 42\n")
+
+        # レポートに AUDIT_FAILED または AUDIT_PENDING が記録されていること
+        report_text = (self.repo_dir / "NIGHTLY_REPORT.md").read_text(encoding="utf-8")
+        self.assertTrue("AUDIT_FAILED" in report_text or "AUDIT_PENDING" in report_text or "失敗" in report_text)
+
 
 if __name__ == "__main__":
     unittest.main()
