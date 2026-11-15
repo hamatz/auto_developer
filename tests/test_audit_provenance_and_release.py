@@ -1579,6 +1579,31 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         )
         self.assertEqual(findings, [])
 
+    def test_non_dict_list_in_code_block_fails_closed(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 27): 例示空ブロックの後に文字列リストなどの非dict配列ブロックが続く場合、ゼロ欠陥偽装されず Fail-Closed（ValueError）で拒絶されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        text = (
+            "Example format: ```json\n[]\n```\n\n"
+            "Findings:\n```json\n[\"P0: SPEC.md VVV.3 violated in bundler.py\", \"P1: stop_reason not recorded\"]\n```"
+        )
+        with self.assertRaises(ValueError):
+            runner.parse_response(text)
+
+    def test_auditor_client_non_dict_list_in_code_block_fails_closed(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 27): auditor_client において例示空ブロックの後に文字列リストなどの非dict配列ブロックが続く場合、Fail-Closed（ValueError）で拒絶されること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+        text = (
+            "Example format: ```json\n[]\n```\n\n"
+            "Findings:\n```json\n[\"P0: SPEC.md VVV.3 violated in bundler.py\", \"P1: stop_reason not recorded\"]\n```"
+        )
+        with self.assertRaises(ValueError):
+            auditor_client._extract_findings_from_text(text)
+
 
 if __name__ == "__main__":
     unittest.main()

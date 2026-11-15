@@ -77,11 +77,14 @@ def _extract_findings_from_text(text: str) -> list[dict]:
         try:
             parsed = json.loads(content)
             if isinstance(parsed, list):
-                findings = [item for item in parsed if isinstance(item, dict)]
-                if findings:
-                    collected_findings.extend(findings)
-                elif len(parsed) == 0:
+                findings = [item for item in parsed if isinstance(item, dict) and "finding_id" in item]
+                if len(parsed) == 0:
                     empty_block_found = True
+                elif len(findings) == len(parsed):
+                    collected_findings.extend(findings)
+                else:
+                    has_decode_error = True
+                    decode_error_msg = f"JSON array contains non-finding items: {parsed}"
             elif isinstance(parsed, dict):
                 if parsed.get("error"):
                     raise ValueError(f"AUDIT_FAILED: Auditor response contains error: {parsed.get('error')}")
