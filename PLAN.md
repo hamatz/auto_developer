@@ -37,7 +37,7 @@
 ## ステップ
 - [x] 1. 実Anthropic APIクライアントの実装・Fail-Closed安全停止・本物provider_request_id取得（Red-First）（UUU.1）
 - [x] 2. audit_stage.json の mode: LIVE / MOCK 分離・実プロバイダID拘束・EvidenceBundler / verify_bundle 厳格化（Red-First）（UUU.2）
-- [ ] 3. 実Claudeによるコード監査実行・意図的Red指摘の構造化取り込み実証（Red-First）（UUU.3）
+- [x] 3. 実Claudeによるコード監査実行・意図的Red指摘の構造化取り込み実証（Red-First）（UUU.3）
 - [ ] 4. 実Claude監査証跡を内包した最終 Evidence Bundle ZIP の生成・独立検証・v0.7.0 正式リリース確定（UUU.4）
 
 ## 止まっていること・判断待ち
