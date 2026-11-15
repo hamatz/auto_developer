@@ -423,7 +423,7 @@ class IndependentAuditRunner:
                             except json.JSONDecodeError:
                                 pass
 
-                if data is None and re.search(r"\[\s*\{", text_outside):
+                if data is None and re.search(r"(?:\[\s*\{|\{\s*[\"'](?:finding_id|findings)[\"'])", text_outside):
                     has_decode_error = True
 
             if has_decode_error and data is None:
@@ -450,7 +450,8 @@ class IndependentAuditRunner:
                 prov_req_id = data.get("provider_request_id") or data.get("id")
                 raw_mode = data.get("mode")
                 status = data.get("status")
-                has_prov_metadata = bool(raw_mode or exec_id or prov_req_id or data.get("provider") or status)
+                stop_reason = data.get("stop_reason")
+                has_prov_metadata = bool(raw_mode or exec_id or prov_req_id or data.get("provider") or status or stop_reason)
 
                 # AUD-002 (Sol Phase 62 / Cycle 11 & 12): Envelope status validation (Fail-Closed: reject non-COMPLETED status)
                 if status and status != "COMPLETED":
@@ -460,10 +461,9 @@ class IndependentAuditRunner:
 
                 if has_prov_metadata:
                     mode = raw_mode or ("MOCK" if (exec_id and str(exec_id).startswith("mock_")) else "LIVE")
-                    stop_reason = data.get("stop_reason")
 
                     # AUD-001 / AUD-002 / VVV.1 / Sol Phase 61 P1: mode: LIVE 時の stop_reason 厳格検証（Fail-Closed allow-list）
-                    if mode == "LIVE" and (not stop_reason or stop_reason != "end_turn"):
+                    if (mode == "LIVE" or stop_reason is not None) and (not stop_reason or stop_reason != "end_turn"):
                         raise ValueError(
                             f"AUDIT_INTERRUPTED: Live audit envelope has invalid stop_reason '{stop_reason}' (expected 'end_turn')"
                         )

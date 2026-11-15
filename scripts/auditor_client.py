@@ -122,9 +122,9 @@ def _extract_findings_from_text(text: str) -> list[dict]:
         except json.JSONDecodeError:
             pass
 
-    if re.search(r"\[\s*\{", text_outside):
+    if re.search(r"(?:\[\s*\{|\{\s*[\"'](?:finding_id|findings)[\"'])", text_outside):
         has_decode_error = True
-        decode_error_msg = "Invalid JSON array of findings outside code block"
+        decode_error_msg = "Invalid JSON structure outside code block"
 
     if has_decode_error:
         raise ValueError(f"Malformed JSON in audit response code block: {decode_error_msg}")

@@ -1334,6 +1334,40 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
         findings = runner.parse_response(text)
         self.assertEqual([f.finding_id for f in findings], ["AUD-M-003", "AUD-M-004"], "second finding silently discarded")
 
+    def test_malformed_single_object_after_empty_example_fails_closed(self) -> None:
+        """AUD-001 (Sol Phase 62 / Cycle 20): 例示空コードブロックの後に不正な単一指摘JSONが続く場合、ゼロ件偽装せずFail-Closed例外を送出すること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        text = (
+            "Example format: ```json\n[]\n```\n"
+            "Finding:\n"
+            '{"finding_id": "AUD-X", "severity": "P0", "description": "real bug",}'
+        )
+        with self.assertRaises(ValueError):
+            runner.parse_response(text)
+
+    def test_auditor_client_malformed_single_object_after_empty_example_fails_closed(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 20): auditor_client において不正な単一指摘JSONが続く場合、Fail-Closed例外を送出すること。"""
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+        text = (
+            "Example format: ```json\n[]\n```\n"
+            "Finding:\n"
+            '{"finding_id": "AUD-X", "severity": "P0", "description": "real bug",}'
+        )
+        with self.assertRaises(ValueError):
+            auditor_client._extract_findings_from_text(text)
+
+    def test_truncated_minimal_envelope_without_provider_keys_rejected(self) -> None:
+        """AUD-003 (Sol Phase 62 / Cycle 20): プロバイダメタデータキーを持たない最小限のエンベロープでも stop_reason: max_tokens は確実に棄却されること。"""
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        envelope = {"stop_reason": "max_tokens", "findings": []}
+        with self.assertRaises(ValueError):
+            runner.parse_response(json.dumps(envelope))
+
 
 if __name__ == "__main__":
     unittest.main()
