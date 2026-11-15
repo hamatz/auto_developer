@@ -47,10 +47,10 @@ def _extract_findings_from_text(text: str) -> list[dict]:
     """
     clean_text = text.strip()
     # 1. Try markdown code block ```json ... ```
-    m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", clean_text, re.DOTALL)
+    m = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", clean_text, re.DOTALL)
     if m:
         try:
-            parsed = json.loads(m.group(1))
+            parsed = json.loads(m.group(1).strip())
             if isinstance(parsed, list):
                 findings = [item for item in parsed if isinstance(item, dict)]
                 if findings:
@@ -58,11 +58,12 @@ def _extract_findings_from_text(text: str) -> list[dict]:
         except json.JSONDecodeError:
             pass
 
-    # 2. Try raw JSON list [ ... ]
-    m_raw = re.search(r"(\[\s*\{.*?\}\s*\])", clean_text, re.DOTALL)
-    if m_raw:
+    # 2. Try raw JSON list from first '[' to last ']'
+    start = clean_text.find("[")
+    end = clean_text.rfind("]")
+    if start != -1 and end != -1 and end > start:
         try:
-            parsed = json.loads(m_raw.group(1))
+            parsed = json.loads(clean_text[start : end + 1])
             if isinstance(parsed, list):
                 findings = [item for item in parsed if isinstance(item, dict)]
                 if findings:
@@ -71,8 +72,7 @@ def _extract_findings_from_text(text: str) -> list[dict]:
             pass
 
     # 3. Explicit empty array: must strictly match [] alone or inside single markdown code block
-    stripped = clean_text.strip()
-    if re.fullmatch(r"(?:```(?:json)?\s*)?\[\s*\](?:\s*```)?", stripped):
+    if re.fullmatch(r"(?:```(?:json)?\s*)?\[\s*\](?:\s*```)?", clean_text):
         return []
 
     # Fail-Closed: unparseable text must NOT be treated as zero defects
@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prompt", help="Prompt text or path to prompt file")
     parser.add_argument("--repo-dir", default=".", help="Repository root directory")
     parser.add_argument("--api-key", help="API key for LLM provider")
-    parser.add_argument("--max-tokens", type=int, default=8192, help="Max tokens for LLM completion")
+    parser.add_argument("--max-tokens", type=int, default=16384, help="Max tokens for LLM completion")
     parser.add_argument("--mock", action="store_true", help="Explicit mock mode for offline test fixtures only")
     args = parser.parse_args(argv)
 
@@ -253,15 +253,22 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(err_envelope, ensure_ascii=False, indent=2), file=sys.stderr)
             return 1
 
-        # VVV.1 / Sol Phase 61 P1: 途中打ち切り（max_tokens到達）は監査完了とみなさず AUDIT_PENDING で安全停止
-        if stop_reason == "max_tokens":
+        # VVV.1 / Sol Phase 61 P1 / AUD-002: Fail-Closed: stop_reason must strictly be "end_turn" (allow-list)
+        # Any other value (max_tokens, refusal, stop_sequence, pause_turn, etc.) is incomplete / interrupted
+        if stop_reason != "end_turn":
+            content_preview = ""
+            for b in resp_json.get("content", []):
+                if isinstance(b, dict) and b.get("type") == "text":
+                    content_preview += b.get("text", "")
             err_envelope = {
                 "mode": "LIVE",
                 "provider": "anthropic",
                 "model": args.model,
                 "status": "AUDIT_PENDING",
-                "error": f"OUTPUT_TRUNCATED_MAX_TOKENS: Output was truncated before completion (stop_reason={stop_reason})",
+                "error": f"AUDIT_INTERRUPTED: Audit did not complete with end_turn (stop_reason={stop_reason})",
                 "stop_reason": stop_reason,
+                "usage": resp_json.get("usage"),
+                "content_preview": content_preview[-500:],
                 "findings": [],
             }
             print(json.dumps(err_envelope, ensure_ascii=False, indent=2), file=sys.stderr)

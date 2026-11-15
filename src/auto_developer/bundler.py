@@ -724,10 +724,10 @@ class EvidenceBundler:
                             # 監査対象コミット以降にプロダクトコード（src/**, scripts/** 等）が変更されていないかを検証
                             target_commit = audit_meta.get("target_commit") or audit_stage_data.get("target_commit")
                             target_c = str(target_commit).strip() if target_commit else ""
-                            if not target_c or target_c == "0" * 40:
+                            if not target_c or not re.fullmatch(r"[0-9a-fA-F]{40}", target_c) or target_c == "0" * 40:
                                 result.audit_stage_verified = False
                                 result.warnings.append(
-                                    "AUDIT_TARGET_COMMIT_MISSING: Live audit record lacks a valid target_commit SHA binding."
+                                    f"AUDIT_TARGET_COMMIT_INVALID: Live audit record lacks a valid 40-hex target_commit SHA binding (got '{target_c}')."
                                 )
                             elif not actual_head_commit or not clone_dir.exists():
                                 result.audit_stage_verified = False
@@ -738,7 +738,7 @@ class EvidenceBundler:
                                 result.audit_stage_verified = True
                             else:
                                 diff_res = subprocess.run(
-                                    ["git", "diff", "--name-only", target_c, actual_head_commit],
+                                    ["git", "diff", "--no-renames", "--name-only", target_c, actual_head_commit],
                                     cwd=clone_dir,
                                     capture_output=True,
                                     text=True,

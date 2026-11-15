@@ -682,7 +682,7 @@ class TestEvidenceBundler(unittest.TestCase):
         bundler.create_bundle(dest_path=bundle_zip)
         res = bundler.verify_bundle(bundle_zip)
         self.assertFalse(res.audit_stage_verified)
-        self.assertTrue(any("AUDIT_TARGET_COMMIT_MISSING" in w for w in res.warnings))
+        self.assertTrue(any("AUDIT_TARGET_COMMIT_INVALID" in w for w in res.warnings))
 
     def test_verify_bundle_rejects_when_post_audit_git_diff_fails(self):
         """AUD-002: target_commit が存在しないコミットハッシュの場合、git diff 失敗を検知して audit_stage_verified=False とすること。"""
@@ -712,6 +712,81 @@ class TestEvidenceBundler(unittest.TestCase):
         res = bundler.verify_bundle(bundle_zip)
         self.assertFalse(res.audit_stage_verified)
         self.assertTrue(any("AUDIT_DIFF_FAILED" in w for w in res.warnings))
+
+    def test_verify_bundle_rejects_symbolic_ref_target_commit(self):
+        """AUD-001: target_commit が 'HEAD' や短縮SHA等の非40文字16進数の場合、AUDIT_TARGET_COMMIT_INVALID で拒絶すること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+
+        evidence_dir = self.repo / ".git" / "nightly_evidence" / "records"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        (evidence_dir / "audit_stage.json").write_text(
+            json.dumps({
+                "status": "SUCCESS",
+                "mode": "LIVE",
+                "provider": "anthropic",
+                "provider_request_id": "msg_live_valid_12345",
+                "audit_metadata": {
+                    "mode": "LIVE",
+                    "provider": "anthropic",
+                    "provider_request_id": "msg_live_valid_12345",
+                    "auditor_model": "claude-opus-5.5",
+                    "target_commit": "HEAD",  # Symbolic ref must be rejected
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        bundle_zip = self.repo / "symbolic_target_commit_bundle.zip"
+        bundler.create_bundle(dest_path=bundle_zip)
+        res = bundler.verify_bundle(bundle_zip)
+        self.assertFalse(res.audit_stage_verified)
+        self.assertTrue(any("AUDIT_TARGET_COMMIT_INVALID" in w for w in res.warnings))
+
+    def test_verify_bundle_rejects_renamed_product_file_post_audit(self):
+        """AUD-003: 監査後に scripts/ 内のファイルがリネーム/移動された場合、--no-renames で検知して AUDIT_OUTDATED とすること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+
+        # 1. scripts/tool.sh を追加して監査対象コミットを作成
+        tool_file = self.repo / "scripts" / "tool.sh"
+        tool_file.parent.mkdir(parents=True, exist_ok=True)
+        tool_file.write_text("#!/bin/bash\necho ok\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "Add tool.sh"], cwd=self.repo, check=True)
+        rev_res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True)
+        audit_target_commit = rev_res.stdout.strip()
+
+        # 2. scripts/tool.sh を bin/tool.sh にリネーム（Git rename detection により通常は bin/tool.sh のみが出現する）
+        bin_dir = self.repo / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "mv", "scripts/tool.sh", "bin/tool.sh"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "Move tool.sh to bin/"], cwd=self.repo, check=True)
+
+        # 3. audit_stage.json を配置
+        evidence_dir = self.repo / ".git" / "nightly_evidence" / "records"
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        (evidence_dir / "audit_stage.json").write_text(
+            json.dumps({
+                "status": "SUCCESS",
+                "mode": "LIVE",
+                "provider": "anthropic",
+                "provider_request_id": "msg_live_valid_12345",
+                "audit_metadata": {
+                    "mode": "LIVE",
+                    "provider": "anthropic",
+                    "provider_request_id": "msg_live_valid_12345",
+                    "auditor_model": "claude-opus-5.5",
+                    "target_commit": audit_target_commit,
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        bundle_zip = self.repo / "renamed_tool_bundle.zip"
+        bundler.create_bundle(dest_path=bundle_zip)
+        res = bundler.verify_bundle(bundle_zip)
+        self.assertFalse(res.audit_stage_verified)
+        self.assertTrue(any("AUDIT_OUTDATED" in w for w in res.warnings))
+
 
 
 

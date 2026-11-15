@@ -628,6 +628,47 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             self.assertEqual(err_output.get("status"), "AUDIT_PENDING")
             self.assertIn("MISSING_STOP_REASON", err_output.get("error", ""))
 
+    def test_auditor_client_fails_closed_when_stop_reason_is_not_end_turn(self) -> None:
+        """AUD-002: stop_reason が end_turn 以外の値（refusal, stop_sequence, pause_turn等）の場合、AUDIT_PENDING で安全停止すること。"""
+        import io
+        from unittest import mock
+
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        try:
+            import auditor_client
+        finally:
+            if str(Path(__file__).parent.parent / "scripts") in sys.path:
+                sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
+
+        for bad_reason in ["refusal", "stop_sequence", "pause_turn", "tool_use"]:
+            mock_resp_body = json.dumps({
+                "id": "msg_success_12345",
+                "model": "claude-opus-5-5",
+                "stop_reason": bad_reason,
+                "content": [{"type": "text", "text": "[]"}],
+                "usage": {"input_tokens": 1000, "output_tokens": 10},
+            }).encode("utf-8")
+
+            mock_resp = mock.MagicMock()
+            mock_resp.read.return_value = mock_resp_body
+            mock_resp.__enter__.return_value = mock_resp
+
+            env_file = self.repo_dir / ".env"
+            env_file.write_text("ANTHROPIC_API_KEY=test_key\n", encoding="utf-8")
+
+            stderr_capture = io.StringIO()
+            with mock.patch("urllib.request.urlopen", return_value=mock_resp), mock.patch("sys.stderr", stderr_capture):
+                exit_code = auditor_client.main([
+                    "--model", "claude-opus-5.5",
+                    "--prompt", "test prompt",
+                    "--repo-dir", str(self.repo_dir),
+                ])
+                self.assertEqual(exit_code, 1, f"bad stop_reason '{bad_reason}' must exit with code 1")
+                err_output = json.loads(stderr_capture.getvalue())
+                self.assertEqual(err_output.get("status"), "AUDIT_PENDING")
+                self.assertIn("AUDIT_INTERRUPTED", err_output.get("error", ""))
+
+
 
 
 if __name__ == "__main__":
