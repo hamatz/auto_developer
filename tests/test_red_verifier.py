@@ -1605,6 +1605,45 @@ class T(unittest.TestCase):
         is_trivial, _msg = check_trivial_red_ast(code)
         self.assertTrue(is_trivial, "method call on a dict-literal local inside try was accepted as a product-call exception guard")
 
+    def test_exception_guard_via_self_attribute_is_not_trivial(self) -> None:
+        """AUD-601: setUp 等で self に保持したプロダクトオブジェクト経由の例外ガード呼出が Trivial Red と誤認されないこと。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def setUp(self):
+        self.runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+
+    def test_case(self):
+        try:
+            self.runner.parse_response("broken")
+        except ValueError:
+            return
+        self.fail("expected ValueError was not raised")
+'''
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial, f"genuine exception-guarded product call via self attribute rejected as trivial: {msg}")
+
+    def test_assertion_on_self_attribute_product_result_is_not_trivial(self) -> None:
+        """AUD-601: setUp 等で self に保持したプロダクトオブジェクトの実行結果に対するアサーションが因果依存を維持すること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def setUp(self):
+        self.runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+
+    def test_case(self):
+        result = self.runner.parse_response("[]")
+        self.assertEqual(len(result), 1)
+'''
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial, f"assertion on product result via self attribute rejected as trivial: {msg}")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest

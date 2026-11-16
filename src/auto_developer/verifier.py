@@ -190,8 +190,13 @@ def _resolve_expr_origin(
             return expr.id
         return None
     if isinstance(expr, ast.Attribute):
+        # self.<attr> の属性アクセス (例: self.runner: AUD-601)
+        if isinstance(expr.value, ast.Name) and expr.value.id == "self":
+            eff = _get_effective_origin(f"self.{expr.attr}", var_origins)
+            if eff is not None:
+                return eff
         val_origin = _resolve_expr_origin(expr.value, imported_symbols, imported_modules, var_origins)
-        if val_origin:
+        if val_origin and val_origin != "self":
             return val_origin
         root_name = _get_root_name(expr)
         if root_name:
@@ -298,6 +303,10 @@ def _is_product_or_causal_call(
         from_mod = imported_symbols.get(root_name) if root_name else None
         root_origin = _get_effective_origin(root_name, var_origins) if root_name else None
         val_origin = _resolve_expr_origin(call.func.value, imported_symbols, imported_modules, var_origins)
+
+        # レシーバオブジェクト (val_origin) がプロダクト起源の場合、root_name が "self" (例: self.runner) であってもプロダクト呼出として承認 (AUD-601)
+        if val_origin is not None and val_origin not in _NON_PRODUCT_ORIGINS:
+            return True
 
         if any(
             o in _NON_PRODUCT_ORIGINS
@@ -612,6 +621,17 @@ def _process_stmts_in_order(
             target_names = [n.id for t in stmt.targets for n in ast.walk(t) if isinstance(n, ast.Name)]
             origin = _resolve_expr_origin(rhs, imported_symbols, imported_modules, var_origins)
             if origin:
+                for t in stmt.targets:
+                    if (
+                        isinstance(t, ast.Attribute)
+                        and isinstance(t.value, ast.Name)
+                        and t.value.id == "self"
+                    ):
+                        existing_attr = var_origins.setdefault(f"self.{t.attr}", set())
+                        if isinstance(existing_attr, set):
+                            existing_attr.add(origin)
+                        else:
+                            var_origins[f"self.{t.attr}"] = {existing_attr, origin}
                 for name in target_names:
                     existing = var_origins.setdefault(name, set())
                     if isinstance(existing, set):
@@ -645,6 +665,16 @@ def _process_stmts_in_order(
             target_names = [n.id for n in ast.walk(stmt.target) if isinstance(n, ast.Name)]
             origin = _resolve_expr_origin(rhs, imported_symbols, imported_modules, var_origins)
             if origin:
+                if (
+                    isinstance(stmt.target, ast.Attribute)
+                    and isinstance(stmt.target.value, ast.Name)
+                    and stmt.target.value.id == "self"
+                ):
+                    existing_attr = var_origins.setdefault(f"self.{stmt.target.attr}", set())
+                    if isinstance(existing_attr, set):
+                        existing_attr.add(origin)
+                    else:
+                        var_origins[f"self.{stmt.target.attr}"] = {existing_attr, origin}
                 for name in target_names:
                     existing = var_origins.setdefault(name, set())
                     if isinstance(existing, set):
@@ -742,6 +772,33 @@ def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
                     if isinstance(n, ast.Name):
                         module_var_origins.setdefault(n.id, set()).add("test_local_helper")
 
+    class_self_origins: dict[str, set[str]] = {}
+    for stmt in ast.walk(tree):
+        if isinstance(stmt, ast.ClassDef):
+            for item in stmt.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for s in ast.walk(item):
+                        if isinstance(s, ast.Assign):
+                            orig = _resolve_expr_origin(s.value, imported_symbols, imported_modules, module_var_origins)
+                            if orig:
+                                for t in s.targets:
+                                    if (
+                                        isinstance(t, ast.Attribute)
+                                        and isinstance(t.value, ast.Name)
+                                        and t.value.id == "self"
+                                    ):
+                                        class_self_origins.setdefault(f"self.{t.attr}", set()).add(orig)
+                        elif (
+                            isinstance(s, ast.AnnAssign)
+                            and s.value is not None
+                            and isinstance(s.target, ast.Attribute)
+                            and isinstance(s.target.value, ast.Name)
+                            and s.target.value.id == "self"
+                        ):
+                            orig = _resolve_expr_origin(s.value, imported_symbols, imported_modules, module_var_origins)
+                            if orig:
+                                class_self_origins.setdefault(f"self.{s.target.attr}", set()).add(orig)
+
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -749,6 +806,7 @@ def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
             continue
 
         var_origins: dict[str, set[str]] = {k: set(v) for k, v in module_var_origins.items()}
+        var_origins.update({k: set(v) for k, v in class_self_origins.items()})
         for sub_node in ast.walk(node):
             if isinstance(sub_node, (ast.FunctionDef, ast.AsyncFunctionDef)) and sub_node is not node:
                 var_origins.setdefault(sub_node.name, set()).add("test_local_helper")
@@ -763,6 +821,15 @@ def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
                     origin = _resolve_expr_origin(sub_stmt.value, imported_symbols, imported_modules, var_origins)
                     if origin:
                         for t in sub_stmt.targets:
+                            if (
+                                isinstance(t, ast.Attribute)
+                                and isinstance(t.value, ast.Name)
+                                and t.value.id == "self"
+                            ):
+                                existing_attr = var_origins.setdefault(f"self.{t.attr}", set())
+                                if origin not in existing_attr:
+                                    existing_attr.add(origin)
+                                    changed = True
                             for n in ast.walk(t):
                                 if isinstance(n, ast.Name):
                                     existing = var_origins.setdefault(n.id, set())
@@ -780,6 +847,15 @@ def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
                 elif isinstance(sub_stmt, ast.AnnAssign) and sub_stmt.value is not None:
                     origin = _resolve_expr_origin(sub_stmt.value, imported_symbols, imported_modules, var_origins)
                     if origin:
+                        if (
+                            isinstance(sub_stmt.target, ast.Attribute)
+                            and isinstance(sub_stmt.target.value, ast.Name)
+                            and sub_stmt.target.value.id == "self"
+                        ):
+                            existing_attr = var_origins.setdefault(f"self.{sub_stmt.target.attr}", set())
+                            if origin not in existing_attr:
+                                existing_attr.add(origin)
+                                changed = True
                         for n in ast.walk(sub_stmt.target):
                             if isinstance(n, ast.Name):
                                 existing = var_origins.setdefault(n.id, set())
