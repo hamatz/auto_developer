@@ -1565,6 +1565,46 @@ class T(unittest.TestCase):
         is_trivial, _msg = check_trivial_red_ast(code)
         self.assertTrue(is_trivial, "method call on a builtin-call result inside try was accepted as a product-call exception guard")
 
+    def test_method_on_literal_bound_local_in_try_is_trivial(self) -> None:
+        """AUD-501 (Sol Phase 62 / Cycle 41): s = '1' 等のリテラル退避変数に対するメソッド呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        s = "1"
+        try:
+            s.upper()
+        except ValueError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "method call on a literal-bound local inside try was accepted as a product-call exception guard")
+
+    def test_method_on_dict_literal_local_in_try_is_trivial(self) -> None:
+        """AUD-501 (Sol Phase 62 / Cycle 41): d = {'a': 1} 等の辞書リテラル退避変数に対するメソッド呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        d = {"a": 1}
+        try:
+            d.get("a")
+        except KeyError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "method call on a dict-literal local inside try was accepted as a product-call exception guard")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest

@@ -145,18 +145,41 @@ def _get_root_name(node: ast.AST) -> str | None:
     return None
 
 
+def _get_effective_origin(name: str, var_origins: dict[str, Any]) -> str | None:
+    """var_origins (dict[str, str] または dict[str, set[str]]) から有効な起源を解決する (AUD-501)。
+    同一変数に複数起源が存在する場合、プロダクト起源を最優先し、発振を防ぐ。
+    """
+    val = var_origins.get(name)
+    if val is None:
+        return None
+    if isinstance(val, str):
+        return val
+    if isinstance(val, (set, list, tuple)):
+        for o in val:
+            if isinstance(o, str) and o not in _NON_PRODUCT_ORIGINS:
+                return str(o)
+        if val:
+            first = next(iter(val))
+            if isinstance(first, str):
+                return str(first)
+    return None
+
+
 def _resolve_expr_origin(
     expr: ast.AST,
     imported_symbols: dict[str, str],
     imported_modules: dict[str, str],
-    var_origins: dict[str, str],
+    var_origins: dict[str, Any],
 ) -> str | None:
-    """式 (Name / Attribute / Call) の解決元パッケージ・モジュール名または 'builtins' / 'self' / 'test_local_helper' を特定する (AUD-202 / AUD-301)。"""
+    """式 (Name / Attribute / Call / Literal) の解決元パッケージ・モジュール名または 'builtins' / 'self' / 'test_local_helper' を特定する (AUD-202 / AUD-301 / AUD-501)。"""
+    if isinstance(expr, (ast.Constant, ast.List, ast.Dict, ast.Set, ast.Tuple)):
+        return "builtins"
     if isinstance(expr, ast.Name):
         if expr.id == "self":
             return "self"
-        if expr.id in var_origins:
-            return var_origins[expr.id]
+        eff = _get_effective_origin(expr.id, var_origins)
+        if eff is not None:
+            return eff
         if expr.id in imported_symbols:
             return imported_symbols[expr.id]
         if expr.id in imported_modules:
@@ -174,8 +197,9 @@ def _resolve_expr_origin(
         if root_name:
             if root_name == "self":
                 return "self"
-            if root_name in var_origins:
-                return var_origins[root_name]
+            eff = _get_effective_origin(root_name, var_origins)
+            if eff is not None:
+                return eff
             if root_name in imported_modules:
                 return imported_modules[root_name]
             if root_name in imported_symbols:
@@ -208,7 +232,7 @@ def _has_causal_dependency(
     dependent_vars: set[str],
     imported_symbols: dict[str, str] | None = None,
     imported_modules: dict[str, str] | None = None,
-    var_origins: dict[str, str] | None = None,
+    var_origins: dict[str, Any] | None = None,
 ) -> bool:
     """ノードがプロダクト関数呼出または因果依存変数を含んでいるかを判定する (AUD-401)。"""
     for sub in ast.walk(node):
@@ -250,7 +274,7 @@ def _is_product_or_causal_call(
 
     imported_symbols: dict[str, str] = getattr(func_node, "_imported_symbols", {}) if func_node else {}
     imported_modules: dict[str, str] = getattr(func_node, "_imported_modules", {}) if func_node else {}
-    var_origins: dict[str, str] = getattr(func_node, "_var_origins", {}) if func_node else {}
+    var_origins: dict[str, Any] = getattr(func_node, "_var_origins", {}) if func_node else {}
 
     if isinstance(call.func, ast.Attribute):
         # builtins モジュール経由の呼出 (builtins.int(...) 等)
@@ -272,7 +296,7 @@ def _is_product_or_causal_call(
         root_name = _get_root_name(call.func)
         orig_mod = imported_modules.get(root_name) if root_name else None
         from_mod = imported_symbols.get(root_name) if root_name else None
-        root_origin = var_origins.get(root_name) if root_name else None
+        root_origin = _get_effective_origin(root_name, var_origins) if root_name else None
         val_origin = _resolve_expr_origin(call.func.value, imported_symbols, imported_modules, var_origins)
 
         if any(
@@ -280,14 +304,25 @@ def _is_product_or_causal_call(
             for o in (root_name, orig_mod, from_mod, root_origin, val_origin)
             if o is not None
         ):
-            return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
-        return True
+            return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars, imported_symbols, imported_modules, var_origins) for arg in call.args))
+
+        # プロダクト起源の確認: root_name が dependent_vars に含まれるか、モジュール・シンボル起源がプロダクトである場合のみ True (AUD-501)
+        is_product = (
+            (root_name is not None and root_name in (dependent_vars or set()))
+            or (orig_mod is not None and orig_mod not in _NON_PRODUCT_ORIGINS)
+            or (from_mod is not None and from_mod not in _NON_PRODUCT_ORIGINS)
+            or (root_origin is not None and root_origin not in _NON_PRODUCT_ORIGINS)
+            or (val_origin is not None and val_origin not in _NON_PRODUCT_ORIGINS)
+        )
+        if is_product:
+            return True
+        return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars, imported_symbols, imported_modules, var_origins) for arg in call.args))
 
     if isinstance(call.func, ast.Name):
         if call.func.id in _BUILTIN_NAMES:
             return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
         from_mod = imported_symbols.get(call.func.id)
-        func_origin = var_origins.get(call.func.id)
+        func_origin = _get_effective_origin(call.func.id, var_origins)
         if (
             call.func.id in _NON_PRODUCT_ORIGINS
             or from_mod in _NON_PRODUCT_ORIGINS
@@ -444,7 +479,7 @@ def _process_stmts_in_order(
     """文を実行順序 (Program Order) に沿って走査し、変数の最新状態を維持しながらアサーションを順次検証する (機能OOO.1 / PPP.1 / PPP.2)。"""
     imported_symbols: dict[str, str] = getattr(func_node, "_imported_symbols", {})
     imported_modules: dict[str, str] = getattr(func_node, "_imported_modules", {})
-    var_origins: dict[str, str] = getattr(func_node, "_var_origins", {})
+    var_origins: dict[str, Any] = getattr(func_node, "_var_origins", {})
 
     for stmt in stmts:
         # 1. 複合文の再帰走査
@@ -578,7 +613,11 @@ def _process_stmts_in_order(
             origin = _resolve_expr_origin(rhs, imported_symbols, imported_modules, var_origins)
             if origin:
                 for name in target_names:
-                    var_origins[name] = origin
+                    existing = var_origins.setdefault(name, set())
+                    if isinstance(existing, set):
+                        existing.add(origin)
+                    else:
+                        var_origins[name] = {existing, origin}
             val_has_dep = _has_causal_dependency(rhs, dependent_vars, imported_symbols, imported_modules, var_origins)
             if val_has_dep:
                 for name in target_names:
@@ -591,7 +630,8 @@ def _process_stmts_in_order(
                         var_env[name] = const_val
                         dependent_vars.discard(name)
                 else:
-                    if origin and origin in _NON_PRODUCT_ORIGINS:
+                    eff_origin = _get_effective_origin(target_names[0], var_origins) if target_names else origin
+                    if eff_origin and eff_origin in _NON_PRODUCT_ORIGINS:
                         for name in target_names:
                             dependent_vars.discard(name)
                             var_env.pop(name, None)
@@ -606,7 +646,11 @@ def _process_stmts_in_order(
             origin = _resolve_expr_origin(rhs, imported_symbols, imported_modules, var_origins)
             if origin:
                 for name in target_names:
-                    var_origins[name] = origin
+                    existing = var_origins.setdefault(name, set())
+                    if isinstance(existing, set):
+                        existing.add(origin)
+                    else:
+                        var_origins[name] = {existing, origin}
             val_has_dep = _has_causal_dependency(rhs, dependent_vars, imported_symbols, imported_modules, var_origins)
             if val_has_dep:
                 for name in target_names:
@@ -619,7 +663,8 @@ def _process_stmts_in_order(
                         var_env[name] = const_val
                         dependent_vars.discard(name)
                 else:
-                    if origin and origin in _NON_PRODUCT_ORIGINS:
+                    eff_origin = _get_effective_origin(target_names[0], var_origins) if target_names else origin
+                    if eff_origin and eff_origin in _NON_PRODUCT_ORIGINS:
                         for name in target_names:
                             dependent_vars.discard(name)
                             var_env.pop(name, None)
@@ -670,32 +715,32 @@ def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
                 imported_symbols[alias_name] = root_pkg
                 imported_modules[alias_name] = root_pkg
 
-    module_var_origins: dict[str, str] = {}
+    module_var_origins: dict[str, set[str]] = {}
     for stmt in ast.iter_child_nodes(tree):
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and not stmt.name.startswith("test"):
-            module_var_origins[stmt.name] = "test_local_helper"
+            module_var_origins.setdefault(stmt.name, set()).add("test_local_helper")
         elif isinstance(stmt, ast.Assign):
             origin = _resolve_expr_origin(stmt.value, imported_symbols, imported_modules, module_var_origins)
             if origin:
                 for t in stmt.targets:
                     for n in ast.walk(t):
                         if isinstance(n, ast.Name):
-                            module_var_origins[n.id] = origin
+                            module_var_origins.setdefault(n.id, set()).add(origin)
             elif isinstance(stmt.value, ast.Lambda):
                 for t in stmt.targets:
                     for n in ast.walk(t):
                         if isinstance(n, ast.Name):
-                            module_var_origins[n.id] = "test_local_helper"
+                            module_var_origins.setdefault(n.id, set()).add("test_local_helper")
         elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
             origin = _resolve_expr_origin(stmt.value, imported_symbols, imported_modules, module_var_origins)
             if origin:
                 for n in ast.walk(stmt.target):
                     if isinstance(n, ast.Name):
-                        module_var_origins[n.id] = origin
+                        module_var_origins.setdefault(n.id, set()).add(origin)
             elif isinstance(stmt.value, ast.Lambda):
                 for n in ast.walk(stmt.target):
                     if isinstance(n, ast.Name):
-                        module_var_origins[n.id] = "test_local_helper"
+                        module_var_origins.setdefault(n.id, set()).add("test_local_helper")
 
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -703,41 +748,51 @@ def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
         if not node.name.startswith("test"):
             continue
 
-        var_origins: dict[str, str] = dict(module_var_origins)
+        var_origins: dict[str, set[str]] = {k: set(v) for k, v in module_var_origins.items()}
         for sub_node in ast.walk(node):
             if isinstance(sub_node, (ast.FunctionDef, ast.AsyncFunctionDef)) and sub_node is not node:
-                var_origins[sub_node.name] = "test_local_helper"
+                var_origins.setdefault(sub_node.name, set()).add("test_local_helper")
 
         changed = True
-        while changed:
+        iterations = 0
+        while changed and iterations < 20:
             changed = False
+            iterations += 1
             for sub_stmt in ast.walk(node):
                 if isinstance(sub_stmt, ast.Assign):
                     origin = _resolve_expr_origin(sub_stmt.value, imported_symbols, imported_modules, var_origins)
                     if origin:
                         for t in sub_stmt.targets:
                             for n in ast.walk(t):
-                                if isinstance(n, ast.Name) and var_origins.get(n.id) != origin:
-                                    var_origins[n.id] = origin
-                                    changed = True
+                                if isinstance(n, ast.Name):
+                                    existing = var_origins.setdefault(n.id, set())
+                                    if origin not in existing:
+                                        existing.add(origin)
+                                        changed = True
                     elif isinstance(sub_stmt.value, ast.Lambda):
                         for t in sub_stmt.targets:
                             for n in ast.walk(t):
-                                if isinstance(n, ast.Name) and var_origins.get(n.id) != "test_local_helper":
-                                    var_origins[n.id] = "test_local_helper"
-                                    changed = True
+                                if isinstance(n, ast.Name):
+                                    existing = var_origins.setdefault(n.id, set())
+                                    if "test_local_helper" not in existing:
+                                        existing.add("test_local_helper")
+                                        changed = True
                 elif isinstance(sub_stmt, ast.AnnAssign) and sub_stmt.value is not None:
                     origin = _resolve_expr_origin(sub_stmt.value, imported_symbols, imported_modules, var_origins)
                     if origin:
                         for n in ast.walk(sub_stmt.target):
-                            if isinstance(n, ast.Name) and var_origins.get(n.id) != origin:
-                                var_origins[n.id] = origin
-                                changed = True
+                            if isinstance(n, ast.Name):
+                                existing = var_origins.setdefault(n.id, set())
+                                if origin not in existing:
+                                    existing.add(origin)
+                                    changed = True
                     elif isinstance(sub_stmt.value, ast.Lambda):
                         for n in ast.walk(sub_stmt.target):
-                            if isinstance(n, ast.Name) and var_origins.get(n.id) != "test_local_helper":
-                                var_origins[n.id] = "test_local_helper"
-                                changed = True
+                            if isinstance(n, ast.Name):
+                                existing = var_origins.setdefault(n.id, set())
+                                if "test_local_helper" not in existing:
+                                    existing.add("test_local_helper")
+                                    changed = True
 
         node._imported_symbols = imported_symbols  # type: ignore[attr-defined,union-attr]
         node._imported_modules = imported_modules  # type: ignore[attr-defined,union-attr]
