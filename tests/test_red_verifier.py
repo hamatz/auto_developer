@@ -827,6 +827,47 @@ class PassTest(unittest.TestCase):
         home_str = str(Path.home().resolve())
         self.assertNotIn(home_str, ro_bind_targets, "Host home directory must NOT be ro-bound!")
 
+    def test_bwrap_command_includes_dir_before_bind_for_tmpfs_compatibility(self) -> None:
+        """機能VVV.2: Linux bwrap において --tmpfs /tmp 後に bind mount が失敗しないよう、
+        --dir <exec_resolved> が --bind より前に設定されること（Sol氏 Phase 61 P1指摘）。
+        """
+        from unittest.mock import MagicMock, patch
+
+        bwrap_cmd_captured = []
+        orig_popen = subprocess.Popen
+
+        def capturing_popen(*args: Any, **kwargs: Any) -> Any:
+            nonlocal bwrap_cmd_captured
+            cmd = args[0] if args else kwargs.get("args", [])
+            if cmd and "bwrap" in str(cmd[0]):
+                bwrap_cmd_captured = list(cmd)
+                mock_p = MagicMock()
+                mock_p.pid = 12345
+                mock_p.returncode = 0
+                mock_p.communicate.return_value = (
+                    '===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [], "errors": []}',
+                    "",
+                )
+                return mock_p
+            return orig_popen(*args, **kwargs)
+
+        code = """import unittest
+class PassTest(unittest.TestCase):
+    def test_ok(self):
+        self.assertEqual(1, 1)
+"""
+        with patch.object(self.verifier, "_get_sandbox_backend", return_value="bwrap"), \
+             patch("subprocess.Popen", side_effect=capturing_popen):
+            result = self.verifier.verify_candidate_test(code)
+            self.assertEqual(result.reason, "ALREADY_GREEN")
+
+        self.assertTrue(bwrap_cmd_captured, "bwrap command must be invoked")
+        # --dir が --bind の前に存在することを確認
+        self.assertIn("--dir", bwrap_cmd_captured)
+        dir_idx = bwrap_cmd_captured.index("--dir")
+        bind_idx = bwrap_cmd_captured.index("--bind")
+        self.assertLess(dir_idx, bind_idx, "--dir must precede --bind in bwrap command")
+
     def test_sandbox_blocks_reading_system_keychains_and_sensitive_etc(self) -> None:
         """機能LLL.2: macOS sandbox-exec においてホーム外の機密パス（/Library/Keychains 等）が
         明示的 deny され、候補テストから読み取れないこと（Sol氏 Phase 51 P1指摘）。
@@ -1222,6 +1263,480 @@ class T(unittest.TestCase):
         is_trivial, msg = check_trivial_red_ast(code)
         self.assertFalse(is_trivial)
         self.assertEqual(msg, "")
+
+    def test_ast_accepts_fail_preceded_by_try_except_with_product_call(self) -> None:
+        """機能OOO.2: プロダクト呼出を含む try-except ブロックの直後にある self.fail() は例外発生検証として許容されること（Trivial Red と判定されないこと）。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = """import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            runner.parse_response("broken")
+        except ValueError:
+            return
+        self.fail("expected ValueError was not raised")
+"""
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial)
+        self.assertEqual(msg, "")
+
+    def test_fail_after_swallowing_try_is_trivial_red(self) -> None:
+        """機能OOO.2: 例外を握り潰す(pass) try-except ブロックの直後にある self.fail() は無条件失敗(Trivial Red)として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            runner.parse_response("[]")
+        except Exception:
+            pass
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "unconditional self.fail() after an exception-swallowing try was accepted as genuine")
+
+    def test_nested_def_return_in_except_handler_is_trivial_red(self) -> None:
+        """機能OOO.2: except ハンドラ内で nested def/lambda が return していてもハンドラ自体が脱出しない場合、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            runner.parse_response("[]")
+        except Exception:
+            def helper():
+                return 1
+            pass
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "nested def return in except handler was falsely accepted as genuine exit")
+
+    def test_dead_branch_return_in_except_handler_is_trivial_red(self) -> None:
+        """機能OOO.2: except ハンドラ内で if False: return などのデッドブランチで脱出を偽装した場合、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            runner.parse_response("[]")
+        except Exception:
+            if False:
+                return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "dead branch return in except handler was falsely accepted as genuine exit")
+
+    def test_fail_after_try_with_builtin_call_is_trivial(self) -> None:
+        """機能MMM.3 / 機能NNN.2: try ブロック内に int("1") などの独立した組込呼出しかない場合、自己完結した無条件失敗(Trivial Red)として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            int("1")
+        except ValueError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "unconditional fail after try wrapping a non-product call was accepted as genuine")
+
+    def test_fail_after_try_with_literal_method_call_is_trivial(self) -> None:
+        """AUD-002 (Sol Phase 62 / Cycle 34): try ブロック内に "1".upper() などのリテラルに対するメソッド呼出しかない場合、自己完結した無条件失敗(Trivial Red)として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            "1".upper()
+        except ValueError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "unconditional fail after try wrapping a literal method call was accepted as genuine")
+
+    def test_fail_after_try_with_stdlib_module_call_is_trivial(self) -> None:
+        """AUD-020 (Sol Phase 62 / Cycle 36): try ブロック内に os.getcwd() などの標準ライブラリモジュール呼出しかない場合、自己完結した無条件失敗(Trivial Red)として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import os
+import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            os.getcwd()
+        except OSError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "unconditional fail after try wrapping a stdlib (non-product) call was accepted as genuine")
+
+    def test_from_import_stdlib_call_in_try_is_trivial(self) -> None:
+        """AUD-101 (Sol Phase 62 / Cycle 37): from os import getcwd のように標準ライブラリから直接 import された関数の呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''from os import getcwd
+import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            getcwd()
+        except OSError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "stdlib call via from-import inside try was accepted as a product call guard")
+
+    def test_aliased_stdlib_module_call_in_try_is_trivial(self) -> None:
+        """AUD-101 (Sol Phase 62 / Cycle 37): import os as o のように別名 import された標準ライブラリモジュール呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import os as o
+import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            o.getcwd()
+        except OSError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "aliased stdlib module call inside try was accepted as a product call guard")
+
+    def test_local_alias_of_stdlib_function_is_trivial(self) -> None:
+        """AUD-202 (Sol Phase 62 / Cycle 38): cwd = os.getcwd のようにローカル変数に退避された標準ライブラリ関数呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import os
+import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        cwd = os.getcwd
+        try:
+            cwd()
+        except OSError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "stdlib call via local alias inside try was accepted as a product call guard")
+
+    def test_local_alias_of_stdlib_module_is_trivial(self) -> None:
+        """AUD-202 (Sol Phase 62 / Cycle 38): p = os.path のようにローカル変数に退避された標準ライブラリモジュール経由呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import os
+import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        p = os.path
+        try:
+            p.exists(".")
+        except OSError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "stdlib module via local alias inside try was accepted as a product call guard")
+
+    def test_self_method_call_in_try_is_trivial(self) -> None:
+        """AUD-301 (Sol Phase 62 / Cycle 39): self.id() 等の TestCase 自身に対する呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            self.id()
+        except ValueError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "self.id() inside try was accepted as a product-call exception guard")
+
+    def test_local_helper_call_in_try_is_trivial(self) -> None:
+        """AUD-301 (Sol Phase 62 / Cycle 39): def helper() 等のテスト内ローカルヘルパー呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        def helper():
+            return 1
+        try:
+            helper()
+        except ValueError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "locally defined helper inside try was accepted as a product-call exception guard")
+
+    def test_getattr_stdlib_alias_call_in_try_is_trivial(self) -> None:
+        """AUD-301 (Sol Phase 62 / Cycle 39): f = getattr(os, 'getcwd') 等の getattr 経由標準ライブラリ呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import os
+import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        f = getattr(os, "getcwd")
+        try:
+            f()
+        except OSError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "getattr-derived stdlib callable inside try was accepted as a product-call exception guard")
+
+    def test_method_on_builtin_call_result_in_try_is_trivial(self) -> None:
+        """AUD-401 (Sol Phase 62 / Cycle 40): x = int('1') 等の非プロダクト呼出結果に対するメソッド呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        x = int("1")
+        try:
+            x.bit_length()
+        except ValueError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "method call on a builtin-call result inside try was accepted as a product-call exception guard")
+
+    def test_method_on_literal_bound_local_in_try_is_trivial(self) -> None:
+        """AUD-501 (Sol Phase 62 / Cycle 41): s = '1' 等のリテラル退避変数に対するメソッド呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        s = "1"
+        try:
+            s.upper()
+        except ValueError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "method call on a literal-bound local inside try was accepted as a product-call exception guard")
+
+    def test_method_on_dict_literal_local_in_try_is_trivial(self) -> None:
+        """AUD-501 (Sol Phase 62 / Cycle 41): d = {'a': 1} 等の辞書リテラル退避変数に対するメソッド呼出しかない場合でも、Trivial Red として検出されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        d = {"a": 1}
+        try:
+            d.get("a")
+        except KeyError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "method call on a dict-literal local inside try was accepted as a product-call exception guard")
+
+    def test_exception_guard_via_self_attribute_is_not_trivial(self) -> None:
+        """AUD-601: setUp 等で self に保持したプロダクトオブジェクト経由の例外ガード呼出が Trivial Red と誤認されないこと。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def setUp(self):
+        self.runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+
+    def test_case(self):
+        try:
+            self.runner.parse_response("broken")
+        except ValueError:
+            return
+        self.fail("expected ValueError was not raised")
+'''
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial, f"genuine exception-guarded product call via self attribute rejected as trivial: {msg}")
+
+    def test_assertion_on_self_attribute_product_result_is_not_trivial(self) -> None:
+        """AUD-601: setUp 等で self に保持したプロダクトオブジェクトの実行結果に対するアサーションが因果依存を維持すること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def setUp(self):
+        self.runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+
+    def test_case(self):
+        result = self.runner.parse_response("[]")
+        self.assertEqual(len(result), 1)
+'''
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial, f"assertion on product result via self attribute rejected as trivial: {msg}")
+
+    def test_exception_guard_via_factory_helper_is_not_trivial(self) -> None:
+        """AUD-701: ファクトリヘルパー関数経由で生成されたプロダクトオブジェクトの例外ガードが Trivial Red と誤認されないこと。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+def make_runner():
+    return IndependentAuditRunner(model_name="claude-opus-5.5")
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = make_runner()
+        try:
+            runner.parse_response("broken")
+        except ValueError:
+            return
+        self.fail("expected ValueError was not raised")
+'''
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial, f"genuine product exception guard via factory helper rejected as trivial: {msg}")
+
+    def test_assertion_on_product_result_via_factory_helper_is_not_trivial(self) -> None:
+        """AUD-701: ファクトリヘルパー関数経由で実行されたプロダクトコード結果に対するアサーションが因果依存を維持すること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+def make_runner():
+    return IndependentAuditRunner(model_name="claude-opus-5.5")
+
+class T(unittest.TestCase):
+    def test_case(self):
+        result = make_runner().parse_response("[]")
+        self.assertEqual(len(result), 1)
+'''
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial, f"assertion on product result via factory helper rejected as trivial: {msg}")
+
+    def test_fail_after_reraising_handler_is_trivial(self) -> None:
+        """AUD-801: except ハンドラ内で raise (再送出) して異常終了する直後の self.fail() は Green になり得ないため Trivial Red として拒絶されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            runner.parse_response("[]")
+        except Exception:
+            raise
+        self.fail("can never pass: either errors or fails")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "self.fail() after a re-raising handler can never be Green but was accepted as genuine")
+
+    def test_lambda_or_dead_branch_in_try_is_trivial(self) -> None:
+        """AUD-901: try節内のラムダ定義や静的死分岐内のプロダクト呼出は例外ガードとして認めず TRIVIAL_RED と判定すること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        lambda_code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            f = lambda: runner.parse_response("broken")
+        except ValueError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _ = check_trivial_red_ast(lambda_code)
+        self.assertTrue(is_trivial, "product call in uninvoked lambda in try body was accepted as exception guard")
+
+        dead_branch_code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            if False:
+                runner.parse_response("broken")
+        except ValueError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial_dead, _ = check_trivial_red_ast(dead_branch_code)
+        self.assertTrue(is_trivial_dead, "product call in dead branch in try body was accepted as exception guard")
 
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""

@@ -232,7 +232,9 @@ class IndependentAuditRunner:
         '    "status": "REPORTED"\n'
         "  }\n"
         "]\n"
-        'If no issues are found, return an empty array `[]` or `{"findings": []}`.'
+        'If no issues are found, return an empty array `[]` or `{"findings": []}`.\n'
+        "CRITICAL: Do NOT output conversational prose, explanations, markdown headings, or commentary outside the JSON array.\n"
+        "Your output must be strictly the JSON array (or ```json [...] ```) so token budget is not wasted and max_tokens is never exceeded."
     )
 
     def __init__(
@@ -269,47 +271,320 @@ class IndependentAuditRunner:
         import json
         import re
 
-        json_match = re.search(r"```json\s*(.*?)\s*```", output, re.DOTALL)
-        raw_json_str = json_match.group(1) if json_match else output.strip()
+        clean_output = output.strip()
+        found_envelope: dict[str, Any] | None = None
+        collected_findings: list[dict[str, Any]] = []
+        empty_block_found = False
+        has_decode_error = False
+        empty_envelope: dict[str, Any] | None = None
 
-        data: Any = None
+        # 1. まず output 全体が有効な JSON（Envelope や JSON 配列）であるかを直接試行
         try:
-            data = json.loads(raw_json_str)
+            parsed = json.loads(clean_output)
+            if isinstance(parsed, list):
+                findings = [item for item in parsed if isinstance(item, dict) and "finding_id" in item]
+                if len(parsed) == 0:
+                    empty_block_found = True
+                elif len(findings) == len(parsed):
+                    collected_findings.extend(findings)
+                else:
+                    raise ValueError(f"AUDIT_PARSE_ERROR: JSON array contains non-finding items: {parsed}")
+            elif isinstance(parsed, dict):
+                if parsed.get("error"):
+                    raise ValueError(f"AUDIT_FAILED: Auditor response contains error: {parsed.get('error')}")
+                is_prov = bool(
+                    parsed.get("mode")
+                    or parsed.get("execution_id")
+                    or parsed.get("provider_request_id")
+                    or parsed.get("provider")
+                    or ("status" in parsed and "finding_id" not in parsed and "severity" not in parsed)
+                    or parsed.get("stop_reason")
+                )
+                if is_prov:
+                    status = parsed.get("status")
+                    if status and status != "COMPLETED":
+                        raise ValueError(f"AUDIT_{status}: Live audit envelope returned non-completed status '{status}': {parsed.get('error') or ''}")
+                    found_envelope = parsed
+                    if "findings" in parsed and isinstance(parsed["findings"], list):
+                        findings = [item for item in parsed["findings"] if isinstance(item, dict) and "finding_id" in item]
+                        if len(parsed["findings"]) == 0:
+                            empty_block_found = True
+                        elif len(findings) == len(parsed["findings"]):
+                            collected_findings.extend(findings)
+                        else:
+                            raise ValueError(f"AUDIT_PARSE_ERROR: JSON findings array contains non-finding items: {parsed['findings']}")
+                elif "finding_id" in parsed and "findings" not in parsed:
+                    collected_findings.append(parsed)
+                elif "findings" in parsed and isinstance(parsed["findings"], list):
+                    status = parsed.get("status")
+                    if status and status != "COMPLETED":
+                        raise ValueError(f"AUDIT_{status}: Live audit envelope returned non-completed status '{status}': {parsed.get('error') or ''}")
+                    found_envelope = parsed
+                    findings = [item for item in parsed["findings"] if isinstance(item, dict) and "finding_id" in item]
+                    if len(parsed["findings"]) == 0:
+                        empty_block_found = True
+                    elif len(findings) == len(parsed["findings"]):
+                        collected_findings.extend(findings)
+                    else:
+                        raise ValueError(f"AUDIT_PARSE_ERROR: JSON findings array contains non-finding items: {parsed['findings']}")
         except json.JSONDecodeError:
-            bracket_match = re.search(r"(\[.*\]|\{.*\})", raw_json_str, re.DOTALL)
-            if bracket_match:
+            # 2. Markdown コードブロックの探索（複数ブロック走査＆全件集約）
+            all_code_blocks = list(re.finditer(r"```[ \t]*(?:[a-zA-Z0-9_-]+)?[ \t]*\n?(.*?)\n?```", clean_output, re.DOTALL))
+            if all_code_blocks:
+                for m in all_code_blocks:
+                    content = m.group(1).strip()
+                    if not content.startswith(("[", "{")):
+                        stripped = re.sub(r"^[a-zA-Z0-9_-]+[ \t]*\n?", "", content).strip()
+                        if stripped.startswith(("[", "{")):
+                            content = stripped
+                    if not content.startswith(("[", "{")):
+                        continue
+                    try:
+                        parsed = json.loads(content)
+                        if isinstance(parsed, list):
+                            findings = [item for item in parsed if isinstance(item, dict) and "finding_id" in item]
+                            if len(parsed) == 0:
+                                empty_block_found = True
+                            elif len(findings) == len(parsed):
+                                collected_findings.extend(findings)
+                            else:
+                                has_decode_error = True
+                        elif isinstance(parsed, dict):
+                            if parsed.get("error"):
+                                raise ValueError(f"AUDIT_FAILED: Auditor response contains error: {parsed.get('error')}")
+                            is_prov = bool(
+                                parsed.get("mode")
+                                or parsed.get("execution_id")
+                                or parsed.get("provider_request_id")
+                                or parsed.get("provider")
+                                or ("status" in parsed and "finding_id" not in parsed and "severity" not in parsed)
+                                or parsed.get("stop_reason")
+                            )
+                            if is_prov:
+                                env_status = parsed.get("status")
+                                if env_status and env_status != "COMPLETED":
+                                    raise ValueError(
+                                        f"AUDIT_{env_status}: Live audit envelope returned non-completed status '{env_status}': {parsed.get('error') or ''}"
+                                    )
+                                env_mode = parsed.get("mode")
+                                env_stop = parsed.get("stop_reason")
+                                if (env_mode == "LIVE" or env_stop is not None) and (not env_stop or env_stop != "end_turn"):
+                                    raise ValueError(
+                                        f"AUDIT_INTERRUPTED: Live audit envelope has invalid stop_reason '{env_stop}' (expected 'end_turn')"
+                                    )
+                                if found_envelope is None:
+                                    found_envelope = parsed
+                                if "findings" in parsed and isinstance(parsed["findings"], list):
+                                    findings = [item for item in parsed["findings"] if isinstance(item, dict) and "finding_id" in item]
+                                    if len(parsed["findings"]) == 0:
+                                        empty_block_found = True
+                                    elif len(findings) == len(parsed["findings"]):
+                                        collected_findings.extend(findings)
+                                    else:
+                                        has_decode_error = True
+                            elif "finding_id" in parsed and "findings" not in parsed:
+                                collected_findings.append(parsed)
+                            elif "findings" in parsed and isinstance(parsed["findings"], list):
+                                env_status = parsed.get("status")
+                                if env_status and env_status != "COMPLETED":
+                                    raise ValueError(
+                                        f"AUDIT_{env_status}: Live audit envelope returned non-completed status '{env_status}': {parsed.get('error') or ''}"
+                                    )
+                                if found_envelope is None:
+                                    found_envelope = parsed
+                                findings = [item for item in parsed["findings"] if isinstance(item, dict) and "finding_id" in item]
+                                if len(parsed["findings"]) == 0:
+                                    empty_block_found = True
+                                elif len(findings) == len(parsed["findings"]):
+                                    collected_findings.extend(findings)
+                                else:
+                                    has_decode_error = True
+                            else:
+                                has_decode_error = True
+                    except json.JSONDecodeError:
+                        has_decode_error = True
+
+                if has_decode_error:
+                    raise ValueError("Malformed JSON in audit response code block")
+
+            # 3. コードブロック外またはコードブロックが存在しない場合の生構造探索
+            text_outside = re.sub(r"```[ \t]*(?:[a-zA-Z0-9_-]+)?[ \t]*\n?(.*?)\n?```", "", clean_output, flags=re.DOTALL)
+            decoder = json.JSONDecoder()
+
+            # プロバイダエンベロープ辞書およびエラー辞書を最優先で探索（ログ行混入時でも外側封筒を厳格評価）
+            for m_brace in re.finditer(r"\{", text_outside):
+                s_idx = m_brace.start()
                 try:
-                    data = json.loads(bracket_match.group(1))
+                    parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
+                    if isinstance(parsed_out, dict):
+                        if parsed_out.get("error"):
+                            raise ValueError(f"AUDIT_FAILED: Auditor response contains error: {parsed_out.get('error')}")
+                        is_prov = bool(
+                            parsed_out.get("mode")
+                            or parsed_out.get("execution_id")
+                            or parsed_out.get("provider_request_id")
+                            or parsed_out.get("provider")
+                            or ("status" in parsed_out and "finding_id" not in parsed_out and "severity" not in parsed_out)
+                            or parsed_out.get("stop_reason")
+                        )
+                        if is_prov:
+                            env_status = parsed_out.get("status")
+                            if env_status and env_status != "COMPLETED":
+                                raise ValueError(
+                                    f"AUDIT_{env_status}: Live audit envelope returned non-completed status '{env_status}': {parsed_out.get('error') or ''}"
+                                )
+                            env_mode = parsed_out.get("mode")
+                            env_stop = parsed_out.get("stop_reason")
+                            if (env_mode == "LIVE" or env_stop is not None) and (not env_stop or env_stop != "end_turn"):
+                                raise ValueError(
+                                    f"AUDIT_INTERRUPTED: Live audit envelope has invalid stop_reason '{env_stop}' (expected 'end_turn')"
+                                )
+                            if found_envelope is None:
+                                found_envelope = parsed_out
+                            if "findings" in parsed_out and isinstance(parsed_out["findings"], list):
+                                findings = [item for item in parsed_out["findings"] if isinstance(item, dict) and "finding_id" in item]
+                                if len(parsed_out["findings"]) == 0:
+                                    empty_block_found = True
+                                elif len(findings) == len(parsed_out["findings"]):
+                                    if not collected_findings:
+                                        collected_findings.extend(findings)
+                                else:
+                                    has_decode_error = True
                 except json.JSONDecodeError:
                     pass
 
-        if data is None:
-            raise ValueError(f"Could not parse valid JSON from audit response: {output[:200]}")
+            # 配列構造の探索
+            parsed_raw_bracket = False
+            for m_bracket in re.finditer(r"\[", text_outside):
+                s_idx = m_bracket.start()
+                try:
+                    parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
+                    if isinstance(parsed_out, list):
+                        findings = [item for item in parsed_out if isinstance(item, dict) and "finding_id" in item]
+                        if len(parsed_out) == 0:
+                            pass
+                        elif len(findings) == len(parsed_out):
+                            parsed_raw_bracket = True
+                            if not collected_findings:
+                                collected_findings.extend(findings)
+                            break
+                        else:
+                            has_decode_error = True
+                except json.JSONDecodeError:
+                    pass
 
-        if isinstance(data, dict):
-            # TTT.1 / UUU.1: エンベロープメタデータ（mode, provider, execution_id, provider_request_id, status 等）の抽出・保持
-            exec_id = data.get("execution_id") or data.get("id")
-            prov_req_id = data.get("provider_request_id") or data.get("id")
-            mode = data.get("mode") or ("MOCK" if str(exec_id).startswith("mock_") else "LIVE")
-            self._last_envelope_metadata = {
-                "mode": mode,
-                "provider": data.get("provider"),
-                "execution_id": exec_id,
-                "provider_request_id": prov_req_id,
-                "model": data.get("model"),
-                "resolved_model": data.get("resolved_model") or data.get("model"),
-                "status": data.get("status"),
-                "usage": data.get("usage"),
-            }
-            if "findings" in data and isinstance(data["findings"], list):
-                data = data["findings"]
+            # 非プロバイダ辞書（{"findings": [...]} または単一指摘）の探索
+            for m_brace in re.finditer(r"\{", text_outside):
+                s_idx = m_brace.start()
+                try:
+                    parsed_out, _ = decoder.raw_decode(text_outside, s_idx)
+                    if isinstance(parsed_out, dict):
+                        if parsed_out.get("error"):
+                            raise ValueError(f"AUDIT_FAILED: Auditor response contains error: {parsed_out.get('error')}")
+                        findings_fld = parsed_out.get("findings")
+                        if isinstance(findings_fld, list):
+                            findings = [item for item in findings_fld if isinstance(item, dict) and "finding_id" in item]
+                            if len(findings_fld) == 0:
+                                if found_envelope is None:
+                                    found_envelope = parsed_out
+                                if empty_envelope is None:
+                                    empty_envelope = parsed_out
+                            elif len(findings) == len(findings_fld):
+                                if found_envelope is None:
+                                    found_envelope = parsed_out
+                                if not collected_findings:
+                                    collected_findings.extend(findings)
+                                break
+                            else:
+                                has_decode_error = True
+                        elif "finding_id" in parsed_out:
+                            if not collected_findings:
+                                collected_findings.append(parsed_out)
+                            break
+                except json.JSONDecodeError:
+                    pass
+
+            for m in re.finditer(r"\[\s*\{", text_outside):
+                try:
+                    p_candidate, _ = decoder.raw_decode(text_outside, m.start())
+                    if not isinstance(p_candidate, list):
+                        has_decode_error = True
+                except json.JSONDecodeError:
+                    has_decode_error = True
+
+            for m in re.finditer(r"\{\s*[\"'](?:finding_id|findings)[\"']", text_outside):
+                try:
+                    p_candidate, _ = decoder.raw_decode(text_outside, m.start())
+                    if not isinstance(p_candidate, dict):
+                        has_decode_error = True
+                except json.JSONDecodeError:
+                    has_decode_error = True
+
+            if not parsed_raw_bracket and re.search(
+                r"(?:\[\s*\{|\{\s*[\"'](?:finding_id|findings)[\"'])", text_outside
+            ):
+                has_decode_error = True
+
+            if has_decode_error:
+                raise ValueError("Malformed JSON in audit response")
+
+            if not collected_findings and not empty_block_found and found_envelope is None and empty_envelope is not None:
+                found_envelope = empty_envelope
+
+            if not collected_findings and not empty_block_found and found_envelope is None and re.fullmatch(r"(?:```(?:json)?\s*)?\[\s*\](?:\s*```)?", clean_output):
+                empty_block_found = True
+
+            if not collected_findings and not empty_block_found and found_envelope is None:
+                raise ValueError(f"Could not parse valid JSON from audit response: {output[:200]}")
+
+        # Envelope メタデータ検証と保持（指摘配列とは独立して常に検証）
+        if found_envelope is not None:
+            exec_id = found_envelope.get("execution_id") or found_envelope.get("id")
+            prov_req_id = found_envelope.get("provider_request_id") or found_envelope.get("id")
+            raw_mode = found_envelope.get("mode")
+            status = found_envelope.get("status")
+            stop_reason = found_envelope.get("stop_reason")
+            has_prov_metadata = bool(raw_mode or exec_id or prov_req_id or found_envelope.get("provider") or status or stop_reason)
+
+            # AUD-002 (Sol Phase 62 / Cycle 11 & 12): Envelope status validation (Fail-Closed: reject non-COMPLETED status)
+            if status and status != "COMPLETED":
+                raise ValueError(
+                    f"AUDIT_{status}: Live audit envelope returned non-completed status '{status}': {found_envelope.get('error') or ''}"
+                )
+
+            if has_prov_metadata:
+                mode = raw_mode or ("MOCK" if (exec_id and str(exec_id).startswith("mock_")) else "LIVE")
+
+                # AUD-001 / AUD-002 / VVV.1 / Sol Phase 61 P1: mode: LIVE 時の stop_reason 厳格検証（Fail-Closed allow-list）
+                if (mode == "LIVE" or stop_reason is not None) and (not stop_reason or stop_reason != "end_turn"):
+                    raise ValueError(
+                        f"AUDIT_INTERRUPTED: Live audit envelope has invalid stop_reason '{stop_reason}' (expected 'end_turn')"
+                    )
+
+                self._last_envelope_metadata = {
+                    "mode": mode,
+                    "provider": found_envelope.get("provider"),
+                    "execution_id": exec_id,
+                    "provider_request_id": prov_req_id,
+                    "model": found_envelope.get("model"),
+                    "resolved_model": found_envelope.get("resolved_model") or found_envelope.get("model"),
+                    "status": status,
+                    "stop_reason": stop_reason,
+                    "usage": found_envelope.get("usage"),
+                }
             else:
-                data = [data] if "finding_id" in data else []
+                self._last_envelope_metadata = None
         else:
             self._last_envelope_metadata = None
 
-        if not isinstance(data, list):
-            raise TypeError(f"Expected a list of findings, got {type(data).__name__}")
+        if collected_findings:
+            data = collected_findings
+        elif found_envelope is not None and "findings" in found_envelope and isinstance(found_envelope["findings"], list):
+            data = found_envelope["findings"]
+        elif empty_block_found:
+            data = []
+        else:
+            raise ValueError(f"Could not parse valid JSON findings from audit response: {output[:200]}")
 
         if not data:
             return []
@@ -318,7 +593,9 @@ class IndependentAuditRunner:
 
     def audit(self, spec_content: str, git_diff: str) -> list[AuditFinding]:
         import hashlib
+        import os
         import subprocess
+        import tempfile
 
         prompt = self.build_audit_prompt(spec_content, git_diff)
         raw_prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -361,8 +638,15 @@ class IndependentAuditRunner:
         for candidate in independent_candidates:
             is_fallback = (candidate != self.model_name)
 
-            cmd_str = self.auditor_cmd_template.replace("{model}", candidate)
+            temp_prompt_file: str | None = None
             try:
+                cmd_str = self.auditor_cmd_template.replace("{model}", candidate)
+                if "{prompt_file}" in cmd_str:
+                    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".txt") as tfile:
+                        tfile.write(prompt)
+                        temp_prompt_file = tfile.name
+                    cmd_str = cmd_str.replace("{prompt_file}", temp_prompt_file)
+
                 proc = subprocess.run(
                     ["bash", "-c", cmd_str],
                     input=prompt,
@@ -415,6 +699,7 @@ class IndependentAuditRunner:
                     "resolved_model": envelope_meta.get("resolved_model") or candidate,
                     "execution_id": execution_id,
                     "status": envelope_meta.get("status") or "COMPLETED",
+                    "stop_reason": envelope_meta.get("stop_reason"),
                     "fallback_occurred": is_fallback,
                     "fallback_from": self.model_name if is_fallback else None,
                     "maker_model": maker_m,
@@ -428,6 +713,12 @@ class IndependentAuditRunner:
             except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as e:
                 last_error = e
                 continue
+            finally:
+                if temp_prompt_file and os.path.exists(temp_prompt_file):
+                    try:
+                        os.unlink(temp_prompt_file)
+                    except OSError:
+                        pass
 
         # すべての独立候補モデルがエラーとなった場合、NO_INDEPENDENT_AUDITOR_AVAILABLE として送出 (SSS.3)
         raise RuntimeError(

@@ -894,6 +894,36 @@ class TestResilientModelFallbackAndAuditEvidence(unittest.TestCase):
         self.assertEqual(res["status"], "AUDIT_PENDING")
         self.assertIn("NO_INDEPENDENT_AUDITOR_AVAILABLE", res["error"])
 
+    def test_parse_response_with_envelope_containing_embedded_codeblock(self) -> None:
+        """VVV.1: envelope 内の文字列に ```json や引用が含まれる場合でも、外側の envelope を優先して正しく解析できること。"""
+        import json
+        envelope = {
+            "mode": "LIVE",
+            "provider": "anthropic",
+            "model": "claude-opus-5.5",
+            "provider_request_id": "msg_test_embedded_codeblock",
+            "execution_id": "msg_test_embedded_codeblock",
+            "status": "COMPLETED",
+            "stop_reason": "end_turn",
+            "findings": [
+                {
+                    "finding_id": "AUD-001",
+                    "severity": "P1",
+                    "spec_reference": "VVV.1",
+                    "location": "scripts/auditor_client.py:200",
+                    "description": "Issue with ```json {\"test\": 1} ``` inside description",
+                    "reproduction_test_code": "def test_embedded(): pass",
+                    "status": "REPORTED",
+                }
+            ],
+        }
+        output = json.dumps(envelope, indent=2)
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        findings = runner.parse_response(output)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].finding_id, "AUD-001")
+        self.assertEqual(runner._last_envelope_metadata.get("provider_request_id"), "msg_test_embedded_codeblock")
+
 
 if __name__ == "__main__":
     unittest.main()
