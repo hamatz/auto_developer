@@ -370,6 +370,41 @@ def _is_product_or_causal_call(
     return bool(dependent_vars and any(_has_causal_dependency(arg, dependent_vars) for arg in call.args))
 
 
+def _walk_executable_calls(node: ast.AST) -> Iterator[ast.Call]:
+    """遅延評価・ネスト定義（Lambda, FunctionDef等）に潜らず実行可能 Call を走査する (AUD-901)。"""
+    if isinstance(node, (ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return
+    if isinstance(node, ast.Call):
+        yield node
+    for child in ast.iter_child_nodes(node):
+        yield from _walk_executable_calls(child)
+
+
+def _iter_executable_calls(stmts: list[ast.stmt]) -> Iterator[ast.Call]:
+    """try ブロック等の文列から、実際に同期実行される Call ノードを列挙する (AUD-901)。
+    静的死分岐 (if False:) や関数/ラムダ定義内の呼出を排除する。
+    """
+    for stmt in stmts:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(stmt, ast.If):
+            is_const, val = _eval_constant_expr(stmt.test)
+            if is_const:
+                branch = stmt.body if bool(val) else stmt.orelse
+                yield from _iter_executable_calls(branch)
+            else:
+                yield from _walk_executable_calls(stmt.test)
+                yield from _iter_executable_calls(stmt.body)
+                yield from _iter_executable_calls(stmt.orelse)
+            continue
+        if isinstance(stmt, (ast.Try, ast.With, ast.For, ast.While)):
+            # 複合文の場合は直下の文を再帰探索
+            body = getattr(stmt, "body", [])
+            yield from _iter_executable_calls(body)
+            continue
+        yield from _walk_executable_calls(stmt)
+
+
 def _is_in_try_block_with_call(
     call_node: ast.AST, func_node: ast.AST, dependent_vars: set[str] | None = None
 ) -> bool:
@@ -379,9 +414,8 @@ def _is_in_try_block_with_call(
             in_body = any(sub is call_node for item in n.body for sub in ast.walk(item))
             if in_body:
                 has_call = any(
-                    isinstance(sub, ast.Call) and _is_product_or_causal_call(sub, dependent_vars, func_node)
-                    for item in n.body
-                    for sub in ast.walk(item)
+                    _is_product_or_causal_call(sub, dependent_vars, func_node)
+                    for sub in _iter_executable_calls(n.body)
                 )
                 if has_call:
                     return True
@@ -410,7 +444,7 @@ def _handler_body_exits(stmts: list[ast.stmt]) -> bool:
 def _is_preceded_by_try_with_call(
     call_node: ast.AST, func_node: ast.AST, dependent_vars: set[str] | None = None
 ) -> bool:
-    """call_node がプロダクト呼出を含む try-except ブロックの直後（例外発生期待の fail）にあるかを判定する (機能OOO.2 / AUD-003 Cycle 33)。"""
+    """call_node がプロダクト呼出を含む try-except ブロックの直後（例外発生期待の fail）にあるかを判定する (機能OOO.2 / AUD-003 Cycle 33 / AUD-901)。"""
     for node in ast.walk(func_node):
         for attr in ("body", "orelse", "finalbody"):
             stmts = getattr(node, attr, None)
@@ -420,9 +454,8 @@ def _is_preceded_by_try_with_call(
                         for prev in stmts[:idx]:
                             if isinstance(prev, ast.Try):
                                 has_call = any(
-                                    isinstance(sub, ast.Call) and _is_product_or_causal_call(sub, dependent_vars, func_node)
-                                    for item in prev.body
-                                    for sub in ast.walk(item)
+                                    _is_product_or_causal_call(sub, dependent_vars, func_node)
+                                    for sub in _iter_executable_calls(prev.body)
                                 )
                                 all_handlers_exit = (
                                     len(prev.handlers) > 0

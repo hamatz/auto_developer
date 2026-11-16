@@ -1703,6 +1703,41 @@ class T(unittest.TestCase):
         is_trivial, _msg = check_trivial_red_ast(code)
         self.assertTrue(is_trivial, "self.fail() after a re-raising handler can never be Green but was accepted as genuine")
 
+    def test_lambda_or_dead_branch_in_try_is_trivial(self) -> None:
+        """AUD-901: try節内のラムダ定義や静的死分岐内のプロダクト呼出は例外ガードとして認めず TRIVIAL_RED と判定すること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        lambda_code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            f = lambda: runner.parse_response("broken")
+        except ValueError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial, _ = check_trivial_red_ast(lambda_code)
+        self.assertTrue(is_trivial, "product call in uninvoked lambda in try body was accepted as exception guard")
+
+        dead_branch_code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            if False:
+                runner.parse_response("broken")
+        except ValueError:
+            return
+        self.fail("always fails regardless of product behaviour")
+'''
+        is_trivial_dead, _ = check_trivial_red_ast(dead_branch_code)
+        self.assertTrue(is_trivial_dead, "product call in dead branch in try body was accepted as exception guard")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest
