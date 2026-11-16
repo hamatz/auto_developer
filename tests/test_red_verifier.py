@@ -1644,6 +1644,46 @@ class T(unittest.TestCase):
         is_trivial, msg = check_trivial_red_ast(code)
         self.assertFalse(is_trivial, f"assertion on product result via self attribute rejected as trivial: {msg}")
 
+    def test_exception_guard_via_factory_helper_is_not_trivial(self) -> None:
+        """AUD-701: ファクトリヘルパー関数経由で生成されたプロダクトオブジェクトの例外ガードが Trivial Red と誤認されないこと。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+def make_runner():
+    return IndependentAuditRunner(model_name="claude-opus-5.5")
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = make_runner()
+        try:
+            runner.parse_response("broken")
+        except ValueError:
+            return
+        self.fail("expected ValueError was not raised")
+'''
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial, f"genuine product exception guard via factory helper rejected as trivial: {msg}")
+
+    def test_assertion_on_product_result_via_factory_helper_is_not_trivial(self) -> None:
+        """AUD-701: ファクトリヘルパー関数経由で実行されたプロダクトコード結果に対するアサーションが因果依存を維持すること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+def make_runner():
+    return IndependentAuditRunner(model_name="claude-opus-5.5")
+
+class T(unittest.TestCase):
+    def test_case(self):
+        result = make_runner().parse_response("[]")
+        self.assertEqual(len(result), 1)
+'''
+        is_trivial, msg = check_trivial_red_ast(code)
+        self.assertFalse(is_trivial, f"assertion on product result via factory helper rejected as trivial: {msg}")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest

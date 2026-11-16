@@ -232,6 +232,32 @@ def _resolve_expr_origin(
     return None
 
 
+def _inspect_helper_fn_origins(
+    fn_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    imported_symbols: dict[str, str],
+    imported_modules: dict[str, str],
+    base_origins: dict[str, Any],
+) -> set[str]:
+    """ヘルパー関数の return 式および内部代入から解決されるプロダクト起源を特定する (AUD-701)。"""
+    res_origins: set[str] = set()
+    local_origins: dict[str, set[str]] = {
+        k: set(v) if isinstance(v, (set, list, tuple)) else {str(v)} for k, v in base_origins.items()
+    }
+    for s in ast.walk(fn_node):
+        if isinstance(s, ast.Assign):
+            orig = _resolve_expr_origin(s.value, imported_symbols, imported_modules, local_origins)
+            if orig:
+                for t in s.targets:
+                    for n in ast.walk(t):
+                        if isinstance(n, ast.Name):
+                            local_origins.setdefault(n.id, set()).add(orig)
+        elif isinstance(s, ast.Return) and s.value is not None:
+            ret_orig = _resolve_expr_origin(s.value, imported_symbols, imported_modules, local_origins)
+            if ret_orig and ret_orig not in _NON_PRODUCT_ORIGINS:
+                res_origins.add(ret_orig)
+    return res_origins
+
+
 def _has_causal_dependency(
     node: ast.AST,
     dependent_vars: set[str],
@@ -748,7 +774,11 @@ def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
     module_var_origins: dict[str, set[str]] = {}
     for stmt in ast.iter_child_nodes(tree):
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and not stmt.name.startswith("test"):
-            module_var_origins.setdefault(stmt.name, set()).add("test_local_helper")
+            fn_origs = _inspect_helper_fn_origins(stmt, imported_symbols, imported_modules, module_var_origins)
+            if fn_origs:
+                module_var_origins.setdefault(stmt.name, set()).update(fn_origs)
+            else:
+                module_var_origins.setdefault(stmt.name, set()).add("test_local_helper")
         elif isinstance(stmt, ast.Assign):
             origin = _resolve_expr_origin(stmt.value, imported_symbols, imported_modules, module_var_origins)
             if origin:
@@ -777,6 +807,13 @@ def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
         if isinstance(stmt, ast.ClassDef):
             for item in stmt.body:
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if not item.name.startswith("test"):
+                        fn_origs = _inspect_helper_fn_origins(item, imported_symbols, imported_modules, module_var_origins)
+                        if fn_origs:
+                            class_self_origins.setdefault(f"self.{item.name}", set()).update(fn_origs)
+                            module_var_origins.setdefault(item.name, set()).update(fn_origs)
+                        else:
+                            module_var_origins.setdefault(item.name, set()).add("test_local_helper")
                     for s in ast.walk(item):
                         if isinstance(s, ast.Assign):
                             orig = _resolve_expr_origin(s.value, imported_symbols, imported_modules, module_var_origins)
@@ -809,7 +846,11 @@ def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
         var_origins.update({k: set(v) for k, v in class_self_origins.items()})
         for sub_node in ast.walk(node):
             if isinstance(sub_node, (ast.FunctionDef, ast.AsyncFunctionDef)) and sub_node is not node:
-                var_origins.setdefault(sub_node.name, set()).add("test_local_helper")
+                fn_origs = _inspect_helper_fn_origins(sub_node, imported_symbols, imported_modules, var_origins)
+                if fn_origs:
+                    var_origins.setdefault(sub_node.name, set()).update(fn_origs)
+                else:
+                    var_origins.setdefault(sub_node.name, set()).add("test_local_helper")
 
         changed = True
         iterations = 0
