@@ -7,13 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.7.0] - 2026-11-14
+## [0.7.0] - 2026-11-16
 
-### Major Milestone: Stage 4〜Stage 7 Completion — OS-Level Sandboxing, Multi-LLM Audit Boundary, and Multi-Team Resilience (Phases 19 - 53)
+### Major Milestone: Stage 4〜Stage 7 Completion — OS-Level Sandboxing, Multi-LLM Audit Boundary, Live Claude Opus 5.5 Independent Audit, and Evidence Integrity (Phases 19 - 62)
 
-Auto Developer v0.7.0 delivers the full realization of Stages 4, 5, 6, and 7, establishing an industrial-grade multi-agent autonomous engineering platform under strict adversarial and fail-closed constraints.
+Auto Developer v0.7.0 delivers the full realization of Stages 4, 5, 6, and 7, establishing an industrial-grade multi-agent autonomous engineering platform under strict adversarial, fail-closed, and independent cross-model audit constraints.
 
 ### Added
+- **Live Cross-Model Independent Repository Audit (Stage 7 / Anthropic Claude Opus 5.5)**:
+  - **Live Messages API Integration**: Full production client calling Anthropic API with real provider request ID (`msg_...`) binding and cryptographic execution receipts.
+  - **Strict Fail-Closed Architecture**: Non-zero exit on API key absence, HTTP error, or network failure, forbidding silent fall-through to zero findings.
+  - **Audit Response Integrity & `stop_reason` Verification**: Detects `max_tokens` cutoffs and malformed outputs, halting safely as `AUDIT_PENDING` rather than falsely reporting zero defects.
+  - **Post-Audit Diff Integrity Verification**: Rejects bundles as `AUDIT_OUTDATED` if product source code (`src/**`, `scripts/**`) is modified between audit execution and final release packaging.
 - **OS-Level Sandboxing for Red-First Test Execution (`RedTestVerifier`)**:
   - **macOS `sandbox-exec` Default-Deny**: Enforced `(deny file-read*)` default policy combined with explicit read allowlists (`/usr/lib`, `/System`, system Python, isolated worktree) to prevent host secrets (`~/.ssh`, `~/.aws`, `.env`, keychains) from being accessed by candidate tests.
   - **Linux `bwrap` (Bubblewrap) Hardening**: Isolated mount namespace with complete network unsharing (`--unshare-net`), root filesystem isolation, and strict virtual environment boundary checks using `is_relative_to` to restrict host filesystem visibility.
@@ -21,6 +26,7 @@ Auto Developer v0.7.0 delivers the full realization of Stages 4, 5, 6, and 7, es
 - **Trivial & Fabricated Red Test Elimination (`TRIVIAL_RED`)**:
   - **Static AST Constant Inspection**: Detects unconditional assertion failures (e.g., `self.assertEqual(1, 2)`) before candidate test adoption.
   - **Dynamic Execution Tracing (`sys.settrace`)**: Verifies that candidate tests actually traverse production source code in stack frames during failure, rejecting detached or synthetic assertions.
+  - **AST Causal Dependency & Guard Validation**: Recognizes product calls across factory functions, `self` attribute fixtures, and guarded `try-except` blocks while strictly rejecting dead branches (`if False:`), uninvoked lambdas, and re-raising handlers.
 - **Independent Multi-LLM Cross-Family Audit Boundary (`AuditDispatcher` & `AuditStore`)**:
   - **Cross-Family Model Policy Enforcement**: Structurally forbids Maker and Auditor LLMs from sharing the same model family (e.g. Gemini Maker vs Claude Opus / GPT 6.1 Auditor), eliminating cognitive bias and sycophantic approval.
   - **Tamper-Evident Audit Invariant Store**: Structured `AuditFinding` persistence recording all audit findings, human handoff notes, and `REJECTED` invalid findings in the Evidence Store and Bundle.
@@ -31,7 +37,7 @@ Auto Developer v0.7.0 delivers the full realization of Stages 4, 5, 6, and 7, es
   - **PGID Process Tree Supervision**: Reliable group termination preventing orphan or detached sub-processes upon parent orchestrator exit.
   - **Zombie Process Disambiguation**: Deterministic start-time verification (`lstart`) preventing accidental signaling of recycled PIDs.
 - **Test Suite Expansion**:
-  - Expanded test coverage from 125 tests to **321 tests across 26 test suites**, maintaining 100% pass rate in `scripts/verify_local.sh`.
+  - Expanded test coverage from 125 tests to **471 tests**, maintaining 100% pass rate in `scripts/verify_local.sh`.
 
 ---
 

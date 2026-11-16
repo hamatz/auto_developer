@@ -423,7 +423,7 @@ auto_developer/
 │   ├── nightly-run/SKILL.md   # /nightly-run 自律パイプライン夜間実行
 │   ├── nightly-bundle/SKILL.md# /nightly-bundle 監査用 Evidence Bundle パッケージング
 │   └── nightly-verify/SKILL.md# /nightly-verify 独立第三者監査検証
-├── tests/                     # 包括的テストスイート（26 スイート / 321 tests）
+├── tests/                     # 包括的テストスイート（470+ tests）
 │   ├── immunity/              # 免疫テスト（改変不可の外部不変条件）
 │   ├── test_red_verifier.py   # OS サンドボックス & 偽陽性 Red 排除テスト
 │   ├── test_audit_*.py        # Multi-LLM 独立監査境界テスト
