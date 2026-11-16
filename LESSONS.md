@@ -21,6 +21,21 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-16] 外部LLM独立監査におけるP2モグラ叩きの底なし沼化と自律サイクルの終了判定 (Preventing Endless Audit Loops and Over-Engineering in LLM Static Verification)
+- Context: 外部 LLM（Claude Opus 5.5 / Anthropic API）による独立監査ステージ、`src/auto_developer/verifier.py`（AST による Red テスト因果関係・Trivial 判定器）、自律開発ループ終了判定。
+- Trap: 監査モデルが提示する構文上のエッジケース（P2: 未実行ラムダ、例外ハンドラ内の raise、ネスト関数、別名 import、dotted import 等）を1件ずつモグラ叩きで修正し続けた結果、開発の主眼が「重大欠陥の排除」から「完全な静的プログラム解析器の構築」という不可能な目標（Riceの定理）へ変質し、40サイクル以上にわたり開発が終了しなくなるエンドレスゲームに陥った（Sol氏 Phase 62 考察）。
+- Rule:
+  1. **監査の目的は「欠陥ゼロの証明」ではなく「重大欠陥の排除」である**: 完全な静的解析器を目指す方向には自然な終点がない。AI が正しいことをやり過ぎて全体として間違った行動（開発の停滞）に陥ることを防ぐ。
+  2. **重要度に基づくトリアージとリリース切り離し**:
+     - P0/P1（重大欠陥・安全性破綻・監査の Fail-Open・偽装）: 即時修正・リリース BLOCK。
+     - P2（限定条件での不具合・構文エッジケース）: Backlog に記録し、リリースを BLOCK しない。
+     - P3（改善提案・理論的懸念）: レポート通知のみ。
+  3. **自動修正回数の上限設定**: 1つの監査指摘に対する自動修正は最大3回、同一モジュールへの連続監査は最大5サイクルなど、明確な打ち切り・人間への引き渡し条件を設ける。
+  4. **監査システムの自己肥大化防止**: 監査で生まれたテスト判定器の改善そのものを、再び同じ監査モデルに無制限で監査させない。
+- Rung: 作り（P0/P1 と P2 のトリアージ境界、自動修正上限） & 関門（リリース判定条件の厳格化）
+- Immunity Test: `tests/immunity/` において、監査モデルが P2 を連続返却しても、自動修正上限を超えずに開発サイクルが正常終了し、残件が Backlog に引き継がれることを検証する免疫テスト。
+- Proof: Phase 62 において AUD-901 修正後、AUD-1001 (P2) をリリースをブロックしない Backlog として切り離し、v0.7.0 リリース判定（10/10 一致 Evidence Bundle）を完走。
+
 ### [2026-11-15] 条件分岐後の変数環境合流における不確定性の無視と静的解析の底なし沼化 (Ignoring Uncertainty in Control Flow Variable Merging and Static Analysis Scope Creep)
 - Context: `src/auto_developer/verifier.py` (`_process_stmts_in_order`, `check_trivial_red_ast`)
 - Trap: 分岐（`if`）内で再代入された変数（例: `x = 1; if compute_val(1) == 2: x = 2; self.assertEqual(x, 2)`）が、分岐後に合流（Merge）されず分岐前の古い固定値 `x = 1` のまま残っていたため、正常なテストを固定値不一致（`1 == 2`）の `TRIVIAL_RED` として誤拒絶した（Sol氏 Phase 55 P1指摘）。
