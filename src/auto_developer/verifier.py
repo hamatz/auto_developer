@@ -389,11 +389,12 @@ def _is_in_try_block_with_call(
 
 
 def _handler_body_exits(stmts: list[ast.stmt]) -> bool:
-    """except ハンドラの直接の文列が脱出 (return/raise) するかを判定する (機能OOO.2 / AUD-003 Cycle 32)。
+    """except ハンドラの直接の文列が正常脱出 (return) するかを判定する (機能OOO.2 / AUD-003 Cycle 32 / AUD-801)。
     nested def/lambda 内の return や dead branch (if False: return) による偽装脱出を排除する。
+    なお、raise による再送出はテストを ERROR にするため、後続の self.fail() を救済する正常脱出としては認めない (AUD-801)。
     """
     for stmt in stmts:
-        if isinstance(stmt, (ast.Return, ast.Raise)):
+        if isinstance(stmt, ast.Return):
             return True
         if isinstance(stmt, ast.If):
             is_const, val = _eval_constant_expr(stmt.test)

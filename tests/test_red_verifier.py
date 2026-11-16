@@ -1684,6 +1684,25 @@ class T(unittest.TestCase):
         is_trivial, msg = check_trivial_red_ast(code)
         self.assertFalse(is_trivial, f"assertion on product result via factory helper rejected as trivial: {msg}")
 
+    def test_fail_after_reraising_handler_is_trivial(self) -> None:
+        """AUD-801: except ハンドラ内で raise (再送出) して異常終了する直後の self.fail() は Green になり得ないため Trivial Red として拒絶されること。"""
+        from auto_developer.verifier import check_trivial_red_ast
+
+        code = '''import unittest
+from auto_developer.audit import IndependentAuditRunner
+
+class T(unittest.TestCase):
+    def test_case(self):
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+        try:
+            runner.parse_response("[]")
+        except Exception:
+            raise
+        self.fail("can never pass: either errors or fails")
+'''
+        is_trivial, _msg = check_trivial_red_ast(code)
+        self.assertTrue(is_trivial, "self.fail() after a re-raising handler can never be Green but was accepted as genuine")
+
     def test_rejects_trivial_red_immediate_fail(self) -> None:
         """機能MMM.3: self.fail() を直接呼び出すプロダクト非呼出テストは TRIVIAL_RED として拒絶されること。"""
         code = """import unittest
