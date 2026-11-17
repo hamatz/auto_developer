@@ -544,7 +544,7 @@ class TestUntrackedTamper(unittest.TestCase):
             # 1. 構文不正
             AuditFinding(
                 finding_id="BATCH-ERR-001",
-                severity="P2",
+                severity="P1",
                 spec_reference="SPEC.md",
                 location="src/calc.py:1",
                 description="Malformed syntax finding",
@@ -554,7 +554,7 @@ class TestUntrackedTamper(unittest.TestCase):
             # 2. 偽陽性 (最初からPassするテスト)
             AuditFinding(
                 finding_id="BATCH-PASS-002",
-                severity="P2",
+                severity="P1",
                 spec_reference="SPEC.md",
                 location="src/calc.py:5",
                 description="Already passing finding",

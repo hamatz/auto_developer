@@ -68,7 +68,7 @@ class T(unittest.TestCase):
         """機能CCC.3.1: 偽Red（成功するテストや構文エラー）はREJECTEDとなり、PLAN.mdは改変されないこと。"""
         passing_finding = AuditFinding(
             finding_id="FINDING-PASS",
-            severity="P2",
+            severity="P1",
             spec_reference="SPEC.md",
             location="app.py",
             description="Already passing dummy test",
@@ -188,7 +188,7 @@ class T(unittest.TestCase):
             # 2. 偽陽性 (Already green / pass)
             AuditFinding(
                 finding_id="HOSTILE-PASS-002",
-                severity="P2",
+                severity="P1",
                 spec_reference="SPEC.md",
                 location="app.py:5",
                 description="Passing test",
@@ -292,7 +292,7 @@ class FakeTest(unittest.TestCase):
 
         new_finding = AuditFinding(
             finding_id="AUD-002",
-            severity="P2",
+            severity="P1",
             spec_reference="SPEC.md MMM.3",
             location="src/target_pkg.py:1",
             description="Brand new defect in target_pkg",
@@ -340,6 +340,93 @@ class T(unittest.TestCase):
         content = self.plan_path.read_text(encoding="utf-8")
         self.assertEqual(res.status, "DISPATCHED")
         self.assertIn("[AUD-099]", content, "genuine finding was marked DISPATCHED but never written to PLAN.md")
+
+    def test_feature_www_0_prompt_includes_severity_definitions(self) -> None:
+        """機能WWW.0: IndependentAuditRunner.DEFAULT_PROMPT_TEMPLATE に重要度定義が原文のまま埋め込まれていること。"""
+        from auto_developer.audit import IndependentAuditRunner
+
+        prompt = IndependentAuditRunner.DEFAULT_PROMPT_TEMPLATE
+        self.assertIn("P0: データ消失、機密の漏洩、証跡（Evidence / Bundle）の偽装・改ざんの見逃し、保護ファイル防壁のバイパス。", prompt)
+        self.assertIn("P1: 安全ゲート（検証・監査・Red 判定・Checker 判定）が Fail-Open になる経路、通常利用の主経路での仕様違反・誤った結果。", prompt)
+        self.assertIn("P2: 限定的な条件・構文上のエッジケースでのみ起きる誤判定（偽陽性・偽陰性）、ヒューリスティクスの精度不足。", prompt)
+        self.assertIn("INFO: 改善提案・理論的懸念・可読性。", prompt)
+        self.assertIn("判定に迷う場合は低い方を付ける（P1 か P2 か迷うなら P2）。", prompt)
+
+    def test_feature_www_1_valid_statuses_extended(self) -> None:
+        """機能WWW.1: VALID_STATUSES に BACKLOGGED, NOTED, ESCALATED が含まれること。"""
+        from auto_developer.audit import VALID_STATUSES
+
+        self.assertIn("BACKLOGGED", VALID_STATUSES)
+        self.assertIn("NOTED", VALID_STATUSES)
+        self.assertIn("ESCALATED", VALID_STATUSES)
+
+    def test_feature_www_1_p2_finding_routed_to_backlog(self) -> None:
+        """機能WWW.1: P2 指摘は Red 検証を行わず BACKLOG.md に追記され、status が BACKLOGGED となること。"""
+        backlog_path = self.repo_dir / "BACKLOG.md"
+        if backlog_path.exists():
+            backlog_path.unlink()
+
+        # 敢えて実行不可な（構文不正な）テストコードを指定し、Red検証がスキップされることを確認する
+        p2_finding = AuditFinding(
+            finding_id="AUD-P2-001",
+            severity="P2",
+            spec_reference="SPEC.md WWW.1",
+            location="src/foo.py:42",
+            description="Minor edge case misbehavior",
+            reproduction_test_code="def broken_syntax(:",
+            target_commit="c0ffee1234",
+        )
+
+        res = self.dispatcher.dispatch_finding(p2_finding, plan_path=self.plan_path)
+        self.assertEqual(res.status, "BACKLOGGED")
+
+        # PLAN.md には書かれないこと
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        self.assertNotIn("AUD-P2-001", plan_content)
+
+        # BACKLOG.md に追記されていること
+        self.assertTrue(backlog_path.exists())
+        backlog_content = backlog_path.read_text(encoding="utf-8")
+        self.assertTrue(backlog_content.startswith("# BACKLOG.md"))
+        expected_line = "- [AUD-P2-001] Minor edge case misbehavior (Severity: P2, Loc: src/foo.py:42, Cycle: c0ffee1234)"
+        self.assertIn(expected_line, backlog_content)
+        # チェックボックスを持たないこと
+        self.assertNotIn("- [ ]", backlog_content)
+
+        # 冪等性: 同一 finding_id を再度 dispatch しても二重追記されないこと
+        self.dispatcher.dispatch_finding(p2_finding, plan_path=self.plan_path)
+        lines = [line for line in backlog_path.read_text(encoding="utf-8").splitlines() if "[AUD-P2-001]" in line]
+        self.assertEqual(len(lines), 1)
+
+    def test_feature_www_1_info_finding_routed_to_audit_store_only(self) -> None:
+        """機能WWW.1: INFO 指摘は PLAN.md も BACKLOG.md も書き換えず AuditStore にのみ保存され、status が NOTED となること。"""
+        backlog_path = self.repo_dir / "BACKLOG.md"
+        if backlog_path.exists():
+            backlog_path.unlink()
+
+        info_finding = AuditFinding(
+            finding_id="AUD-INFO-001",
+            severity="INFO",
+            spec_reference="SPEC.md WWW.1",
+            location="src/bar.py:10",
+            description="Code clarity suggestion",
+            reproduction_test_code="def broken(:",
+        )
+
+        res = self.dispatcher.dispatch_finding(info_finding, plan_path=self.plan_path)
+        self.assertEqual(res.status, "NOTED")
+
+        # PLAN.md と BACKLOG.md には一切書かれないこと
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        self.assertNotIn("AUD-INFO-001", plan_content)
+        if backlog_path.exists():
+            self.assertNotIn("AUD-INFO-001", backlog_path.read_text(encoding="utf-8"))
+
+        # AuditStore に保存されていること
+        saved = self.dispatcher.audit_store.get_finding("AUD-INFO-001")
+        self.assertIsNotNone(saved)
+        assert saved is not None
+        self.assertEqual(saved.status, "NOTED")
 
 
 if __name__ == "__main__":

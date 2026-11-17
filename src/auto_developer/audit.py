@@ -6,7 +6,16 @@ from typing import Any
 
 VALID_SEVERITIES: frozenset[str] = frozenset({"P0", "P1", "P2", "INFO"})
 VALID_STATUSES: frozenset[str] = frozenset(
-    {"REPORTED", "VERIFIED_RED", "DISPATCHED", "RESOLVED", "REJECTED"}
+    {
+        "REPORTED",
+        "VERIFIED_RED",
+        "DISPATCHED",
+        "RESOLVED",
+        "REJECTED",
+        "BACKLOGGED",
+        "NOTED",
+        "ESCALATED",
+    }
 )
 
 
@@ -217,6 +226,12 @@ class IndependentAuditRunner:
         "Review the following SPEC.md and git diff according to AGENTS.md rules.\n"
         "Your role is critical audit only: identify any bugs, specification deviations, or unmitigated risks.\n"
         "For each issue found, provide a concrete Python unittest reproduction test that genuinely reproduces the bug.\n\n"
+        "--- SEVERITY DEFINITIONS ---\n"
+        "- P0: データ消失、機密の漏洩、証跡（Evidence / Bundle）の偽装・改ざんの見逃し、保護ファイル防壁のバイパス。\n"
+        "- P1: 安全ゲート（検証・監査・Red 判定・Checker 判定）が Fail-Open になる経路、通常利用の主経路での仕様違反・誤った結果。\n"
+        "- P2: 限定的な条件・構文上のエッジケースでのみ起きる誤判定（偽陽性・偽陰性）、ヒューリスティクスの精度不足。\n"
+        "- INFO: 改善提案・理論的懸念・可読性。\n"
+        "判定に迷う場合は低い方を付ける（P1 か P2 か迷うなら P2）。\n\n"
         "--- SPEC.md ---\n{spec_content}\n\n"
         "--- GIT DIFF ---\n{git_diff}\n\n"
         "--- OUTPUT FORMAT ---\n"

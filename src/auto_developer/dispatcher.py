@@ -129,8 +129,39 @@ class AuditDispatcher:
         self,
         finding: AuditFinding,
         plan_path: Path | str | None = None,
+        cycle_id: str | None = None,
     ) -> AuditFinding:
-        """単一の AuditFinding を検証し、GENUINE_RED であれば PLAN.md に修正タスクを登録する。"""
+        """単一の AuditFinding を重要度トリアージし、適切な経路に振り分ける (WWW.1)。"""
+        sev = (finding.severity or "P2").strip().upper()
+        effective_cycle_id = cycle_id or finding.target_commit or self._get_head_commit_sha()
+
+        # 1. INFO: どこにも書かず AuditStore にのみ保存する (status NOTED)
+        if sev == "INFO":
+            finding.status = "NOTED"
+            self.audit_store.save_finding(finding)
+            return finding
+
+        # 2. P2: Red 検証を行わず BACKLOG.md に 1 行追記する (status BACKLOGGED)
+        if sev == "P2":
+            finding.status = "BACKLOGGED"
+            backlog_path = self.repo_dir / "BACKLOG.md"
+            if not backlog_path.exists():
+                backlog_path.write_text("# BACKLOG.md\n\n", encoding="utf-8")
+
+            backlog_content = backlog_path.read_text(encoding="utf-8")
+            fid = finding.finding_id if finding.finding_id.startswith("AUD-") else f"AUD-{finding.finding_id}"
+
+            # 同一 finding_id が既に存在する場合は追記しない（冪等）
+            if f"[{fid}]" not in backlog_content and f"[{finding.finding_id}]" not in backlog_content:
+                backlog_line = f"- [{fid}] {finding.description} (Severity: P2, Loc: {finding.location}, Cycle: {effective_cycle_id})"
+                if not backlog_content.endswith("\n"):
+                    backlog_content += "\n"
+                backlog_path.write_text(backlog_content + backlog_line + "\n", encoding="utf-8")
+
+            self.audit_store.save_finding(finding)
+            return finding
+
+        # 3. P0 / P1: 従来どおり RedTestVerifier で検証し、GENUINE_RED のみ PLAN.md に登録する
         target_plan = Path(plan_path) if plan_path else self.repo_dir / "PLAN.md"
 
         # 1. 再現テストコードの Red 検証
@@ -226,11 +257,20 @@ class AuditDispatcher:
         self,
         findings: list[AuditFinding],
         plan_path: Path | str | None = None,
+        cycle_id: str | None = None,
     ) -> list[AuditFinding]:
         """複数の AuditFinding を処理し、正常に登録 (DISPATCHED) された指摘のリストを返す。"""
+        if cycle_id is None:
+            first_target = findings[0].target_commit if findings else None
+            effective_cycle_id = first_target or self._get_head_commit_sha()
+        else:
+            effective_cycle_id = cycle_id
+
         dispatched: list[AuditFinding] = []
         for finding in findings:
-            res = self.dispatch_finding(finding, plan_path=plan_path)
+            res = self.dispatch_finding(
+                finding, plan_path=plan_path, cycle_id=effective_cycle_id
+            )
             if res.status == "DISPATCHED":
                 dispatched.append(res)
         return dispatched
