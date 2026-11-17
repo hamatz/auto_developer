@@ -14,7 +14,7 @@
 - AUD-1001（P2）は本フェーズの方針に従い PLAN から BACKLOG.md へ移した。本フェーズでは着手しない。
 
 ## 作業手順（Phase 63・LESSONS.md 2026-11-15 の教訓に基づく）
-- Maker と Checker は別系統のモデルにする（AGENTS.md Rule 6）。Maker が Gemini 系のとき、Checker サブエージェントは `Model: "pro"` を明示指定する。`inherit` は使わない。commit-step の `--checker-reason` に Checker のモデル指定を書く。
+- Maker と Checker は別系統のモデルにする（AGENTS.md Rule 6）。Maker が Gemini 系のとき、Checker は異系統の Claude Opus 5.5（swarm にて model: "claude-opus-5-5-medium"）を明示指定して実行する。commit-step の `--checker-reason` に Checker のモデル指定（claude-opus-5.5）を書く。
 - Checker への入力は要約・再構成しない。以下をファイルに書き出し、Checker にはそのパスを渡して直接読ませる:
   1. `awk '/^- \[ \] 機能WWW/,/^## 3\./' SPEC.md > .dev/checker/spec_www.md`
   2. `git add -N . && git diff <checkpoint> > .dev/checker/diff_task<n>.patch`（未追跡ファイルも差分に含める）
