@@ -32,7 +32,7 @@
 - 上記以外の既存テストは変更しない。免疫テスト（`tests/immunity/**`）は変更しない（本フェーズの免疫テスト草案は `docs/proposals/phase63/` にあり、完了後に人間が配置する）。
 
 ## ステップ
-- [ ] 1. Checker 判定のテキスト・フォールバックを Fail-Closed にする（部分文字列 PASS による承認の廃止、判定行の一意性要求）（Red-First）（WWW.4）
+- [x] 1. Checker 判定のテキスト・フォールバックを Fail-Closed にする（部分文字列 PASS による承認の廃止、判定行の一意性要求）（Red-First）（WWW.4）
 - [ ] 2. 重要度トリアージ: P2 → BACKLOG.md（Red 検証なし）、INFO → AuditStore のみ、P0/P1 → 従来経路。VALID_STATUSES 拡張と監査プロンプトへの重要度定義の埋め込み（Red-First）（WWW.0 / WWW.1）
 - [ ] 3. 修正予算: process_findings を監査サイクルの正規入口にし、モジュール単位の連続サイクル上限と ESCALATED 引き渡しを実装（Red-First）（WWW.2）
 - [ ] 4. リリース判定の分離: find_release_blockers と verify_bundle の RELEASE_BLOCKED、Bundle への BACKLOG.md 同梱と backlog_count（Red-First）（WWW.3）

@@ -388,7 +388,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         # 2. CommandRunnerAdapter (bash -c でシミュレート)
         cmd_runner = CommandRunnerAdapter(
             maker_cmd_template="echo 'Making task {task_id}'",
-            checker_cmd_template="echo 'APPROVE: Looks solid'",
+            checker_cmd_template="printf 'DECISION: APPROVE\\nLooks solid\\n'",
         )
         code, out = cmd_runner.run_maker(task, context={})
         self.assertEqual(code, 0)
@@ -730,7 +730,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
             # 4. 外部アプリ内で auto-dev run を実行（外部Makerコマンドを指定）
             python_bin = sys.executable
             maker_code = f'{python_bin} -c "open(\'module.py\', \'w\').write(\'def ok(): return True\\n\')"'
-            checker_code = 'echo "APPROVE: Looks good"'
+            checker_code = 'printf "DECISION: APPROVE\\nLooks good\\n"'
 
             proc_run = subprocess.run(
                 [
@@ -998,6 +998,65 @@ class TestNightlyOrchestrator(unittest.TestCase):
         approved2, expl2 = runner_reject.run_checker(task, diff="diff", spec_content="spec")
         self.assertFalse(approved2)
         self.assertIn("Missing tests", expl2)
+
+    def test_feature_www_4_checker_fail_closed_text_fallback(self):
+        """機能WWW.4: Checker のテキスト判定で PASS による承認を廃止し、判定行の一意性を要求すること。"""
+        task = Task("1", "テストタスク", 1, False, False)
+
+        # 1. 'tests did not pass' は部分一致 PASS で承認されてはならず、Fail-Closed (REJECT) となること
+        runner_did_not_pass = CommandRunnerAdapter(
+            checker_cmd_template="echo 'The tests did not pass in this commit'",
+        )
+        approved, _ = runner_did_not_pass.run_checker(task, diff="diff", spec_content="spec")
+        self.assertFalse(approved, f"'tests did not pass' must not be approved! Got: {approved}")
+
+        # 2. 'BYPASS' も部分一致 PASS で承認されてはならない
+        runner_bypass = CommandRunnerAdapter(
+            checker_cmd_template="echo 'Attempting to BYPASS verification'",
+        )
+        approved, _ = runner_bypass.run_checker(task, diff="diff", spec_content="spec")
+        self.assertFalse(approved, f"'BYPASS' must not be approved! Got: {approved}")
+
+        # 3. 単なる 'PASS' も廃止され判定行がないため不承認
+        runner_pass = CommandRunnerAdapter(
+            checker_cmd_template="echo 'PASS'",
+        )
+        approved, _ = runner_pass.run_checker(task, diff="diff", spec_content="spec")
+        self.assertFalse(approved, f"'PASS' alone must not be approved (requires APPROVE/REJECT)! Got: {approved}")
+
+        # 4. 単独の APPROVE または DECISION: APPROVE 行（大文字小文字無視、前後空白許容）は承認
+        runner_approve = CommandRunnerAdapter(
+            checker_cmd_template="printf 'Detailed explanation\\n  DECISION: APPROVE  \\nLGTM\\n'",
+        )
+        approved, _ = runner_approve.run_checker(task, diff="diff", spec_content="spec")
+        self.assertTrue(approved, f"DECISION: APPROVE line must be approved! Got: {approved}")
+
+        runner_approve_plain = CommandRunnerAdapter(
+            checker_cmd_template="printf 'approve\\nlooks great\\n'",
+        )
+        approved, _ = runner_approve_plain.run_checker(task, diff="diff", spec_content="spec")
+        self.assertTrue(approved, f"plain 'approve' line must be approved! Got: {approved}")
+
+        # 5. 単独の REJECT または DECISION: REJECT 行は不承認
+        runner_reject = CommandRunnerAdapter(
+            checker_cmd_template="printf 'DECISION: REJECT\\nFound issues\\n'",
+        )
+        approved, _ = runner_reject.run_checker(task, diff="diff", spec_content="spec")
+        self.assertFalse(approved, f"DECISION: REJECT must not be approved! Got: {approved}")
+
+        # 6. APPROVE と REJECT の両方の判定行が含まれる場合は不承認 (Fail-Closed)
+        runner_both = CommandRunnerAdapter(
+            checker_cmd_template="printf 'DECISION: APPROVE\\nDECISION: REJECT\\n'",
+        )
+        approved, _ = runner_both.run_checker(task, diff="diff", spec_content="spec")
+        self.assertFalse(approved, f"Both APPROVE and REJECT lines must be unapproved! Got: {approved}")
+
+        # 7. 判定行が 0 件（曖昧な散文のみ）の場合は不承認 (Fail-Closed)
+        runner_prose = CommandRunnerAdapter(
+            checker_cmd_template="echo 'Everything looks okay but no decision line'",
+        )
+        approved, _ = runner_prose.run_checker(task, diff="diff", spec_content="spec")
+        self.assertFalse(approved, f"Prose without decision line must be unapproved! Got: {approved}")
 
     def test_feature_l_cannot_resume_completed_or_failed_job(self):
         """機能L-1: 既に COMPLETED または FAILED な JobState を --resume した場合に再開を拒否すること。"""
