@@ -738,6 +738,45 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 最新の実装コミットに対し、本物の Claude Opus 5.5（Anthropic Messages API）による独立監査を実行（`stop_reason: "end_turn"`、実 `provider_request_id` を拘束）。
      - 4 タスク + 監査ステージの整合性を完全検証した最終 Evidence Bundle ZIP（10/10 一致）を生成し、v0.7.0 正式リリースを確定する。
 
+- [ ] 機能WWW (監査サイクルの終了保証: 重要度トリアージ・修正予算・リリース判定の分離 Audit Loop Termination Guarantee: Severity Triage, Fix Budget, and Release Gate Separation):
+  <!-- 起点: LESSONS.md 2026-11-16「P2モグラ叩きの底なし沼化」。教訓の Rule を文章ではなく作り・関門に置く。 -->
+  0. 重要度の定義（監査役・dispatcher・リリース判定が共有する物差し）:
+     - P0: データ消失、機密の漏洩、証跡（Evidence / Bundle）の偽装・改ざんの見逃し、保護ファイル防壁のバイパス。
+     - P1: 安全ゲート（検証・監査・Red 判定・Checker 判定）が Fail-Open になる経路、通常利用の主経路での仕様違反・誤った結果。
+     - P2: 限定的な条件・構文上のエッジケースでのみ起きる誤判定（偽陽性・偽陰性）、ヒューリスティクスの精度不足。
+     - INFO: 改善提案・理論的懸念・可読性。
+     - 判定に迷う場合は低い方を付ける（P1 か P2 か迷うなら P2）。この定義は監査プロンプト（`IndependentAuditRunner.DEFAULT_PROMPT_TEMPLATE`）に原文のまま埋め込む。
+  1. 重要度トリアージ (WWW.1):
+     - `AuditDispatcher.dispatch_finding()` は severity に応じて経路を分ける。
+       - P0 / P1: 従来どおり `RedTestVerifier` で検証し、`GENUINE_RED` のみ PLAN.md の「## ステップ」に `- [ ] AUD-<id>. Fix: ...` として登録する（status `DISPATCHED`）。
+       - P2: Red 検証を行わず（`verify_candidate_test` を呼ばない）、リポジトリ直下の `BACKLOG.md` に 1 行追記する（status `BACKLOGGED`）。PLAN.md には書かない。
+       - INFO: どこにも書かず AuditStore にのみ保存する（status `NOTED`）。
+     - `VALID_STATUSES` に `BACKLOGGED`, `NOTED`, `ESCALATED` を追加する。
+     - `BACKLOG.md` の行書式: `- [AUD-<id>] <description> (Severity: P2, Loc: <location>, Cycle: <cycle_id>)`。同一 finding_id が既に存在する場合は追記しない（冪等）。ファイルがなければ見出し `# BACKLOG.md` 付きで作成する。
+     - `BACKLOG.md` の行はチェックボックスを持たない（`TaskDispatcher` が Maker タスクとして拾わないこと）。
+  2. 修正予算（モジュール単位の連続サイクル上限）(WWW.2):
+     - `AuditDispatcher.__init__` に `max_consecutive_cycles: int = 5` を追加する。
+     - `AuditDispatcher.process_findings(findings, plan_path=None, cycle_id=None)` を 1 回の監査サイクルの正規入口とする。`cycle_id` 省略時は先頭 finding の `target_commit`、それもなければ HEAD SHA を使う。`IndependentAuditRunner.screen_and_dispatch_findings()` はこの入口を経由する。
+     - モジュールキー: `location` 先頭の空白・`:`・`(` までのトークン（例: `src/auto_developer/verifier.py:166` → `src/auto_developer/verifier.py`）。取れなければ `UNKNOWN`。
+     - 台帳 `.dev/audit/budget.json` にモジュールごとの `streak`（連続して P0/P1 を登録したサイクル数）と `last_cycle_id` を保存する。
+     - サイクル処理の規則:
+       - そのサイクルで `GENUINE_RED` となった P0/P1 があるモジュールについて、処理前の `streak >= max_consecutive_cycles` なら、そのモジュールの当該 finding はすべて PLAN の「## ステップ」に登録せず status `ESCALATED` とし、PLAN.md の「## 止まっていること・判断待ち」節に `- ESCALATED [AUD-<id>] <description> (Severity: <sev>, Loc: <location>, Streak: <n>)` を追記する（チェックボックスなし）。上限未満なら登録し、`streak` を 1 増やす（1 サイクルにつき 1 回）。
+       - そのサイクルで P0/P1 の登録がなかったモジュールは `streak` を 0 に戻す。
+       - P2 / INFO / REJECTED は `streak` に数えない。
+       - 同じ `cycle_id` を 2 回処理しても `streak` は二重に増えない（冪等）。
+     - 台帳のリセットは人間が `.dev/audit/budget.json` の該当エントリを削除して行う（CLI はスコープ外）。
+  3. リリース判定の分離 (WWW.3):
+     - `auto_developer.bundler` にモジュール関数 `find_release_blockers(plan_text: str) -> list[str]` を追加する。未完了の `- [ ]` 行のうち `(Severity: P0` または `(Severity: P1` を含む行、および `- ESCALATED` 行を返す。P2 は返さない。
+     - `EvidenceBundler.verify_bundle()` は Bundle 内の PLAN.md に対しこれを適用し、1 件以上あれば `RELEASE_BLOCKED:` で始まるエラーとして不合格にする。
+     - Bundle には `BACKLOG.md`（存在する場合）を含め、manifest に `backlog_count` を記録する。P2 の残件はリリースを止めない。
+  4. Checker 判定のテキスト・フォールバックの Fail-Closed 化 (WWW.4):
+     - `CommandRunnerAdapter.run_checker()` のテキスト判定で、部分文字列 `PASS` による承認を廃止する（"tests did not pass" や "BYPASS" で APPROVE になる欠陥）。
+     - 構造化 JSON が得られない場合は、出力中に行単位の判定行（正規表現 `^\s*(?:DECISION:\s*)?(APPROVE|REJECT)\s*$`、大文字小文字無視）がちょうど 1 種類だけ存在するときに限りそれに従う。0 件、または APPROVE と REJECT が両方ある場合は不承認とする。
+  5. Morning Brief への反映 (WWW.5):
+     - `MorningReporter` は監査ステージの結果として、登録（DISPATCHED）・Backlog 送り（BACKLOGGED）・エスカレーション（ESCALATED）の件数を分けて表示する。
+     - ESCALATED が 1 件以上あれば「あなたに判断してほしいこと」節にモジュール名・streak・該当 finding を列挙する。
+  - スコープ外（WWW）: 監査器（`verifier.py` / `audit.py`）自身の変更を監査対象から外す等のメタ監査制限、予算リセット CLI、重要度の自動降格判定。必要になれば BACKLOG.md に積む。
+
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
 - スコープ外: 複数Workerの同時並行Git編集 / 仕様（SPEC.md）の自己改変 / タスクの憶測スキップと継続 / クラウド分散実行 / 外部DB
@@ -749,6 +788,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
 1. データ整合性・クリーン復元: 障害ロールバック時に未追跡ファイル・ゴミスクリプト含めて直前の成功コミットまで完全に巻き戻され、作業ツリーを一切汚染しないこと（`git clean -fd` 必須）。
 2. 境界値・安全停止 (Strict Fail-Fast): 2回連続失敗時は推測で後続タスクに進まず直ちにパイプラインを安全停止し、状況を記録すること（AGENTS.md Rule 5 の機械的強制）。
 3. 保護アセット不変: `.github/**`, `SPEC.md`, `scripts/verify_local.sh`, 免疫テストの無断改変を検証実行前に物理遮断すること。
+4. 監査サイクルの終了保証: 監査役が指摘を返し続けても、P2 以下は PLAN.md の実行タスクにならず、同一モジュールへの P0/P1 自動登録は連続 `max_consecutive_cycles` サイクルで打ち切られ人間に引き渡されること（機能WWW）。
 
 ## 5. 完了定義 (Definition of Done)
 - `bash scripts/verify_local.sh` がすべて成功（Exit 0）していること。
