@@ -156,7 +156,7 @@ class TestImmunityAuditLoopTermination(unittest.TestCase):
 
 class TestImmunityCheckerTextFallbackFailClosed(unittest.TestCase):
     def _decide(self, text: str) -> bool:
-        adapter = CommandRunnerAdapter(checker_cmd_template=f"printf '%s\\n' {text!r}", timeout_sec=30)
+        adapter = CommandRunnerAdapter(checker_cmd_template=f"printf '%b\\n' {text!r}", timeout_sec=30)
         approved, _ = adapter.run_checker(task=_task(), diff="", spec_content="")
         return approved
 
