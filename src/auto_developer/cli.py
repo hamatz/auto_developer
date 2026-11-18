@@ -275,6 +275,10 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.add_parser("brief", help="Display morning brief of recent execution")
     subparsers.add_parser("morning-brief", help="Alias for brief")
 
+    # Subcommand: report
+    report_parser = subparsers.add_parser("report", help="Generate or refresh NIGHTLY_REPORT.md from git, PLAN.md, and evidence")
+    report_parser.add_argument("--out", type=Path, default=None, help="Output markdown path")
+
     # Subcommand: pre-flight
     subparsers.add_parser("pre-flight", help="Check clean working tree and print next pending task")
 
@@ -690,6 +694,16 @@ def main(argv: list[str] | None = None) -> int:
             print(metrics.format_metrics_report(result))
         return 0
 
+    elif args.subcommand == "report":
+        out_p = args.out or report_path
+        gen_p = reporter.generate_standalone_report(
+            report_path=out_p,
+            repo_dir=work_dir,
+            plan_path=plan_path,
+        )
+        print(f"REPORT GENERATED: {gen_p}")
+        return 0
+
     elif args.subcommand in ("brief", "morning-brief"):
         if state_file.exists():
             state = JobState.load(state_file)
@@ -702,14 +716,31 @@ def main(argv: list[str] | None = None) -> int:
                 "completed_tasks": state.completed_tasks,
                 "quarantined_task": state.quarantined_task,
             }
+            try:
+                reporter.write_report(report_path, summary, repo_dir=work_dir)
+            except Exception as e:  # noqa: BLE001
+                print(f"REPORT_WARNING: Failed to write report from job_state: {e}", file=sys.stderr)
             print(reporter.format_console_brief(summary))
             return 0
-        elif report_path.exists():
-            print(report_path.read_text(encoding="utf-8"))
-            return 0
         else:
-            print("No execution state or report found. Have you run the orchestrator yet?", file=sys.stderr)
-            return 1
+            try:
+                gen_p = reporter.generate_standalone_report(
+                    report_path=report_path,
+                    repo_dir=work_dir,
+                    plan_path=plan_path,
+                )
+                if gen_p.exists():
+                    print(gen_p.read_text(encoding="utf-8"))
+                    return 0
+            except Exception as e:  # noqa: BLE001
+                print(f"REPORT_WARNING: Failed to generate standalone report: {e}", file=sys.stderr)
+
+            if report_path.exists():
+                print(report_path.read_text(encoding="utf-8"))
+                return 0
+            else:
+                print("No execution state or report found. Have you run the orchestrator yet?", file=sys.stderr)
+                return 1
 
     elif args.subcommand == "recover":
         from auto_developer.recovery import RecoveryEngine
@@ -772,6 +803,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if rec_result.success else 1
 
     elif args.subcommand == "bundle":
+        try:
+            reporter.generate_standalone_report(
+                report_path=report_path,
+                repo_dir=work_dir,
+                plan_path=plan_path,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"REPORT_WARNING: Failed to refresh report before bundle: {e}", file=sys.stderr)
+
         bundler = EvidenceBundler(repo_dir=work_dir)
         out_path = bundler.create_bundle(dest_path=args.out, job_id=args.job_id)
         print(f"BUNDLE CREATED: {out_path}")

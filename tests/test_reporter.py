@@ -319,5 +319,196 @@ class TestMorningReporterEvidenceVerification(unittest.TestCase):
         self.assertIn("- **不正/偽Red排除数**: 1 件", content)
 
 
+class TestStandaloneReportGeneration(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmpdir.name)
+
+        # Git リポジトリ初期化
+        subprocess.run(["git", "init"], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=self.repo, check=True)
+
+        (self.repo / "README.md").write_text("# Test Repo\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=self.repo, check=True)
+
+        self.records_dir = self.repo / ".git" / "nightly_evidence" / "records"
+        self.records_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_generate_standalone_report_from_plan_and_evidence(self):
+        """job_state.json がない環境でも PLAN.md、HEAD、evidence records から完全なレポートが生成されること (YYY.2)。"""
+        # PLAN.md を作成
+        plan_content = """# PLAN.md
+## 現在の目標
+- Phase 65: Test Phase
+
+## ステップ
+- [x] 1. First Task (YYY.1)
+- [ ] 2. Second Task (YYY.2)
+"""
+        (self.repo / "PLAN.md").write_text(plan_content, encoding="utf-8")
+        subprocess.run(["git", "add", "PLAN.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: complete task 1 [refs: 1]"], cwd=self.repo, check=True)
+
+        res_tree = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo, capture_output=True, text=True, check=True)
+        head_tree = res_tree.stdout.strip()
+        res_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True)
+        head_commit = res_head.stdout.strip()
+
+        # Evidence record を作成
+        (self.records_dir / "task_1.json").write_text(
+            json.dumps({
+                "task_id": "1",
+                "checkpoint": "chk1",
+                "tree_sha": head_tree,
+                "status": "COMPLETED",
+                "checker": {"decision": "APPROVE", "reason": "All good", "model": "claude-opus-5.5"},
+                "commit": {"tree_sha": head_tree, "sha": head_commit},
+            }),
+            encoding="utf-8",
+        )
+
+        reporter = MorningReporter(repo_dir=self.repo)
+        report_path = self.repo / "NIGHTLY_REPORT.md"
+        generated_path = reporter.generate_standalone_report(report_path=report_path, repo_dir=self.repo)
+
+        self.assertEqual(generated_path, report_path)
+        self.assertTrue(report_path.is_file())
+        content = report_path.read_text(encoding="utf-8")
+
+        # レポート内容の検証
+        self.assertIn(head_commit, content)
+        self.assertIn("1 / 2** 完了", content)
+        self.assertIn("IN_PROGRESS", content)
+        self.assertIn("`task-1`", content)
+        self.assertIn("First Task", content)
+        self.assertIn("APPROVE (Verified)", content)
+
+    def test_cli_report_subcommand(self):
+        """auto-dev report によりスタンドアロンレポートが正常に生成されること (YYY.2)。"""
+        from auto_developer.cli import main
+
+        # PLAN.md 作成
+        (self.repo / "PLAN.md").write_text("# PLAN\n## ステップ\n- [x] 1. Done task\n", encoding="utf-8")
+        subprocess.run(["git", "add", "PLAN.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "task 1"], cwd=self.repo, check=True)
+
+        report_target = self.repo / "custom_report.md"
+        ret = main(["--work-dir", str(self.repo), "report", "--out", str(report_target)])
+        self.assertEqual(ret, 0)
+        self.assertTrue(report_target.is_file())
+        self.assertIn("Done task", report_target.read_text(encoding="utf-8"))
+
+    def test_cli_brief_auto_generates_when_no_job_state(self):
+        """job_state.json がない場合でも auto-dev brief が最新 HEAD からレポートを生成・表示すること (YYY.2)。"""
+        import io
+        from unittest.mock import patch
+
+        from auto_developer.cli import main
+
+        (self.repo / "PLAN.md").write_text("# PLAN\n## ステップ\n- [x] 1. Auto brief task\n", encoding="utf-8")
+        subprocess.run(["git", "add", "PLAN.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "task 1"], cwd=self.repo, check=True)
+
+        res_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True)
+        head_commit = res_head.stdout.strip()
+
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            ret = main(["--work-dir", str(self.repo), "brief"])
+        self.assertEqual(ret, 0)
+        output = buf.getvalue()
+        self.assertIn("Auto brief task", output)
+        self.assertIn(head_commit, output)
+        # NIGHTLY_REPORT.md が自動作成されていること
+        self.assertTrue((self.repo / "NIGHTLY_REPORT.md").is_file())
+
+    def test_generate_standalone_report_detects_tree_mismatch(self):
+        """実コミットの Tree SHA と Evidence Record の Tree SHA が不一致なら TAMPERED (Tree Mismatch) となること。"""
+        # PLAN.md 作成
+        (self.repo / "PLAN.md").write_text("# PLAN\n## ステップ\n- [x] 1. Tampered task\n", encoding="utf-8")
+        subprocess.run(["git", "add", "PLAN.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "task 1 [refs: 1]"], cwd=self.repo, check=True)
+
+        res_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True)
+        head_commit = res_head.stdout.strip()
+
+        # レコードに嘘の tree_sha を入れる
+        (self.records_dir / "task_1.json").write_text(
+            json.dumps({
+                "task_id": "1",
+                "checkpoint": "chk1",
+                "tree_sha": "0000000000000000000000000000000000000000",
+                "status": "COMPLETED",
+                "checker": {"decision": "APPROVE", "reason": "Tampered"},
+                "commit": {"tree_sha": "0000000000000000000000000000000000000000", "sha": head_commit},
+            }),
+            encoding="utf-8",
+        )
+
+        reporter = MorningReporter(repo_dir=self.repo)
+        report_p = self.repo / "NIGHTLY_REPORT.md"
+        reporter.generate_standalone_report(report_path=report_p, repo_dir=self.repo)
+        content = report_p.read_text(encoding="utf-8")
+        self.assertIn("TAMPERED (Tree Mismatch)", content)
+
+    def test_uncommitted_task_not_misattributed_to_head(self):
+        """完了マークはあるが証跡もコミットもないタスクが HEAD に誤帰属されず UNVERIFIED となること。"""
+        (self.repo / "PLAN.md").write_text("# PLAN\n## ステップ\n- [x] 1. Phantom task\n", encoding="utf-8")
+        subprocess.run(["git", "add", "PLAN.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "unrelated commit"], cwd=self.repo, check=True)
+
+        reporter = MorningReporter(repo_dir=self.repo)
+        report_p = self.repo / "NIGHTLY_REPORT.md"
+        reporter.generate_standalone_report(report_path=report_p, repo_dir=self.repo)
+        content = report_p.read_text(encoding="utf-8")
+        self.assertIn("UNVERIFIED (No Evidence Record)", content)
+        self.assertIn("| `task-1` | Phantom task | `` |", content)
+
+    def test_forged_record_with_nonexistent_or_unancestral_commit_is_tampered(self):
+        """実在しないコミットや HEAD の祖先でないコミットを持つ Evidence Record は TAMPERED と判定されること。"""
+        (self.repo / "PLAN.md").write_text("# PLAN\n## ステップ\n- [x] 1. Forged task\n", encoding="utf-8")
+        subprocess.run(["git", "add", "PLAN.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "legit commit"], cwd=self.repo, check=True)
+
+        # 1. 存在しないコミット SHA を指定した偽装レコード
+        (self.records_dir / "task_1.json").write_text(
+            json.dumps({
+                "task_id": "1",
+                "checkpoint": "chk1",
+                "tree_sha": "abcdef1234567890abcdef1234567890abcdef12",
+                "status": "COMPLETED",
+                "checker": {"decision": "APPROVE", "reason": "Forged"},
+                "commit": {"tree_sha": "abcdef1234567890abcdef1234567890abcdef12", "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
+            }),
+            encoding="utf-8",
+        )
+
+        reporter = MorningReporter(repo_dir=self.repo)
+        report_p = self.repo / "NIGHTLY_REPORT.md"
+        reporter.generate_standalone_report(report_path=report_p, repo_dir=self.repo)
+        content = report_p.read_text(encoding="utf-8")
+        self.assertIn("TAMPERED (Tree Mismatch)", content)
+
+    def test_quarantine_branch_detected_in_standalone_report(self):
+        """quarantine/* ブランチが存在する場合、要確認・隔離件数として検出・集計されること。"""
+        (self.repo / "PLAN.md").write_text("# PLAN\n## ステップ\n- [ ] 1. Pending task\n", encoding="utf-8")
+        subprocess.run(["git", "add", "PLAN.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "init plan"], cwd=self.repo, check=True)
+
+        # 隔離ブランチの作成
+        subprocess.run(["git", "branch", "quarantine/task-1-test"], cwd=self.repo, check=True)
+
+        reporter = MorningReporter(repo_dir=self.repo)
+        report_p = self.repo / "NIGHTLY_REPORT.md"
+        reporter.generate_standalone_report(report_path=report_p, repo_dir=self.repo)
+        content = report_p.read_text(encoding="utf-8")
+        self.assertIn("| **要確認・隔離** | **1** 件 |", content)
+
+
 if __name__ == "__main__":
     unittest.main()
