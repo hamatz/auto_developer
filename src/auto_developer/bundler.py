@@ -12,6 +12,19 @@ from pathlib import Path
 from typing import Any
 
 
+def find_release_blockers(plan_text: str) -> list[str]:
+    """未完了の - [ ] 行のうち (Severity: P0 または (Severity: P1 を含む行、および - ESCALATED 行を返す (WWW.3)。"""
+    blockers: list[str] = []
+    for line in plan_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- [ ]"):
+            if "(Severity: P0" in line or "(Severity: P1" in line:
+                blockers.append(stripped)
+        elif stripped.startswith("- ESCALATED"):
+            blockers.append(stripped)
+    return blockers
+
+
 @dataclass
 class BundleVerificationResult:
     is_valid: bool
@@ -24,6 +37,7 @@ class BundleVerificationResult:
     file_hashes: dict[str, str] = field(default_factory=dict)
     audit_stage_verified: bool = False
     audit_stage_info: dict[str, Any] | None = None
+    backlog_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +51,7 @@ class BundleVerificationResult:
             "file_hashes": self.file_hashes,
             "audit_stage_verified": self.audit_stage_verified,
             "audit_stage_info": self.audit_stage_info,
+            "backlog_count": self.backlog_count,
         }
 
 
@@ -262,8 +277,8 @@ class EvidenceBundler:
                         if not self.is_sanitized_out(rel):
                             items_to_zip.append((log_file, f"logs/{rel}"))
 
-            # (F) 主要ドキュメント (NIGHTLY_REPORT.md, PLAN.md, SPEC.md)
-            for doc_name in ["NIGHTLY_REPORT.md", "PLAN.md", "SPEC.md"]:
+            # (F) 主要ドキュメント (NIGHTLY_REPORT.md, PLAN.md, SPEC.md, BACKLOG.md)
+            for doc_name in ["NIGHTLY_REPORT.md", "PLAN.md", "SPEC.md", "BACKLOG.md"]:
                 doc_path = self.repo_dir / doc_name
                 if doc_name == "NIGHTLY_REPORT.md":
                     job_report_path = self.repo_dir / ".dev" / "job_report.md"
@@ -271,6 +286,18 @@ class EvidenceBundler:
                         doc_path = job_report_path
                 if doc_path.exists() and not self.is_sanitized_out(doc_name):
                     items_to_zip.append((doc_path, doc_name))
+
+            backlog_count = 0
+            backlog_file = self.repo_dir / "BACKLOG.md"
+            if backlog_file.is_file():
+                for b_line in backlog_file.read_text(encoding="utf-8").splitlines():
+                    b_stripped = b_line.strip()
+                    if (
+                        b_stripped.startswith("- [")
+                        and not b_stripped.startswith("- [ ]")
+                        and not b_stripped.startswith("- [x]")
+                    ):
+                        backlog_count += 1
 
             # (G) 各ファイルの SHA-256 ハッシュを計算し Manifest を構築
             file_hashes: dict[str, str] = {}
@@ -285,6 +312,7 @@ class EvidenceBundler:
                 "head_tree_sha": head_tree,
                 "tasks": tasks_manifest,
                 "file_hashes": file_hashes,
+                "backlog_count": backlog_count,
             }
             if audit_stage_manifest is not None:
                 manifest_data["audit_stage"] = audit_stage_manifest
@@ -350,6 +378,7 @@ class EvidenceBundler:
             result.tasks = list(manifest_data.get("tasks", []))
             file_hashes: dict[str, str] = manifest_data.get("file_hashes", {})
             result.file_hashes = file_hashes
+            result.backlog_count = int(manifest_data.get("backlog_count", 0))
 
             # 2. ZIP 内全ファイルと Manifest 記載ファイルの完全一致検証 (P1: 未知ファイル・パストラバーサル遮断)
             with zipfile.ZipFile(bundle_path, "r") as zf:
@@ -696,6 +725,19 @@ class EvidenceBundler:
                             )
                     except OSError:
                         pass
+
+            # 7.5 リリースブロッカー検査 (WWW.3: PLAN.md 内の未完了 P0/P1 および ESCALATED)
+            plan_file = inspect_dir / "PLAN.md"
+            if plan_file.exists():
+                try:
+                    plan_text = plan_file.read_text(encoding="utf-8")
+                    blockers = find_release_blockers(plan_text)
+                    if blockers:
+                        result.errors.append(
+                            f"RELEASE_BLOCKED: Unresolved release blockers found in PLAN.md: {blockers}"
+                        )
+                except OSError as e:
+                    result.errors.append(f"Failed to read PLAN.md: {e}")
 
             # 8. 独立監査ステージ検証 (evidence/audit_stage.json がある場合: TTT.2 / UUU.2)
             audit_stage_file = inspect_dir / "evidence" / "audit_stage.json"
