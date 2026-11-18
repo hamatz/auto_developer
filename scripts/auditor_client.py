@@ -243,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-dir", default=".", help="Repository root directory")
     parser.add_argument("--api-key", help="API key for LLM provider")
     parser.add_argument("--max-tokens", type=int, default=8192, help="Max tokens for LLM completion")
+    parser.add_argument("--timeout", type=int, default=300, help="Socket and HTTP timeout in seconds")
     parser.add_argument("--mock", action="store_true", help="Explicit mock mode for offline test fixtures only")
     args = parser.parse_args(argv)
 
@@ -381,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=args.timeout) as resp:
                 body = resp.read().decode("utf-8")
                 resp_json = json.loads(body)
         except urllib.error.HTTPError as e:
