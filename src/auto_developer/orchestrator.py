@@ -687,8 +687,17 @@ class NightlyOrchestrator:
             )
 
         if not auditor:
+            self._record_audit_stage_event(
+                status="SKIPPED",
+                findings=[],
+                screen_res={},
+                audit_metadata={},
+            )
             return {"status": "SKIPPED", "reason": "No auditor configured"}
 
+        findings: list[Any] = []
+        screen_res: dict[str, Any] = {}
+        audit_metadata: dict[str, Any] = {}
         try:
             verifier = RedTestVerifier(repo_dir=self.repo_dir)
             dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=verifier)
@@ -731,7 +740,7 @@ class NightlyOrchestrator:
             except OSError:
                 pass
 
-            return {
+            result: dict[str, Any] = {
                 "status": "SUCCESS",
                 "dispatched": screen_res["dispatched"],
                 "rejected": screen_res["rejected"],
@@ -746,6 +755,13 @@ class NightlyOrchestrator:
                 "target_commit": target_commit,
                 "audit_metadata": audit_metadata,
             }
+            self._record_audit_stage_event(
+                status="SUCCESS",
+                findings=findings,
+                screen_res=screen_res,
+                audit_metadata=audit_metadata,
+            )
+            return result
         except (subprocess.SubprocessError, OSError, ValueError, RuntimeError, KeyError, TypeError) as e:
             # 外部監査役の失敗時にも通常開発成果物は破棄せず安全に保全する (Fail-Safe)
             err_msg = str(e)
@@ -769,6 +785,13 @@ class NightlyOrchestrator:
                 )
             except OSError:
                 pass
+
+            self._record_audit_stage_event(
+                status=status,
+                findings=[],
+                screen_res={},
+                audit_metadata={},
+            )
             return {
                 "status": status,
                 "error": err_msg,
@@ -776,6 +799,56 @@ class NightlyOrchestrator:
                 "target_commit": target_commit,
                 "findings": [],
             }
+
+    def _record_audit_stage_event(
+        self,
+        status: str,
+        findings: list[Any],
+        screen_res: dict[str, Any],
+        audit_metadata: dict[str, Any],
+    ) -> None:
+        """audit_stage イベントを安全に記録する (XXX.3 非干渉保証)。"""
+        try:
+            findings_by_severity: dict[str, int] = {}
+            for f in findings:
+                sev = getattr(f, "severity", None) or (f.get("severity") if isinstance(f, dict) else None)
+                if sev:
+                    findings_by_severity[sev] = findings_by_severity.get(sev, 0) + 1
+
+            usage = audit_metadata.get("usage")
+            input_tokens = None
+            output_tokens = None
+            if isinstance(usage, dict):
+                in_tok = usage.get("input_tokens")
+                if in_tok is None:
+                    in_tok = usage.get("prompt_tokens")
+                input_tokens = in_tok
+
+                out_tok = usage.get("output_tokens")
+                if out_tok is None:
+                    out_tok = usage.get("completion_tokens")
+                output_tokens = out_tok
+
+            if input_tokens is None:
+                input_tokens = audit_metadata.get("input_tokens")
+            if output_tokens is None:
+                output_tokens = audit_metadata.get("output_tokens")
+
+            from auto_developer.metrics import MetricsLog
+            MetricsLog(repo_dir=self.repo_dir, plan_path=self.plan_path).record_event(
+                "audit_stage",
+                status=status,
+                findings_by_severity=findings_by_severity,
+                dispatched=len(screen_res.get("dispatched", [])),
+                backlogged=len(screen_res.get("backlogged", [])),
+                escalated=len(screen_res.get("escalated", [])),
+                duplicate=len(screen_res.get("duplicates", [])),
+                rejected=len(screen_res.get("rejected", [])),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            )
+        except Exception as ex:  # noqa: BLE001
+            print(f"METRICS_WARNING: Failed to record audit_stage event: {ex}", file=sys.stderr)
 
     def _check_boundary(self, checkpoint: str) -> list[str]:
         """チーム所有スコープ（owns）が指定されている場合、領空侵犯を検査し違反ファイルリストを返す。"""

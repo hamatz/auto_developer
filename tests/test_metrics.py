@@ -343,6 +343,302 @@ class TestMetricsLog(unittest.TestCase):
         self.assertEqual(rr_res.returncode, 0)
         self.assertIn("METRICS_WARNING", rr_res.stderr)
 
+    def test_audit_stage_event_recorded_on_success(self) -> None:
+        """run_audit_stage 成功時に audit_stage イベントが全属性揃って記録されること。"""
+        from unittest.mock import MagicMock
+
+        from auto_developer.audit import AuditFinding
+        from auto_developer.orchestrator import NightlyOrchestrator
+
+        orch = NightlyOrchestrator(repo_dir=self.repo, plan_path=self.plan)
+        mock_auditor = MagicMock()
+
+        f_p0 = AuditFinding(finding_id="AUD-001", description="p0 bug", severity="P0", location="foo.py:1", spec_reference="XXX.1", reproduction_test_code="def test_p0(): pass")
+        f_p1 = AuditFinding(finding_id="AUD-002", description="p1 bug", severity="P1", location="bar.py:1", spec_reference="XXX.1", reproduction_test_code="def test_p1(): pass")
+        f_p2 = AuditFinding(finding_id="AUD-003", description="p2 note", severity="P2", location="baz.py:1", spec_reference="XXX.1", reproduction_test_code="def test_p2(): pass")
+        f_dup = AuditFinding(finding_id="AUD-004", description="dup", severity="P1", location="dup.py:1", spec_reference="XXX.1", reproduction_test_code="def test_dup(): pass")
+        f_rej = AuditFinding(finding_id="AUD-005", description="rej", severity="INFO", location="rej.py:1", spec_reference="XXX.1", reproduction_test_code="def test_rej(): pass")
+
+        mock_auditor.audit_repository.return_value = [f_p0, f_p1, f_p2, f_dup, f_rej]
+        mock_auditor.screen_and_dispatch_findings.return_value = {
+            "dispatched": [f_p0, f_p1],
+            "rejected": [(f_rej, "Adversarial finding")],
+            "backlogged": [f_p2],
+            "escalated": [],
+            "duplicates": [f_dup],
+            "total_processed": 5,
+            "genuine_count": 2,
+            "rejected_count": 1,
+            "duplicate_count": 1,
+        }
+        mock_auditor.last_run_metadata = {
+            "mode": "LIVE",
+            "usage": {
+                "input_tokens": 15000,
+                "output_tokens": 1200,
+            },
+        }
+
+        res = orch.run_audit_stage(
+            baseline_commit=self.checkpoint,
+            target_commit="HEAD",
+            auditor_runner=mock_auditor,
+        )
+        self.assertEqual(res["status"], "SUCCESS")
+
+        events_file = self.repo / ".git" / "nightly_evidence" / "events.jsonl"
+        self.assertTrue(events_file.exists())
+        lines = [json.loads(line) for line in events_file.read_text(encoding="utf-8").strip().splitlines()]
+        audit_events = [e for e in lines if e.get("event") == "audit_stage"]
+        self.assertEqual(len(audit_events), 1)
+
+        ae = audit_events[0]
+        self.assertEqual(ae["schema"], 1)
+        self.assertEqual(ae["phase"], "Phase 64")
+        self.assertEqual(ae["status"], "SUCCESS")
+        self.assertEqual(ae["findings_by_severity"], {"P0": 1, "P1": 2, "P2": 1, "INFO": 1})
+        self.assertEqual(ae["dispatched"], 2)
+        self.assertEqual(ae["backlogged"], 1)
+        self.assertEqual(ae["escalated"], 0)
+        self.assertEqual(ae["duplicate"], 1)
+        self.assertEqual(ae["rejected"], 1)
+        self.assertEqual(ae["input_tokens"], 15000)
+        self.assertEqual(ae["output_tokens"], 1200)
+
+    def test_audit_stage_event_recorded_on_failure(self) -> None:
+        """run_audit_stage 失敗時にも status (AUDIT_PENDING / AUDIT_FAILED) のイベントが記録されること。"""
+        from unittest.mock import MagicMock
+
+        from auto_developer.orchestrator import NightlyOrchestrator
+
+        orch = NightlyOrchestrator(repo_dir=self.repo, plan_path=self.plan)
+        mock_auditor = MagicMock()
+        mock_auditor.audit_repository.side_effect = RuntimeError("NO_INDEPENDENT_AUDITOR_AVAILABLE: timeout")
+
+        res = orch.run_audit_stage(
+            baseline_commit=self.checkpoint,
+            target_commit="HEAD",
+            auditor_runner=mock_auditor,
+        )
+        self.assertEqual(res["status"], "AUDIT_PENDING")
+
+        events_file = self.repo / ".git" / "nightly_evidence" / "events.jsonl"
+        self.assertTrue(events_file.exists())
+        lines = [json.loads(line) for line in events_file.read_text(encoding="utf-8").strip().splitlines()]
+        audit_events = [e for e in lines if e.get("event") == "audit_stage"]
+        self.assertEqual(len(audit_events), 1)
+
+        ae = audit_events[0]
+        self.assertEqual(ae["status"], "AUDIT_PENDING")
+        self.assertEqual(ae["findings_by_severity"], {})
+        self.assertEqual(ae["dispatched"], 0)
+        self.assertEqual(ae["backlogged"], 0)
+        self.assertEqual(ae["escalated"], 0)
+        self.assertEqual(ae["duplicate"], 0)
+        self.assertEqual(ae["rejected"], 0)
+        self.assertIsNone(ae["input_tokens"])
+        self.assertIsNone(ae["output_tokens"])
+
+    def test_audit_stage_non_interference_when_write_fails(self) -> None:
+        """events.jsonl の書き込みが失敗しても run_audit_stage は中断せず METRICS_WARNING を出力すること。"""
+        import io
+        from unittest.mock import MagicMock
+
+        from auto_developer.orchestrator import NightlyOrchestrator
+
+        events_file = self.repo / ".git" / "nightly_evidence" / "events.jsonl"
+        events_file.mkdir(parents=True)
+
+        orch = NightlyOrchestrator(repo_dir=self.repo, plan_path=self.plan)
+        mock_auditor = MagicMock()
+        mock_auditor.audit_repository.return_value = []
+        mock_auditor.screen_and_dispatch_findings.return_value = {
+            "dispatched": [],
+            "rejected": [],
+            "backlogged": [],
+            "escalated": [],
+            "duplicates": [],
+            "total_processed": 0,
+            "genuine_count": 0,
+            "rejected_count": 0,
+            "duplicate_count": 0,
+        }
+        mock_auditor.last_run_metadata = {"mode": "LIVE"}
+
+        captured_stderr = io.StringIO()
+        orig_stderr = sys.stderr
+        try:
+            sys.stderr = captured_stderr
+            res = orch.run_audit_stage(
+                baseline_commit=self.checkpoint,
+                target_commit="HEAD",
+                auditor_runner=mock_auditor,
+            )
+        finally:
+            sys.stderr = orig_stderr
+
+        self.assertEqual(res["status"], "SUCCESS")
+        self.assertIn("METRICS_WARNING", captured_stderr.getvalue())
+
+    def test_audit_stage_event_recorded_on_skipped(self) -> None:
+        """監査役が設定されていない場合 (SKIPPED) に audit_stage イベントが1件記録されること。"""
+        from auto_developer.orchestrator import NightlyOrchestrator
+
+        orch = NightlyOrchestrator(repo_dir=self.repo, plan_path=self.plan)
+        orch.auditor_runner = None
+        orch.auditor_model = ""
+        orch.auditor_cmd_template = ""
+
+        res = orch.run_audit_stage(
+            baseline_commit=self.checkpoint,
+            target_commit="HEAD",
+            auditor_runner=None,
+        )
+        self.assertEqual(res["status"], "SKIPPED")
+
+        events_file = self.repo / ".git" / "nightly_evidence" / "events.jsonl"
+        self.assertTrue(events_file.exists())
+        lines = [json.loads(line) for line in events_file.read_text(encoding="utf-8").strip().splitlines()]
+        audit_events = [e for e in lines if e.get("event") == "audit_stage"]
+        self.assertEqual(len(audit_events), 1)
+
+        ae = audit_events[0]
+        self.assertEqual(ae["status"], "SKIPPED")
+        self.assertEqual(ae["findings_by_severity"], {})
+        self.assertEqual(ae["dispatched"], 0)
+        self.assertEqual(ae["backlogged"], 0)
+        self.assertEqual(ae["escalated"], 0)
+        self.assertEqual(ae["duplicate"], 0)
+        self.assertEqual(ae["rejected"], 0)
+        self.assertIsNone(ae["input_tokens"])
+        self.assertIsNone(ae["output_tokens"])
+
+    def test_audit_stage_non_interference_on_skip_and_failure_paths(self) -> None:
+        """skip 経路および failure 経路で events.jsonl が書けなくても処理が中断せず warning が出ること。"""
+        import io
+        from unittest.mock import MagicMock
+
+        from auto_developer.orchestrator import NightlyOrchestrator
+
+        events_file = self.repo / ".git" / "nightly_evidence" / "events.jsonl"
+        events_file.mkdir(parents=True)
+
+        orch = NightlyOrchestrator(repo_dir=self.repo, plan_path=self.plan)
+        orch.auditor_runner = None
+        orch.auditor_model = ""
+        orch.auditor_cmd_template = ""
+
+        # 1. Skip path
+        captured_stderr = io.StringIO()
+        orig_stderr = sys.stderr
+        try:
+            sys.stderr = captured_stderr
+            res_skip = orch.run_audit_stage(
+                baseline_commit=self.checkpoint,
+                target_commit="HEAD",
+                auditor_runner=None,
+            )
+        finally:
+            sys.stderr = orig_stderr
+        self.assertEqual(res_skip["status"], "SKIPPED")
+        self.assertIn("METRICS_WARNING", captured_stderr.getvalue())
+
+        # 2. Failure path
+        mock_auditor = MagicMock()
+        mock_auditor.audit_repository.side_effect = RuntimeError("Audit failed")
+        captured_stderr = io.StringIO()
+        try:
+            sys.stderr = captured_stderr
+            res_fail = orch.run_audit_stage(
+                baseline_commit=self.checkpoint,
+                target_commit="HEAD",
+                auditor_runner=mock_auditor,
+            )
+        finally:
+            sys.stderr = orig_stderr
+        self.assertEqual(res_fail["status"], "AUDIT_FAILED")
+        self.assertIn("METRICS_WARNING", captured_stderr.getvalue())
+
+    def test_audit_stage_exactly_one_event_when_step_after_screening_raises(self) -> None:
+        """screening 後の処理で例外が発生した場合、SUCCESS は記録されず AUDIT_FAILED の1件のみ記録されること。"""
+        from unittest.mock import MagicMock
+
+        from auto_developer.orchestrator import NightlyOrchestrator
+
+        orch = NightlyOrchestrator(repo_dir=self.repo, plan_path=self.plan)
+        mock_auditor = MagicMock()
+        mock_auditor.audit_repository.return_value = []
+        # screen_res["dispatched"] が無効な型などで後続が TypeError を起こすケースを模倣
+        mock_auditor.screen_and_dispatch_findings.return_value = {
+            "dispatched": None,  # len(None) will raise TypeError in main try block
+            "rejected": [],
+            "backlogged": [],
+            "escalated": [],
+            "duplicates": [],
+            "total_processed": 0,
+            "genuine_count": 0,
+            "rejected_count": 0,
+            "duplicate_count": 0,
+        }
+        mock_auditor.last_run_metadata = {"mode": "LIVE"}
+
+        res = orch.run_audit_stage(
+            baseline_commit=self.checkpoint,
+            target_commit="HEAD",
+            auditor_runner=mock_auditor,
+        )
+        self.assertEqual(res["status"], "AUDIT_FAILED")
+
+        events_file = self.repo / ".git" / "nightly_evidence" / "events.jsonl"
+        self.assertTrue(events_file.exists())
+        lines = [json.loads(line) for line in events_file.read_text(encoding="utf-8").strip().splitlines()]
+        audit_events = [e for e in lines if e.get("event") == "audit_stage"]
+        # 重複せず、かつ SUCCESS ではなく AUDIT_FAILED の 1 件のみであること
+        self.assertEqual(len(audit_events), 1)
+        self.assertEqual(audit_events[0]["status"], "AUDIT_FAILED")
+
+    def test_audit_stage_handles_zero_tokens(self) -> None:
+        """トークン数が 0 の場合にも None にフォールバックせず 0 として記録されること。"""
+        from unittest.mock import MagicMock
+
+        from auto_developer.orchestrator import NightlyOrchestrator
+
+        orch = NightlyOrchestrator(repo_dir=self.repo, plan_path=self.plan)
+        mock_auditor = MagicMock()
+        mock_auditor.audit_repository.return_value = []
+        mock_auditor.screen_and_dispatch_findings.return_value = {
+            "dispatched": [],
+            "rejected": [],
+            "backlogged": [],
+            "escalated": [],
+            "duplicates": [],
+            "total_processed": 0,
+            "genuine_count": 0,
+            "rejected_count": 0,
+            "duplicate_count": 0,
+        }
+        mock_auditor.last_run_metadata = {
+            "mode": "LIVE",
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+            },
+        }
+
+        res = orch.run_audit_stage(
+            baseline_commit=self.checkpoint,
+            target_commit="HEAD",
+            auditor_runner=mock_auditor,
+        )
+        self.assertEqual(res["status"], "SUCCESS")
+
+        events_file = self.repo / ".git" / "nightly_evidence" / "events.jsonl"
+        lines = [json.loads(line) for line in events_file.read_text(encoding="utf-8").strip().splitlines()]
+        audit_events = [e for e in lines if e.get("event") == "audit_stage"]
+        self.assertEqual(len(audit_events), 1)
+        self.assertEqual(audit_events[0]["input_tokens"], 0)
+        self.assertEqual(audit_events[0]["output_tokens"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
