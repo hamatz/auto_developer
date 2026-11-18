@@ -844,21 +844,28 @@ class IndependentAuditRunner:
         dispatcher: Any,
         plan_path: Path | None = None,
     ) -> dict[str, Any]:
-        """外部監査役から投入された指摘リストを多層防壁で選別し、真正な指摘のみを PLAN.md に登録する (QQQ.2)。"""
-        dispatched: list[AuditFinding] = []
+        """外部監査役から投入された指摘リストを多層防壁で選別し、真正な指摘のみを PLAN.md に登録する (QQQ.2 / WWW.2)。"""
+        # SPEC.md WWW.2: cycle_id 省略時は先頭 finding の target_commit、それもなければ HEAD SHA を使う
+        dispatched = dispatcher.process_findings(findings, plan_path=plan_path, cycle_id=None)
+
         rejected: list[tuple[AuditFinding, str]] = []
+        backlogged: list[AuditFinding] = []
+        escalated: list[AuditFinding] = []
 
         for finding in findings:
-            res_finding = dispatcher.dispatch_finding(finding, plan_path=plan_path)
-            if res_finding.status == "DISPATCHED":
-                dispatched.append(res_finding)
-            else:
-                reason = res_finding.red_verification_reason or "UNKNOWN_REJECTION"
-                rejected.append((res_finding, reason))
+            if finding.status == "BACKLOGGED":
+                backlogged.append(finding)
+            elif finding.status == "ESCALATED":
+                escalated.append(finding)
+            elif finding.status != "DISPATCHED":
+                reason = finding.red_verification_reason or finding.status or "UNKNOWN_REJECTION"
+                rejected.append((finding, reason))
 
         return {
             "dispatched": dispatched,
             "rejected": rejected,
+            "backlogged": backlogged,
+            "escalated": escalated,
             "total_processed": len(findings),
             "genuine_count": len(dispatched),
             "rejected_count": len(rejected),

@@ -428,6 +428,214 @@ class T(unittest.TestCase):
         assert saved is not None
         self.assertEqual(saved.status, "NOTED")
 
+    def test_feature_www_2_module_key_extraction(self) -> None:
+        """機能WWW.2: location からモジュールキーが正しく抽出されること。"""
+        extract = self.dispatcher._extract_module_key
+        self.assertEqual(extract("src/auto_developer/verifier.py:166"), "src/auto_developer/verifier.py")
+        self.assertEqual(extract("src/calc.py:5"), "src/calc.py")
+        self.assertEqual(extract("src/foo.py (line 12)"), "src/foo.py")
+        self.assertEqual(extract("  src/bar.py : 20"), "src/bar.py")
+        self.assertEqual(extract(""), "UNKNOWN")
+        self.assertEqual(extract(":123"), "UNKNOWN")
+
+    def test_feature_www_2_budget_ledger_and_streak_increment_and_idempotency(self) -> None:
+        """機能WWW.2: 修正予算台帳 (.dev/audit/budget.json) に streak が記録され、同一 cycle_id は二重加算されないこと。"""
+        import json
+
+        f1 = AuditFinding(
+            finding_id="AUD-BUG-001",
+            severity="P1",
+            spec_reference="SPEC.md WWW.2",
+            location="src/target_pkg.py:10",
+            description="Genuine bug",
+            reproduction_test_code="""import unittest
+from target_pkg import target_fn
+class T(unittest.TestCase):
+    def test_x(self):
+        self.assertTrue(target_fn())
+""",
+        )
+
+        # サイクル1: 初回登録 -> streak 1
+        self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="cycle-001")
+        budget_path = self.repo_dir / ".dev" / "audit" / "budget.json"
+        self.assertTrue(budget_path.exists())
+        budget_data = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget_data["src/target_pkg.py"]["streak"], 1)
+        self.assertEqual(budget_data["src/target_pkg.py"]["last_cycle_id"], "cycle-001")
+
+        # 冪等性: 同じ cycle-001 を再度処理しても streak は増えない
+        self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="cycle-001")
+        budget_data = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget_data["src/target_pkg.py"]["streak"], 1)
+
+        # サイクル2: 異なる cycle-002 で再登録 -> streak 2
+        f2 = AuditFinding(
+            finding_id="AUD-BUG-002",
+            severity="P1",
+            spec_reference="SPEC.md WWW.2",
+            location="src/target_pkg.py:20",
+            description="Another bug in same module",
+            reproduction_test_code="""import unittest
+from target_pkg import target_fn
+class T(unittest.TestCase):
+    def test_y(self):
+        self.assertTrue(target_fn())
+""",
+        )
+        self.dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="cycle-002")
+        budget_data = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget_data["src/target_pkg.py"]["streak"], 2)
+        self.assertEqual(budget_data["src/target_pkg.py"]["last_cycle_id"], "cycle-002")
+
+    def test_feature_www_2_escalation_when_streak_exceeds_max(self) -> None:
+        """機能WWW.2: streak >= max_consecutive_cycles のとき ESCALATED となり PLAN.md の「止まっていること・判断待ち」節に記録されること。"""
+        dispatcher = AuditDispatcher(
+            repo_dir=self.repo_dir,
+            verifier=self.verifier,
+            audit_store=self.dispatcher.audit_store,
+            max_consecutive_cycles=2,
+        )
+
+        f1 = AuditFinding(
+            finding_id="AUD-S1",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Bug 1",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())",
+        )
+        f2 = AuditFinding(
+            finding_id="AUD-S2",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Bug 2",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_2(self):\n        self.assertTrue(target_fn())",
+        )
+        f3 = AuditFinding(
+            finding_id="AUD-S3",
+            severity="P0",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Bug 3 (exceeding budget)",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_3(self):\n        self.assertTrue(target_fn())",
+        )
+
+        # cycle 1: streak 1
+        dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        # cycle 2: streak 2
+        dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c2")
+
+        # cycle 3: streak was 2 (>= max 2) -> ESCALATED
+        res_list = dispatcher.process_findings([f3], plan_path=self.plan_path, cycle_id="c3")
+        self.assertEqual(len(res_list), 0, "Escalated finding must not be in dispatched return list")
+        self.assertEqual(f3.status, "ESCALATED")
+
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        # ## ステップ には登録されないこと
+        steps_part = plan_content.split("## 止まっていること・判断待ち")[0] if "## 止まっていること・判断待ち" in plan_content else plan_content
+        self.assertNotIn("AUD-S3", steps_part)
+
+        # ## 止まっていること・判断待ち 節に追記されていること
+        self.assertIn("## 止まっていること・判断待ち", plan_content)
+        expected_line = "- ESCALATED [AUD-S3] Bug 3 (exceeding budget) (Severity: P0, Loc: src/target_pkg.py:1, Streak: 2)"
+        self.assertIn(expected_line, plan_content)
+        self.assertNotIn("- [ ] AUD-S3", plan_content)
+
+    def test_feature_www_2_streak_resets_when_no_p0_p1(self) -> None:
+        """機能WWW.2: P0/P1 の登録がなかったサイクルで該当モジュールの streak が 0 に戻ること。"""
+        import json
+
+        f1 = AuditFinding(
+            finding_id="AUD-R1",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Bug 1",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())",
+        )
+        self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        budget_path = self.repo_dir / ".dev" / "audit" / "budget.json"
+        budget_data = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget_data["src/target_pkg.py"]["streak"], 1)
+
+        # 次のサイクル c2 では P2 のみ（P0/P1 なし）
+        f_p2 = AuditFinding(
+            finding_id="AUD-P2-99",
+            severity="P2",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="P2 bug",
+            reproduction_test_code="def broken(:",
+        )
+        self.dispatcher.process_findings([f_p2], plan_path=self.plan_path, cycle_id="c2")
+        budget_data = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget_data["src/target_pkg.py"]["streak"], 0)
+        self.assertEqual(budget_data["src/target_pkg.py"]["last_cycle_id"], "c2")
+
+    def test_feature_www_2_idempotent_reprocessing_does_not_flip_to_escalated(self) -> None:
+        """機能WWW.2: 同じ cycle_id を再処理した際、DISPATCHED 判定が ESCALATED に反転しないこと。"""
+        dispatcher = AuditDispatcher(
+            repo_dir=self.repo_dir,
+            verifier=self.verifier,
+            audit_store=self.dispatcher.audit_store,
+            max_consecutive_cycles=2,
+        )
+
+        f1 = AuditFinding(
+            finding_id="AUD-C1",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Bug 1",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())",
+        )
+        f2 = AuditFinding(
+            finding_id="AUD-C2",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Bug 2",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_2(self):\n        self.assertTrue(target_fn())",
+        )
+
+        dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        res2 = dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(len(res2), 1)
+        self.assertEqual(f2.status, "DISPATCHED")
+
+        # 同じ c2 を再投入
+        res2_retry = dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(f2.status, "DISPATCHED", "Re-running the same cycle must remain DISPATCHED, not flip to ESCALATED")
+        self.assertEqual(len(res2_retry), 1)
+
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        self.assertNotIn("- ESCALATED", plan_content, "Re-running cycle 2 must not escalate")
+
+    def test_feature_www_2_empty_findings_resets_streak(self) -> None:
+        """機能WWW.2: 指摘が0件のサイクルでも、P0/P1の登録がなかったモジュールの streak は 0 に戻ること。"""
+        import json
+
+        f1 = AuditFinding(
+            finding_id="AUD-R1",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Bug 1",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())",
+        )
+        self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        budget_path = self.repo_dir / ".dev" / "audit" / "budget.json"
+        budget_data = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget_data["src/target_pkg.py"]["streak"], 1)
+
+        # 空の findings リストで新サイクル c2 を実行
+        self.dispatcher.process_findings([], plan_path=self.plan_path, cycle_id="c2")
+        budget_data = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget_data["src/target_pkg.py"]["streak"], 0)
+        self.assertEqual(budget_data["src/target_pkg.py"]["last_cycle_id"], "c2")
+
 
 if __name__ == "__main__":
     unittest.main()
