@@ -35,7 +35,7 @@
 - 上記以外の既存テストは変更しない。免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [ ] 1. 指標の適正化: human_commits → out_of_path_commits 改名、rework_tasks_ratio の追加、METRICS.md の Phase 64 最終数値更新と注記（Red-First）（YYY.1）
+- [x] 1. 指標の適正化: human_commits → out_of_path_commits 改名、rework_tasks_ratio の追加、METRICS.md の Phase 64 最終数値更新と注記（Red-First）（YYY.1）
 - [ ] 2. NIGHTLY_REPORT.md の自動生成とモーニングブリーフ復旧: 独立 report 生成機能、auto-dev brief および bundle との連携（Red-First）（YYY.2）
 - [ ] 3. バージョン整合（0.8.0）とリリースドキュメント整備（CHANGELOG.md, docs/releases/v0.8.0.md）（YYY.3）
 - [ ] 4. 最新 HEAD に対する実 Claude Opus 5.5 本番監査の実行と完全性検証済み Evidence Bundle の生成・検証（YYY.4）

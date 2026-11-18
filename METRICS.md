@@ -9,6 +9,7 @@
 | **tasks_committed** | event | 当該フェーズでコミット完了に至ったタスク数 | 開発スループットの測定 |
 | **first_pass_rate** | event | コミット済みタスクのうち、1回目の verify-step で合格した割合 | Maker の能力およびタスク分割の粒度が適切か |
 | **mean_verify_attempts** | event | コミット済みタスクの平均 verify-step 試行回数 | Maker の実装精度と試行錯誤の負荷 |
+| **rework_tasks_ratio** | event | コミット済みタスクのうち、コミットまでに verify-step が 2 回以上実行されたタスクの割合 | Maker の手戻り・試行錯誤頻度（粒度や仕様理解の適切性） |
 | **verify_failures** | event | verify-step が失敗 (FAILED) した回数 | コード品質とローカル不合格の早期検出頻度 |
 | **circuit_breakers** | event | 保護ファイル改変等により遮断 (CIRCUIT_BREAKER) された回数 | ガードレール・境界逸脱の発生頻度 |
 | **quarantines** | event | 修正不能等で隔離 (rollback-step) された回数 | 致命的障害とタスク隔離メカニズムの作動状況 |
@@ -24,7 +25,7 @@
 | **unplanned_steps** | git | フェーズ終了時点で追加されていた数値ステップ数 | パイプライン外や途中でしか見つからなかった計画外タスクの量 |
 | **audit_steps_added** | git | フェーズ中に外部監査によって PLAN.md に追加された AUD- ステップ数 | 自律監査サイクルが生成したタスク量 |
 | **pipeline_commits** | git | メッセージに [refs: を含む自動パイプラインコミット数 | 自律ループによるコミットの進捗量 |
-| **human_commits** | git | メッセージに [refs: を含まない非マージコミット数 | 人間の介入（指示・修正・仕様調整等）の回数 |
+| **out_of_path_commits** | git | メッセージに [refs: を含まない非マージコミット数（自動監査ループや外部コミット等を含む、commit-step 正規経路外の全コミット） | 正規経路外コミットや人間介入の回数 |
 | **lead_time_hours** | git | フェーズ開始コミットから終了コミットまでの経過時間（時間） | フェーズ全体の所要時間とリードタイム |
 
 
@@ -35,6 +36,7 @@
 | tasks_committed | - | - | event |
 | first_pass_rate | - | - | event |
 | mean_verify_attempts | - | - | event |
+| rework_tasks_ratio | - | - | event |
 | verify_failures | - | - | event |
 | circuit_breakers | - | - | event |
 | quarantines | - | - | event |
@@ -50,7 +52,7 @@
 | unplanned_steps | 0 | 0 | git |
 | audit_steps_added | 0 | 0 | git |
 | pipeline_commits | 4 | +1 | git |
-| human_commits | 2 | +1 | git |
+| out_of_path_commits | 2 | +1 | git |
 | lead_time_hours | 23.45 | -3.8 | git |
 
 ## Phase 51
@@ -60,6 +62,7 @@
 | tasks_committed | - | - | event |
 | first_pass_rate | - | - | event |
 | mean_verify_attempts | - | - | event |
+| rework_tasks_ratio | - | - | event |
 | verify_failures | - | - | event |
 | circuit_breakers | - | - | event |
 | quarantines | - | - | event |
@@ -75,7 +78,7 @@
 | unplanned_steps | 0 | 0 | git |
 | audit_steps_added | 0 | 0 | git |
 | pipeline_commits | 4 | 0 | git |
-| human_commits | 1 | -1 | git |
+| out_of_path_commits | 1 | -1 | git |
 | lead_time_hours | 14.08 | -9.37 | git |
 
 ## Phase 52
@@ -85,6 +88,7 @@
 | tasks_committed | - | - | event |
 | first_pass_rate | - | - | event |
 | mean_verify_attempts | - | - | event |
+| rework_tasks_ratio | - | - | event |
 | verify_failures | - | - | event |
 | circuit_breakers | - | - | event |
 | quarantines | - | - | event |
@@ -100,7 +104,7 @@
 | unplanned_steps | 0 | 0 | git |
 | audit_steps_added | 0 | 0 | git |
 | pipeline_commits | 4 | 0 | git |
-| human_commits | 1 | 0 | git |
+| out_of_path_commits | 1 | 0 | git |
 | lead_time_hours | 0.6 | -13.48 | git |
 
 ## Phase 53
@@ -110,6 +114,7 @@
 | tasks_committed | - | - | event |
 | first_pass_rate | - | - | event |
 | mean_verify_attempts | - | - | event |
+| rework_tasks_ratio | - | - | event |
 | verify_failures | - | - | event |
 | circuit_breakers | - | - | event |
 | quarantines | - | - | event |
@@ -125,7 +130,7 @@
 | unplanned_steps | 0 | 0 | git |
 | audit_steps_added | 0 | 0 | git |
 | pipeline_commits | 4 | 0 | git |
-| human_commits | 3 | +2 | git |
+| out_of_path_commits | 3 | +2 | git |
 | lead_time_hours | 2.23 | +1.63 | git |
 
 ## Phase 54
@@ -135,6 +140,7 @@
 | tasks_committed | - | - | event |
 | first_pass_rate | - | - | event |
 | mean_verify_attempts | - | - | event |
+| rework_tasks_ratio | - | - | event |
 | verify_failures | - | - | event |
 | circuit_breakers | - | - | event |
 | quarantines | - | - | event |
@@ -150,7 +156,7 @@
 | unplanned_steps | 0 | 0 | git |
 | audit_steps_added | 0 | 0 | git |
 | pipeline_commits | 4 | 0 | git |
-| human_commits | 1 | -2 | git |
+| out_of_path_commits | 1 | -2 | git |
 | lead_time_hours | 3.17 | +0.94 | git |
 
 ## Phase 55
@@ -160,6 +166,7 @@
 | tasks_committed | - | - | event |
 | first_pass_rate | - | - | event |
 | mean_verify_attempts | - | - | event |
+| rework_tasks_ratio | - | - | event |
 | verify_failures | - | - | event |
 | circuit_breakers | - | - | event |
 | quarantines | - | - | event |
@@ -175,7 +182,7 @@
 | unplanned_steps | 0 | 0 | git |
 | audit_steps_added | 0 | 0 | git |
 | pipeline_commits | 4 | 0 | git |
-| human_commits | 1 | 0 | git |
+| out_of_path_commits | 1 | 0 | git |
 | lead_time_hours | 0.89 | -2.28 | git |
 
 ## Phase 56
@@ -185,6 +192,7 @@
 | tasks_committed | - | - | event |
 | first_pass_rate | - | - | event |
 | mean_verify_attempts | - | - | event |
+| rework_tasks_ratio | - | - | event |
 | verify_failures | - | - | event |
 | circuit_breakers | - | - | event |
 | quarantines | - | - | event |
@@ -200,7 +208,7 @@
 | unplanned_steps | 0 | 0 | git |
 | audit_steps_added | 0 | 0 | git |
 | pipeline_commits | 4 | 0 | git |
-| human_commits | 1 | 0 | git |
+| out_of_path_commits | 1 | 0 | git |
 | lead_time_hours | 0.55 | -0.34 | git |
 
 ## Phase 57
@@ -210,6 +218,7 @@
 | tasks_committed | - | - | event |
 | first_pass_rate | - | - | event |
 | mean_verify_attempts | - | - | event |
+| rework_tasks_ratio | - | - | event |
 | verify_failures | - | - | event |
 | circuit_breakers | - | - | event |
 | quarantines | - | - | event |
@@ -225,7 +234,7 @@
 | unplanned_steps | 0 | 0 | git |
 | audit_steps_added | 0 | 0 | git |
 | pipeline_commits | 4 | 0 | git |
-| human_commits | 1 | 0 | git |
+| out_of_path_commits | 1 | 0 | git |
 | lead_time_hours | 4.31 | +3.76 | git |
 
 ## Phase 58
@@ -235,6 +244,7 @@
 | tasks_committed | - | - | event |
 | first_pass_rate | - | - | event |
 | mean_verify_attempts | - | - | event |
+| rework_tasks_ratio | - | - | event |
 | verify_failures | - | - | event |
 | circuit_breakers | - | - | event |
 | quarantines | - | - | event |
@@ -250,7 +260,7 @@
 | unplanned_steps | 0 | 0 | git |
 | audit_steps_added | 0 | 0 | git |
 | pipeline_commits | 4 | 0 | git |
-| human_commits | 1 | 0 | git |
+| out_of_path_commits | 1 | 0 | git |
 | lead_time_hours | 0.6 | -3.71 | git |
 
 ## Phase 59
@@ -260,6 +270,7 @@
 | tasks_committed | - | - | event |
 | first_pass_rate | - | - | event |
 | mean_verify_attempts | - | - | event |
+| rework_tasks_ratio | - | - | event |
 | verify_failures | - | - | event |
 | circuit_breakers | - | - | event |
 | quarantines | - | - | event |
@@ -275,7 +286,7 @@
 | unplanned_steps | 0 | 0 | git |
 | audit_steps_added | 0 | 0 | git |
 | pipeline_commits | 4 | 0 | git |
-| human_commits | 1 | 0 | git |
+| out_of_path_commits | 1 | 0 | git |
 | lead_time_hours | 0.76 | +0.16 | git |
 
 ## Phase 60
@@ -285,6 +296,7 @@
 | tasks_committed | - | - | event |
 | first_pass_rate | - | - | event |
 | mean_verify_attempts | - | - | event |
+| rework_tasks_ratio | - | - | event |
 | verify_failures | - | - | event |
 | circuit_breakers | - | - | event |
 | quarantines | - | - | event |
@@ -300,7 +312,7 @@
 | unplanned_steps | 0 | 0 | git |
 | audit_steps_added | 0 | 0 | git |
 | pipeline_commits | 4 | 0 | git |
-| human_commits | 1 | 0 | git |
+| out_of_path_commits | 1 | 0 | git |
 | lead_time_hours | 0.5 | -0.26 | git |
 
 ## Phase 61
@@ -310,6 +322,7 @@
 | tasks_committed | - | - | event |
 | first_pass_rate | - | - | event |
 | mean_verify_attempts | - | - | event |
+| rework_tasks_ratio | - | - | event |
 | verify_failures | - | - | event |
 | circuit_breakers | - | - | event |
 | quarantines | - | - | event |
@@ -325,7 +338,7 @@
 | unplanned_steps | 0 | 0 | git |
 | audit_steps_added | 0 | 0 | git |
 | pipeline_commits | 4 | 0 | git |
-| human_commits | 2 | +1 | git |
+| out_of_path_commits | 2 | +1 | git |
 | lead_time_hours | 2.17 | +1.67 | git |
 
 ## Phase 62
@@ -335,6 +348,7 @@
 | tasks_committed | - | - | event |
 | first_pass_rate | - | - | event |
 | mean_verify_attempts | - | - | event |
+| rework_tasks_ratio | - | - | event |
 | verify_failures | - | - | event |
 | circuit_breakers | - | - | event |
 | quarantines | - | - | event |
@@ -350,7 +364,7 @@
 | unplanned_steps | 0 | 0 | git |
 | audit_steps_added | 29 | +29 | git |
 | pipeline_commits | 3 | -1 | git |
-| human_commits | 50 | +48 | git |
+| out_of_path_commits | 50 | +48 | git |
 | lead_time_hours | 31.41 | +29.24 | git |
 
 ## Phase 63
@@ -360,6 +374,7 @@
 | tasks_committed | - | - | event |
 | first_pass_rate | - | - | event |
 | mean_verify_attempts | - | - | event |
+| rework_tasks_ratio | - | - | event |
 | verify_failures | - | - | event |
 | circuit_breakers | - | - | event |
 | quarantines | - | - | event |
@@ -375,16 +390,19 @@
 | unplanned_steps | 2 | +2 | git |
 | audit_steps_added | 0 | -29 | git |
 | pipeline_commits | 7 | +4 | git |
-| human_commits | 8 | -42 | git |
+| out_of_path_commits | 8 | -42 | git |
 | lead_time_hours | 10.74 | -20.67 | git |
 
 ## Phase 64
 
+> ※注記: ステップ 1〜2 はイベントログ機能の新設前に完了したため、イベント由来の指標はステップ 3〜7 の 5 タスクを基準に集計されています（実際の完了タスク数は 7）。
+
 | 指標 | 値 | 直前差分 | 情報源 |
 | :--- | :--- | :--- | :--- |
-| tasks_committed | 4 | - | event |
+| tasks_committed | 5 | - | event |
 | first_pass_rate | 1.0 | - | event |
-| mean_verify_attempts | 2.5 | - | event |
+| mean_verify_attempts | 2.2 | - | event |
+| rework_tasks_ratio | 0.8 | - | event |
 | verify_failures | 0 | - | event |
 | circuit_breakers | 0 | - | event |
 | quarantines | 0 | - | event |
@@ -399,6 +417,6 @@
 | planned_steps | 7 | +2 | git |
 | unplanned_steps | 0 | -2 | git |
 | audit_steps_added | 0 | 0 | git |
-| pipeline_commits | 6 | -1 | git |
-| human_commits | 1 | -7 | git |
-| lead_time_hours | 2.57 | -8.17 | git |
+| pipeline_commits | 7 | 0 | git |
+| out_of_path_commits | 3 | -5 | git |
+| lead_time_hours | 2.99 | -7.75 | git |

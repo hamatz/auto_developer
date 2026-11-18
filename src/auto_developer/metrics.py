@@ -236,12 +236,18 @@ class MetricsLog:
             if has_missing_verify:
                 first_pass_rate: float | None = None
                 mean_verify_attempts: float | None = None
+                rework_tasks_ratio: float | None = None
             else:
                 first_pass_rate = round(first_pass_count / tasks_committed, 4)
                 mean_verify_attempts = round(attempts_sum / tasks_committed, 2)
+                rework_count = sum(
+                    1 for tid in committed_task_ids if len(verify_by_task.get(tid, [])) >= 2
+                )
+                rework_tasks_ratio = round(rework_count / tasks_committed, 4)
         else:
             first_pass_rate = None
             mean_verify_attempts = None
+            rework_tasks_ratio = None
 
         verify_failures = sum(1 for e in verify_events if e.get("result") == "FAILED")
         circuit_breakers = sum(1 for e in verify_events if e.get("result") == "CIRCUIT_BREAKER")
@@ -288,6 +294,7 @@ class MetricsLog:
             "tasks_committed": {"value": tasks_committed, "source": "event"},
             "first_pass_rate": {"value": first_pass_rate, "source": "event"},
             "mean_verify_attempts": {"value": mean_verify_attempts, "source": "event"},
+            "rework_tasks_ratio": {"value": rework_tasks_ratio, "source": "event"},
             "verify_failures": {"value": verify_failures, "source": "event"},
             "circuit_breakers": {"value": circuit_breakers, "source": "event"},
             "quarantines": {"value": quarantines, "source": "event"},
@@ -348,7 +355,7 @@ class MetricsLog:
             "unplanned_steps": {"value": None, "source": "git"},
             "audit_steps_added": {"value": None, "source": "git"},
             "pipeline_commits": {"value": None, "source": "git"},
-            "human_commits": {"value": None, "source": "git"},
+            "out_of_path_commits": {"value": None, "source": "git"},
             "lead_time_hours": {"value": None, "source": "git"},
         }
         num_match = re.search(r"\d+", target_phase)
@@ -463,7 +470,7 @@ class MetricsLog:
 
             if commit_shas is None:
                 pipeline_commits: int | None = None
-                human_commits: int | None = None
+                out_of_path_commits: int | None = None
             else:
                 p_count = 0
                 h_count = 0
@@ -486,10 +493,10 @@ class MetricsLog:
                         h_count += 1
                 if has_commit_error:
                     pipeline_commits = None
-                    human_commits = None
+                    out_of_path_commits = None
                 else:
                     pipeline_commits = p_count
-                    human_commits = h_count
+                    out_of_path_commits = h_count
 
             # lead_time_hours の算出
             ts_res = subprocess.run(
@@ -545,7 +552,7 @@ class MetricsLog:
                 "unplanned_steps": {"value": unplanned_steps, "source": "git"},
                 "audit_steps_added": {"value": audit_steps_added, "source": "git"},
                 "pipeline_commits": {"value": pipeline_commits, "source": "git"},
-                "human_commits": {"value": human_commits, "source": "git"},
+                "out_of_path_commits": {"value": out_of_path_commits, "source": "git"},
                 "lead_time_hours": {"value": lead_time_hours, "source": "git"},
             }
         except Exception as e:  # noqa: BLE001

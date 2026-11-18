@@ -749,7 +749,7 @@ class TestMetricsLog(unittest.TestCase):
         self.assertEqual(res["phase"], "Phase 50")
         for k, info in res["metrics"].items():
             self.assertIsNone(info["value"], f"Metric '{k}' should be None when phase has no events")
-            if k in ("planned_steps", "unplanned_steps", "audit_steps_added", "pipeline_commits", "human_commits", "lead_time_hours"):
+            if k in ("planned_steps", "unplanned_steps", "audit_steps_added", "pipeline_commits", "out_of_path_commits", "lead_time_hours"):
                 self.assertEqual(info["source"], "git")
             else:
                 self.assertEqual(info["source"], "event")
@@ -767,6 +767,26 @@ class TestMetricsLog(unittest.TestCase):
         self.assertEqual(m["tasks_committed"]["value"], 1)
         self.assertIsNone(m["first_pass_rate"]["value"])
         self.assertIsNone(m["mean_verify_attempts"]["value"])
+        self.assertIsNone(m["rework_tasks_ratio"]["value"])
+
+    def test_rework_tasks_ratio_computation(self) -> None:
+        """コミットされたタスクのうち verify_step が 2回以上行われたタスクの割合 (rework_tasks_ratio) が正しく算出されること。"""
+        metrics = MetricsLog(repo_dir=self.repo, plan_path=self.plan)
+        # Task 1: 1回の verify でコミット
+        metrics.record_event("verify_step", phase="Phase 65", task_id="1", checkpoint="c1", result="PASSED", exit_code=0, duration_sec=1.0)
+        metrics.record_event("commit_step", phase="Phase 65", task_id="1", result="COMMITTED", commit="sha1", checker_decision="APPROVE", checker_model="claude-opus-5.5", checker_family="claude", maker_model="gemini-3.8-flash", maker_family="gemini")
+
+        # Task 2: 2回の verify でコミット (rework あり)
+        metrics.record_event("verify_step", phase="Phase 65", task_id="2", checkpoint="c2", result="FAILED", exit_code=1, duration_sec=1.0)
+        metrics.record_event("verify_step", phase="Phase 65", task_id="2", checkpoint="c2", result="PASSED", exit_code=0, duration_sec=1.0)
+        metrics.record_event("commit_step", phase="Phase 65", task_id="2", result="COMMITTED", commit="sha2", checker_decision="APPROVE", checker_model="claude-opus-5.5", checker_family="claude", maker_model="gemini-3.8-flash", maker_family="gemini")
+
+        res = metrics.compute_phase_metrics("Phase 65")
+        m = res["metrics"]
+        self.assertEqual(m["tasks_committed"]["value"], 2)
+        # 2タスク中1タスクがrework
+        self.assertEqual(m["rework_tasks_ratio"]["value"], 0.5)
+        self.assertEqual(m["rework_tasks_ratio"]["source"], "event")
 
     def test_audit_stage_with_unknown_or_partial_tokens_reports_null_token_ratio(self) -> None:
         """一部またはすべての監査ステージでトークン数が不明な場合、比率は歪めず null とすること。"""
@@ -848,9 +868,9 @@ class TestMetricsLog(unittest.TestCase):
         self.assertEqual(m["pipeline_commits"]["value"], 2)
         self.assertEqual(m["pipeline_commits"]["source"], "git")
 
-        # human_commits: 範囲内で [refs: を含まないコミット -> 2 (start commit と docs commit)
-        self.assertEqual(m["human_commits"]["value"], 2)
-        self.assertEqual(m["human_commits"]["source"], "git")
+        # out_of_path_commits: 範囲内で [refs: を含まないコミット -> 2 (start commit と docs commit)
+        self.assertEqual(m["out_of_path_commits"]["value"], 2)
+        self.assertEqual(m["out_of_path_commits"]["source"], "git")
 
         # lead_time_hours: >= 0.0
         self.assertIsNotNone(m["lead_time_hours"]["value"])
@@ -902,7 +922,7 @@ class TestMetricsLog(unittest.TestCase):
             res = metrics.compute_phase_metrics("Phase 64")
             m = res["metrics"]
             self.assertIsNone(m["pipeline_commits"]["value"])
-            self.assertIsNone(m["human_commits"]["value"])
+            self.assertIsNone(m["out_of_path_commits"]["value"])
 
 
 if __name__ == "__main__":
