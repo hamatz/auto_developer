@@ -179,6 +179,29 @@ class TestImmunityAuditLoopTermination(unittest.TestCase):
         backlog = (self.repo / "BACKLOG.md").read_text(encoding="utf-8")
         self.assertEqual(backlog.count("reused-id issue #0"), 1)
 
+    def test_reused_finding_id_for_completed_task_reopens_as_new_task(self) -> None:
+        """WWW.6: 完了済み（- [x]）タスクと同一の指摘（同一ID・同一hash）が再発した場合は新タスクとして再オープンされること。"""
+        dispatcher = self._dispatcher(max_cycles=5)
+        f0 = self._reused("P1", 0)
+        dispatcher.process_findings([f0], plan_path=self.plan, cycle_id="c0")
+        self.assertEqual(f0.status, "DISPATCHED")
+
+        # Maker が修正して完了（- [x]）になった状態を作る
+        plan_text = self.plan.read_text(encoding="utf-8")
+        plan_text = plan_text.replace(f"- [ ] AUD-{f0.finding_id}.", f"- [x] AUD-{f0.finding_id}.")
+        self.plan.write_text(plan_text, encoding="utf-8")
+
+        # Cycle 1: 後日、まったく同じ指摘（同一 finding_id, 同一 code_hash）が GENUINE_RED として再発
+        f1 = self._reused("P1", 0)
+        self.assertEqual(f1.finding_id, f0.finding_id)
+        dispatcher.process_findings([f1], plan_path=self.plan, cycle_id="c1")
+
+        # 完了済みタスクの回帰として新しい finding_id が割り当てられ、PLAN に未着手タスクとして登録されること
+        self.assertEqual(f1.status, "DISPATCHED")
+        self.assertNotEqual(f1.finding_id, f0.finding_id)
+        new_plan = self.plan.read_text(encoding="utf-8")
+        self.assertIn(f"- [ ] AUD-{f1.finding_id}.", new_plan)
+
     def test_reused_finding_id_still_escalates_after_budget(self) -> None:
         dispatcher = self._dispatcher(max_cycles=1)
         findings = []

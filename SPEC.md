@@ -777,7 +777,9 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - ESCALATED が 1 件以上あれば「あなたに判断してほしいこと」節にモジュール名・streak・該当 finding を列挙する。
   6. 監査役による finding_id 再利用への耐性 (WWW.6):
      - 監査役はサイクルごとに `AUD-001` から採番し直すことがある。`AuditDispatcher.process_findings()` は重要度による振り分けより前に、各 finding について AuditStore・PLAN.md・BACKLOG.md 上の既存 ID との衝突を判定する。
-       - 同じ finding_id で code_hash も同じ: 同一指摘の再報告として扱う（BACKLOG / PLAN に重複して書かない）。
+       - 同じ finding_id で code_hash も同じ:
+         - 既存項目が「未着手（`- [ ]`）の PLAN タスク」または「`BACKLOG.md` の行」の場合: 同一指摘の再報告として扱い、重複して書かない（冪等）。
+         - 既存項目が「PLAN 上で完了済み（`- [x]`）のタスク」の場合: 不具合の再発（回帰）として扱い、AUD-018 の規則（既存番号の最大値 + 1）で新しい finding_id を割り当てて新しい未着手タスク（`- [ ]`）として登録する。
        - 同じ finding_id で code_hash が異なる: 既存の採番規則（AUD-018: 既存番号の最大値 + 1）で新しい finding_id を割り当ててから振り分ける。
      - この処理は P0 / P1 / P2 / INFO / ESCALATED のすべての経路に共通で適用し、`CODE_HASH_TAMPERED` によって監査ステージ全体が `AUDIT_FAILED` になってはならない。
      - AuditStore の不変性（GGG.2: 同一 finding_id の再現テストの上書き拒否）は緩めない。
