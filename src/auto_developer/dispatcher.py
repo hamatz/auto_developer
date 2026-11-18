@@ -412,6 +412,7 @@ class AuditDispatcher:
                 for f in mod_findings:
                     if last_action == "ESCALATED":
                         f.status = "ESCALATED"
+                        f.streak = current_streak
                         self.audit_store.save_finding(f)
                     else:
                         self._register_step(f, target_plan)
@@ -424,6 +425,7 @@ class AuditDispatcher:
                 # 予算上限超過 -> ESCALATED
                 for f in mod_findings:
                     f.status = "ESCALATED"
+                    f.streak = current_streak
                     self.audit_store.save_finding(f)
                     escalated_entries.append((f, current_streak))
                 budget[mod] = {

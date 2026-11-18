@@ -12,6 +12,18 @@ class MorningReporter:
     def __init__(self, repo_dir: Path | None = None) -> None:
         self.repo_dir = repo_dir
 
+    @staticmethod
+    def _extract_module_key(location: str | None) -> str:
+        """location 先頭の空白・`:`・`(` までのトークンを抽出する。取れなければ UNKNOWN。"""
+        if not location:
+            return "UNKNOWN"
+        import re
+
+        m = re.match(r"^\s*([^:\s(]+)", location)
+        if m and m.group(1).strip():
+            return m.group(1).strip()
+        return "UNKNOWN"
+
     def write_report(
         self,
         report_path: Path,
@@ -267,14 +279,18 @@ class MorningReporter:
 
             if status_str == "SUCCESS":
                 dispatched = audit_stage.get("dispatched", [])
+                backlogged = audit_stage.get("backlogged", [])
+                escalated = audit_stage.get("escalated", [])
                 rejected = audit_stage.get("rejected", [])
-                lines.append(f"- **真正指摘登録数**: {len(dispatched)} 件（次期 PLAN.md に自律登録）")
+                lines.append(f"- **真正指摘登録数 (DISPATCHED)**: {len(dispatched)} 件（次期 PLAN.md に自律登録）")
+                lines.append(f"- **Backlog 送り (BACKLOGGED)**: {len(backlogged)} 件（P2 / BACKLOG.md に記録）")
+                lines.append(f"- **エスカレーション (ESCALATED)**: {len(escalated)} 件（修正予算超過・人間判断待ち）")
                 lines.append(f"- **不正/偽Red排除数**: {len(rejected)} 件（多層防壁により遮断）")
                 for f in dispatched:
-                    fid = getattr(f, "finding_id", str(f))
-                    sev = getattr(f, "severity", "P1")
-                    desc = getattr(f, "description", "")
-                    loc = getattr(f, "location", "")
+                    fid = getattr(f, "finding_id", f.get("finding_id", str(f)) if isinstance(f, dict) else str(f))
+                    sev = getattr(f, "severity", f.get("severity", "P1") if isinstance(f, dict) else "P1")
+                    desc = getattr(f, "description", f.get("description", "") if isinstance(f, dict) else "")
+                    loc = getattr(f, "location", f.get("location", "") if isinstance(f, dict) else "")
                     lines.append(f"  - `[{sev}] {fid}`: {desc} ({loc})")
             elif status_str in ("AUDIT_FAILED", "AUDIT_PENDING"):
                 lines.append(f"- **保留/エラー理由**: {audit_stage.get('error', 'Unknown')}")
@@ -349,6 +365,39 @@ class MorningReporter:
                 lines.append(
                     f"- リモートリポジトリ (origin) は未設定です。`git log -p -n {succeeded}` でコミット差分を確認してください。"
                 )
+
+        # 5. エスカレーションされた指摘の列挙 (WWW.5)
+        escalated_findings: list[Any] = []
+        if audit_stage:
+            escalated_findings = audit_stage.get("escalated", []) or []
+
+        if escalated_findings:
+            lines.extend(
+                [
+                    "",
+                    "### 監査エスカレーション（修正予算上限超過・人手による判断が必要です）",
+                    "修正予算（連続サイクル上限）に達した指摘があります。モジュールごとの再設計または修正方針を判断してください：",
+                ]
+            )
+            for f in escalated_findings:
+                fid = getattr(f, "finding_id", f.get("finding_id", str(f)) if isinstance(f, dict) else str(f))
+                sev = getattr(f, "severity", f.get("severity", "P1") if isinstance(f, dict) else "P1")
+                desc = getattr(f, "description", f.get("description", "") if isinstance(f, dict) else "")
+                loc = getattr(f, "location", f.get("location", "") if isinstance(f, dict) else "")
+                mod = getattr(f, "module", None) or (f.get("module") if isinstance(f, dict) else None) or self._extract_module_key(loc)
+                streak = getattr(f, "streak", None) or (f.get("streak") if isinstance(f, dict) else None)
+                if streak is None:
+                    try:
+                        budget_path = effective_repo / ".dev" / "audit" / "budget.json"
+                        if budget_path.is_file():
+                            b_data = json.loads(budget_path.read_text(encoding="utf-8"))
+                            if mod in b_data:
+                                streak = b_data[mod].get("streak")
+                    except OSError:
+                        pass
+                streak_str = str(streak) if streak is not None else "N/A"
+                lines.append(f"- モジュール: `{mod}` (Streak: {streak_str})")
+                lines.append(f"  - `[{sev}] {fid}`: {desc} ({loc})")
 
         bundle_path_str = summary_data.get("bundle_path")
         if bundle_path_str:

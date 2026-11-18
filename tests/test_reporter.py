@@ -178,6 +178,123 @@ class TestMorningReporterEvidenceVerification(unittest.TestCase):
         self.assertIn(f"`{tree_sha[:7]}`", content)
         self.assertIn("APPROVE (Verified)", content)
 
+    def test_feature_www_5_audit_counts_split(self):
+        """機能WWW.5: 監査ステージの結果として、登録（DISPATCHED）・Backlog 送り（BACKLOGGED）・エスカレーション（ESCALATED）の件数を分けて表示すること。"""
+        from auto_developer.audit import AuditFinding
+
+        dispatched_f = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="WWW.1",
+            location="src/mod_a.py:10",
+            description="Severe defect 1",
+            reproduction_test_code="def test_fail(): assert False",
+            status="DISPATCHED",
+        )
+        backlogged_f1 = AuditFinding(
+            finding_id="AUD-002",
+            severity="P2",
+            spec_reference="WWW.1",
+            location="src/mod_b.py:20",
+            description="Minor edge case 1",
+            reproduction_test_code="def test_edge(): pass",
+            status="BACKLOGGED",
+        )
+        backlogged_f2 = AuditFinding(
+            finding_id="AUD-003",
+            severity="P2",
+            spec_reference="WWW.1",
+            location="src/mod_b.py:25",
+            description="Minor edge case 2",
+            reproduction_test_code="def test_edge2(): pass",
+            status="BACKLOGGED",
+        )
+        escalated_f = AuditFinding(
+            finding_id="AUD-004",
+            severity="P1",
+            spec_reference="WWW.2",
+            location="src/mod_c.py:30",
+            description="Recurring defect",
+            reproduction_test_code="def test_rec(): assert False",
+            status="ESCALATED",
+            streak=5,
+        )
+
+        summary_data = {
+            "status": "COMPLETED",
+            "total_tasks": 1,
+            "succeeded_count": 1,
+            "quarantined_count": 0,
+            "checkpoint": "c1c0da8",
+            "completed_tasks": [],
+            "audit_stage": {
+                "status": "SUCCESS",
+                "dispatched": [dispatched_f],
+                "backlogged": [backlogged_f1, backlogged_f2],
+                "escalated": [escalated_f],
+                "rejected": [],
+            },
+        }
+
+        reporter = MorningReporter(repo_dir=self.repo)
+        report_path = self.repo / "NIGHTLY_REPORT.md"
+        reporter.write_report(report_path, summary_data)
+
+        content = report_path.read_text(encoding="utf-8")
+        self.assertIn("DISPATCHED", content)
+        self.assertIn("BACKLOGGED", content)
+        self.assertIn("ESCALATED", content)
+        # 件数の確認: DISPATCHED 1件, BACKLOGGED 2件, ESCALATED 1件
+        self.assertTrue("1 件" in content or "1件" in content)
+        self.assertTrue("2 件" in content or "2件" in content)
+
+    def test_feature_www_5_escalated_findings_listed_under_action_required(self):
+        """機能WWW.5: ESCALATED が 1 件以上あれば「あなたに判断してほしいこと」節にモジュール名・streak・該当 finding を列挙すること。"""
+        from auto_developer.audit import AuditFinding
+
+        escalated_f = AuditFinding(
+            finding_id="AUD-999",
+            severity="P1",
+            spec_reference="WWW.2",
+            location="src/auto_developer/verifier.py:166",
+            description="Repetitive failure in verifier",
+            reproduction_test_code="def test_fail(): assert False",
+            status="ESCALATED",
+            streak=5,
+        )
+
+        summary_data = {
+            "status": "COMPLETED",
+            "total_tasks": 1,
+            "succeeded_count": 1,
+            "quarantined_count": 0,
+            "checkpoint": "c1c0da8",
+            "completed_tasks": [],
+            "audit_stage": {
+                "status": "SUCCESS",
+                "dispatched": [],
+                "backlogged": [],
+                "escalated": [escalated_f],
+                "rejected": [],
+            },
+        }
+
+        reporter = MorningReporter(repo_dir=self.repo)
+        report_path = self.repo / "NIGHTLY_REPORT.md"
+        reporter.write_report(report_path, summary_data)
+
+        content = report_path.read_text(encoding="utf-8")
+        # 「あなたに判断してほしいこと」節以降のテキストを取得
+        section_idx = content.find("## あなたに判断してほしいこと")
+        self.assertNotEqual(section_idx, -1)
+        action_section = content[section_idx:]
+
+        # モジュール名、streak、該当 finding の情報が含まれていること
+        self.assertIn("src/auto_developer/verifier.py", action_section)
+        self.assertIn("5", action_section)
+        self.assertIn("AUD-999", action_section)
+        self.assertIn("Repetitive failure in verifier", action_section)
+
 
 if __name__ == "__main__":
     unittest.main()

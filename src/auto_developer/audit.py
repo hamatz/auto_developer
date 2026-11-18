@@ -129,6 +129,7 @@ class AuditFinding:
     raw_response_hash: str | None = None
     fallback_occurred: bool = False
     fallback_from: str | None = None
+    streak: int | None = None
     # NOTE: auditor_model は監査ランナー設定で渡されたモデル識別子の記録値であり、
     # 外部プロバイダーの実行時同一性を暗号学的に証明するものではない (HHH.2)。
 
@@ -159,6 +160,7 @@ class AuditFinding:
             raw_response_hash=data.get("raw_response_hash"),
             fallback_occurred=data.get("fallback_occurred", False),
             fallback_from=data.get("fallback_from"),
+            streak=data.get("streak"),
         )
 
 
