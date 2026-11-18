@@ -7,10 +7,15 @@ Phase 63 のステップ完了後、人間が tests/immunity/ に配置する。
 
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+
+src_dir = str(Path(__file__).resolve().parents[2] / "src")
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
 
 from auto_developer.audit import AuditFinding
 from auto_developer.audit_store import AuditStore
@@ -141,6 +146,52 @@ class TestImmunityAuditLoopTermination(unittest.TestCase):
         dispatcher.process_findings([third], plan_path=self.plan, cycle_id="c3")
         self.assertEqual(second.status, "DISPATCHED")
         self.assertEqual(third.status, "ESCALATED")
+
+    # --- 監査役が毎サイクル ID を振り直す（AUD-001 から再採番する）現実の挙動 (WWW.6) ---
+    def _reused(self, severity: str, n: int, finding_id: str = "AUD-001") -> AuditFinding:
+        return AuditFinding(
+            finding_id=finding_id,
+            severity=severity,
+            spec_reference="SPEC.md 機能WWW",
+            location="src/auto_developer/verifier.py:166",
+            description=f"reused-id issue #{n}",
+            reproduction_test_code=REPRO + f"# reused {n}\n",
+        )
+
+    def test_reused_finding_id_across_cycles_is_backlogged_not_crashed(self) -> None:
+        dispatcher = self._dispatcher(max_cycles=5)
+        findings = []
+        for cycle in range(3):
+            f = self._reused("P2", cycle)
+            dispatcher.process_findings([f], plan_path=self.plan, cycle_id=f"c{cycle}")
+            findings.append(f)
+
+        self.assertEqual([f.status for f in findings], ["BACKLOGGED"] * 3)
+        self.assertEqual(len({f.finding_id for f in findings}), 3, "colliding IDs must be re-numbered")
+        backlog = (self.repo / "BACKLOG.md").read_text(encoding="utf-8")
+        for n in range(3):
+            self.assertIn(f"reused-id issue #{n}", backlog, "a different finding must not be dropped")
+
+    def test_identical_rereport_is_not_duplicated_in_backlog(self) -> None:
+        dispatcher = self._dispatcher(max_cycles=5)
+        for cycle in range(3):
+            dispatcher.process_findings([self._reused("P2", 0)], plan_path=self.plan, cycle_id=f"c{cycle}")
+        backlog = (self.repo / "BACKLOG.md").read_text(encoding="utf-8")
+        self.assertEqual(backlog.count("reused-id issue #0"), 1)
+
+    def test_reused_finding_id_still_escalates_after_budget(self) -> None:
+        dispatcher = self._dispatcher(max_cycles=1)
+        findings = []
+        for cycle in range(3):
+            f = self._reused("P1", cycle)
+            dispatcher.process_findings([f], plan_path=self.plan, cycle_id=f"c{cycle}")
+            findings.append(f)
+
+        self.assertEqual([f.status for f in findings], ["DISPATCHED", "ESCALATED", "ESCALATED"])
+        self.assertEqual(len({f.finding_id for f in findings}), 3)
+        plan_text = self.plan.read_text(encoding="utf-8")
+        self.assertEqual(plan_text.count("- ESCALATED ["), 2)
+        self.assertEqual(len(self._pending_tasks()), 1)
 
     def test_release_blockers_ignore_p2_and_catch_p0_p1(self) -> None:
         plan_text = (

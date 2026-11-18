@@ -752,7 +752,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
        - P2: Red 検証を行わず（`verify_candidate_test` を呼ばない）、リポジトリ直下の `BACKLOG.md` に 1 行追記する（status `BACKLOGGED`）。PLAN.md には書かない。
        - INFO: どこにも書かず AuditStore にのみ保存する（status `NOTED`）。
      - `VALID_STATUSES` に `BACKLOGGED`, `NOTED`, `ESCALATED` を追加する。
-     - `BACKLOG.md` の行書式: `- [AUD-<id>] <description> (Severity: P2, Loc: <location>, Cycle: <cycle_id>)`。同一 finding_id が既に存在する場合は追記しない（冪等）。ファイルがなければ見出し `# BACKLOG.md` 付きで作成する。
+     - `BACKLOG.md` の行書式: `- [AUD-<id>] <description> (Severity: P2, Loc: <location>, Cycle: <cycle_id>)`。同一の指摘（finding_id と再現テストの code_hash がともに一致）が既に存在する場合は追記しない（冪等）。finding_id だけが一致し内容が異なる場合は WWW.6 に従い採番し直す。ファイルがなければ見出し `# BACKLOG.md` 付きで作成する。
      - `BACKLOG.md` の行はチェックボックスを持たない（`TaskDispatcher` が Maker タスクとして拾わないこと）。
   2. 修正予算（モジュール単位の連続サイクル上限）(WWW.2):
      - `AuditDispatcher.__init__` に `max_consecutive_cycles: int = 5` を追加する。
@@ -775,6 +775,12 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   5. Morning Brief への反映 (WWW.5):
      - `MorningReporter` は監査ステージの結果として、登録（DISPATCHED）・Backlog 送り（BACKLOGGED）・エスカレーション（ESCALATED）の件数を分けて表示する。
      - ESCALATED が 1 件以上あれば「あなたに判断してほしいこと」節にモジュール名・streak・該当 finding を列挙する。
+  6. 監査役による finding_id 再利用への耐性 (WWW.6):
+     - 監査役はサイクルごとに `AUD-001` から採番し直すことがある。`AuditDispatcher.process_findings()` は重要度による振り分けより前に、各 finding について AuditStore・PLAN.md・BACKLOG.md 上の既存 ID との衝突を判定する。
+       - 同じ finding_id で code_hash も同じ: 同一指摘の再報告として扱う（BACKLOG / PLAN に重複して書かない）。
+       - 同じ finding_id で code_hash が異なる: 既存の採番規則（AUD-018: 既存番号の最大値 + 1）で新しい finding_id を割り当ててから振り分ける。
+     - この処理は P0 / P1 / P2 / INFO / ESCALATED のすべての経路に共通で適用し、`CODE_HASH_TAMPERED` によって監査ステージ全体が `AUDIT_FAILED` になってはならない。
+     - AuditStore の不変性（GGG.2: 同一 finding_id の再現テストの上書き拒否）は緩めない。
   - スコープ外（WWW）: 監査器（`verifier.py` / `audit.py`）自身の変更を監査対象から外す等のメタ監査制限、予算リセット CLI、重要度の自動降格判定。必要になれば BACKLOG.md に積む。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
