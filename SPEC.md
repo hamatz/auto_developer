@@ -786,7 +786,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - AuditStore の不変性（GGG.2: 同一 finding_id の再現テストの上書き拒否）は緩めない。
   - スコープ外（WWW）: 監査器（`verifier.py` / `audit.py`）自身の変更を監査対象から外す等のメタ監査制限、予算リセット CLI、重要度の自動降格判定。必要になれば BACKLOG.md に積む。
 
-- [ ] 機能XXX (成果の計測基盤と Checker 記録の構造化 Outcome Metrics Foundation and Structured Checker Records):
+- [x] 機能XXX (成果の計測基盤と Checker 記録の構造化 Outcome Metrics Foundation and Structured Checker Records):
   <!-- 目的: 「型が効いているか」を数字で判断できるようにする。指標はそれぞれ判断に紐づける。
        - 1 回目の verify で通った率・平均試行回数・隔離数 → Maker の能力とタスク分割は適切か
        - Checker の REJECT 数・系統違反数 → 査読が機能し、異系統が守られているか
@@ -826,6 +826,24 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
   5. ベースラインの記録 (XXX.5):
      - git 履歴から算出できるフェーズ（少なくとも Phase 50 以降）を `METRICS.md` に記録し、Phase 64 自体の集計を最後に追記する。`METRICS.md` は先頭に各指標の定義と判断との対応を記す。
   - スコープ外（XXX）: Maker / Checker のトークン・コスト計測（Antigravity 側で消費されるため取得経路がない）、ダッシュボード表示、Morning Brief への指標表示（必要なら次フェーズ）。
+
+- [ ] 機能YYY (v0.8.0 リリース確定と自律レポート復旧・計測指標の適正化 v0.8.0 Finalization, Autonomous Reporting Recovery, and Metric Harmonization):
+  <!-- 目的: v0.8.0 リリースの確定に向け、計測指標の実態との乖離（out_of_path_commits, rework_tasks_ratio）を解消し、夜間バッチおよび Antigravity 対話実行の両方で NIGHTLY_REPORT.md が自動更新・モーニングブリーフされる仕組みを復旧し、バージョン表記・リリースドキュメント・監査済み Evidence Bundle を整える。 -->
+  1. 計測指標の適正化と手戻り率 (YYY.1):
+     - `human_commits` を `out_of_path_commits` に改名する。定義: `[refs:` を含まない非マージコミット（自動監査ループや外部コミット等を含む、commit-step 正規経路外の全コミット）。
+     - 新指標 `rework_tasks_ratio` の追加: コミットされたタスクのうち、コミットまでに `verify_step` が 2 回以上実行されたタスクの割合（タスク単位で集計。イベントログ由来。verify_step 未記録なら null）。
+     - `METRICS.md` の Phase 64 の行を最終数値（ステップ 7 コミット後）で更新し、ステップ 1〜2 はイベントログ新設前のため一部指標が 5 件基準である旨の注記を明記する。
+  2. NIGHTLY_REPORT.md の自動生成とモーニングブリーフ復旧 (YYY.2):
+     - `MorningReporter` / `NightlyOrchestrator` のレポート生成ロジックを整理し、`.dev/job_state.json` が存在しない対話実行環境（`/nightly-run`）でも、git HEAD、PLAN.md、`.git/nightly_evidence/records/`、および `audit_stage.json` を参照して完全な `NIGHTLY_REPORT.md` をスタンドアロン生成できる `auto-dev report` サブコマンド（または同等機能）を提供する。
+     - `auto-dev bundle` 実行時、および `auto-dev brief` 実行時に `NIGHTLY_REPORT.md` が最新 HEAD に合わせて自動更新または検証されるように連携する。
+  3. v0.8.0 バージョン整合とリリースドキュメント整備 (YYY.3):
+     - バージョン表記の統一: `pyproject.toml` (0.8.0), `plugin.json` (0.8.0), `src/auto_developer/__init__.py` (__version__ = "0.8.0"), `src/auto_developer/cli.py` (0.8.0) に更新する。
+     - `CHANGELOG.md` に `## [0.8.0] - 2026-11-18` 節を追加し、Phase 63・64・65 の成果（監査重要度振り分けと修正予算、Maker/Checker 異系統検証、イベントログ・成果計測基盤、指標適正化とレポート復旧）を記載する。
+     - `docs/releases/v0.8.0.md` を作成し、リリースサマリをまとめる。
+  4. 最新 HEAD に対する実 Claude Opus 5.5 本番監査と完全性検証済み Evidence Bundle の生成 (YYY.4):
+     - 最新 HEAD に対して Claude Opus 5.5（`claude-opus-5-5-medium`、Anthropic API 経由）による本番独立監査を実行し、`audit_stage.json` を更新する。
+     - `auto-dev bundle` を実行し、`auto-dev verify-bundle` で `AUDIT_OUTDATED` なくすべての検証（証跡整合性、Tree SHA バインド、SPEC 不変性、Checker 承認）が `VERIFIED` となることを確認する。
+  - スコープ外（YYY）: Web UI ダッシュボードの実装、自動リリースデプロイ（GitHub Releases への自動 push 等）。
 
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
