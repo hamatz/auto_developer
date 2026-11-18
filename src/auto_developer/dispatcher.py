@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -159,6 +160,162 @@ class AuditDispatcher:
             return "unknown"
         return "unknown"
 
+    def _resolve_finding_ids(
+        self,
+        findings: list[AuditFinding],
+        target_plan: Path,
+        effective_cycle_id: str,
+        budget: dict[str, dict[str, object]] | None = None,
+    ) -> list[AuditFinding]:
+        """AuditStore・PLAN.md・BACKLOG.md 上の既存 ID との衝突を判定し、採番し直す (WWW.6)。
+
+        同一指摘（同一 ID かつ同一 code_hash）の再報告は重複登録を抑止するため戻り値から除外する（冪等）。
+        ただし同一 cycle_id のリトライ時はディスパッチ状態を維持する。
+        完了済みタスク（- [x]）の同一指摘は回帰として AUD-018 で採番し直し、新規タスクとして戻り値に含める。
+        内容の異なる ID 衝突は AUD-018 で採番し直して戻り値に含める。
+        """
+        backlog_path = self.repo_dir / "BACKLOG.md"
+        plan_content = target_plan.read_text(encoding="utf-8") if target_plan.exists() else ""
+        backlog_content = backlog_path.read_text(encoding="utf-8") if backlog_path.exists() else ""
+        current_budget = budget if budget is not None else self._load_budget()
+
+        # 全既存番号の収集
+        existing_nums: set[int] = set()
+        for n in re.findall(r"AUD-(?:AUD-)?(\d+)", plan_content):
+            existing_nums.add(int(n))
+        for n in re.findall(r"AUD-(?:AUD-)?(\d+)", backlog_content):
+            existing_nums.add(int(n))
+        if self.audit_store.findings_dir.exists():
+            for p in self.audit_store.findings_dir.glob("*.json"):
+                if m := re.search(r"(\d+)", p.stem):
+                    existing_nums.add(int(m.group(1)))
+
+        # 既存 ID -> code_hash のマッピング
+        known_hashes: dict[str, str] = {}
+        if self.audit_store.findings_dir.exists():
+            for p in self.audit_store.findings_dir.glob("*.json"):
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    h = str(data.get("code_hash", "")).strip()
+                    stem = p.stem
+                    full_id = stem if stem.startswith("AUD-") else f"AUD-{stem}"
+                    num_id = stem.removeprefix("AUD-")
+                    known_hashes[full_id] = h
+                    known_hashes[num_id] = h
+                except (OSError, json.JSONDecodeError):
+                    pass
+
+        allocated_hashes: dict[str, str] = dict(known_hashes)
+
+        # PLAN.md 内の未完了 (- [ ]) および完了済み (- [x]) タスクの ID と Cycle
+        open_plan_ids: set[str] = set()
+        open_plan_cycles: dict[str, str] = {}
+        completed_plan_ids: set[str] = set()
+        for line in plan_content.splitlines():
+            line_str = line.strip()
+            cycle_match = re.search(r"Cycle:\s*([A-Za-z0-9_-]+)", line_str)
+            cycle_val = cycle_match.group(1) if cycle_match else ""
+            if line_str.startswith("- [ ]"):
+                for token in re.findall(r"\[(AUD-[^\]]+)\]", line_str):
+                    open_plan_ids.add(token)
+                    open_plan_ids.add(token[4:])
+                    if cycle_val:
+                        open_plan_cycles[token] = cycle_val
+                        open_plan_cycles[token[4:]] = cycle_val
+            elif line_str.startswith("- [x]"):
+                for token in re.findall(r"\[(AUD-[^\]]+)\]", line_str):
+                    completed_plan_ids.add(token)
+                    completed_plan_ids.add(token[4:])
+
+        # BACKLOG.md 内の ID 一覧
+        backlog_ids: set[str] = set()
+        for line in backlog_content.splitlines():
+            line_str = line.strip()
+            if line_str.startswith("- ["):
+                for token in re.findall(r"\[(AUD-[^\]]+)\]", line_str):
+                    backlog_ids.add(token)
+                    backlog_ids.add(token[4:])
+
+        active_findings: list[AuditFinding] = []
+
+        for finding in findings:
+            # 再現テストコードから常に code_hash を確定（外部入力を過信しない）
+            code_str = finding.reproduction_test_code or ""
+            finding.code_hash = hashlib.sha256(code_str.encode("utf-8")).hexdigest()
+
+            fid = finding.finding_id
+            full_id = fid if fid.startswith("AUD-") else f"AUD-{fid}"
+            num_id = fid.removeprefix("AUD-")
+
+            # 1. 完了済みタスク（- [x]）との衝突判定
+            if full_id in completed_plan_ids or num_id in completed_plan_ids:
+                existing_hash = allocated_hashes.get(full_id) or allocated_hashes.get(num_id)
+                if existing_hash == finding.code_hash:
+                    # 回帰不具合: 既に未完了タスクとして再オープン中か確認
+                    is_hash_already_open = any(
+                        allocated_hashes.get(oid) == finding.code_hash
+                        for oid in open_plan_ids
+                    )
+                    if is_hash_already_open:
+                        # 既に未完了タスクとして再オープン中: 重複して開かない（抑制）
+                        continue
+                    # 新たな回帰タスクとして AUD-018 で採番
+                    next_num = max(existing_nums, default=0) + 1
+                    new_id = f"AUD-{next_num:03d}"
+                    existing_nums.add(next_num)
+                    finding.finding_id = new_id
+                    allocated_hashes[new_id] = finding.code_hash
+                    allocated_hashes[new_id[4:]] = finding.code_hash
+                    open_plan_ids.add(new_id)
+                    open_plan_ids.add(new_id[4:])
+                    active_findings.append(finding)
+                else:
+                    # 完了済みタスクと同一IDだが内容が異なる: AUD-018 で採番し直す
+                    next_num = max(existing_nums, default=0) + 1
+                    new_id = f"AUD-{next_num:03d}"
+                    existing_nums.add(next_num)
+                    finding.finding_id = new_id
+                    allocated_hashes[new_id] = finding.code_hash
+                    allocated_hashes[new_id[4:]] = finding.code_hash
+                    active_findings.append(finding)
+                continue
+
+            # 2. 既存ID（未着手PLAN、BACKLOG、AuditStore、バッチ内割り当て済み）との衝突判定
+            is_in_open = full_id in open_plan_ids or num_id in open_plan_ids
+            is_in_backlog = full_id in backlog_ids or num_id in backlog_ids
+            is_allocated = full_id in allocated_hashes or num_id in allocated_hashes
+
+            if is_in_open or is_in_backlog or is_allocated:
+                existing_hash = allocated_hashes.get(full_id) or allocated_hashes.get(num_id)
+                if existing_hash == finding.code_hash:
+                    # 同一指摘の再報告: 同一サイクルのリトライであれば DISPATCHED 状態を維持して通過させる
+                    mod_key = self._extract_module_key(finding.location)
+                    last_cycle = current_budget.get(mod_key, {}).get("last_cycle_id")
+                    recorded_cycle = open_plan_cycles.get(full_id) or open_plan_cycles.get(num_id)
+                    if is_in_open and (recorded_cycle == effective_cycle_id or last_cycle == effective_cycle_id):
+                        active_findings.append(finding)
+                    else:
+                        # 別サイクルまたは BACKLOG/バッチ内での同一再報告: 重複登録を抑止（抑制し、除外）
+                        continue
+                else:
+                    # 内容の異なる衝突: AUD-018 で採番し直す
+                    next_num = max(existing_nums, default=0) + 1
+                    new_id = f"AUD-{next_num:03d}"
+                    existing_nums.add(next_num)
+                    finding.finding_id = new_id
+                    allocated_hashes[new_id] = finding.code_hash
+                    allocated_hashes[new_id[4:]] = finding.code_hash
+                    active_findings.append(finding)
+            else:
+                # 衝突なし: そのままのIDで登録
+                allocated_hashes[full_id] = finding.code_hash
+                allocated_hashes[num_id] = finding.code_hash
+                if m := re.search(r"(\d+)", fid):
+                    existing_nums.add(int(m.group(1)))
+                active_findings.append(finding)
+
+        return active_findings
+
     def dispatch_finding(
         self,
         finding: AuditFinding,
@@ -213,11 +370,9 @@ class AuditDispatcher:
 
     def _register_step(self, finding: AuditFinding, target_plan: Path) -> None:
         """GENUINE_RED な指摘を PLAN.md の ## ステップ にタスク行として登録する。"""
-        import hashlib
-
         finding.before_commit_sha = self._get_head_commit_sha()
         finding.code_hash = hashlib.sha256(
-            finding.reproduction_test_code.encode("utf-8")
+            (finding.reproduction_test_code or "").encode("utf-8")
         ).hexdigest()
 
         if not target_plan.exists():
@@ -227,9 +382,10 @@ class AuditDispatcher:
         lines = content.splitlines()
 
         # 2. 二重登録防止 (Idempotency)
-        # 既に未着手 (- [ ]) の同一指摘トークンが存在する場合は二重追加を防ぐ (AUD-019)
+        # 既に未着手 (- [ ]) の同一指摘トークンが存在する場合は二重追加を防ぐ (AUD-019 / WWW.6)
+        fid = finding.finding_id if finding.finding_id.startswith("AUD-") else f"AUD-{finding.finding_id}"
         is_already_open = any(
-            line.strip().startswith("- [ ]") and f"[{finding.finding_id}]" in line
+            line.strip().startswith("- [ ]") and (f"[{finding.finding_id}]" in line or f"[{fid}]" in line)
             for line in lines
         )
         if is_already_open:
@@ -237,34 +393,6 @@ class AuditDispatcher:
             with contextlib.suppress(ValueError):
                 self.audit_store.save_finding(finding)
             return
-
-        # 過去の完了済みタスクや既存ストアとの ID 衝突回避 (Cycle間の finding_id 再利用対策: AUD-018)
-        json_file = self.audit_store.findings_dir / f"{finding.finding_id}.json"
-        has_completed_collision = any(
-            line.strip().startswith("- [x]") and f"[{finding.finding_id}]" in line
-            for line in lines
-        )
-        has_store_collision = False
-        if json_file.exists():
-            try:
-                data = json.loads(json_file.read_text(encoding="utf-8"))
-                if data.get("code_hash") != finding.code_hash:
-                    has_store_collision = True
-            except OSError:
-                pass
-
-        if has_completed_collision or has_store_collision:
-            import re
-
-            existing_nums = [int(n) for n in re.findall(r"AUD-(?:AUD-)?(\d+)", content)]
-            store_nums = [
-                int(m.group(1))
-                for p in self.audit_store.findings_dir.glob("*.json")
-                if (m := re.search(r"(\d+)", p.stem))
-            ]
-            all_nums = existing_nums + store_nums
-            next_num = max(all_nums, default=0) + 1
-            finding.finding_id = f"AUD-{next_num:03d}"
 
         # 3. タスク行の作成と挿入 (TaskDispatcher互換書式)
         task_id = f"AUD-{finding.finding_id}"
@@ -353,14 +481,18 @@ class AuditDispatcher:
         cycle_id: str | None = None,
     ) -> list[AuditFinding]:
         """複数の AuditFinding を処理し、正常に登録 (DISPATCHED) された指摘のリストを返す (WWW.2)。"""
+        target_plan = Path(plan_path) if plan_path else self.repo_dir / "PLAN.md"
+
         if cycle_id is None:
             first_target = findings[0].target_commit if findings else None
             effective_cycle_id = first_target or self._get_head_commit_sha()
         else:
             effective_cycle_id = cycle_id
 
-        target_plan = Path(plan_path) if plan_path else self.repo_dir / "PLAN.md"
+        # WWW.6: 監査役による finding_id 再利用への耐性 (全経路共通: トリアージ・予算判定より前に必ず実行)
         budget = self._load_budget()
+        if findings:
+            findings = self._resolve_finding_ids(findings, target_plan, effective_cycle_id, budget=budget)
 
         if not findings:
             # 指摘が0件のサイクルでも、P0/P1の登録がなかったモジュールの streak は 0 に戻す
@@ -379,7 +511,11 @@ class AuditDispatcher:
         for finding in findings:
             sev = (finding.severity or "P2").strip().upper()
             if sev in ("INFO", "P2"):
-                self.dispatch_finding(finding, plan_path=target_plan, cycle_id=effective_cycle_id)
+                self.dispatch_finding(
+                    finding,
+                    plan_path=target_plan,
+                    cycle_id=effective_cycle_id,
+                )
             else:
                 verification = self.verifier.verify_candidate_test(finding.reproduction_test_code)
                 finding.red_verification_reason = verification.reason

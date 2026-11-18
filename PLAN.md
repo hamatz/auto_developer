@@ -38,7 +38,7 @@
 - [x] 3. 修正予算: process_findings を監査サイクルの正規入口にし、モジュール単位の連続サイクル上限と ESCALATED 引き渡しを実装（Red-First）（WWW.2）
 - [x] 4. リリース判定の分離: find_release_blockers と verify_bundle の RELEASE_BLOCKED、Bundle への BACKLOG.md 同梱と backlog_count（Red-First）（WWW.3）
 - [x] 5. Morning Brief に DISPATCHED / BACKLOGGED / ESCALATED を分けて表示し、ESCALATED を判断待ちに列挙（Red-First）（WWW.5）
-- [ ] 6. finding_id 再利用への耐性: process_findings の冒頭で ID 衝突を判定し、同一指摘は重複させず、内容の異なる衝突は AUD-018 の規則で採番し直してから振り分ける（全経路共通）（Red-First: tests/immunity の reused 系 2 件が Red であることを確認してから着手）（WWW.6）
+- [x] 6. finding_id 再利用への耐性: process_findings の冒頭で ID 衝突を判定し、同一指摘は重複させず、内容の異なる衝突は AUD-018 の規則で採番し直してから振り分ける（全経路共通）（Red-First: tests/immunity の reused 系 2 件が Red であることを確認してから着手）（WWW.6）
 
 ## 止まっていること・判断待ち
 - なし。

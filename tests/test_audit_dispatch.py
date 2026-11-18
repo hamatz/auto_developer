@@ -636,6 +636,252 @@ class T(unittest.TestCase):
         self.assertEqual(budget_data["src/target_pkg.py"]["streak"], 0)
         self.assertEqual(budget_data["src/target_pkg.py"]["last_cycle_id"], "c2")
 
+    def test_feature_www_6_reused_id_same_hash_open_plan_suppressed(self) -> None:
+        """機能WWW.6: 未着手タスク(- [ ])と同一ID・同一ハッシュの指摘は重複登録を抑止し除外されること。"""
+        repro = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())"
+        f1 = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="Bug 1",
+            reproduction_test_code=repro,
+        )
+        res1 = self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        self.assertEqual(len(res1), 1)
+        plan_content_1 = self.plan_path.read_text(encoding="utf-8")
+        self.assertIn("[AUD-001]", plan_content_1)
+
+        # 全く同じ内容（AUD-001, same hash）を次サイクルで再報告
+        f2 = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="Bug 1",
+            reproduction_test_code=repro,
+        )
+        res2 = self.dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c2")
+        # 重複抑止され、新規ディスパッチされない（空リスト）
+        self.assertEqual(len(res2), 0)
+        plan_content_2 = self.plan_path.read_text(encoding="utf-8")
+        # タスク行が増えていないこと
+        self.assertEqual(plan_content_1, plan_content_2)
+
+    def test_feature_www_6_reused_id_same_hash_backlog_suppressed(self) -> None:
+        """機能WWW.6: BACKLOG行と同一ID・同一ハッシュの指摘は重複登録を抑止し除外されること。"""
+        repro = ""
+        f1 = AuditFinding(
+            finding_id="AUD-005",
+            severity="P2",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="P2 issue",
+            reproduction_test_code=repro,
+        )
+        self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        backlog_path = self.repo_dir / "BACKLOG.md"
+        self.assertTrue(backlog_path.exists())
+        backlog_content_1 = backlog_path.read_text(encoding="utf-8")
+        self.assertIn("[AUD-005]", backlog_content_1)
+
+        # 同一内容を次サイクルで再報告
+        f2 = AuditFinding(
+            finding_id="AUD-005",
+            severity="P2",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="P2 issue",
+            reproduction_test_code=repro,
+        )
+        res2 = self.dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(len(res2), 0)
+        backlog_content_2 = backlog_path.read_text(encoding="utf-8")
+        self.assertEqual(backlog_content_1, backlog_content_2)
+
+    def test_feature_www_6_reused_id_same_hash_completed_plan_reopens_as_regression(self) -> None:
+        """機能WWW.6: 完了済みタスク(- [x])と同一ID・同一ハッシュの指摘は回帰として採番し直され再オープンされること。"""
+        repro = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())"
+        f1 = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="Regression Bug",
+            reproduction_test_code=repro,
+        )
+        self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        # タスクを完了状態 (- [x]) に変更
+        plan_content = plan_content.replace("- [ ] AUD-AUD-001", "- [x] AUD-AUD-001")
+        self.plan_path.write_text(plan_content, encoding="utf-8")
+
+        # 同一内容が再報告された
+        f_reopened = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="Regression Bug",
+            reproduction_test_code=repro,
+        )
+        res = self.dispatcher.process_findings([f_reopened], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(len(res), 1)
+        # AUD-001 は完了済みなので、回帰タスクとして AUD-002 で採番
+        self.assertEqual(res[0].finding_id, "AUD-002")
+        new_plan = self.plan_path.read_text(encoding="utf-8")
+        self.assertIn("[AUD-002]", new_plan)
+
+    def test_feature_www_6_reused_id_different_hash_renumbered(self) -> None:
+        """機能WWW.6: 同一IDだが内容(code_hash)の異なる指摘はAUD-018で採番し直されCODE_HASH_TAMPEREDを起こさないこと。"""
+        repro1 = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())"
+        f1 = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="Bug A",
+            reproduction_test_code=repro1,
+        )
+        self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+
+        # 別サイクルで外部LLMが AUD-001 を別のバグBに再利用
+        repro2 = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_2(self):\n        self.assertTrue(target_fn())"
+        f2 = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="Bug B (different)",
+            reproduction_test_code=repro2,
+        )
+        # CODE_HASH_TAMPERED 例外が発生せず正常終了すること
+        res = self.dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0].finding_id, "AUD-002")
+
+    def test_feature_www_6_all_severity_paths_id_collision(self) -> None:
+        """機能WWW.6: P0, P1, P2, INFO の全経路で同一IDが安全に採番・処理されAUDIT_FAILEDにならないこと。"""
+        # 初回に AUD-001 を登録
+        f0 = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Base bug",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_0(self):\n        self.assertTrue(target_fn())",
+        )
+        self.dispatcher.process_findings([f0], plan_path=self.plan_path, cycle_id="c0")
+
+        # 衝突する AUD-001 を各重要度で投入
+        f_info = AuditFinding(
+            finding_id="AUD-001",
+            severity="INFO",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Info note",
+            reproduction_test_code="code_info",
+        )
+        f_p2 = AuditFinding(
+            finding_id="AUD-001",
+            severity="P2",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="P2 note",
+            reproduction_test_code="code_p2",
+        )
+        # 一括投入して全経路で採番し直され、例外なく完了すること
+        self.dispatcher.process_findings([f_info, f_p2], plan_path=self.plan_path, cycle_id="c1")
+        self.assertEqual(f_info.status, "NOTED")
+        self.assertEqual(f_p2.status, "BACKLOGGED")
+        self.assertNotEqual(f_info.finding_id, "AUD-001")
+        self.assertNotEqual(f_p2.finding_id, "AUD-001")
+
+    def test_feature_www_6_backlog_item_reported_as_p1_is_suppressed(self) -> None:
+        """機能WWW.6: BACKLOG行に存在する同一ハッシュの指摘が別サイクルでP1として再報告されても重複登録されないこと。"""
+        repro = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_backlog(self):\n        self.assertTrue(target_fn())"
+        f_p2 = AuditFinding(
+            finding_id="AUD-010",
+            severity="P2",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Backlog bug",
+            reproduction_test_code=repro,
+        )
+        self.dispatcher.process_findings([f_p2], plan_path=self.plan_path, cycle_id="c1")
+        plan_before = self.plan_path.read_text(encoding="utf-8")
+
+        # 別サイクルで同一ハッシュがP1として報告された
+        f_p1 = AuditFinding(
+            finding_id="AUD-010",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Backlog bug promoted to P1",
+            reproduction_test_code=repro,
+        )
+        res = self.dispatcher.process_findings([f_p1], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(len(res), 0)
+        plan_after = self.plan_path.read_text(encoding="utf-8")
+        # PLAN.md に重複して登録されないこと
+        self.assertEqual(plan_before, plan_after)
+
+    def test_feature_www_6_open_plan_reported_as_p2_is_suppressed(self) -> None:
+        """機能WWW.6: 未完了PLANに存在する同一ハッシュの指摘が別サイクルでP2として再報告されてもBACKLOGに重複登録されないこと。"""
+        repro = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_plan(self):\n        self.assertTrue(target_fn())"
+        f_p1 = AuditFinding(
+            finding_id="AUD-020",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Plan bug",
+            reproduction_test_code=repro,
+        )
+        self.dispatcher.process_findings([f_p1], plan_path=self.plan_path, cycle_id="c1")
+        backlog_path = self.repo_dir / "BACKLOG.md"
+        backlog_before = backlog_path.read_text(encoding="utf-8") if backlog_path.exists() else ""
+
+        # 別サイクルで同一ハッシュがP2として報告された
+        f_p2 = AuditFinding(
+            finding_id="AUD-020",
+            severity="P2",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Plan bug demoted to P2",
+            reproduction_test_code=repro,
+        )
+        res = self.dispatcher.process_findings([f_p2], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(len(res), 0)
+        backlog_after = backlog_path.read_text(encoding="utf-8") if backlog_path.exists() else ""
+        # BACKLOG.md に重複して登録されないこと
+        self.assertEqual(backlog_before, backlog_after)
+
+    def test_feature_www_6_duplicate_findings_in_same_batch_suppressed(self) -> None:
+        """機能WWW.6: 同一バッチ内に同一ハッシュの指摘が複数含まれる場合、重複登録が抑止されること。"""
+        repro = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_batch(self):\n        self.assertTrue(target_fn())"
+        f1 = AuditFinding(
+            finding_id="AUD-030",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Batch bug 1",
+            reproduction_test_code=repro,
+        )
+        f2 = AuditFinding(
+            finding_id="AUD-030",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Batch bug 2 duplicate",
+            reproduction_test_code=repro,
+        )
+        res = self.dispatcher.process_findings([f1, f2], plan_path=self.plan_path, cycle_id="c1")
+        # 1件目のみディスパッチされ、2件目は除外
+        self.assertEqual(len(res), 1)
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        # PLAN.md に1回だけ記載されていること
+        self.assertEqual(plan_content.count("[AUD-030]"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
