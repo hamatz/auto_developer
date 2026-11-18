@@ -90,7 +90,7 @@ class Repro(unittest.TestCase):
         """機能DDD.3: AuditDispatcher が VERIFIED_RED 指摘を登録する際、自動的に永続化すること。"""
         finding = AuditFinding(
             finding_id="AUTO-PERSIST-003",
-            severity="P2",
+            severity="P1",
             spec_reference="SPEC.md DDD.3",
             location="calc.py:5",
             description="Auto persist during dispatch",

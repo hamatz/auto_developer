@@ -154,11 +154,18 @@ class CommandRunnerAdapter(RunnerAdapter):
                 except json.JSONDecodeError:
                     pass
 
-            # 2. テキスト判定 (厳格な否定語検知)
-            up = output.upper()
-            has_rejection = any(w in up for w in ("REJECT", "NOT APPROVED", "DISAPPROVED", "DECLINE"))
-            is_approved = ("APPROVE" in up or "PASS" in up) and not has_rejection
-            return is_approved, output.strip()
+            # 2. テキスト判定 (Fail-Closed: 行単位判定行の一意性を要求)
+            pattern = re.compile(r"^\s*(?:DECISION:\s*)?(APPROVE|REJECT)\s*$", re.IGNORECASE)
+            decisions = set()
+            for line in output.splitlines():
+                m = pattern.match(line)
+                if m:
+                    decisions.add(m.group(1).upper())
+
+            if len(decisions) == 1:
+                dec = next(iter(decisions))
+                return dec == "APPROVE", output.strip()
+            return False, output.strip()
         except subprocess.TimeoutExpired:
             return False, f"Checker timed out after {self.timeout_sec}s"
         except Exception as e:  # noqa: BLE001

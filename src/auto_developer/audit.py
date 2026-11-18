@@ -6,7 +6,16 @@ from typing import Any
 
 VALID_SEVERITIES: frozenset[str] = frozenset({"P0", "P1", "P2", "INFO"})
 VALID_STATUSES: frozenset[str] = frozenset(
-    {"REPORTED", "VERIFIED_RED", "DISPATCHED", "RESOLVED", "REJECTED"}
+    {
+        "REPORTED",
+        "VERIFIED_RED",
+        "DISPATCHED",
+        "RESOLVED",
+        "REJECTED",
+        "BACKLOGGED",
+        "NOTED",
+        "ESCALATED",
+    }
 )
 
 
@@ -120,6 +129,7 @@ class AuditFinding:
     raw_response_hash: str | None = None
     fallback_occurred: bool = False
     fallback_from: str | None = None
+    streak: int | None = None
     # NOTE: auditor_model は監査ランナー設定で渡されたモデル識別子の記録値であり、
     # 外部プロバイダーの実行時同一性を暗号学的に証明するものではない (HHH.2)。
 
@@ -150,6 +160,7 @@ class AuditFinding:
             raw_response_hash=data.get("raw_response_hash"),
             fallback_occurred=data.get("fallback_occurred", False),
             fallback_from=data.get("fallback_from"),
+            streak=data.get("streak"),
         )
 
 
@@ -217,6 +228,12 @@ class IndependentAuditRunner:
         "Review the following SPEC.md and git diff according to AGENTS.md rules.\n"
         "Your role is critical audit only: identify any bugs, specification deviations, or unmitigated risks.\n"
         "For each issue found, provide a concrete Python unittest reproduction test that genuinely reproduces the bug.\n\n"
+        "--- SEVERITY DEFINITIONS ---\n"
+        "- P0: データ消失、機密の漏洩、証跡（Evidence / Bundle）の偽装・改ざんの見逃し、保護ファイル防壁のバイパス。\n"
+        "- P1: 安全ゲート（検証・監査・Red 判定・Checker 判定）が Fail-Open になる経路、通常利用の主経路での仕様違反・誤った結果。\n"
+        "- P2: 限定的な条件・構文上のエッジケースでのみ起きる誤判定（偽陽性・偽陰性）、ヒューリスティクスの精度不足。\n"
+        "- INFO: 改善提案・理論的懸念・可読性。\n"
+        "判定に迷う場合は低い方を付ける（P1 か P2 か迷うなら P2）。\n\n"
         "--- SPEC.md ---\n{spec_content}\n\n"
         "--- GIT DIFF ---\n{git_diff}\n\n"
         "--- OUTPUT FORMAT ---\n"
@@ -829,21 +846,28 @@ class IndependentAuditRunner:
         dispatcher: Any,
         plan_path: Path | None = None,
     ) -> dict[str, Any]:
-        """外部監査役から投入された指摘リストを多層防壁で選別し、真正な指摘のみを PLAN.md に登録する (QQQ.2)。"""
-        dispatched: list[AuditFinding] = []
+        """外部監査役から投入された指摘リストを多層防壁で選別し、真正な指摘のみを PLAN.md に登録する (QQQ.2 / WWW.2)。"""
+        # SPEC.md WWW.2: cycle_id 省略時は先頭 finding の target_commit、それもなければ HEAD SHA を使う
+        dispatched = dispatcher.process_findings(findings, plan_path=plan_path, cycle_id=None)
+
         rejected: list[tuple[AuditFinding, str]] = []
+        backlogged: list[AuditFinding] = []
+        escalated: list[AuditFinding] = []
 
         for finding in findings:
-            res_finding = dispatcher.dispatch_finding(finding, plan_path=plan_path)
-            if res_finding.status == "DISPATCHED":
-                dispatched.append(res_finding)
-            else:
-                reason = res_finding.red_verification_reason or "UNKNOWN_REJECTION"
-                rejected.append((res_finding, reason))
+            if finding.status == "BACKLOGGED":
+                backlogged.append(finding)
+            elif finding.status == "ESCALATED":
+                escalated.append(finding)
+            elif finding.status != "DISPATCHED":
+                reason = finding.red_verification_reason or finding.status or "UNKNOWN_REJECTION"
+                rejected.append((finding, reason))
 
         return {
             "dispatched": dispatched,
             "rejected": rejected,
+            "backlogged": backlogged,
+            "escalated": escalated,
             "total_processed": len(findings),
             "genuine_count": len(dispatched),
             "rejected_count": len(rejected),

@@ -68,7 +68,7 @@ class T(unittest.TestCase):
         """機能CCC.3.1: 偽Red（成功するテストや構文エラー）はREJECTEDとなり、PLAN.mdは改変されないこと。"""
         passing_finding = AuditFinding(
             finding_id="FINDING-PASS",
-            severity="P2",
+            severity="P1",
             spec_reference="SPEC.md",
             location="app.py",
             description="Already passing dummy test",
@@ -188,7 +188,7 @@ class T(unittest.TestCase):
             # 2. 偽陽性 (Already green / pass)
             AuditFinding(
                 finding_id="HOSTILE-PASS-002",
-                severity="P2",
+                severity="P1",
                 spec_reference="SPEC.md",
                 location="app.py:5",
                 description="Passing test",
@@ -292,7 +292,7 @@ class FakeTest(unittest.TestCase):
 
         new_finding = AuditFinding(
             finding_id="AUD-002",
-            severity="P2",
+            severity="P1",
             spec_reference="SPEC.md MMM.3",
             location="src/target_pkg.py:1",
             description="Brand new defect in target_pkg",
@@ -340,6 +340,819 @@ class T(unittest.TestCase):
         content = self.plan_path.read_text(encoding="utf-8")
         self.assertEqual(res.status, "DISPATCHED")
         self.assertIn("[AUD-099]", content, "genuine finding was marked DISPATCHED but never written to PLAN.md")
+
+    def test_feature_www_0_prompt_includes_severity_definitions(self) -> None:
+        """機能WWW.0: IndependentAuditRunner.DEFAULT_PROMPT_TEMPLATE に重要度定義が原文のまま埋め込まれていること。"""
+        from auto_developer.audit import IndependentAuditRunner
+
+        prompt = IndependentAuditRunner.DEFAULT_PROMPT_TEMPLATE
+        self.assertIn("P0: データ消失、機密の漏洩、証跡（Evidence / Bundle）の偽装・改ざんの見逃し、保護ファイル防壁のバイパス。", prompt)
+        self.assertIn("P1: 安全ゲート（検証・監査・Red 判定・Checker 判定）が Fail-Open になる経路、通常利用の主経路での仕様違反・誤った結果。", prompt)
+        self.assertIn("P2: 限定的な条件・構文上のエッジケースでのみ起きる誤判定（偽陽性・偽陰性）、ヒューリスティクスの精度不足。", prompt)
+        self.assertIn("INFO: 改善提案・理論的懸念・可読性。", prompt)
+        self.assertIn("判定に迷う場合は低い方を付ける（P1 か P2 か迷うなら P2）。", prompt)
+
+    def test_feature_www_1_valid_statuses_extended(self) -> None:
+        """機能WWW.1: VALID_STATUSES に BACKLOGGED, NOTED, ESCALATED が含まれること。"""
+        from auto_developer.audit import VALID_STATUSES
+
+        self.assertIn("BACKLOGGED", VALID_STATUSES)
+        self.assertIn("NOTED", VALID_STATUSES)
+        self.assertIn("ESCALATED", VALID_STATUSES)
+
+    def test_feature_www_1_p2_finding_routed_to_backlog(self) -> None:
+        """機能WWW.1: P2 指摘は Red 検証を行わず BACKLOG.md に追記され、status が BACKLOGGED となること。"""
+        backlog_path = self.repo_dir / "BACKLOG.md"
+        if backlog_path.exists():
+            backlog_path.unlink()
+
+        # 敢えて実行不可な（構文不正な）テストコードを指定し、Red検証がスキップされることを確認する
+        p2_finding = AuditFinding(
+            finding_id="AUD-P2-001",
+            severity="P2",
+            spec_reference="SPEC.md WWW.1",
+            location="src/foo.py:42",
+            description="Minor edge case misbehavior",
+            reproduction_test_code="def broken_syntax(:",
+            target_commit="c0ffee1234",
+        )
+
+        res = self.dispatcher.dispatch_finding(p2_finding, plan_path=self.plan_path)
+        self.assertEqual(res.status, "BACKLOGGED")
+
+        # PLAN.md には書かれないこと
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        self.assertNotIn("AUD-P2-001", plan_content)
+
+        # BACKLOG.md に追記されていること
+        self.assertTrue(backlog_path.exists())
+        backlog_content = backlog_path.read_text(encoding="utf-8")
+        self.assertTrue(backlog_content.startswith("# BACKLOG.md"))
+        expected_line = "- [AUD-P2-001] Minor edge case misbehavior (Severity: P2, Loc: src/foo.py:42, Cycle: c0ffee1234)"
+        self.assertIn(expected_line, backlog_content)
+        # チェックボックスを持たないこと
+        self.assertNotIn("- [ ]", backlog_content)
+
+        # 冪等性: 同一 finding_id を再度 dispatch しても二重追記されないこと
+        self.dispatcher.dispatch_finding(p2_finding, plan_path=self.plan_path)
+        lines = [line for line in backlog_path.read_text(encoding="utf-8").splitlines() if "[AUD-P2-001]" in line]
+        self.assertEqual(len(lines), 1)
+
+    def test_feature_www_1_info_finding_routed_to_audit_store_only(self) -> None:
+        """機能WWW.1: INFO 指摘は PLAN.md も BACKLOG.md も書き換えず AuditStore にのみ保存され、status が NOTED となること。"""
+        backlog_path = self.repo_dir / "BACKLOG.md"
+        if backlog_path.exists():
+            backlog_path.unlink()
+
+        info_finding = AuditFinding(
+            finding_id="AUD-INFO-001",
+            severity="INFO",
+            spec_reference="SPEC.md WWW.1",
+            location="src/bar.py:10",
+            description="Code clarity suggestion",
+            reproduction_test_code="def broken(:",
+        )
+
+        res = self.dispatcher.dispatch_finding(info_finding, plan_path=self.plan_path)
+        self.assertEqual(res.status, "NOTED")
+
+        # PLAN.md と BACKLOG.md には一切書かれないこと
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        self.assertNotIn("AUD-INFO-001", plan_content)
+        if backlog_path.exists():
+            self.assertNotIn("AUD-INFO-001", backlog_path.read_text(encoding="utf-8"))
+
+        # AuditStore に保存されていること
+        saved = self.dispatcher.audit_store.get_finding("AUD-INFO-001")
+        self.assertIsNotNone(saved)
+        assert saved is not None
+        self.assertEqual(saved.status, "NOTED")
+
+    def test_feature_www_2_module_key_extraction(self) -> None:
+        """機能WWW.2: location からモジュールキーが正しく抽出されること。"""
+        extract = self.dispatcher._extract_module_key
+        self.assertEqual(extract("src/auto_developer/verifier.py:166"), "src/auto_developer/verifier.py")
+        self.assertEqual(extract("src/calc.py:5"), "src/calc.py")
+        self.assertEqual(extract("src/foo.py (line 12)"), "src/foo.py")
+        self.assertEqual(extract("  src/bar.py : 20"), "src/bar.py")
+        self.assertEqual(extract(""), "UNKNOWN")
+        self.assertEqual(extract(":123"), "UNKNOWN")
+
+    def test_feature_www_2_budget_ledger_and_streak_increment_and_idempotency(self) -> None:
+        """機能WWW.2: 修正予算台帳 (.dev/audit/budget.json) に streak が記録され、同一 cycle_id は二重加算されないこと。"""
+        import json
+
+        f1 = AuditFinding(
+            finding_id="AUD-BUG-001",
+            severity="P1",
+            spec_reference="SPEC.md WWW.2",
+            location="src/target_pkg.py:10",
+            description="Genuine bug",
+            reproduction_test_code="""import unittest
+from target_pkg import target_fn
+class T(unittest.TestCase):
+    def test_x(self):
+        self.assertTrue(target_fn())
+""",
+        )
+
+        # サイクル1: 初回登録 -> streak 1
+        self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="cycle-001")
+        budget_path = self.repo_dir / ".dev" / "audit" / "budget.json"
+        self.assertTrue(budget_path.exists())
+        budget_data = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget_data["src/target_pkg.py"]["streak"], 1)
+        self.assertEqual(budget_data["src/target_pkg.py"]["last_cycle_id"], "cycle-001")
+
+        # 冪等性: 同じ cycle-001 を再度処理しても streak は増えない
+        self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="cycle-001")
+        budget_data = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget_data["src/target_pkg.py"]["streak"], 1)
+
+        # サイクル2: 異なる cycle-002 で再登録 -> streak 2
+        f2 = AuditFinding(
+            finding_id="AUD-BUG-002",
+            severity="P1",
+            spec_reference="SPEC.md WWW.2",
+            location="src/target_pkg.py:20",
+            description="Another bug in same module",
+            reproduction_test_code="""import unittest
+from target_pkg import target_fn
+class T(unittest.TestCase):
+    def test_y(self):
+        self.assertTrue(target_fn())
+""",
+        )
+        self.dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="cycle-002")
+        budget_data = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget_data["src/target_pkg.py"]["streak"], 2)
+        self.assertEqual(budget_data["src/target_pkg.py"]["last_cycle_id"], "cycle-002")
+
+    def test_feature_www_2_escalation_when_streak_exceeds_max(self) -> None:
+        """機能WWW.2: streak >= max_consecutive_cycles のとき ESCALATED となり PLAN.md の「止まっていること・判断待ち」節に記録されること。"""
+        dispatcher = AuditDispatcher(
+            repo_dir=self.repo_dir,
+            verifier=self.verifier,
+            audit_store=self.dispatcher.audit_store,
+            max_consecutive_cycles=2,
+        )
+
+        f1 = AuditFinding(
+            finding_id="AUD-S1",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Bug 1",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())",
+        )
+        f2 = AuditFinding(
+            finding_id="AUD-S2",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Bug 2",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_2(self):\n        self.assertTrue(target_fn())",
+        )
+        f3 = AuditFinding(
+            finding_id="AUD-S3",
+            severity="P0",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Bug 3 (exceeding budget)",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_3(self):\n        self.assertTrue(target_fn())",
+        )
+
+        # cycle 1: streak 1
+        dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        # cycle 2: streak 2
+        dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c2")
+
+        # cycle 3: streak was 2 (>= max 2) -> ESCALATED
+        res_list = dispatcher.process_findings([f3], plan_path=self.plan_path, cycle_id="c3")
+        self.assertEqual(len(res_list), 0, "Escalated finding must not be in dispatched return list")
+        self.assertEqual(f3.status, "ESCALATED")
+
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        # ## ステップ には登録されないこと
+        steps_part = plan_content.split("## 止まっていること・判断待ち")[0] if "## 止まっていること・判断待ち" in plan_content else plan_content
+        self.assertNotIn("AUD-S3", steps_part)
+
+        # ## 止まっていること・判断待ち 節に追記されていること
+        self.assertIn("## 止まっていること・判断待ち", plan_content)
+        expected_line = "- ESCALATED [AUD-S3] Bug 3 (exceeding budget) (Severity: P0, Loc: src/target_pkg.py:1, Streak: 2)"
+        self.assertIn(expected_line, plan_content)
+        self.assertNotIn("- [ ] AUD-S3", plan_content)
+
+    def test_feature_www_2_streak_resets_when_no_p0_p1(self) -> None:
+        """機能WWW.2: P0/P1 の登録がなかったサイクルで該当モジュールの streak が 0 に戻ること。"""
+        import json
+
+        f1 = AuditFinding(
+            finding_id="AUD-R1",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Bug 1",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())",
+        )
+        self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        budget_path = self.repo_dir / ".dev" / "audit" / "budget.json"
+        budget_data = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget_data["src/target_pkg.py"]["streak"], 1)
+
+        # 次のサイクル c2 では P2 のみ（P0/P1 なし）
+        f_p2 = AuditFinding(
+            finding_id="AUD-P2-99",
+            severity="P2",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="P2 bug",
+            reproduction_test_code="def broken(:",
+        )
+        self.dispatcher.process_findings([f_p2], plan_path=self.plan_path, cycle_id="c2")
+        budget_data = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget_data["src/target_pkg.py"]["streak"], 0)
+        self.assertEqual(budget_data["src/target_pkg.py"]["last_cycle_id"], "c2")
+
+    def test_feature_www_2_idempotent_reprocessing_does_not_flip_to_escalated(self) -> None:
+        """機能WWW.2: 同じ cycle_id を再処理した際、DISPATCHED 判定が ESCALATED に反転しないこと。"""
+        dispatcher = AuditDispatcher(
+            repo_dir=self.repo_dir,
+            verifier=self.verifier,
+            audit_store=self.dispatcher.audit_store,
+            max_consecutive_cycles=2,
+        )
+
+        f1 = AuditFinding(
+            finding_id="AUD-C1",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Bug 1",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())",
+        )
+        f2 = AuditFinding(
+            finding_id="AUD-C2",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Bug 2",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_2(self):\n        self.assertTrue(target_fn())",
+        )
+
+        dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        res2 = dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(len(res2), 1)
+        self.assertEqual(f2.status, "DISPATCHED")
+
+        # 同じ c2 を再投入
+        res2_retry = dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(f2.status, "DISPATCHED", "Re-running the same cycle must remain DISPATCHED, not flip to ESCALATED")
+        self.assertEqual(len(res2_retry), 1)
+
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        self.assertNotIn("- ESCALATED", plan_content, "Re-running cycle 2 must not escalate")
+
+    def test_feature_www_2_empty_findings_resets_streak(self) -> None:
+        """機能WWW.2: 指摘が0件のサイクルでも、P0/P1の登録がなかったモジュールの streak は 0 に戻ること。"""
+        import json
+
+        f1 = AuditFinding(
+            finding_id="AUD-R1",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Bug 1",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())",
+        )
+        self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        budget_path = self.repo_dir / ".dev" / "audit" / "budget.json"
+        budget_data = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget_data["src/target_pkg.py"]["streak"], 1)
+
+        # 空の findings リストで新サイクル c2 を実行
+        self.dispatcher.process_findings([], plan_path=self.plan_path, cycle_id="c2")
+        budget_data = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget_data["src/target_pkg.py"]["streak"], 0)
+        self.assertEqual(budget_data["src/target_pkg.py"]["last_cycle_id"], "c2")
+
+    def test_feature_www_6_reused_id_same_hash_open_plan_suppressed(self) -> None:
+        """機能WWW.6: 未着手タスク(- [ ])と同一ID・同一ハッシュの指摘は重複登録を抑止し除外されること。"""
+        repro = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())"
+        f1 = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="Bug 1",
+            reproduction_test_code=repro,
+        )
+        res1 = self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        self.assertEqual(len(res1), 1)
+        plan_content_1 = self.plan_path.read_text(encoding="utf-8")
+        self.assertIn("[AUD-001]", plan_content_1)
+
+        # 全く同じ内容（AUD-001, same hash）を次サイクルで再報告
+        f2 = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="Bug 1",
+            reproduction_test_code=repro,
+        )
+        res2 = self.dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c2")
+        # 重複抑止され、新規ディスパッチされない（空リスト）
+        self.assertEqual(len(res2), 0)
+        plan_content_2 = self.plan_path.read_text(encoding="utf-8")
+        # タスク行が増えていないこと
+        self.assertEqual(plan_content_1, plan_content_2)
+
+    def test_feature_www_6_reused_id_same_hash_backlog_suppressed(self) -> None:
+        """機能WWW.6: BACKLOG行と同一ID・同一ハッシュの指摘は重複登録を抑止し除外されること。"""
+        repro = ""
+        f1 = AuditFinding(
+            finding_id="AUD-005",
+            severity="P2",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="P2 issue",
+            reproduction_test_code=repro,
+        )
+        self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        backlog_path = self.repo_dir / "BACKLOG.md"
+        self.assertTrue(backlog_path.exists())
+        backlog_content_1 = backlog_path.read_text(encoding="utf-8")
+        self.assertIn("[AUD-005]", backlog_content_1)
+
+        # 同一内容を次サイクルで再報告
+        f2 = AuditFinding(
+            finding_id="AUD-005",
+            severity="P2",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="P2 issue",
+            reproduction_test_code=repro,
+        )
+        res2 = self.dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(len(res2), 0)
+        backlog_content_2 = backlog_path.read_text(encoding="utf-8")
+        self.assertEqual(backlog_content_1, backlog_content_2)
+
+    def test_feature_www_6_reused_id_same_hash_completed_plan_reopens_as_regression(self) -> None:
+        """機能WWW.6: 完了済みタスク(- [x])と同一ID・同一ハッシュの指摘は回帰として採番し直され再オープンされること。"""
+        repro = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())"
+        f1 = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="Regression Bug",
+            reproduction_test_code=repro,
+        )
+        self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        # タスクを完了状態 (- [x]) に変更
+        plan_content = plan_content.replace("- [ ] AUD-AUD-001", "- [x] AUD-AUD-001")
+        self.plan_path.write_text(plan_content, encoding="utf-8")
+
+        # 同一内容が再報告された
+        f_reopened = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="Regression Bug",
+            reproduction_test_code=repro,
+        )
+        res = self.dispatcher.process_findings([f_reopened], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(len(res), 1)
+        # AUD-001 は完了済みなので、回帰タスクとして AUD-002 で採番
+        self.assertEqual(res[0].finding_id, "AUD-002")
+        new_plan = self.plan_path.read_text(encoding="utf-8")
+        self.assertIn("[AUD-002]", new_plan)
+
+    def test_feature_www_6_reused_id_different_hash_renumbered(self) -> None:
+        """機能WWW.6: 同一IDだが内容(code_hash)の異なる指摘はAUD-018で採番し直されCODE_HASH_TAMPEREDを起こさないこと。"""
+        repro1 = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())"
+        f1 = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="Bug A",
+            reproduction_test_code=repro1,
+        )
+        self.dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+
+        # 別サイクルで外部LLMが AUD-001 を別のバグBに再利用
+        repro2 = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_2(self):\n        self.assertTrue(target_fn())"
+        f2 = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md WWW.6",
+            location="src/target_pkg.py:1",
+            description="Bug B (different)",
+            reproduction_test_code=repro2,
+        )
+        # CODE_HASH_TAMPERED 例外が発生せず正常終了すること
+        res = self.dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0].finding_id, "AUD-002")
+
+    def test_feature_www_6_all_severity_paths_id_collision(self) -> None:
+        """機能WWW.6: P0, P1, P2, INFO の全経路で同一IDが安全に採番・処理されAUDIT_FAILEDにならないこと。"""
+        # 初回に AUD-001 を登録
+        f0 = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Base bug",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_0(self):\n        self.assertTrue(target_fn())",
+        )
+        self.dispatcher.process_findings([f0], plan_path=self.plan_path, cycle_id="c0")
+
+        # 衝突する AUD-001 を各重要度で投入
+        f_info = AuditFinding(
+            finding_id="AUD-001",
+            severity="INFO",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Info note",
+            reproduction_test_code="code_info",
+        )
+        f_p2 = AuditFinding(
+            finding_id="AUD-001",
+            severity="P2",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="P2 note",
+            reproduction_test_code="code_p2",
+        )
+        # 一括投入して全経路で採番し直され、例外なく完了すること
+        self.dispatcher.process_findings([f_info, f_p2], plan_path=self.plan_path, cycle_id="c1")
+        self.assertEqual(f_info.status, "NOTED")
+        self.assertEqual(f_p2.status, "BACKLOGGED")
+        self.assertNotEqual(f_info.finding_id, "AUD-001")
+        self.assertNotEqual(f_p2.finding_id, "AUD-001")
+
+    def test_feature_www_6_backlog_item_reported_as_p1_is_suppressed(self) -> None:
+        """機能WWW.6: BACKLOG行に存在する同一ハッシュの指摘が別サイクルでP1として再報告されても重複登録されないこと。"""
+        repro = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_backlog(self):\n        self.assertTrue(target_fn())"
+        f_p2 = AuditFinding(
+            finding_id="AUD-010",
+            severity="P2",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Backlog bug",
+            reproduction_test_code=repro,
+        )
+        self.dispatcher.process_findings([f_p2], plan_path=self.plan_path, cycle_id="c1")
+        plan_before = self.plan_path.read_text(encoding="utf-8")
+
+        # 別サイクルで同一ハッシュがP1として報告された
+        f_p1 = AuditFinding(
+            finding_id="AUD-010",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Backlog bug promoted to P1",
+            reproduction_test_code=repro,
+        )
+        res = self.dispatcher.process_findings([f_p1], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(len(res), 0)
+        plan_after = self.plan_path.read_text(encoding="utf-8")
+        # PLAN.md に重複して登録されないこと
+        self.assertEqual(plan_before, plan_after)
+
+    def test_feature_www_6_open_plan_reported_as_p2_is_suppressed(self) -> None:
+        """機能WWW.6: 未完了PLANに存在する同一ハッシュの指摘が別サイクルでP2として再報告されてもBACKLOGに重複登録されないこと。"""
+        repro = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_plan(self):\n        self.assertTrue(target_fn())"
+        f_p1 = AuditFinding(
+            finding_id="AUD-020",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Plan bug",
+            reproduction_test_code=repro,
+        )
+        self.dispatcher.process_findings([f_p1], plan_path=self.plan_path, cycle_id="c1")
+        backlog_path = self.repo_dir / "BACKLOG.md"
+        backlog_before = backlog_path.read_text(encoding="utf-8") if backlog_path.exists() else ""
+
+        # 別サイクルで同一ハッシュがP2として報告された
+        f_p2 = AuditFinding(
+            finding_id="AUD-020",
+            severity="P2",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Plan bug demoted to P2",
+            reproduction_test_code=repro,
+        )
+        res = self.dispatcher.process_findings([f_p2], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(len(res), 0)
+        backlog_after = backlog_path.read_text(encoding="utf-8") if backlog_path.exists() else ""
+        # BACKLOG.md に重複して登録されないこと
+        self.assertEqual(backlog_before, backlog_after)
+
+    def test_feature_www_6_duplicate_findings_in_same_batch_suppressed(self) -> None:
+        """機能WWW.6: 同一バッチ内に同一ハッシュの指摘が複数含まれる場合、重複登録が抑止されること。"""
+        repro = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_batch(self):\n        self.assertTrue(target_fn())"
+        f1 = AuditFinding(
+            finding_id="AUD-030",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Batch bug 1",
+            reproduction_test_code=repro,
+        )
+        f2 = AuditFinding(
+            finding_id="AUD-030",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="Batch bug 2 duplicate",
+            reproduction_test_code=repro,
+        )
+        res = self.dispatcher.process_findings([f1, f2], plan_path=self.plan_path, cycle_id="c1")
+        # 1件目のみディスパッチされ、2件目は除外
+        self.assertEqual(len(res), 1)
+        plan_content = self.plan_path.read_text(encoding="utf-8")
+        # PLAN.md に1回だけ記載されていること
+        self.assertEqual(plan_content.count("[AUD-030]"), 1)
+
+    def test_feature_www_2_sticky_escalation_records_escalated_flag(self) -> None:
+        """機能WWW.2改訂: 予算超過で一度ESCALATEDになったモジュールはescalated: trueが記録され解除されないこと。"""
+        import json
+
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=self.verifier, max_consecutive_cycles=1)
+        repro1 = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())"
+        repro2 = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_2(self):\n        self.assertTrue(target_fn())"
+
+        f1 = AuditFinding(finding_id="AUD-E1", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="E1", reproduction_test_code=repro1)
+        dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+
+        f2 = AuditFinding(finding_id="AUD-E2", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="E2", reproduction_test_code=repro2)
+        res2 = dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(len(res2), 0)
+        self.assertEqual(f2.status, "ESCALATED")
+
+        budget_path = self.repo_dir / ".dev" / "audit" / "budget.json"
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertTrue(budget["src/target_pkg.py"].get("escalated"))
+
+        # 指摘0件のサイクルを挟んでも escalated: true は維持され streak も戻らない
+        dispatcher.process_findings([], plan_path=self.plan_path, cycle_id="c3")
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertTrue(budget["src/target_pkg.py"].get("escalated"))
+        self.assertEqual(budget["src/target_pkg.py"].get("streak"), 1)
+
+        # その後新しい指摘が来ても ESCALATED のまま
+        repro3 = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_3(self):\n        self.assertTrue(target_fn())"
+        f3 = AuditFinding(finding_id="AUD-E3", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="E3", reproduction_test_code=repro3)
+        res3 = dispatcher.process_findings([f3], plan_path=self.plan_path, cycle_id="c4")
+        self.assertEqual(len(res3), 0)
+        self.assertEqual(f3.status, "ESCALATED")
+
+    def test_feature_www_2_rereport_only_cycle_keeps_streak(self) -> None:
+        """機能WWW.2改訂: 再報告（抑止されたP0/P1）のみのサイクルではstreakを戻さず維持すること。"""
+        import json
+
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=self.verifier, max_consecutive_cycles=3)
+        repro1 = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_r1(self):\n        self.assertTrue(target_fn())"
+        f1 = AuditFinding(finding_id="AUD-R1", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="R1", reproduction_test_code=repro1)
+        dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+
+        budget_path = self.repo_dir / ".dev" / "audit" / "budget.json"
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget["src/target_pkg.py"]["streak"], 1)
+
+        # c2 で f1 を再報告のみ投入（WWW.6 で抑止される）
+        f1_repeat = AuditFinding(finding_id="AUD-R1", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="R1", reproduction_test_code=repro1)
+        res2 = dispatcher.process_findings([f1_repeat], plan_path=self.plan_path, cycle_id="c2")
+        self.assertEqual(len(res2), 0)
+
+        # streak は 0 に戻らず 1 を維持
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget["src/target_pkg.py"]["streak"], 1)
+
+    def test_feature_www_2_legacy_budget_entry_without_escalated_key_stays_escalated(self) -> None:
+        """機能WWW.2改訂: escalated キーを持たないレガシー台帳エントリもエスカレーションを維持すること。"""
+        import json
+
+        budget_path = self.repo_dir / ".dev" / "audit" / "budget.json"
+        budget_path.parent.mkdir(parents=True, exist_ok=True)
+        # レガシー形式のエントリ (escalated キーなし)
+        legacy_data = {
+            "src/target_pkg.py": {
+                "streak": 2,
+                "last_cycle_id": "c1",
+                "last_action": "ESCALATED",
+            }
+        }
+        budget_path.write_text(json.dumps(legacy_data), encoding="utf-8")
+
+        # 指摘0件のサイクルを実行
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=self.verifier, max_consecutive_cycles=2)
+        dispatcher.process_findings([], plan_path=self.plan_path, cycle_id="c2")
+
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertTrue(budget["src/target_pkg.py"].get("escalated"))
+        self.assertEqual(budget["src/target_pkg.py"]["streak"], 2)
+
+    def test_feature_www_2_escalated_module_keeps_escalation_on_rereport_only_cycle(self) -> None:
+        """機能WWW.2改訂: エスカレーション済みモジュールは再報告のみのサイクルでもエスカレーションが維持されること。"""
+        import json
+
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=self.verifier, max_consecutive_cycles=1)
+        repro = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())"
+        f1 = AuditFinding(finding_id="AUD-001", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="B1", reproduction_test_code=repro)
+        dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+
+        # 2サイクル目で予算超過 -> ESCALATED
+        f2 = AuditFinding(finding_id="AUD-002", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="B2", reproduction_test_code=repro + "# 2")
+        dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c2")
+
+        budget_path = self.repo_dir / ".dev" / "audit" / "budget.json"
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertTrue(budget["src/target_pkg.py"].get("escalated"))
+
+        # c3 で再報告のみ投入 (AUD-001)
+        f1_repeat = AuditFinding(finding_id="AUD-001", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="B1", reproduction_test_code=repro)
+        res = dispatcher.process_findings([f1_repeat], plan_path=self.plan_path, cycle_id="c3")
+        self.assertEqual(len(res), 0)
+
+        # エスカレーションが解除されず維持されていること
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertTrue(budget["src/target_pkg.py"].get("escalated"))
+        self.assertEqual(budget["src/target_pkg.py"]["streak"], 1)
+
+    def test_feature_www_2_p2_info_rejected_resets_normal_and_keeps_escalated(self) -> None:
+        """機能WWW.2改訂: P2/INFO/REJECTEDのみのサイクルで非エスカレーションはRESET、エスカレーションは維持されること。"""
+        import json
+
+        # 2つのモジュールを準備
+        budget_path = self.repo_dir / ".dev" / "audit" / "budget.json"
+        budget_path.parent.mkdir(parents=True, exist_ok=True)
+        init_data = {
+            "src/target_pkg.py": {
+                "streak": 1,
+                "last_cycle_id": "c1",
+                "last_action": "DISPATCHED",
+                "escalated": False,
+            },
+            "src/auto_developer/other.py": {
+                "streak": 3,
+                "last_cycle_id": "c1",
+                "last_action": "ESCALATED",
+                "escalated": True,
+            },
+        }
+        budget_path.write_text(json.dumps(init_data), encoding="utf-8")
+
+        # P2、INFO、偽Red(REJECTED) を投入
+        f_p2 = AuditFinding(finding_id="AUD-P2", severity="P2", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="p2", reproduction_test_code="")
+        f_info = AuditFinding(finding_id="AUD-INF", severity="INFO", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="info", reproduction_test_code="")
+        # target_fn() は False を返すので assertTrue は Red だが、以下は assertFalse なので Green -> REJECTED
+        f_rejected = AuditFinding(
+            finding_id="AUD-REJ",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/target_pkg.py:1",
+            description="rejected",
+            reproduction_test_code="import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_f(self):\n        self.assertFalse(target_fn())",
+        )
+
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=self.verifier)
+        dispatcher.process_findings([f_p2, f_info, f_rejected], plan_path=self.plan_path, cycle_id="c2")
+
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        # 非エスカレーションモジュールは P0/P1 の genuine/suppressed 報告なし -> RESET (streak: 0)
+        self.assertEqual(budget["src/target_pkg.py"]["streak"], 0)
+        self.assertEqual(budget["src/target_pkg.py"]["last_action"], "RESET")
+        # エスカレーションモジュールは維持 (streak: 3, escalated: True)
+        self.assertEqual(budget["src/auto_developer/other.py"]["streak"], 3)
+        self.assertTrue(budget["src/auto_developer/other.py"]["escalated"])
+
+    def test_feature_www_2_idempotency_same_cycle_twice_maintains_streak(self) -> None:
+        """機能WWW.2改訂: 同一 cycle_id を2回処理しても streak が二重カウントされないこと。"""
+        import json
+
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=self.verifier, max_consecutive_cycles=3)
+        repro = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_idem(self):\n        self.assertTrue(target_fn())"
+        f1 = AuditFinding(finding_id="AUD-IDEM", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="idem", reproduction_test_code=repro)
+
+        # 1回目の実行
+        dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        budget_path = self.repo_dir / ".dev" / "audit" / "budget.json"
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget["src/target_pkg.py"]["streak"], 1)
+
+        # 同一 cycle_id で再実行
+        dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget["src/target_pkg.py"]["streak"], 1)
+
+    def test_feature_www_2_streak_increments_after_rereport_cycle(self) -> None:
+        """機能WWW.2改訂: 再報告のみのサイクルで維持された streak が、次サイクルの新規報告で正しく 1 -> 2 と増えること。"""
+        import json
+
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=self.verifier, max_consecutive_cycles=5)
+        repro1 = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())"
+        repro2 = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_2(self):\n        self.assertTrue(target_fn())"
+
+        # c1: 新規 P1 (streak: 1)
+        f1 = AuditFinding(finding_id="AUD-S1", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="s1", reproduction_test_code=repro1)
+        dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+
+        budget_path = self.repo_dir / ".dev" / "audit" / "budget.json"
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget["src/target_pkg.py"]["streak"], 1)
+
+        # c2: 再報告のみ (streak: 1 のまま維持)
+        f1_rep = AuditFinding(finding_id="AUD-S1", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="s1", reproduction_test_code=repro1)
+        dispatcher.process_findings([f1_rep], plan_path=self.plan_path, cycle_id="c2")
+
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget["src/target_pkg.py"]["streak"], 1)
+
+        # c3: 新規 P1 (streak: 1 -> 2 にインクリメント)
+        f2 = AuditFinding(finding_id="AUD-S2", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="s2", reproduction_test_code=repro2)
+        dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c3")
+
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget["src/target_pkg.py"]["streak"], 2)
+
+    def test_feature_www_2_cap_reached_rereport_then_new_genuine_in_same_cycle_escalates(self) -> None:
+        """機能WWW.2改訂: 上限到達時に再報告のみで維持された後、同一サイクルで新規GENUINE_REDが来ても安全にESCALATEDになること。"""
+        import json
+
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=self.verifier, max_consecutive_cycles=2)
+        repro1 = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_1(self):\n        self.assertTrue(target_fn())"
+        repro2 = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_2(self):\n        self.assertTrue(target_fn())"
+        repro3 = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_3(self):\n        self.assertTrue(target_fn())"
+
+        # c1 で登録 (streak=1)
+        f1 = AuditFinding(finding_id="AUD-C1", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="c1", reproduction_test_code=repro1)
+        dispatcher.process_findings([f1], plan_path=self.plan_path, cycle_id="c1")
+
+        # c2 で登録 (streak=2 = max_consecutive_cycles)
+        f2 = AuditFinding(finding_id="AUD-C2", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="c2", reproduction_test_code=repro2)
+        dispatcher.process_findings([f2], plan_path=self.plan_path, cycle_id="c2")
+
+        budget_path = self.repo_dir / ".dev" / "audit" / "budget.json"
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget["src/target_pkg.py"]["streak"], 2)
+
+        # cycle c3 (1回目): 再報告のみ投入 (AUD-C1) -> 維持され last_cycle_id="c3", last_action="MAINTAINED"
+        f1_rep = AuditFinding(finding_id="AUD-C1", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="c1", reproduction_test_code=repro1)
+        dispatcher.process_findings([f1_rep], plan_path=self.plan_path, cycle_id="c3")
+
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget["src/target_pkg.py"]["last_cycle_id"], "c3")
+        self.assertEqual(budget["src/target_pkg.py"]["last_action"], "MAINTAINED")
+
+        # cycle c3 (2回目: 同一サイクル再実行): 新規 GENUINE_RED な f3 を投入
+        f3 = AuditFinding(finding_id="AUD-C3", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="c3", reproduction_test_code=repro3)
+        res = dispatcher.process_findings([f3], plan_path=self.plan_path, cycle_id="c3")
+        # 予算チェックをバイパスせず、ESCALATED になること！
+        self.assertEqual(len(res), 0)
+        self.assertEqual(f3.status, "ESCALATED")
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertTrue(budget["src/target_pkg.py"]["escalated"])
+        self.assertEqual(budget["src/target_pkg.py"]["last_action"], "ESCALATED")
+
+    def test_feature_www_2_rejected_rereport_does_not_prevent_streak_reset(self) -> None:
+        """機能WWW.2改訂: 過去にREJECTEDとなった指摘の再報告は「報告」とみなされずstreakが0にリセットされること。"""
+        import json
+
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=self.verifier, max_consecutive_cycles=5)
+        # target_fn() は False を返すので assertFalse は Green -> REJECTED
+        repro_rejected = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_rej(self):\n        self.assertFalse(target_fn())"
+
+        # c1 で一度偽Redが報告されて REJECTED として AuditStore に保存される
+        f_rej = AuditFinding(finding_id="AUD-REJ1", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="rej", reproduction_test_code=repro_rejected)
+        dispatcher.process_findings([f_rej], plan_path=self.plan_path, cycle_id="c1")
+        self.assertEqual(f_rej.status, "REJECTED")
+
+        # c2 で別の正常な P1 を登録して streak=1 にする
+        repro_good = "import unittest\nfrom target_pkg import target_fn\nclass T(unittest.TestCase):\n    def test_good(self):\n        self.assertTrue(target_fn())"
+        f_good = AuditFinding(finding_id="AUD-GOOD", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="good", reproduction_test_code=repro_good)
+        dispatcher.process_findings([f_good], plan_path=self.plan_path, cycle_id="c2")
+
+        budget_path = self.repo_dir / ".dev" / "audit" / "budget.json"
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget["src/target_pkg.py"]["streak"], 1)
+
+        # c3 で、過去に REJECTED だった f_rej のみを再投入
+        # 過去が REJECTED なので「REJECTED 以外の P0/P1 報告」とはみなされず、streak は 0 にリセットされるべき！
+        f_rej_again = AuditFinding(finding_id="AUD-REJ1", severity="P1", spec_reference="SPEC.md", location="src/target_pkg.py:1", description="rej", reproduction_test_code=repro_rejected)
+        dispatcher.process_findings([f_rej_again], plan_path=self.plan_path, cycle_id="c3")
+
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        self.assertEqual(budget["src/target_pkg.py"]["streak"], 0)
+        self.assertEqual(budget["src/target_pkg.py"]["last_action"], "RESET")
 
 
 if __name__ == "__main__":

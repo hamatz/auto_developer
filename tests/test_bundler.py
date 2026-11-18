@@ -787,6 +787,100 @@ class TestEvidenceBundler(unittest.TestCase):
         self.assertFalse(res.audit_stage_verified)
         self.assertTrue(any("AUDIT_OUTDATED" in w for w in res.warnings))
 
+    def test_feature_www_3_find_release_blockers(self):
+        """機能WWW.3: find_release_blockers は未完了の P0/P1 および ESCALATED のみを返し、P2 や完了タスクは返さないこと。"""
+        from auto_developer.bundler import find_release_blockers
+
+        plan_text = (
+            "## ステップ\n"
+            "- [x] 1. 完了タスク (Severity: P0, Loc: a.py:1)\n"
+            "- [ ] 2. 未完了P2タスク (Severity: P2, Loc: b.py:2)\n"
+            "- [ ] 3. 未完了P1タスク (Severity: P1, Loc: c.py:3)\n"
+            "- [ ] 4. 未完了P0タスク (Severity: P0, Loc: d.py:4)\n"
+            "\n"
+            "## 止まっていること・判断待ち\n"
+            "- ESCALATED [AUD-999] Severe bug (Severity: P1, Loc: e.py:5, Streak: 5)\n"
+        )
+
+        blockers = find_release_blockers(plan_text)
+        self.assertEqual(len(blockers), 3)
+        self.assertTrue(any("未完了P1タスク" in b for b in blockers))
+        self.assertTrue(any("未完了P0タスク" in b for b in blockers))
+        self.assertTrue(any("ESCALATED [AUD-999]" in b for b in blockers))
+        self.assertFalse(any("未完了P2タスク" in b for b in blockers))
+        self.assertFalse(any("完了タスク" in b for b in blockers))
+
+    def test_feature_www_3_bundle_includes_backlog_and_manifest_backlog_count(self):
+        """機能WWW.3: Bundle に BACKLOG.md が同梱され、manifest に backlog_count が記録されること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+
+        # BACKLOG.md を作成
+        backlog_path = self.repo / "BACKLOG.md"
+        backlog_path.write_text(
+            "# BACKLOG.md\n\n"
+            "- [AUD-1001] Edge case defect (Severity: P2, Loc: a.py:1, Cycle: c1)\n"
+            "- [AUD-1002] Another minor issue (Severity: P2, Loc: b.py:2, Cycle: c2)\n",
+            encoding="utf-8",
+        )
+
+        bundle_zip = self.repo / "backlog_bundle.zip"
+        bundler.create_bundle(dest_path=bundle_zip)
+
+        with zipfile.ZipFile(bundle_zip, "r") as zf:
+            self.assertIn("BACKLOG.md", zf.namelist())
+            manifest_bytes = zf.read("bundle_manifest.json")
+            manifest = json.loads(manifest_bytes.decode("utf-8"))
+            self.assertEqual(manifest.get("backlog_count"), 2)
+
+    def test_feature_www_3_verify_bundle_rejects_unresolved_release_blockers(self):
+        """機能WWW.3: verify_bundle は PLAN.md に未解決の P0/P1 または ESCALATED がある場合に RELEASE_BLOCKED で不合格にすること。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+
+        # PLAN.md に未完了 P1 を追加
+        (self.repo / "PLAN.md").write_text(
+            "# PLAN.md\n\n## ステップ\n"
+            "- [x] 1. Initial done task\n"
+            "- [ ] 2. Blocked task (Severity: P1, Loc: src/app.py:1)\n",
+            encoding="utf-8",
+        )
+
+        bundle_zip = self.repo / "blocker_bundle.zip"
+        bundler.create_bundle(dest_path=bundle_zip)
+        res = bundler.verify_bundle(bundle_zip)
+
+        self.assertFalse(res.is_valid)
+        self.assertEqual(res.status, "INVALID")
+        self.assertTrue(
+            any(e.startswith("RELEASE_BLOCKED:") for e in res.errors),
+            f"Expected error starting with RELEASE_BLOCKED:, got errors: {res.errors}",
+        )
+
+    def test_feature_www_3_verify_bundle_allows_p2_in_plan_and_backlog(self):
+        """機能WWW.3: P2 の残件（PLAN.md の P2 タスクや BACKLOG.md）はリリースを止めないこと。"""
+        bundler = EvidenceBundler(repo_dir=self.repo)
+
+        # PLAN.md に完了タスクと未完了 P2 タスク
+        (self.repo / "PLAN.md").write_text(
+            "# PLAN.md\n\n## ステップ\n"
+            "- [x] 1. Initial done task\n"
+            "- [ ] 2. Minor edge case (Severity: P2, Loc: src/app.py:1)\n",
+            encoding="utf-8",
+        )
+        # BACKLOG.md にも P2
+        (self.repo / "BACKLOG.md").write_text(
+            "# BACKLOG.md\n\n- [AUD-1001] Minor P2 issue (Severity: P2, Loc: a.py:1, Cycle: c1)\n",
+            encoding="utf-8",
+        )
+
+        bundle_zip = self.repo / "p2_allowed_bundle.zip"
+        bundler.create_bundle(dest_path=bundle_zip)
+        res = bundler.verify_bundle(bundle_zip)
+
+        # RELEASE_BLOCKED エラーが発生しないこと
+        self.assertFalse(any(e.startswith("RELEASE_BLOCKED:") for e in res.errors))
+        self.assertTrue(res.is_valid)
+        self.assertEqual(res.status, "VERIFIED")
+
 
 
 

@@ -21,6 +21,14 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-18] 免疫テストを「都合のよい相手」で書くと、仕組みが現実の相手に対して成り立たない (Immunity Tests Must Model the Real Counterparty)
+- Context: Phase 63（SPEC 機能WWW）、`src/auto_developer/dispatcher.py`（重要度トリアージ・修正予算）、`tests/immunity/test_immunity_audit_budget.py`。
+- Trap: 最初の免疫テストは「監査役は毎サイクル一意な ID で新しい指摘だけを返す」前提で書かれており、全件 Green でも次の 3 つの欠陥を見逃した。(1) 監査役がサイクルごとに AUD-001 から採番し直すと、P2・ESCALATED 経路で `CODE_HASH_TAMPERED` が送出され監査ステージ全体が AUDIT_FAILED になる。(2) その修正で冪等性判定を広げた結果、完了済み（- [x]）指摘の再発（回帰）が「登録済み」として黙って捨てられた（Fail-Open）。(3) 未解決の指摘が再報告だけされるサイクルで streak が 0 に戻り、エスカレーション済みモジュールへの自動登録が 1 サイクルおきに再開した（終了保証の不成立）。いずれも仕様（SPEC WWW）の文言自体に穴があり、実装は文言どおりだった。
+- Rule: 安全・終了保証の免疫テストは、相手（監査役・Maker・Checker）の現実的な振る舞いでシナリオを書く。少なくとも「ID の再採番」「未解決指摘の再報告」「修正済み指摘の再発」「指摘 0 件のサイクル」を混ぜる。仕様を書く段階でも、状態（未着手 / 完了 / 抑止 / エスカレーション）ごとに扱いを明記し、「同一なら重複させない」のような状態を区別しない規則を書かない。
+- Rung: 検査（免疫テストのシナリオ設計）。仕様査読の観点として AGENTS.md 第2部への追加も検討。
+- Immunity Test: `tests/immunity/test_immunity_audit_budget.py` の `test_reused_finding_id_*`, `test_reused_finding_id_for_completed_task_reopens_as_new_task`, `test_persistent_auditor_cannot_reopen_escalated_module`, `test_rereport_only_cycle_does_not_reset_streak`。
+- Proof: 3 つの欠陥はいずれも、ステップ完了後の人間側レビューで再現スクリプトにより確認し、Red-First で免疫テストを追加してからステップ 6・7 で修正した（2d8e647, ad46d10）。修正後、同じ再現スクリプトで期待どおりの挙動を確認。
+
 ### [2026-11-16] 外部LLM独立監査におけるP2モグラ叩きの底なし沼化と自律サイクルの終了判定 (Preventing Endless Audit Loops and Over-Engineering in LLM Static Verification)
 - Context: 外部 LLM（Claude Opus 5.5 / Anthropic API）による独立監査ステージ、`src/auto_developer/verifier.py`（AST による Red テスト因果関係・Trivial 判定器）、自律開発ループ終了判定。
 - Trap: 監査モデルが提示する構文上のエッジケース（P2: 未実行ラムダ、例外ハンドラ内の raise、ネスト関数、別名 import、dotted import 等）を1件ずつモグラ叩きで修正し続けた結果、開発の主眼が「重大欠陥の排除」から「完全な静的プログラム解析器の構築」という不可能な目標（Riceの定理）へ変質し、40サイクル以上にわたり開発が終了しなくなるエンドレスゲームに陥った（Sol氏 Phase 62 考察）。
@@ -32,9 +40,17 @@
      - P3（改善提案・理論的懸念）: レポート通知のみ。
   3. **自動修正回数の上限設定**: 1つの監査指摘に対する自動修正は最大3回、同一モジュールへの連続監査は最大5サイクルなど、明確な打ち切り・人間への引き渡し条件を設ける。
   4. **監査システムの自己肥大化防止**: 監査で生まれたテスト判定器の改善そのものを、再び同じ監査モデルに無制限で監査させない。
-- Rung: 作り（P0/P1 と P2 のトリアージ境界、自動修正上限） & 関門（リリース判定条件の厳格化）
-- Immunity Test: `tests/immunity/` において、監査モデルが P2 を連続返却しても、自動修正上限を超えずに開発サイクルが正常終了し、残件が Backlog に引き継がれることを検証する免疫テスト。
-- Proof: Phase 62 において AUD-901 修正後、AUD-1001 (P2) をリリースをブロックしない Backlog として切り離し、v0.7.0 リリース判定（10/10 一致 Evidence Bundle）を完走。
+- Rung: 作り（`AuditDispatcher` の重要度トリアージ・モジュール単位の修正予算・sticky エスカレーション） & 関門（`find_release_blockers` / `verify_bundle` の RELEASE_BLOCKED）。Phase 63（SPEC 機能WWW）で実装。
+- Immunity Test: `tests/immunity/test_immunity_audit_budget.py`（15 件）。主なもの:
+  - `test_endless_p2_stream_never_becomes_plan_task`: P2 を 20 サイクル × 3 件返し続けても Maker タスク 0 件・Red 検証 0 回・BACKLOG に 60 件。
+  - `test_persistent_auditor_cannot_reopen_escalated_module`: 未解決指摘を毎サイクル再報告し、新規指摘・指摘 0 件・再報告のみのサイクルを混ぜても、上限到達後は新規指摘がすべて ESCALATED のまま、未着手タスクが増えない。
+  - `test_reused_finding_id_*` / `test_reused_finding_id_for_completed_task_reopens_as_new_task`: 監査役の ID 再採番（毎サイクル AUD-001）でも監査ステージが落ちず、完了済み指摘の再発は新タスクとして再オープンされる。
+  - `test_human_reset_of_budget_entry_reenables_dispatch`: エスカレーションの解除は人間による台帳エントリ削除のみ。
+- Proof:
+  - 2026-11-18: 同一入力（P2 を 20 サイクル × 3 件 = 60 件、`location` は同一モジュール）を Phase 63 着手前 f299d39 と ad46d10 に与えた。f299d39: Maker タスク 60 件・Red 検証 60 回（元の失敗を再現）。ad46d10: Maker タスク 0 件・Red 検証 0 回。
+  - 免疫テストは f299d39 で 15 件中 13 件が Red（大半は新 API 不在によるエラー）、ad46d10 で 15 件すべて Green。
+  - 機械化の範囲: Rule 1・2（トリアージ、P2 でリリースを止めない）と Rule 3 の「同一モジュールへの連続監査上限」は作りに置いた。Rule 3 の「1 指摘あたり自動修正 3 回」はタスク単位の既存 Strict Fail-Fast（2 回失敗で隔離）で代替しており、専用の仕組みはない。Rule 4（監査器を同じ監査モデルに無制限に監査させない）は未機械化（BACKLOG IDEA-005）。
+  - 初回: Phase 62 において AUD-901 修正後、AUD-1001 (P2) をリリースをブロックしない Backlog として手作業で切り離し、v0.7.0 リリース判定（10/10 一致 Evidence Bundle）を完走。
 
 ### [2026-11-15] 条件分岐後の変数環境合流における不確定性の無視と静的解析の底なし沼化 (Ignoring Uncertainty in Control Flow Variable Merging and Static Analysis Scope Creep)
 - Context: `src/auto_developer/verifier.py` (`_process_stmts_in_order`, `check_trivial_red_ast`)
