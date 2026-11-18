@@ -30,6 +30,7 @@
 - WWW.1: 既存の監査取り込みテスト（`tests/test_immunity_and_red_acceptance.py`, `tests/test_independent_audit_runner.py` 等）で、P2 の finding が `DISPATCHED` になることを前提にしている箇所があれば、`BACKLOGGED` を期待するよう変更する。P0/P1 の挙動は変えない。
 - WWW.4: `tests/test_nightly_orchestrator.py` 等で、Checker のテキスト出力 "PASS" のみで承認されることを前提にしている箇所があれば、判定行（APPROVE / REJECT）を出力する形に変更する。
 - WWW.6: 既存テストの変更は想定しない。Red になっている免疫テスト（`tests/immunity/test_immunity_audit_budget.py` の reused 系 2 件）は人間が追加したもので、変更せずに Green にする。
+- WWW.2 改訂: 既存テストで「指摘 0 件または再報告のみのサイクル後にエスカレーション済みモジュールへ再登録できる」ことを前提にしている箇所があれば、sticky 化に合わせて変更してよい。免疫テストは変更しない。
 - 上記以外の既存テストは変更しない。免疫テスト（`tests/immunity/**`）は変更しない（本フェーズの免疫テスト草案は `docs/proposals/phase63/` にあり、完了後に人間が配置する）。
 
 ## ステップ
@@ -39,6 +40,7 @@
 - [x] 4. リリース判定の分離: find_release_blockers と verify_bundle の RELEASE_BLOCKED、Bundle への BACKLOG.md 同梱と backlog_count（Red-First）（WWW.3）
 - [x] 5. Morning Brief に DISPATCHED / BACKLOGGED / ESCALATED を分けて表示し、ESCALATED を判断待ちに列挙（Red-First）（WWW.5）
 - [x] 6. finding_id 再利用への耐性: process_findings の冒頭で ID 衝突を判定し、同一指摘は重複させず、内容の異なる衝突は AUD-018 の規則で採番し直してから振り分ける（全経路共通）（Red-First: tests/immunity の reused 系 2 件が Red であることを確認してから着手）（WWW.6）
+- [ ] 7. エスカレーションの sticky 化とリセット条件の厳格化: 台帳に escalated: true を持たせ人間が消すまで解除しない。再報告（抑止分を含む REJECTED 以外の P0/P1）があるサイクルでは streak を 0 に戻さない（Red-First: tests/immunity の persistent / rereport 系 2 件が Red であることを確認してから着手）（WWW.2 改訂）
 
 ## 止まっていること・判断待ち
 - なし。
@@ -46,4 +48,5 @@
 ## 人間が行うこと（Maker は実行しない）
 - [済] 免疫テストを `tests/immunity/` に配置（`__init__.py` 作成、src の sys.path 追加）。
 - [済] WWW.6 の免疫テスト（reused 系 2 件）を Red-First で追加。
-- ステップ 6 の完了後: f299d39（Phase 63 着手前）で免疫テストが Red、HEAD で Green になることを確認し、LESSONS.md 2026-11-16 の Immunity Test / Proof 欄を実際のパスと結果で更新する。
+- [済] WWW.2 改訂の免疫テスト（persistent / rereport / human reset の 3 件）を Red-First で追加。
+- ステップ 7 の完了後: f299d39（Phase 63 着手前）で免疫テストが Red、HEAD で Green になることを確認し、LESSONS.md 2026-11-16 の Immunity Test / Proof 欄を実際のパスと結果で更新する。

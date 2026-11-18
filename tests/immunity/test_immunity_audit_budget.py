@@ -7,6 +7,7 @@ Phase 63 のステップ完了後、人間が tests/immunity/ に配置する。
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -215,6 +216,58 @@ class TestImmunityAuditLoopTermination(unittest.TestCase):
         plan_text = self.plan.read_text(encoding="utf-8")
         self.assertEqual(plan_text.count("- ESCALATED ["), 2)
         self.assertEqual(len(self._pending_tasks()), 1)
+
+    # --- 未解決の指摘を毎サイクル再報告し続ける現実的な監査役 (WWW.2 sticky escalation) ---
+    def _stable(self, n: int) -> AuditFinding:
+        """同じ指摘は毎サイクル同じ ID・同じ再現コードで再報告される。"""
+        return AuditFinding(
+            finding_id=f"AUD-{200 + n}",
+            severity="P1",
+            spec_reference="SPEC.md 機能WWW",
+            location="src/auto_developer/verifier.py:166",
+            description=f"persistent issue #{n}",
+            reproduction_test_code=REPRO + f"# persistent {n}\n",
+        )
+
+    def _run_cycles(self, dispatcher: AuditDispatcher, schedule: list[list[int]]) -> dict[int, str]:
+        last_status: dict[int, str] = {}
+        for cycle, numbers in enumerate(schedule):
+            findings = [self._stable(n) for n in numbers]
+            dispatcher.process_findings(findings, plan_path=self.plan, cycle_id=f"c{cycle}")
+            for n, f in zip(numbers, findings):
+                if f.status in ("DISPATCHED", "ESCALATED"):
+                    last_status[n] = f.status
+        return last_status
+
+    def test_persistent_auditor_cannot_reopen_escalated_module(self) -> None:
+        dispatcher = self._dispatcher(max_cycles=2)
+        # 未解決の指摘は再報告され続け、ときどき新しい指摘が混ざる。再報告だけのサイクルも挟まる。
+        schedule = [[0], [0, 1], [0, 1, 2], [0, 1, 2], [0, 1, 2, 3], [], [0, 1, 2, 3], [0, 1, 2, 3, 4]]
+        status = self._run_cycles(dispatcher, schedule)
+
+        self.assertEqual(status[0], "DISPATCHED")
+        self.assertEqual(status[1], "DISPATCHED")
+        for n in (2, 3, 4):
+            self.assertEqual(status.get(n), "ESCALATED", f"issue #{n} must stay escalated after the budget")
+        self.assertEqual(len(self._pending_tasks()), 2, "an escalated module must never get new Maker tasks")
+
+    def test_rereport_only_cycle_does_not_reset_streak(self) -> None:
+        dispatcher = self._dispatcher(max_cycles=3)
+        # #0 が未解決のまま再報告だけされるサイクル (c1) は「指摘なし」ではない
+        schedule = [[0], [0], [0, 1], [0, 1, 2], [0, 1, 2, 3]]
+        status = self._run_cycles(dispatcher, schedule)
+        self.assertEqual([status.get(n) for n in range(4)], ["DISPATCHED"] * 3 + ["ESCALATED"])
+
+    def test_human_reset_of_budget_entry_reenables_dispatch(self) -> None:
+        dispatcher = self._dispatcher(max_cycles=1)
+        self._run_cycles(dispatcher, [[0], [0, 1]])
+        budget_path = self.repo / ".dev" / "audit" / "budget.json"
+        budget = json.loads(budget_path.read_text(encoding="utf-8"))
+        del budget["src/auto_developer/verifier.py"]
+        budget_path.write_text(json.dumps(budget), encoding="utf-8")
+
+        status = self._run_cycles(dispatcher, [[0, 1, 2]])
+        self.assertEqual(status.get(2), "DISPATCHED", "only a human reset may lift the escalation")
 
     def test_release_blockers_ignore_p2_and_catch_p0_p1(self) -> None:
         plan_text = (

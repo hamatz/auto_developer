@@ -761,7 +761,8 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 台帳 `.dev/audit/budget.json` にモジュールごとの `streak`（連続して P0/P1 を登録したサイクル数）と `last_cycle_id` を保存する。
      - サイクル処理の規則:
        - そのサイクルで `GENUINE_RED` となった P0/P1 があるモジュールについて、処理前の `streak >= max_consecutive_cycles` なら、そのモジュールの当該 finding はすべて PLAN の「## ステップ」に登録せず status `ESCALATED` とし、PLAN.md の「## 止まっていること・判断待ち」節に `- ESCALATED [AUD-<id>] <description> (Severity: <sev>, Loc: <location>, Streak: <n>)` を追記する（チェックボックスなし）。上限未満なら登録し、`streak` を 1 増やす（1 サイクルにつき 1 回）。
-       - そのサイクルで P0/P1 の登録がなかったモジュールは `streak` を 0 に戻す。
+       - エスカレーションは解除しない（sticky）: あるモジュールで一度 ESCALATED が発生したら、台帳エントリに `escalated: true` を記録する。`escalated: true` のモジュールでは、以後どのサイクルでも（指摘 0 件のサイクル・再報告のみのサイクルを含む）`streak` を 0 に戻さず、新たな P0/P1（`GENUINE_RED`）はすべて ESCALATED とする。解除は人間が台帳エントリを削除した場合のみ。
+       - `escalated` でないモジュールの `streak` を 0 に戻すのは、そのサイクルで当該モジュールに P0/P1 の報告が 1 件もなかった場合に限る。ここでいう「報告」は REJECTED 以外の P0/P1 finding であり、WWW.6 により重複として抑止された再報告を含む。再報告のみのサイクルでは `streak` を増やしも戻しもしない。
        - P2 / INFO / REJECTED は `streak` に数えない。
        - 同じ `cycle_id` を 2 回処理しても `streak` は二重に増えない（冪等）。
      - 台帳のリセットは人間が `.dev/audit/budget.json` の該当エントリを削除して行う（CLI はスコープ外）。
