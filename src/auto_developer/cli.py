@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -11,6 +12,7 @@ from auto_developer.bundler import EvidenceBundler
 from auto_developer.dispatcher import TaskDispatcher
 from auto_developer.evidence import EvidenceStore
 from auto_developer.guard import GitGuard
+from auto_developer.metrics import MetricsLog
 from auto_developer.models import JobState
 from auto_developer.orchestrator import NightlyOrchestrator
 from auto_developer.reporter import MorningReporter
@@ -296,6 +298,19 @@ def main(argv: list[str] | None = None) -> int:
     rollback_parser.add_argument("--task-id", type=str, required=True, help="Task ID to mark failed")
     rollback_parser.add_argument("--reason", type=str, default="Verification failed", help="Failure reason")
 
+    # Subcommand: record-review
+    review_parser = subparsers.add_parser("record-review", help="Record Checker review outcome to metrics log")
+    review_parser.add_argument("--task-id", type=str, required=True, help="Task ID")
+    review_parser.add_argument(
+        "--decision",
+        type=str,
+        required=True,
+        help="Review decision (APPROVE or REJECT)",
+    )
+    review_parser.add_argument("--checker-model", type=str, required=True, help="Checker model")
+    review_parser.add_argument("--maker-model", type=str, required=True, help="Maker model")
+    review_parser.add_argument("--reason", type=str, default="", help="Review reason")
+
     # Subcommand: recover
     recover_parser = subparsers.add_parser("recover", help="Crash recovery and consistency tools")
     recover_parser.add_argument(
@@ -368,6 +383,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     elif args.subcommand == "verify-step":
+        metrics = MetricsLog(repo_dir=work_dir, plan_path=plan_path)
+        start_time = time.time()
+        phase = metrics.get_current_phase()
         tasks = dispatcher.parse_plan(plan_path)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
         if not target:
@@ -381,13 +399,36 @@ def main(argv: list[str] | None = None) -> int:
         if not git_guard.check_protected_files_untouched(args.checkpoint):
             plan_path.write_text(original_plan_content, encoding="utf-8")
             print(f"CIRCUIT BREAKER: Protected file modified since {args.checkpoint}", file=sys.stderr)
+            attempt = metrics.count_verify_attempts(args.task_id, args.checkpoint, phase=phase) + 1
+            metrics.record_event(
+                "verify_step",
+                task_id=args.task_id,
+                checkpoint=args.checkpoint,
+                result="CIRCUIT_BREAKER",
+                exit_code=10,
+                duration_sec=round(time.time() - start_time, 2),
+                attempt=attempt,
+                phase=phase,
+            )
             return 10
         code, out = verifier.run_verification(
             verify_script, timeout_sec=args.timeout, cwd=work_dir
         )
+        duration_sec = round(time.time() - start_time, 2)
+        attempt = metrics.count_verify_attempts(args.task_id, args.checkpoint, phase=phase) + 1
         if code != 0:
             plan_path.write_text(original_plan_content, encoding="utf-8")
             print(f"VERIFICATION FAILED (Exit {code}):\n{out}", file=sys.stderr)
+            metrics.record_event(
+                "verify_step",
+                task_id=args.task_id,
+                checkpoint=args.checkpoint,
+                result="FAILED",
+                exit_code=code,
+                duration_sec=duration_sec,
+                attempt=attempt,
+                phase=phase,
+            )
             return code
         tree_sha = git_guard.get_working_tree_sha()
         spec_sha = git_guard.get_spec_sha(spec_path)
@@ -404,10 +445,21 @@ def main(argv: list[str] | None = None) -> int:
                 }
             },
         )
+        metrics.record_event(
+            "verify_step",
+            task_id=args.task_id,
+            checkpoint=args.checkpoint,
+            result="PASSED",
+            exit_code=0,
+            duration_sec=duration_sec,
+            attempt=attempt,
+            phase=phase,
+        )
         print(f"VERIFICATION PASSED (Evidence Token: {evidence['token']})")
         return 0
 
     elif args.subcommand == "commit-step":
+        metrics = MetricsLog(repo_dir=work_dir, plan_path=plan_path)
         tasks = dispatcher.parse_plan(plan_path)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
         if not target:
@@ -416,10 +468,24 @@ def main(argv: list[str] | None = None) -> int:
 
         # Checker Policy 検査 (機能XXX.1 / AGENTS.md Rule 6)
         decision = (args.checker_decision or "").strip().upper()
+        maker_fam = detect_model_family(args.maker_model)
+        checker_fam = detect_model_family(args.checker_model)
+
         if decision != "APPROVE":
             print(
                 f"CHECKER_POLICY_VIOLATION: Checker review decision must be APPROVE (got '{args.checker_decision}')",
                 file=sys.stderr,
+            )
+            metrics.record_event(
+                "commit_step",
+                task_id=args.task_id,
+                result="CHECKER_POLICY_VIOLATION",
+                commit=None,
+                checker_decision=decision,
+                checker_model=args.checker_model,
+                checker_family=checker_fam,
+                maker_model=args.maker_model,
+                maker_family=maker_fam,
             )
             return 4
 
@@ -428,6 +494,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not is_independent:
             print(f"CHECKER_POLICY_VIOLATION: {violation_msg}", file=sys.stderr)
+            metrics.record_event(
+                "commit_step",
+                task_id=args.task_id,
+                result="CHECKER_POLICY_VIOLATION",
+                commit=None,
+                checker_decision=decision,
+                checker_model=args.checker_model,
+                checker_family=checker_fam,
+                maker_model=args.maker_model,
+                maker_family=maker_fam,
+            )
             return 4
 
         current_tree_sha = git_guard.get_working_tree_sha()
@@ -443,6 +520,17 @@ def main(argv: list[str] | None = None) -> int:
                 "Evidence missing or working tree/spec was tampered after verify-step.",
                 file=sys.stderr,
             )
+            metrics.record_event(
+                "commit_step",
+                task_id=args.task_id,
+                result="EVIDENCE_ERROR",
+                commit=None,
+                checker_decision=decision,
+                checker_model=args.checker_model,
+                checker_family=checker_fam,
+                maker_model=args.maker_model,
+                maker_family=maker_fam,
+            )
             return 3
         commit_hash = git_guard.commit_task(target)
         committed_tree = git_guard.get_commit_tree_sha("HEAD")
@@ -451,11 +539,20 @@ def main(argv: list[str] | None = None) -> int:
                 f"FATAL INVARIANT BREACH: Committed tree {committed_tree} does not match verified tree {current_tree_sha}!",
                 file=sys.stderr,
             )
+            metrics.record_event(
+                "commit_step",
+                task_id=args.task_id,
+                result="EVIDENCE_ERROR",
+                commit=commit_hash,
+                checker_decision=decision,
+                checker_model=args.checker_model,
+                checker_family=checker_fam,
+                maker_model=args.maker_model,
+                maker_family=maker_fam,
+            )
             return 3
 
         # Checker 査読メタデータの抽出 (機能Q / 機能XXX.1)
-        maker_fam = detect_model_family(args.maker_model)
-        checker_fam = detect_model_family(args.checker_model)
         checker_info: dict[str, Any] = {
             "decision": decision,
             "reason": args.checker_reason or "",
@@ -486,10 +583,22 @@ def main(argv: list[str] | None = None) -> int:
             },
             checker_info=checker_info,
         )
+        metrics.record_event(
+            "commit_step",
+            task_id=args.task_id,
+            result="COMMITTED",
+            commit=commit_hash,
+            checker_decision=decision,
+            checker_model=args.checker_model,
+            checker_family=checker_fam,
+            maker_model=args.maker_model,
+            maker_family=maker_fam,
+        )
         print(f"COMMITTED: {commit_hash}")
         return 0
 
     elif args.subcommand == "rollback-step":
+        metrics = MetricsLog(repo_dir=work_dir, plan_path=plan_path)
         tasks = dispatcher.parse_plan(plan_path)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
         task_id = target.task_id if target else args.task_id
@@ -509,7 +618,34 @@ def main(argv: list[str] | None = None) -> int:
                     "attempt_1_log": args.reason,
                 },
             )
+        metrics.record_event(
+            "rollback_step",
+            task_id=task_id,
+            checkpoint=args.checkpoint,
+            quarantine_branch=quarantine_branch or None,
+            reason=args.reason or "",
+        )
         print(f"ROLLED BACK TO {args.checkpoint} (Work quarantined to: {quarantine_branch or 'none'})")
+        return 0
+
+    elif args.subcommand == "record-review":
+        dec = (args.decision or "").strip().upper()
+        if dec not in ("APPROVE", "REJECT"):
+            print(f"ERROR: --decision must be APPROVE or REJECT (got '{args.decision}')", file=sys.stderr)
+            return 2
+        maker_fam = detect_model_family(args.maker_model)
+        checker_fam = detect_model_family(args.checker_model)
+        metrics = MetricsLog(repo_dir=work_dir, plan_path=plan_path)
+        metrics.record_event(
+            "checker_review",
+            task_id=args.task_id,
+            decision=dec,
+            checker_model=args.checker_model,
+            checker_family=checker_fam,
+            maker_model=args.maker_model,
+            maker_family=maker_fam,
+            reason=args.reason or "",
+        )
         return 0
 
     elif args.subcommand in ("brief", "morning-brief"):
