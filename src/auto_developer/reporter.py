@@ -282,9 +282,11 @@ class MorningReporter:
                 backlogged = audit_stage.get("backlogged", [])
                 escalated = audit_stage.get("escalated", [])
                 rejected = audit_stage.get("rejected", [])
+                duplicates = audit_stage.get("duplicates", [])
                 lines.append(f"- **真正指摘登録数 (DISPATCHED)**: {len(dispatched)} 件（次期 PLAN.md に自律登録）")
                 lines.append(f"- **Backlog 送り (BACKLOGGED)**: {len(backlogged)} 件（P2 / BACKLOG.md に記録）")
                 lines.append(f"- **エスカレーション (ESCALATED)**: {len(escalated)} 件（修正予算超過・人間判断待ち）")
+                lines.append(f"- **重複再報告 (DUPLICATE)**: {len(duplicates)} 件（既存指摘と重複のため抑止）")
                 lines.append(f"- **不正/偽Red排除数**: {len(rejected)} 件（多層防壁により遮断）")
                 for f in dispatched:
                     fid = getattr(f, "finding_id", f.get("finding_id", str(f)) if isinstance(f, dict) else str(f))

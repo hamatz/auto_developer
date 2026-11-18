@@ -633,6 +633,65 @@ class TestTamper(unittest.TestCase):
         self.assertNotIn("AUD-TRIVIAL-001", plan_content)
         self.assertNotIn("AUD-TAMPER-001", plan_content)
 
+    def test_suppressed_duplicate_findings_have_duplicate_status_and_not_in_rejected(self) -> None:
+        """XXX.2: 重複抑止された finding の status は DUPLICATE となり、rejected ではなく duplicates に分離されること。"""
+        from auto_developer.audit import VALID_STATUSES, AuditFinding, IndependentAuditRunner
+        from auto_developer.dispatcher import AuditDispatcher
+        from auto_developer.verifier import RedTestVerifier
+
+        self.assertIn("DUPLICATE", VALID_STATUSES)
+
+        verifier = RedTestVerifier(repo_dir=self.repo_dir)
+        dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=verifier)
+        runner = IndependentAuditRunner(model_name="claude-opus-5.5")
+
+        plan_path = self.repo_dir / "PLAN.md"
+        plan_path.write_text("- [ ] AUD-001. 既存の未着手指摘 (AUD-001)\n", encoding="utf-8")
+
+        test_code = """import unittest
+from calc import add_vals
+class TestAdd(unittest.TestCase):
+    def test_add(self):
+        self.assertEqual(add_vals(2, 3), 5)
+"""
+        import hashlib
+        code_hash = hashlib.sha256(test_code.encode("utf-8")).hexdigest()
+        dispatcher.audit_store.save_finding(AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/calc.py:2",
+            description="desc",
+            reproduction_test_code=test_code,
+            status="DISPATCHED",
+            code_hash=code_hash,
+        ))
+
+        # 同じ code_hash を持つ finding を投入（重複再報告）
+        dup_finding = AuditFinding(
+            finding_id="AUD-001",
+            severity="P1",
+            spec_reference="SPEC.md",
+            location="src/calc.py:2",
+            description="desc",
+            reproduction_test_code=test_code,
+            status="REPORTED",
+            code_hash=code_hash,
+        )
+
+        res = runner.screen_and_dispatch_findings(
+            findings=[dup_finding],
+            dispatcher=dispatcher,
+            plan_path=plan_path,
+        )
+
+        self.assertEqual(dup_finding.status, "DUPLICATE")
+        self.assertIn("duplicates", res)
+        self.assertEqual(len(res["duplicates"]), 1)
+        self.assertEqual(res["duplicates"][0].finding_id, "AUD-001")
+        self.assertEqual(len(res["rejected"]), 0)
+        self.assertEqual(res.get("duplicate_count"), 1)
+
 
 class TestCommitBoundSpecAndAuditInputProvenance(unittest.TestCase):
     """機能RRR.1: 監査対象 SPEC のコミット拘束と監査入力ハッシュの厳格証明。"""

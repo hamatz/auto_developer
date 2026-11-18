@@ -295,6 +295,29 @@ class TestMorningReporterEvidenceVerification(unittest.TestCase):
         self.assertIn("AUD-999", action_section)
         self.assertIn("Repetitive failure in verifier", action_section)
 
+    def test_duplicate_reported_separately_from_rejected(self) -> None:
+        """XXX.2: 重複再報告が不正/偽Red排除数と分離されて表示されること。"""
+        summary_data = {
+            "status": "COMPLETED",
+            "checkpoint": "abcdef1",
+            "completed_tasks": [],
+            "audit_stage": {
+                "status": "SUCCESS",
+                "dispatched": [],
+                "backlogged": [],
+                "escalated": [],
+                "duplicates": [{"finding_id": "AUD-001"}],
+                "rejected": [({"finding_id": "AUD-002"}, "TRIVIAL_RED")],
+            },
+        }
+        reporter = MorningReporter(repo_dir=self.repo)
+        report_path = self.repo / "NIGHTLY_REPORT.md"
+        reporter.write_report(report_path, summary_data)
+
+        content = report_path.read_text(encoding="utf-8")
+        self.assertIn("- **重複再報告 (DUPLICATE)**: 1 件", content)
+        self.assertIn("- **不正/偽Red排除数**: 1 件", content)
+
 
 if __name__ == "__main__":
     unittest.main()

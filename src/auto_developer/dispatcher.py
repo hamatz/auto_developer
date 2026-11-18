@@ -262,6 +262,7 @@ class AuditDispatcher:
                     )
                     if is_hash_already_open:
                         # 既に未完了タスクとして再オープン中: 重複して開かない（抑制）
+                        finding.status = "DUPLICATE"
                         suppressed_findings.append(finding)
                         continue
                     # 新たな回帰タスクとして AUD-018 で採番
@@ -301,6 +302,7 @@ class AuditDispatcher:
                         active_findings.append(finding)
                     else:
                         # 別サイクルまたは BACKLOG/バッチ内での同一再報告: 重複登録を抑止（抑制し、除外）
+                        finding.status = "DUPLICATE"
                         suppressed_findings.append(finding)
                         continue
                 else:
