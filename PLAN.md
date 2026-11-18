@@ -49,4 +49,4 @@
 - [済] 免疫テストを `tests/immunity/` に配置（`__init__.py` 作成、src の sys.path 追加）。
 - [済] WWW.6 の免疫テスト（reused 系 2 件）を Red-First で追加。
 - [済] WWW.2 改訂の免疫テスト（persistent / rereport / human reset の 3 件）を Red-First で追加。
-- ステップ 7 の完了後: f299d39（Phase 63 着手前）で免疫テストが Red、HEAD で Green になることを確認し、LESSONS.md 2026-11-16 の Immunity Test / Proof 欄を実際のパスと結果で更新する。
+- [済] ステップ 7 の完了後の Proof 確認（f299d39: P2 60 件 → Maker タスク 60 件 / ad46d10: 0 件、免疫テスト 15/15 Green）と LESSONS.md 2026-11-16 の Rung / Immunity Test / Proof 更新、2026-11-18 の教訓追加。
