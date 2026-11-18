@@ -166,13 +166,16 @@ class AuditDispatcher:
         target_plan: Path,
         effective_cycle_id: str,
         budget: dict[str, dict[str, object]] | None = None,
-    ) -> list[AuditFinding]:
+    ) -> tuple[list[AuditFinding], list[AuditFinding]]:
         """AuditStore・PLAN.md・BACKLOG.md 上の既存 ID との衝突を判定し、採番し直す (WWW.6)。
 
         同一指摘（同一 ID かつ同一 code_hash）の再報告は重複登録を抑止するため戻り値から除外する（冪等）。
         ただし同一 cycle_id のリトライ時はディスパッチ状態を維持する。
         完了済みタスク（- [x]）の同一指摘は回帰として AUD-018 で採番し直し、新規タスクとして戻り値に含める。
         内容の異なる ID 衝突は AUD-018 で採番し直して戻り値に含める。
+
+        Returns:
+            (active_findings, suppressed_findings)
         """
         backlog_path = self.repo_dir / "BACKLOG.md"
         plan_content = target_plan.read_text(encoding="utf-8") if target_plan.exists() else ""
@@ -237,6 +240,7 @@ class AuditDispatcher:
                     backlog_ids.add(token[4:])
 
         active_findings: list[AuditFinding] = []
+        suppressed_findings: list[AuditFinding] = []
 
         for finding in findings:
             # 再現テストコードから常に code_hash を確定（外部入力を過信しない）
@@ -258,6 +262,7 @@ class AuditDispatcher:
                     )
                     if is_hash_already_open:
                         # 既に未完了タスクとして再オープン中: 重複して開かない（抑制）
+                        suppressed_findings.append(finding)
                         continue
                     # 新たな回帰タスクとして AUD-018 で採番
                     next_num = max(existing_nums, default=0) + 1
@@ -296,6 +301,7 @@ class AuditDispatcher:
                         active_findings.append(finding)
                     else:
                         # 別サイクルまたは BACKLOG/バッチ内での同一再報告: 重複登録を抑止（抑制し、除外）
+                        suppressed_findings.append(finding)
                         continue
                 else:
                     # 内容の異なる衝突: AUD-018 で採番し直す
@@ -314,7 +320,7 @@ class AuditDispatcher:
                     existing_nums.add(int(m.group(1)))
                 active_findings.append(finding)
 
-        return active_findings
+        return active_findings, suppressed_findings
 
     def dispatch_finding(
         self,
@@ -491,24 +497,47 @@ class AuditDispatcher:
 
         # WWW.6: 監査役による finding_id 再利用への耐性 (全経路共通: トリアージ・予算判定より前に必ず実行)
         budget = self._load_budget()
-        if findings:
-            findings = self._resolve_finding_ids(findings, target_plan, effective_cycle_id, budget=budget)
+        active_findings, suppressed_findings = (
+            self._resolve_finding_ids(findings, target_plan, effective_cycle_id, budget=budget)
+            if findings
+            else ([], [])
+        )
 
-        if not findings:
-            # 指摘が0件のサイクルでも、P0/P1の登録がなかったモジュールの streak は 0 に戻す
+        # WWW.2 改訂: 報告のあったモジュール（抑止された再報告）の特定
+        # 過去の判定が REJECTED である指摘の再報告は「報告」に数えない
+        reported_p0_p1_mods: set[str] = set()
+        for f in suppressed_findings:
+            if (f.severity or "P2").strip().upper() in ("P0", "P1"):
+                stored = self.audit_store.load_finding(f.finding_id)
+                if stored and stored.status == "REJECTED":
+                    continue
+                reported_p0_p1_mods.add(self._extract_module_key(f.location))
+
+        if not active_findings:
+            # 指摘が0件のサイクル（またはすべて抑止されたサイクル）でも、escalated なモジュールは維持する (WWW.2 改訂)
             for mod in list(budget.keys()):
                 if budget[mod].get("last_cycle_id") != effective_cycle_id:
-                    budget[mod] = {
-                        "streak": 0,
-                        "last_cycle_id": effective_cycle_id,
-                        "last_action": "RESET",
-                    }
+                    is_escalated = bool(budget[mod].get("escalated") or budget[mod].get("last_action") == "ESCALATED")
+                    if is_escalated or mod in reported_p0_p1_mods:
+                        budget[mod]["last_cycle_id"] = effective_cycle_id
+                        if is_escalated:
+                            budget[mod]["escalated"] = True
+                            budget[mod]["last_action"] = "ESCALATED"
+                        else:
+                            budget[mod]["last_action"] = "MAINTAINED"
+                    else:
+                        budget[mod] = {
+                            "streak": 0,
+                            "last_cycle_id": effective_cycle_id,
+                            "last_action": "RESET",
+                            "escalated": False,
+                        }
             self._save_budget(budget)
             return []
 
         # 各指摘の事前評価（INFO, P2, P0/P1）
         candidate_genuine: list[tuple[AuditFinding, str]] = []
-        for finding in findings:
+        for finding in active_findings:
             sev = (finding.severity or "P2").strip().upper()
             if sev in ("INFO", "P2"):
                 self.dispatch_finding(
@@ -520,13 +549,14 @@ class AuditDispatcher:
                 verification = self.verifier.verify_candidate_test(finding.reproduction_test_code)
                 finding.red_verification_reason = verification.reason
                 finding.red_verification_output = verification.output
+                mod_key = self._extract_module_key(finding.location)
                 if not (verification.is_reproduced and verification.reason == "GENUINE_RED"):
                     finding.status = "REJECTED"
                     self.audit_store.save_finding(finding)
                 else:
                     finding.status = "VERIFIED_RED"
-                    mod_key = self._extract_module_key(finding.location)
                     candidate_genuine.append((finding, mod_key))
+                    reported_p0_p1_mods.add(mod_key)
 
         # モジュールごとにグループ化
         genuine_by_module: dict[str, list[AuditFinding]] = {}
@@ -538,12 +568,18 @@ class AuditDispatcher:
 
         # GENUINE_RED となった P0/P1 があるモジュールを処理
         for mod, mod_findings in genuine_by_module.items():
-            mod_entry = budget.get(mod, {"streak": 0, "last_cycle_id": None, "last_action": None})
+            mod_entry = budget.get(mod, {"streak": 0, "last_cycle_id": None, "last_action": None, "escalated": False})
             current_streak = int(mod_entry.get("streak", 0))
             last_cycle = mod_entry.get("last_cycle_id")
             last_action = mod_entry.get("last_action")
+            is_escalated = bool(mod_entry.get("escalated") or last_action == "ESCALATED")
 
-            if last_cycle == effective_cycle_id:
+            # 同一サイクルで既に GENUINE_RED のディスパッチ決定済み（MAINTAINED / RESET は再判定へ進む）
+            is_cycle_already_dispatched = (
+                last_cycle == effective_cycle_id
+                and last_action in ("DISPATCHED", "ESCALATED")
+            )
+            if is_cycle_already_dispatched:
                 # 既にこの cycle_id で処理済み（冪等性: 前回のアクションを維持）
                 for f in mod_findings:
                     if last_action == "ESCALATED":
@@ -556,9 +592,8 @@ class AuditDispatcher:
                         dispatched.append(f)
                 continue
 
-            # 新規サイクル
-            if current_streak >= self.max_consecutive_cycles:
-                # 予算上限超過 -> ESCALATED
+            # 新規サイクル: 既にエスカレーション済み、または予算上限超過 -> ESCALATED (WWW.2 改訂 sticky)
+            if is_escalated or current_streak >= self.max_consecutive_cycles:
                 for f in mod_findings:
                     f.status = "ESCALATED"
                     f.streak = current_streak
@@ -568,6 +603,7 @@ class AuditDispatcher:
                     "streak": current_streak,
                     "last_cycle_id": effective_cycle_id,
                     "last_action": "ESCALATED",
+                    "escalated": True,
                 }
             else:
                 # 予算内 -> DISPATCHED、streak を 1 増やす（1 サイクルにつき 1 回）
@@ -579,19 +615,33 @@ class AuditDispatcher:
                     "streak": current_streak + 1,
                     "last_cycle_id": effective_cycle_id,
                     "last_action": "DISPATCHED",
+                    "escalated": False,
                 }
 
-        # そのサイクルで P0/P1 の登録がなかったモジュールは streak を 0 に戻す
+        # WWW.2 改訂: 報告のなかったモジュールの streak 判定
+        # - escalated なモジュールは streak を 0 に戻さない（sticky）
+        # - 再報告のみのモジュール（reported_p0_p1_mods）は streak を増やしも戻しもしない（維持）
+        # - 当該モジュールに P0/P1 の報告が 1 件もなかった場合のみ streak を 0 に戻す
         for mod in list(budget.keys()):
             if (
                 mod not in genuine_by_module
                 and budget[mod].get("last_cycle_id") != effective_cycle_id
             ):
-                budget[mod] = {
-                    "streak": 0,
-                    "last_cycle_id": effective_cycle_id,
-                    "last_action": "RESET",
-                }
+                is_escalated = bool(budget[mod].get("escalated") or budget[mod].get("last_action") == "ESCALATED")
+                if is_escalated or mod in reported_p0_p1_mods:
+                    budget[mod]["last_cycle_id"] = effective_cycle_id
+                    if is_escalated:
+                        budget[mod]["escalated"] = True
+                        budget[mod]["last_action"] = "ESCALATED"
+                    else:
+                        budget[mod]["last_action"] = "MAINTAINED"
+                else:
+                    budget[mod] = {
+                        "streak": 0,
+                        "last_cycle_id": effective_cycle_id,
+                        "last_action": "RESET",
+                        "escalated": False,
+                    }
 
         self._save_budget(budget)
 
