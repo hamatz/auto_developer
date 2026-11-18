@@ -738,7 +738,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - 最新の実装コミットに対し、本物の Claude Opus 5.5（Anthropic Messages API）による独立監査を実行（`stop_reason: "end_turn"`、実 `provider_request_id` を拘束）。
      - 4 タスク + 監査ステージの整合性を完全検証した最終 Evidence Bundle ZIP（10/10 一致）を生成し、v0.7.0 正式リリースを確定する。
 
-- [ ] 機能WWW (監査サイクルの終了保証: 重要度トリアージ・修正予算・リリース判定の分離 Audit Loop Termination Guarantee: Severity Triage, Fix Budget, and Release Gate Separation):
+- [x] 機能WWW (監査サイクルの終了保証: 重要度トリアージ・修正予算・リリース判定の分離 Audit Loop Termination Guarantee: Severity Triage, Fix Budget, and Release Gate Separation):
   <!-- 起点: LESSONS.md 2026-11-16「P2モグラ叩きの底なし沼化」。教訓の Rule を文章ではなく作り・関門に置く。 -->
   0. 重要度の定義（監査役・dispatcher・リリース判定が共有する物差し）:
      - P0: データ消失、機密の漏洩、証跡（Evidence / Bundle）の偽装・改ざんの見逃し、保護ファイル防壁のバイパス。
@@ -786,6 +786,47 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
      - AuditStore の不変性（GGG.2: 同一 finding_id の再現テストの上書き拒否）は緩めない。
   - スコープ外（WWW）: 監査器（`verifier.py` / `audit.py`）自身の変更を監査対象から外す等のメタ監査制限、予算リセット CLI、重要度の自動降格判定。必要になれば BACKLOG.md に積む。
 
+- [ ] 機能XXX (成果の計測基盤と Checker 記録の構造化 Outcome Metrics Foundation and Structured Checker Records):
+  <!-- 目的: 「型が効いているか」を数字で判断できるようにする。指標はそれぞれ判断に紐づける。
+       - 1 回目の verify で通った率・平均試行回数・隔離数 → Maker の能力とタスク分割は適切か
+       - Checker の REJECT 数・系統違反数 → 査読が機能し、異系統が守られているか
+       - 監査の重要度別件数・本物の P0/P1 あたりトークン → 監査はコストに見合うか
+       - 計画外ステップ数（フェーズ開始時の PLAN になかった数値ステップ） → パイプラインの外でしか見つからない欠陥がどれだけあるか
+       - 人間の直接コミット数・所要時間 → 自律化で人の手がどれだけ減ったか -->
+  1. commit-step における Checker 記録の構造化と方針検査 (XXX.1 / BACKLOG IDEA-002):
+     - `commit-step` はサブコマンド引数 `--maker-model` と `--checker-model` を必須とする。トップレベル引数の既定値（`gemini-3.8-flash` / `claude-opus-5.5`）にフォールバックしてはならない。
+     - `--checker-decision` は必須とし、`APPROVE`（大文字小文字無視）以外ならコミットしない。
+     - `auto_developer.audit.verify_model_independence(maker_model, checker_model, strict=True)` を用い、同一モデル・同一系統・系統不明（例: `pro`）のいずれでもコミットしない。
+     - 上記いずれかに該当する場合、`CHECKER_POLICY_VIOLATION:` で始まるメッセージを標準エラーに出し、終了コード 4 を返す。この検査は Evidence の照合・消費とコミットより前に行い、違反時は Evidence を消費せず、HEAD も PLAN.md も変更しない（正しい引数での再実行で通常どおりコミットできること）。
+     - 成功時の Evidence record の `checker` に `decision`, `reason`, `model`, `family`, `maker_model`, `maker_family` を構造化して記録する。
+     - スコープ外: `auto-dev run`（NightlyOrchestrator）経路の Checker 呼び出し。
+  2. 抑止された再報告の専用ステータス (XXX.2 / BACKLOG IDEA-003):
+     - WWW.6 で重複として抑止された finding の status を `DUPLICATE` とし、`VALID_STATUSES` に追加する。
+     - `IndependentAuditRunner.screen_and_dispatch_findings()` は `DUPLICATE` を rejected に含めず、戻り値に `duplicates`（リスト）を追加する。`audit_stage.json` に `duplicate_count` を記録する。
+     - Morning Brief の「不正/偽Red排除数」に DUPLICATE を含めず、「重複再報告」として別に表示する。
+  3. イベントログ (XXX.3):
+     - `auto_developer/metrics.py` に `MetricsLog` を新設する。保存先は `.git/nightly_evidence/events.jsonl`（`.git` がディレクトリでない場合は `.dev/metrics/events.jsonl`）。1 イベント 1 行の JSON で追記のみ行い、既存行を書き換えない。
+     - 全イベント共通フィールド: `schema`（1）, `ts`（epoch 秒）, `event`, `phase`（PLAN.md「## 現在の目標」節の最初の `Phase <数字>`。取れなければ `"unknown"`）, `head`（HEAD の SHA）。
+     - 記録するイベント:
+       - `verify_step`: `task_id`, `checkpoint`, `result`（`PASSED` / `FAILED` / `CIRCUIT_BREAKER`）, `exit_code`, `duration_sec`, `attempt`（同一 phase・task_id・checkpoint の既存 `verify_step` 件数 + 1）。
+       - `commit_step`: `task_id`, `result`（`COMMITTED` / `CHECKER_POLICY_VIOLATION` / `EVIDENCE_ERROR`）, `commit`, `checker_decision`, `checker_model`, `checker_family`, `maker_model`, `maker_family`。
+       - `rollback_step`: `task_id`, `checkpoint`, `quarantine_branch`, `reason`。
+       - `checker_review`: 新サブコマンド `auto-dev record-review --task-id <id> --decision APPROVE|REJECT --checker-model <m> --maker-model <m> [--reason <text>]` が記録する。ゲートには影響しない（記録のみ）。
+       - `audit_stage`: `status`, `findings_by_severity`, `dispatched`, `backlogged`, `escalated`, `duplicate`, `rejected` の件数, `input_tokens`, `output_tokens`（取れなければ null）。
+     - 計測はゲートの結果を変えてはならない: イベントの書き込みに失敗しても（権限・パスがディレクトリである等）、各サブコマンドの終了コード・コミット・Evidence の扱いは計測なしの場合と同一とし、標準エラーに `METRICS_WARNING:` を出すのみとする。
+  4. フェーズ集計 (XXX.4):
+     - 新サブコマンド `auto-dev metrics [--phase N] [--json] [--append-to PATH]`。`--phase` 省略時は現在のフェーズ。
+     - イベントログから算出: `tasks_committed`, `first_pass_rate`（コミット済みタスクのうち最初の `verify_step` が PASSED の割合）, `mean_verify_attempts`, `verify_failures`, `circuit_breakers`, `quarantines`, `checker_rejects`, `checker_policy_violations`, 監査の各件数と `genuine_p0p1_per_100k_tokens`（DISPATCHED + ESCALATED の P0/P1 件数 ÷ 入力・出力トークン合計 × 100000。トークン不明なら null）。
+     - git 履歴から算出（イベントログがない過去フェーズにも適用）:
+       - フェーズの範囲: PLAN.md を変更したコミットを古い順にたどり、「## 現在の目標」の `Phase <N>` が初めて現れたコミットから、`Phase <N+1>` 以降が初めて現れるコミットの直前まで。
+       - `planned_steps`: 範囲の最初のコミット時点の「## ステップ」節にある数値 ID のステップ数。`unplanned_steps`: 範囲の最後の時点で存在し、最初の時点になかった数値 ID のステップ数。`audit_steps_added`: 同様に増えた `AUD-` ID のステップ数。
+       - `pipeline_commits`（メッセージに `[refs:` を含む）, `human_commits`（それ以外。マージコミットは除く）, `lead_time_hours`（範囲の最初と最後のコミット時刻の差）。
+     - 出力はフェーズの各指標と、直前フェーズとの差分。イベント由来か git 由来かを指標ごとに `source` で示し、算出できない指標は null とする（推定値で埋めない）。
+     - `--append-to PATH` は `## Phase <N>` 節を PATH の末尾に追記する。同じ節が既にあれば追記せず終了コード 1 を返す（追記のみ・上書きなし）。
+  5. ベースラインの記録 (XXX.5):
+     - git 履歴から算出できるフェーズ（少なくとも Phase 50 以降）を `METRICS.md` に記録し、Phase 64 自体の集計を最後に追記する。`METRICS.md` は先頭に各指標の定義と判断との対応を記す。
+  - スコープ外（XXX）: Maker / Checker のトークン・コスト計測（Antigravity 側で消費されるため取得経路がない）、ダッシュボード表示、Morning Brief への指標表示（必要なら次フェーズ）。
+
 ## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
 <!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
 - スコープ外: 複数Workerの同時並行Git編集 / 仕様（SPEC.md）の自己改変 / タスクの憶測スキップと継続 / クラウド分散実行 / 外部DB
@@ -798,6 +839,7 @@ Elephant（設計セッション）が人間と議論して起草し、仕様査
 2. 境界値・安全停止 (Strict Fail-Fast): 2回連続失敗時は推測で後続タスクに進まず直ちにパイプラインを安全停止し、状況を記録すること（AGENTS.md Rule 5 の機械的強制）。
 3. 保護アセット不変: `.github/**`, `SPEC.md`, `scripts/verify_local.sh`, 免疫テストの無断改変を検証実行前に物理遮断すること。
 4. 監査サイクルの終了保証: 監査役が指摘を返し続けても、P2 以下は PLAN.md の実行タスクにならず、同一モジュールへの P0/P1 自動登録は連続 `max_consecutive_cycles` サイクルで打ち切られ人間に引き渡されること（機能WWW）。
+5. 計測の非干渉: 計測（イベントログ・集計）の成否は、検証・査読・コミット・隔離の結果を変えないこと（機能XXX.3）。
 
 ## 5. 完了定義 (Definition of Done)
 - `bash scripts/verify_local.sh` がすべて成功（Exit 0）していること。
