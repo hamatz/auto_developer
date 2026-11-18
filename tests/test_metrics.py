@@ -639,6 +639,156 @@ class TestMetricsLog(unittest.TestCase):
         self.assertEqual(audit_events[0]["input_tokens"], 0)
         self.assertEqual(audit_events[0]["output_tokens"], 0)
 
+    def test_compute_phase_metrics_from_events(self) -> None:
+        """イベントログからフェーズ指標と直前フェーズとの差分が正しく集計されること (XXX.4)。"""
+        metrics = MetricsLog(repo_dir=self.repo, plan_path=self.plan)
+
+        # Phase 63 イベント (比較用)
+        metrics.record_event("verify_step", phase="Phase 63", task_id="1", checkpoint="c63", result="PASSED", exit_code=0, duration_sec=10.0, attempt=1)
+        metrics.record_event("commit_step", phase="Phase 63", task_id="1", result="COMMITTED", commit="sha63_1", checker_decision="APPROVE", checker_model="claude-opus-5.5", checker_family="claude", maker_model="gemini-3.8-flash", maker_family="gemini")
+        metrics.record_event("audit_stage", phase="Phase 63", status="SUCCESS", findings_by_severity={"P1": 1}, dispatched=1, backlogged=0, escalated=0, duplicate=0, rejected=0, input_tokens=10000, output_tokens=1000)
+
+        # Phase 64 イベント
+        # Task 1: 1回目で合格してコミット
+        metrics.record_event("verify_step", phase="Phase 64", task_id="1", checkpoint="c64", result="PASSED", exit_code=0, duration_sec=5.0, attempt=1)
+        metrics.record_event("commit_step", phase="Phase 64", task_id="1", result="COMMITTED", commit="sha64_1", checker_decision="APPROVE", checker_model="claude-opus-5.5", checker_family="claude", maker_model="gemini-3.8-flash", maker_family="gemini")
+        # Task 2: 1回目失敗 (FAILED)、2回目合格 (PASSED) してコミット
+        metrics.record_event("verify_step", phase="Phase 64", task_id="2", checkpoint="c64", result="FAILED", exit_code=1, duration_sec=4.0, attempt=1)
+        metrics.record_event("verify_step", phase="Phase 64", task_id="2", checkpoint="c64", result="PASSED", exit_code=0, duration_sec=6.0, attempt=2)
+        metrics.record_event("commit_step", phase="Phase 64", task_id="2", result="COMMITTED", commit="sha64_2", checker_decision="APPROVE", checker_model="claude-opus-5.5", checker_family="claude", maker_model="gemini-3.8-flash", maker_family="gemini")
+        # その他イベント: サーキットブレーカー、ロールバック (隔離)、Checker ポリシー違反、Checker 査読 REJECT
+        metrics.record_event("verify_step", phase="Phase 64", task_id="3", checkpoint="c64", result="CIRCUIT_BREAKER", exit_code=10, duration_sec=1.0, attempt=1)
+        metrics.record_event("rollback_step", phase="Phase 64", task_id="3", checkpoint="c64", quarantine_branch="quarantine/3", reason="circuit breaker")
+        metrics.record_event("commit_step", phase="Phase 64", task_id="3", result="CHECKER_POLICY_VIOLATION", commit="unknown", checker_decision="APPROVE", checker_model="gemini-2.5-pro", checker_family="gemini", maker_model="gemini-3.8-flash", maker_family="gemini")
+        metrics.record_event("checker_review", phase="Phase 64", task_id="3", decision="REJECT", checker_model="claude-opus-5.5", maker_model="gemini-3.8-flash")
+        # 監査ステージ: 2件 P0/P1 (dispatched=1, escalated=1), 200,000 tokens
+        metrics.record_event(
+            "audit_stage", phase="Phase 64", status="SUCCESS",
+            findings_by_severity={"P0": 1, "P1": 1, "P2": 1},
+            dispatched=1, backlogged=1, escalated=1, duplicate=1, rejected=1,
+            input_tokens=150000, output_tokens=50000,
+        )
+
+        res = metrics.compute_phase_metrics("Phase 64")
+        self.assertEqual(res["phase"], "Phase 64")
+        m = res["metrics"]
+
+        # tasks_committed: 2 tasks (Task 1 and Task 2)
+        self.assertEqual(m["tasks_committed"]["value"], 2)
+        self.assertEqual(m["tasks_committed"]["source"], "event")
+
+        # first_pass_rate: 1 of 2 committed passed on attempt 1 -> 0.5 (50%)
+        self.assertEqual(m["first_pass_rate"]["value"], 0.5)
+        self.assertEqual(m["first_pass_rate"]["source"], "event")
+
+        # mean_verify_attempts: Task 1 had 1 attempt, Task 2 had 2 attempts -> mean = 1.5
+        self.assertEqual(m["mean_verify_attempts"]["value"], 1.5)
+        self.assertEqual(m["mean_verify_attempts"]["source"], "event")
+
+        # verify_failures: 1
+        self.assertEqual(m["verify_failures"]["value"], 1)
+
+        # circuit_breakers: 1
+        self.assertEqual(m["circuit_breakers"]["value"], 1)
+
+        # quarantines: 1
+        self.assertEqual(m["quarantines"]["value"], 1)
+
+        # checker_rejects: 1
+        self.assertEqual(m["checker_rejects"]["value"], 1)
+
+        # checker_policy_violations: 1
+        self.assertEqual(m["checker_policy_violations"]["value"], 1)
+
+        # 監査集計
+        self.assertEqual(m["audit_dispatched"]["value"], 1)
+        self.assertEqual(m["audit_backlogged"]["value"], 1)
+        self.assertEqual(m["audit_escalated"]["value"], 1)
+        self.assertEqual(m["audit_duplicate"]["value"], 1)
+        self.assertEqual(m["audit_rejected"]["value"], 1)
+
+        # genuine_p0p1_per_100k_tokens: (1 + 1) / 200,000 * 100,000 = 1.0
+        self.assertEqual(m["genuine_p0p1_per_100k_tokens"]["value"], 1.0)
+        self.assertEqual(m["genuine_p0p1_per_100k_tokens"]["source"], "event")
+
+        # git 由来の項目はステップ 5 時点では null (source: "git")
+        self.assertIsNone(m["planned_steps"]["value"])
+        self.assertEqual(m["planned_steps"]["source"], "git")
+
+        # 直前フェーズ (Phase 63) との差分
+        delta = res.get("delta")
+        self.assertIsNotNone(delta)
+        # tasks_committed in Phase 64 was 2, Phase 63 was 1 -> delta = 1
+        self.assertEqual(delta["tasks_committed"], 1)
+        # first_pass_rate: 0.5 - 1.0 = -0.5
+        self.assertEqual(delta["first_pass_rate"], -0.5)
+
+    def test_cli_metrics_subcommand_json_and_text(self) -> None:
+        """auto-dev metrics サブコマンドの --json 出力およびテキスト出力が機能すること。"""
+        metrics = MetricsLog(repo_dir=self.repo, plan_path=self.plan)
+        metrics.record_event("commit_step", phase="Phase 64", task_id="1", result="COMMITTED", commit="abc", checker_decision="APPROVE", checker_model="claude-opus-5.5", checker_family="claude", maker_model="gemini-3.8-flash", maker_family="gemini")
+
+        # 1. --json mode
+        res_json = self._orch("metrics", "--phase", "64", "--json")
+        self.assertEqual(res_json.returncode, 0)
+        data = json.loads(res_json.stdout)
+        self.assertEqual(data["phase"], "Phase 64")
+        self.assertEqual(data["metrics"]["tasks_committed"]["value"], 1)
+        self.assertEqual(data["metrics"]["tasks_committed"]["source"], "event")
+
+        # 2. Text mode
+        res_text = self._orch("metrics", "--phase", "64")
+        self.assertEqual(res_text.returncode, 0)
+        self.assertIn("Phase 64", res_text.stdout)
+        self.assertIn("tasks_committed", res_text.stdout)
+
+    def test_phase_with_no_events_reports_null_not_zero(self) -> None:
+        """イベントが1件も存在しないフェーズでは、0ではなく null (None) が返ること (推定値で埋めない)。"""
+        metrics = MetricsLog(repo_dir=self.repo, plan_path=self.plan)
+        res = metrics.compute_phase_metrics("Phase 50")
+        self.assertEqual(res["phase"], "Phase 50")
+        for k, info in res["metrics"].items():
+            self.assertIsNone(info["value"], f"Metric '{k}' should be None when phase has no events")
+            if k in ("planned_steps", "unplanned_steps", "audit_steps_added", "pipeline_commits", "human_commits", "lead_time_hours"):
+                self.assertEqual(info["source"], "git")
+            else:
+                self.assertEqual(info["source"], "event")
+        # delta もすべて None
+        for k, d_val in res["delta"].items():
+            self.assertIsNone(d_val, f"Delta for '{k}' should be None when phase has no events")
+
+    def test_phase_with_missing_verify_events_reports_null_attempts(self) -> None:
+        """コミットされたタスクに verify_step イベントが欠落している場合、推定値を使わず null を返すこと。"""
+        metrics = MetricsLog(repo_dir=self.repo, plan_path=self.plan)
+        # コミットはあるが verify_step イベントは存在しない
+        metrics.record_event("commit_step", phase="Phase 64", task_id="1", result="COMMITTED", commit="sha1", checker_decision="APPROVE", checker_model="claude-opus-5.5", checker_family="claude", maker_model="gemini-3.8-flash", maker_family="gemini")
+        res = metrics.compute_phase_metrics("Phase 64")
+        m = res["metrics"]
+        self.assertEqual(m["tasks_committed"]["value"], 1)
+        self.assertIsNone(m["first_pass_rate"]["value"])
+        self.assertIsNone(m["mean_verify_attempts"]["value"])
+
+    def test_audit_stage_with_unknown_or_partial_tokens_reports_null_token_ratio(self) -> None:
+        """一部またはすべての監査ステージでトークン数が不明な場合、比率は歪めず null とすること。"""
+        metrics = MetricsLog(repo_dir=self.repo, plan_path=self.plan)
+        # 1件目: トークンあり
+        metrics.record_event("audit_stage", phase="Phase 64", status="SUCCESS", findings_by_severity={"P1": 1}, dispatched=1, backlogged=0, escalated=0, duplicate=0, rejected=0, input_tokens=1000, output_tokens=100)
+        # 2件目: トークンなし (None)
+        metrics.record_event("audit_stage", phase="Phase 64", status="SUCCESS", findings_by_severity={"P0": 1}, dispatched=1, backlogged=0, escalated=0, duplicate=0, rejected=0, input_tokens=None, output_tokens=None)
+
+        res = metrics.compute_phase_metrics("Phase 64")
+        m = res["metrics"]
+        self.assertEqual(m["audit_dispatched"]["value"], 2)
+        self.assertIsNone(m["genuine_p0p1_per_100k_tokens"]["value"])
+
+    def test_phase_with_no_previous_phase_reports_null_delta(self) -> None:
+        """直前フェーズが存在しない場合 (Phase 0 など)、全指標の差分が null となること。"""
+        metrics = MetricsLog(repo_dir=self.repo, plan_path=self.plan)
+        metrics.record_event("commit_step", phase="Phase 0", task_id="1", result="COMMITTED", commit="sha0", checker_decision="APPROVE", checker_model="claude-opus-5.5", checker_family="claude", maker_model="gemini-3.8-flash", maker_family="gemini")
+        res = metrics.compute_phase_metrics("Phase 0")
+        for k, d_val in res["delta"].items():
+            self.assertIsNone(d_val, f"Delta for '{k}' should be None when there is no previous phase")
+
 
 if __name__ == "__main__":
     unittest.main()

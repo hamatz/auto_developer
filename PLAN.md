@@ -38,7 +38,7 @@
 - [x] 2. 抑止された再報告を DUPLICATE とし、rejected と分けて集計・表示する（Red-First）（XXX.2）
 - [x] 3. MetricsLog と verify_step / commit_step / rollback_step / checker_review（record-review サブコマンド）イベントの記録。書き込み失敗時もゲート結果を変えない（Red-First）（XXX.3）
 - [x] 4. 監査ステージの audit_stage イベント記録（Red-First）（XXX.3）
-- [ ] 5. auto-dev metrics: イベントログからのフェーズ集計と直前フェーズとの差分（Red-First）（XXX.4）
+- [x] 5. auto-dev metrics: イベントログからのフェーズ集計と直前フェーズとの差分（Red-First）（XXX.4）
 - [ ] 6. auto-dev metrics: git 履歴からの集計（フェーズ範囲・計画外ステップ・人間コミット・所要時間）と --append-to（Red-First）（XXX.4）
 - [ ] 7. METRICS.md の作成（指標の定義と判断の対応、Phase 50 以降のベースライン、Phase 64 の集計）（XXX.5）
 

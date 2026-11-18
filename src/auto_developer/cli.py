@@ -311,6 +311,11 @@ def main(argv: list[str] | None = None) -> int:
     review_parser.add_argument("--maker-model", type=str, required=True, help="Maker model")
     review_parser.add_argument("--reason", type=str, default="", help="Review reason")
 
+    # Subcommand: metrics (XXX.4)
+    metrics_parser = subparsers.add_parser("metrics", help="Aggregate metrics for a phase and compare with previous phase")
+    metrics_parser.add_argument("--phase", type=str, default=None, help="Target phase (e.g. 64 or 'Phase 64')")
+    metrics_parser.add_argument("--json", action="store_true", help="Output metrics as JSON")
+
     # Subcommand: recover
     recover_parser = subparsers.add_parser("recover", help="Crash recovery and consistency tools")
     recover_parser.add_argument(
@@ -646,6 +651,16 @@ def main(argv: list[str] | None = None) -> int:
             maker_family=maker_fam,
             reason=args.reason or "",
         )
+        return 0
+
+    elif args.subcommand == "metrics":
+        metrics = MetricsLog(repo_dir=work_dir, plan_path=plan_path)
+        target_phase = args.phase or metrics.get_current_phase()
+        result = metrics.compute_phase_metrics(target_phase)
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(metrics.format_metrics_report(result))
         return 0
 
     elif args.subcommand in ("brief", "morning-brief"):
