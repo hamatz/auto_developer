@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+from auto_developer.audit import detect_model_family, verify_model_independence
 from auto_developer.bundler import EvidenceBundler
 from auto_developer.dispatcher import TaskDispatcher
 from auto_developer.evidence import EvidenceStore
@@ -283,7 +284,9 @@ def main(argv: list[str] | None = None) -> int:
     commit_parser = subparsers.add_parser("commit-step", help="Commit current task and mark [x] in PLAN.md")
     commit_parser.add_argument("--task-id", type=str, required=True, help="Task ID to commit")
     commit_parser.add_argument("--checkpoint", type=str, default=None, help="Optional checkpoint commit hash to verify")
-    commit_parser.add_argument("--checker-decision", type=str, default=None, help="Checker review decision (e.g. APPROVE)")
+    commit_parser.add_argument("--maker-model", type=str, required=True, help="Model identifier for Maker")
+    commit_parser.add_argument("--checker-model", type=str, required=True, help="Model identifier for Checker")
+    commit_parser.add_argument("--checker-decision", type=str, required=True, help="Checker review decision (e.g. APPROVE)")
     commit_parser.add_argument("--checker-reason", type=str, default=None, help="Checker review justification")
     commit_parser.add_argument("--checker-json", type=str, default=None, help="Checker review structured JSON string")
 
@@ -410,6 +413,23 @@ def main(argv: list[str] | None = None) -> int:
         if not target:
             print(f"ERROR: Task {args.task_id} not found in {plan_path}", file=sys.stderr)
             return 1
+
+        # Checker Policy 検査 (機能XXX.1 / AGENTS.md Rule 6)
+        decision = (args.checker_decision or "").strip().upper()
+        if decision != "APPROVE":
+            print(
+                f"CHECKER_POLICY_VIOLATION: Checker review decision must be APPROVE (got '{args.checker_decision}')",
+                file=sys.stderr,
+            )
+            return 4
+
+        is_independent, violation_msg = verify_model_independence(
+            args.maker_model, args.checker_model, strict=True
+        )
+        if not is_independent:
+            print(f"CHECKER_POLICY_VIOLATION: {violation_msg}", file=sys.stderr)
+            return 4
+
         current_tree_sha = git_guard.get_working_tree_sha()
         current_spec_sha = git_guard.get_spec_sha(spec_path)
         if not evidence_store.verify_and_consume(
@@ -433,22 +453,26 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 3
 
-        # Checker 査読メタデータの抽出 (機能Q)
-        checker_info: dict[str, Any] = {}
+        # Checker 査読メタデータの抽出 (機能Q / 機能XXX.1)
+        maker_fam = detect_model_family(args.maker_model)
+        checker_fam = detect_model_family(args.checker_model)
+        checker_info: dict[str, Any] = {
+            "decision": decision,
+            "reason": args.checker_reason or "",
+            "model": args.checker_model,
+            "family": checker_fam,
+            "maker_model": args.maker_model,
+            "maker_family": maker_fam,
+        }
         if args.checker_json:
             try:
-                checker_info = cast(dict[str, Any], json.loads(args.checker_json))
+                extra = cast(dict[str, Any], json.loads(args.checker_json))
+                if isinstance(extra, dict):
+                    for k, v in extra.items():
+                        if k not in checker_info:
+                            checker_info[k] = v
             except (json.JSONDecodeError, ValueError):
-                checker_info = {"raw": args.checker_json}
-        if args.checker_decision:
-            checker_info["decision"] = args.checker_decision
-        if args.checker_reason:
-            checker_info["reason"] = args.checker_reason
-        if not checker_info:
-            checker_info = {
-                "decision": "UNSPECIFIED",
-                "reason": "No checker review metadata provided via CLI",
-            }
+                checker_info["raw"] = args.checker_json
 
         evidence_store.archive_record(
             task_id=args.task_id,

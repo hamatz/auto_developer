@@ -34,7 +34,7 @@
 - 上記以外の既存テストは変更しない。免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [ ] 1. commit-step の Checker 方針検査: --maker-model / --checker-model / --checker-decision 必須化、APPROVE 以外と同系統・系統不明を終了コード 4 で拒否（Evidence 未消費・HEAD 不変）、record の checker 構造化（Red-First: tests/immunity/test_immunity_checker_policy.py が Red であることを確認してから着手）（XXX.1）
+- [x] 1. commit-step の Checker 方針検査: --maker-model / --checker-model / --checker-decision 必須化、APPROVE 以外と同系統・系統不明を終了コード 4 で拒否（Evidence 未消費・HEAD 不変）、record の checker 構造化（Red-First: tests/immunity/test_immunity_checker_policy.py が Red であることを確認してから着手）（XXX.1）
 - [ ] 2. 抑止された再報告を DUPLICATE とし、rejected と分けて集計・表示する（Red-First）（XXX.2）
 - [ ] 3. MetricsLog と verify_step / commit_step / rollback_step / checker_review（record-review サブコマンド）イベントの記録。書き込み失敗時もゲート結果を変えない（Red-First）（XXX.3）
 - [ ] 4. 監査ステージの audit_stage イベント記録（Red-First）（XXX.3）
