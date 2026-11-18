@@ -301,6 +301,257 @@ class MetricsLog:
             "genuine_p0p1_per_100k_tokens": {"value": genuine_p0p1_per_100k_tokens, "source": "event"},
         }
 
+    def _extract_phase_num_from_text(self, text: str) -> int | None:
+        """PLAN.md テキストの「## 現在の目標」節から Phase 番号を抽出する。"""
+        in_goal = False
+        for line in text.splitlines():
+            line_s = line.strip()
+            if line_s.startswith("## 現在の目標"):
+                in_goal = True
+                continue
+            elif in_goal and line_s.startswith("## "):
+                break
+            if in_goal:
+                m = re.search(r"\bPhase\s+(\d+)\b", line_s)
+                if m:
+                    return int(m.group(1))
+        return None
+
+    def _extract_steps_from_plan(self, content: str) -> tuple[set[str], set[str]]:
+        """PLAN.md テキストの「## ステップ」節から数値ステップ ID と AUD- ステップ ID を抽出する。"""
+        in_steps = False
+        num_steps: set[str] = set()
+        aud_steps: set[str] = set()
+        for line in content.splitlines():
+            line_s = line.strip()
+            if line_s.startswith("## ステップ"):
+                in_steps = True
+                continue
+            elif in_steps and line_s.startswith("## "):
+                break
+            if in_steps:
+                m_num = re.search(r"^-\s*\[[ xX]\]\s*(\d+)\.", line_s)
+                if m_num:
+                    num_steps.add(m_num.group(1))
+                    continue
+                m_aud = re.search(r"^-\s*\[[ xX]\]\s*(AUD-[A-Za-z0-9_\-]+)", line_s)
+                if m_aud:
+                    aud_steps.add(m_aud.group(1))
+        return num_steps, aud_steps
+
+    def _compute_git_metrics_for_phase(
+        self, target_phase: str
+    ) -> dict[str, dict[str, Any]]:
+        """git 履歴からフェーズ範囲、計画外ステップ、コミット種別、所要時間を算出する (XXX.4)。"""
+        null_result: dict[str, dict[str, Any]] = {
+            "planned_steps": {"value": None, "source": "git"},
+            "unplanned_steps": {"value": None, "source": "git"},
+            "audit_steps_added": {"value": None, "source": "git"},
+            "pipeline_commits": {"value": None, "source": "git"},
+            "human_commits": {"value": None, "source": "git"},
+            "lead_time_hours": {"value": None, "source": "git"},
+        }
+        num_match = re.search(r"\d+", target_phase)
+        if not num_match:
+            return null_result
+        target_num = int(num_match.group(0))
+
+        try:
+            res = subprocess.run(
+                ["git", "log", "--reverse", "--format=%H %ct", "--", "PLAN.md"],
+                cwd=self.repo_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode != 0 or not res.stdout.strip():
+                return null_result
+
+            commits_info = [
+                line.strip().split()
+                for line in res.stdout.strip().splitlines()
+                if line.strip()
+            ]
+
+            start_commit: str | None = None
+            start_ts: int | None = None
+            first_next_commit: str | None = None
+
+            for sha, ts_str in commits_info:
+                show_res = subprocess.run(
+                    ["git", "show", f"{sha}:PLAN.md"],
+                    cwd=self.repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if show_res.returncode != 0:
+                    continue
+                plan_text = show_res.stdout
+                phase_num = self._extract_phase_num_from_text(plan_text)
+                if phase_num is None:
+                    continue
+                if start_commit is None and phase_num == target_num:
+                    start_commit = sha
+                    start_ts = int(ts_str)
+                elif start_commit is not None and phase_num > target_num:
+                    first_next_commit = sha
+                    break
+
+            if start_commit is None:
+                return null_result
+
+            if first_next_commit is not None:
+                rev_res = subprocess.run(
+                    ["git", "rev-parse", f"{first_next_commit}~1"],
+                    cwd=self.repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if rev_res.returncode != 0 or not rev_res.stdout.strip():
+                    return null_result
+                end_commit = rev_res.stdout.strip()
+            else:
+                head_res = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=self.repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if head_res.returncode != 0 or not head_res.stdout.strip():
+                    return null_result
+                end_commit = head_res.stdout.strip()
+
+            # コミット範囲の列挙
+            check_parent = subprocess.run(
+                ["git", "rev-parse", "--verify", f"{start_commit}^"],
+                cwd=self.repo_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if check_parent.returncode == 0:
+                rev_range = f"{start_commit}^..{end_commit}"
+                cmd = ["git", "rev-list", "--topo-order", "--no-merges", rev_range]
+                rev_list_res = subprocess.run(
+                    cmd, cwd=self.repo_dir, capture_output=True, text=True, check=False
+                )
+                if rev_list_res.returncode != 0:
+                    commit_shas: list[str] | None = None
+                else:
+                    commit_shas = [
+                        c.strip()
+                        for c in rev_list_res.stdout.strip().splitlines()
+                        if c.strip()
+                    ]
+            else:
+                # start_commit がルートコミットの場合
+                cmd = ["git", "rev-list", "--topo-order", "--no-merges", f"{start_commit}..{end_commit}"]
+                rev_list_res = subprocess.run(
+                    cmd, cwd=self.repo_dir, capture_output=True, text=True, check=False
+                )
+                if rev_list_res.returncode != 0:
+                    commit_shas = None
+                else:
+                    commit_shas = [
+                        c.strip()
+                        for c in rev_list_res.stdout.strip().splitlines()
+                        if c.strip()
+                    ] + [start_commit]
+
+            if commit_shas is None:
+                pipeline_commits: int | None = None
+                human_commits: int | None = None
+            else:
+                p_count = 0
+                h_count = 0
+                has_commit_error = False
+                for c_sha in commit_shas:
+                    msg_res = subprocess.run(
+                        ["git", "log", "-1", "--format=%s%n%b", c_sha],
+                        cwd=self.repo_dir,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if msg_res.returncode != 0:
+                        has_commit_error = True
+                        break
+                    msg = msg_res.stdout
+                    if "[refs:" in msg:
+                        p_count += 1
+                    else:
+                        h_count += 1
+                if has_commit_error:
+                    pipeline_commits = None
+                    human_commits = None
+                else:
+                    pipeline_commits = p_count
+                    human_commits = h_count
+
+            # lead_time_hours の算出
+            ts_res = subprocess.run(
+                ["git", "log", "-1", "--format=%ct", end_commit],
+                cwd=self.repo_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if ts_res.returncode != 0 or not ts_res.stdout.strip() or start_ts is None:
+                lead_time_hours: float | None = None
+            else:
+                try:
+                    end_ts = int(ts_res.stdout.strip())
+                    lead_time_hours = round(
+                        max(0, end_ts - start_ts) / 3600.0, 2
+                    )
+                except ValueError:
+                    lead_time_hours = None
+
+            # ステップ数の集計
+            start_plan_res = subprocess.run(
+                ["git", "show", f"{start_commit}:PLAN.md"],
+                cwd=self.repo_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            end_plan_res = subprocess.run(
+                ["git", "show", f"{end_commit}:PLAN.md"],
+                cwd=self.repo_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if start_plan_res.returncode != 0 or end_plan_res.returncode != 0:
+                planned_steps: int | None = None
+                unplanned_steps: int | None = None
+                audit_steps_added: int | None = None
+            else:
+                start_num_steps, start_aud_steps = self._extract_steps_from_plan(
+                    start_plan_res.stdout
+                )
+                end_num_steps, end_aud_steps = self._extract_steps_from_plan(
+                    end_plan_res.stdout
+                )
+                planned_steps = len(start_num_steps)
+                unplanned_steps = len(end_num_steps - start_num_steps)
+                audit_steps_added = len(end_aud_steps - start_aud_steps)
+
+            return {
+                "planned_steps": {"value": planned_steps, "source": "git"},
+                "unplanned_steps": {"value": unplanned_steps, "source": "git"},
+                "audit_steps_added": {"value": audit_steps_added, "source": "git"},
+                "pipeline_commits": {"value": pipeline_commits, "source": "git"},
+                "human_commits": {"value": human_commits, "source": "git"},
+                "lead_time_hours": {"value": lead_time_hours, "source": "git"},
+            }
+        except Exception as e:  # noqa: BLE001
+            print(f"METRICS_WARNING: Failed to compute git metrics: {e}", file=sys.stderr)
+            return null_result
+
     def compute_phase_metrics(self, phase: str | int | None = None) -> dict[str, Any]:
         """フェーズの各指標および直前フェーズとの差分を算出する (XXX.4)。"""
         target_phase = self.normalize_phase_name(phase)
@@ -309,15 +560,8 @@ class MetricsLog:
         # イベント由来指標の算出
         event_metrics = self._compute_event_metrics_for_phase(target_phase, events)
 
-        # git 由来指標（ステップ 6 で完全実装、未算出項目は null / source: git）
-        git_metrics: dict[str, dict[str, Any]] = {
-            "planned_steps": {"value": None, "source": "git"},
-            "unplanned_steps": {"value": None, "source": "git"},
-            "audit_steps_added": {"value": None, "source": "git"},
-            "pipeline_commits": {"value": None, "source": "git"},
-            "human_commits": {"value": None, "source": "git"},
-            "lead_time_hours": {"value": None, "source": "git"},
-        }
+        # git 由来指標の算出
+        git_metrics = self._compute_git_metrics_for_phase(target_phase)
 
         all_metrics = {**event_metrics, **git_metrics}
 
@@ -332,9 +576,12 @@ class MetricsLog:
         delta: dict[str, Any] = {}
         if prev_phase:
             prev_event_metrics = self._compute_event_metrics_for_phase(prev_phase, events)
+            prev_git_metrics = self._compute_git_metrics_for_phase(prev_phase)
+            prev_all_metrics = {**prev_event_metrics, **prev_git_metrics}
+
             for k, info in all_metrics.items():
                 curr_val = info.get("value")
-                prev_entry = prev_event_metrics.get(k)
+                prev_entry = prev_all_metrics.get(k)
                 prev_val = prev_entry.get("value") if prev_entry else None
                 if (
                     curr_val is not None
@@ -363,7 +610,7 @@ class MetricsLog:
         delta = result.get("delta", {})
 
         lines = [
-            f"# {phase} Metrics Summary",
+            f"## {phase}",
             "",
             "| 指標 | 値 | 直前差分 | 情報源 |",
             "| :--- | :--- | :--- | :--- |",

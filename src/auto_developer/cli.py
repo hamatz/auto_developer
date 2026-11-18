@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -315,6 +316,7 @@ def main(argv: list[str] | None = None) -> int:
     metrics_parser = subparsers.add_parser("metrics", help="Aggregate metrics for a phase and compare with previous phase")
     metrics_parser.add_argument("--phase", type=str, default=None, help="Target phase (e.g. 64 or 'Phase 64')")
     metrics_parser.add_argument("--json", action="store_true", help="Output metrics as JSON")
+    metrics_parser.add_argument("--append-to", type=Path, default=None, help="Append phase section to file")
 
     # Subcommand: recover
     recover_parser = subparsers.add_parser("recover", help="Crash recovery and consistency tools")
@@ -657,6 +659,31 @@ def main(argv: list[str] | None = None) -> int:
         metrics = MetricsLog(repo_dir=work_dir, plan_path=plan_path)
         target_phase = args.phase or metrics.get_current_phase()
         result = metrics.compute_phase_metrics(target_phase)
+        if getattr(args, "append_to", None):
+            target_file: Path = args.append_to
+            target_phase_name = str(result.get("phase", ""))
+            m_num = re.search(r"\d+", target_phase_name)
+            if m_num:
+                p_num_str = re.escape(m_num.group(0))
+                section_pattern = re.compile(rf"^##\s+Phase\s+{p_num_str}\b", re.MULTILINE)
+                err_label = f"## Phase {m_num.group(0)}"
+            else:
+                escaped_name = re.escape(target_phase_name)
+                section_pattern = re.compile(rf"^##\s+{escaped_name}\b", re.MULTILINE)
+                err_label = f"## {target_phase_name}"
+
+            if target_file.exists():
+                existing_text = target_file.read_text(encoding="utf-8")
+                if section_pattern.search(existing_text):
+                    print(
+                        f"ERROR: Section '{err_label}' already exists in {target_file}",
+                        file=sys.stderr,
+                    )
+                    return 1
+            report_text = metrics.format_metrics_report(result)
+            with open(target_file, "a", encoding="utf-8") as f:
+                f.write(f"\n{report_text}\n")
+            return 0
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:

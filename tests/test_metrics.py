@@ -711,8 +711,8 @@ class TestMetricsLog(unittest.TestCase):
         self.assertEqual(m["genuine_p0p1_per_100k_tokens"]["value"], 1.0)
         self.assertEqual(m["genuine_p0p1_per_100k_tokens"]["source"], "event")
 
-        # git 由来の項目はステップ 5 時点では null (source: "git")
-        self.assertIsNone(m["planned_steps"]["value"])
+        # git 由来の項目 (source: "git")
+        self.assertEqual(m["planned_steps"]["value"], 1)
         self.assertEqual(m["planned_steps"]["source"], "git")
 
         # 直前フェーズ (Phase 63) との差分
@@ -788,6 +788,121 @@ class TestMetricsLog(unittest.TestCase):
         res = metrics.compute_phase_metrics("Phase 0")
         for k, d_val in res["delta"].items():
             self.assertIsNone(d_val, f"Delta for '{k}' should be None when there is no previous phase")
+
+    def test_compute_phase_metrics_git_history(self) -> None:
+        """git 履歴から planned_steps, unplanned_steps, audit_steps_added, pipeline/human commits, lead_time が算出されること (XXX.4)。"""
+        # Phase 63 用の履歴を作成
+        p63_plan = (
+            "# PLAN\n\n## 現在の目標\n- Phase 63: Target\n\n"
+            "## ステップ\n- [ ] 1. タスク1\n- [ ] 2. タスク2\n"
+        )
+        self.plan.write_text(p63_plan, encoding="utf-8")
+        subprocess.run(["git", "add", "PLAN.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: start phase 63"], cwd=self.repo, check=True)
+
+        # パイプラインコミット 1 ([refs: を含む)
+        (self.repo / "f1.txt").write_text("1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: task 1 [refs: 1]"], cwd=self.repo, check=True)
+
+        # 計画外ステップと AUD ステップの追加
+        p63_plan_updated = (
+            "# PLAN\n\n## 現在の目標\n- Phase 63: Target\n\n"
+            "## ステップ\n- [x] 1. タスク1\n- [x] 2. タスク2\n- [ ] 3. 計画外タスク\n- [ ] AUD-001: 監査タスク\n"
+        )
+        self.plan.write_text(p63_plan_updated, encoding="utf-8")
+        subprocess.run(["git", "add", "PLAN.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: add unplanned and aud steps [refs: 2]"], cwd=self.repo, check=True)
+
+        # 人間コミット (refs なし、非マージ)
+        (self.repo / "note.txt").write_text("human note\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "docs: human documentation note"], cwd=self.repo, check=True)
+
+        # 次のフェーズ Phase 64 の開始コミット
+        p64_plan = (
+            "# PLAN\n\n## 現在の目標\n- Phase 64: Next\n\n"
+            "## ステップ\n- [ ] 1. 新タスク\n"
+        )
+        self.plan.write_text(p64_plan, encoding="utf-8")
+        subprocess.run(["git", "add", "PLAN.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: start phase 64"], cwd=self.repo, check=True)
+
+        metrics = MetricsLog(repo_dir=self.repo, plan_path=self.plan)
+        res = metrics.compute_phase_metrics("Phase 63")
+        m = res["metrics"]
+
+        # planned_steps: 開始時点で存在した数値ステップ (1, 2) -> 2
+        self.assertEqual(m["planned_steps"]["value"], 2)
+        self.assertEqual(m["planned_steps"]["source"], "git")
+
+        # unplanned_steps: 終了時点で増えた数値ステップ (3) -> 1
+        self.assertEqual(m["unplanned_steps"]["value"], 1)
+        self.assertEqual(m["unplanned_steps"]["source"], "git")
+
+        # audit_steps_added: 増えた AUD- ステップ (AUD-001) -> 1
+        self.assertEqual(m["audit_steps_added"]["value"], 1)
+        self.assertEqual(m["audit_steps_added"]["source"], "git")
+
+        # pipeline_commits: 範囲内で [refs: を含むコミット -> 2
+        self.assertEqual(m["pipeline_commits"]["value"], 2)
+        self.assertEqual(m["pipeline_commits"]["source"], "git")
+
+        # human_commits: 範囲内で [refs: を含まないコミット -> 2 (start commit と docs commit)
+        self.assertEqual(m["human_commits"]["value"], 2)
+        self.assertEqual(m["human_commits"]["source"], "git")
+
+        # lead_time_hours: >= 0.0
+        self.assertIsNotNone(m["lead_time_hours"]["value"])
+        self.assertGreaterEqual(m["lead_time_hours"]["value"], 0.0)
+        self.assertEqual(m["lead_time_hours"]["source"], "git")
+
+    def test_cli_metrics_append_to(self) -> None:
+        """--append-to PATH により ## Phase <N> 節が追記され、重複時は終了コード 1 となること (XXX.4)。"""
+        metrics = MetricsLog(repo_dir=self.repo, plan_path=self.plan)
+        metrics.record_event("commit_step", phase="Phase 64", task_id="1", result="COMMITTED", commit="abc", checker_decision="APPROVE", checker_model="claude-opus-5.5", checker_family="claude", maker_model="gemini-3.8-flash", maker_family="gemini")
+
+        target_file = self.repo / "METRICS.md"
+        target_file.write_text("# Metrics Log\n\n", encoding="utf-8")
+
+        # 1. 正常追記
+        res = self._orch("metrics", "--phase", "64", "--append-to", str(target_file))
+        self.assertEqual(res.returncode, 0)
+        content = target_file.read_text(encoding="utf-8")
+        self.assertIn("## Phase 64", content)
+        self.assertIn("tasks_committed", content)
+
+        # 2. 重複追記の抑止 (同じ節が既にあれば終了コード 1、ファイル内容は不変)
+        res_dup = self._orch("metrics", "--phase", "64", "--append-to", str(target_file))
+        self.assertEqual(res_dup.returncode, 1)
+        self.assertIn("ERROR:", res_dup.stderr)
+        self.assertEqual(target_file.read_text(encoding="utf-8"), content)
+
+        # 3. 部分一致の誤検知なし (Phase 6 は Phase 64 に誤一致しない)
+        res_p6 = self._orch("metrics", "--phase", "6", "--append-to", str(target_file))
+        self.assertEqual(res_p6.returncode, 0)
+        content_after = target_file.read_text(encoding="utf-8")
+        self.assertIn("## Phase 6\n", content_after)
+
+    def test_git_metrics_failure_paths_return_null_instead_of_fabrications(self) -> None:
+        """git コマンドや PLAN.md 読み取りが失敗した場合、0などの捏造値ではなく null (None) が返ること。"""
+        from unittest.mock import patch
+
+        metrics = MetricsLog(repo_dir=self.repo, plan_path=self.plan)
+
+        # subprocess.run がエラーを返すケースを模倣
+        orig_run = subprocess.run
+        def mock_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and cmd[0] == "git" and "rev-list" in cmd:
+                # rev-list 失敗をシミュレート
+                return subprocess.CompletedProcess(cmd, returncode=128, stdout="", stderr="fatal: bad revision")
+            return orig_run(cmd, *args, **kwargs)
+
+        with patch("subprocess.run", side_effect=mock_run):
+            res = metrics.compute_phase_metrics("Phase 64")
+            m = res["metrics"]
+            self.assertIsNone(m["pipeline_commits"]["value"])
+            self.assertIsNone(m["human_commits"]["value"])
 
 
 if __name__ == "__main__":
