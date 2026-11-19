@@ -181,18 +181,29 @@ class MorningReporter:
 
                         # Git 実態コミットの Tree SHA との照合
                         commit_full = str(item.get("commit") or rec_data.get("commit", {}).get("sha") or "").strip()
+                        commit_valid = False
                         if commit_full:
-                            tree_proc = subprocess.run(
-                                ["git", "rev-parse", f"{commit_full}^{{tree}}"],
+                            # コミットが実在し、かつ HEAD の祖先（または HEAD 自身）であることを検査
+                            anc_proc = subprocess.run(
+                                ["git", "merge-base", "--is-ancestor", commit_full, "HEAD"],
                                 cwd=effective_repo,
                                 capture_output=True,
                                 text=True,
                                 check=False,
                             )
-                            if tree_proc.returncode == 0 and tree_proc.stdout.strip():
-                                rec_tree = tree_proc.stdout.strip()
+                            if anc_proc.returncode == 0:
+                                tree_proc = subprocess.run(
+                                    ["git", "rev-parse", f"{commit_full}^{{tree}}"],
+                                    cwd=effective_repo,
+                                    capture_output=True,
+                                    text=True,
+                                    check=False,
+                                    )
+                                if tree_proc.returncode == 0 and tree_proc.stdout.strip():
+                                    rec_tree = tree_proc.stdout.strip()
+                                    commit_valid = True
 
-                        tree_ok = True
+                        tree_ok = commit_valid
                         if committed_tree_sha and rec_tree and committed_tree_sha != rec_tree:
                             tree_ok = False
                         if rec_commit_tree and rec_tree and rec_commit_tree != rec_tree:
@@ -282,9 +293,11 @@ class MorningReporter:
                 backlogged = audit_stage.get("backlogged", [])
                 escalated = audit_stage.get("escalated", [])
                 rejected = audit_stage.get("rejected", [])
+                duplicates = audit_stage.get("duplicates", [])
                 lines.append(f"- **真正指摘登録数 (DISPATCHED)**: {len(dispatched)} 件（次期 PLAN.md に自律登録）")
                 lines.append(f"- **Backlog 送り (BACKLOGGED)**: {len(backlogged)} 件（P2 / BACKLOG.md に記録）")
                 lines.append(f"- **エスカレーション (ESCALATED)**: {len(escalated)} 件（修正予算超過・人間判断待ち）")
+                lines.append(f"- **重複再報告 (DUPLICATE)**: {len(duplicates)} 件（既存指摘と重複のため抑止）")
                 lines.append(f"- **不正/偽Red排除数**: {len(rejected)} 件（多層防壁により遮断）")
                 for f in dispatched:
                     fid = getattr(f, "finding_id", f.get("finding_id", str(f)) if isinstance(f, dict) else str(f))
@@ -503,3 +516,265 @@ class MorningReporter:
             "",
         ]
         log_path.write_text("\n".join(content), encoding="utf-8")
+
+    def generate_standalone_report(
+        self,
+        report_path: Path | None = None,
+        repo_dir: Path | None = None,
+        plan_path: Path | None = None,
+    ) -> Path:
+        """job_state.json が存在しない対話実行環境等でも、git HEAD、PLAN.md、Evidence records、
+
+        および audit_stage.json を参照して完全な NIGHTLY_REPORT.md をスタンドアロン生成する (YYY.2)。
+        """
+        import re
+
+        effective_repo = Path(repo_dir or self.repo_dir or Path.cwd())
+        effective_report_path = Path(report_path or (effective_repo / "NIGHTLY_REPORT.md"))
+        effective_plan_path = Path(plan_path or (effective_repo / "PLAN.md"))
+
+        # 1. 最新 HEAD コミットの取得
+        head_commit = "UNKNOWN"
+        try:
+            head_res = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=effective_repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if head_res.returncode == 0 and head_res.stdout.strip():
+                head_commit = head_res.stdout.strip()
+        except OSError:
+            pass
+
+        # 2. 初期チェックポイントの推定 (フェーズ開始コミットまたは HEAD 祖先)
+        initial_checkpoint = "UNKNOWN"
+        phase_num: int | None = None
+        if effective_plan_path.is_file():
+            try:
+                for pline in effective_plan_path.read_text(encoding="utf-8").splitlines():
+                    pm = re.search(r"\bPhase\s+(\d+)\b", pline)
+                    if pm:
+                        phase_num = int(pm.group(1))
+                        break
+            except OSError:
+                pass
+
+        if phase_num is not None:
+            try:
+                plog = subprocess.run(
+                    ["git", "log", "--reverse", "--format=%H", "--", "PLAN.md"],
+                    cwd=effective_repo,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if plog.returncode == 0 and plog.stdout.strip():
+                    for c_sha in plog.stdout.strip().splitlines():
+                        c_sha = c_sha.strip()
+                        pshow = subprocess.run(
+                            ["git", "show", f"{c_sha}:PLAN.md"],
+                            cwd=effective_repo,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        if pshow.returncode == 0 and f"Phase {phase_num}" in pshow.stdout:
+                            parent_res = subprocess.run(
+                                ["git", "rev-parse", f"{c_sha}~1"],
+                                cwd=effective_repo,
+                                capture_output=True,
+                                text=True,
+                                check=False,
+                            )
+                            if parent_res.returncode == 0 and parent_res.stdout.strip():
+                                initial_checkpoint = parent_res.stdout.strip()
+                            else:
+                                initial_checkpoint = c_sha
+                            break
+            except OSError:
+                pass
+
+        if initial_checkpoint == "UNKNOWN":
+            try:
+                prev_res = subprocess.run(
+                    ["git", "rev-parse", "HEAD~1"],
+                    cwd=effective_repo,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if prev_res.returncode == 0 and prev_res.stdout.strip():
+                    initial_checkpoint = prev_res.stdout.strip()
+                else:
+                    initial_checkpoint = head_commit
+            except OSError:
+                initial_checkpoint = head_commit
+
+        # 3. Evidence records 候補ディレクトリの収集 (SPEC: records/ のみ参照)
+        candidate_dirs = [
+            effective_repo / ".git" / "nightly_evidence" / "records",
+        ]
+        try:
+            c_res = subprocess.run(
+                ["git", "rev-parse", "--git-common-dir"],
+                cwd=effective_repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if c_res.returncode == 0 and c_res.stdout.strip():
+                common_p = Path(c_res.stdout.strip())
+                if not common_p.is_absolute():
+                    common_p = (effective_repo / common_p).resolve()
+                candidate_dirs.append(common_p / "nightly_evidence" / "records")
+        except OSError:
+            pass
+
+        # 4. PLAN.md からのタスク抽出
+        total_tasks = 0
+        succeeded_count = 0
+        completed_tasks: list[dict[str, Any]] = []
+
+        if effective_plan_path.is_file():
+            try:
+                plan_text = effective_plan_path.read_text(encoding="utf-8")
+                in_steps = False
+                for line in plan_text.splitlines():
+                    line_s = line.strip()
+                    if line_s.startswith("## ステップ"):
+                        in_steps = True
+                        continue
+                    elif in_steps and line_s.startswith("## "):
+                        break
+                    if in_steps and line_s.startswith("- ["):
+                        m = re.search(r"^-\s*\[([ xX])\]\s*(\d+|AUD-[A-Za-z0-9_\-]+)\.\s*(.*)", line_s)
+                        if m:
+                            total_tasks += 1
+                            is_done = m.group(1).lower() == "x"
+                            task_id = m.group(2)
+                            title = m.group(3).strip()
+                            if is_done:
+                                succeeded_count += 1
+                                # レコードの探索
+                                rec_file: Path | None = None
+                                for cdir in candidate_dirs:
+                                    cand = cdir / f"task_{task_id}.json"
+                                    if cand.is_file():
+                                        rec_file = cand
+                                        break
+
+                                task_commit = ""
+                                evidence_tree_sha = ""
+                                committed_tree_sha = ""
+                                checker_dec: str | None = None
+                                if rec_file is not None:
+                                    try:
+                                        rec_data = json.loads(rec_file.read_text(encoding="utf-8"))
+                                        task_commit = rec_data.get("commit", {}).get("sha", "")
+                                        evidence_tree_sha = (
+                                            rec_data.get("commit", {}).get("tree_sha")
+                                            or rec_data.get("tree_sha", "")
+                                        )
+                                        rec_checker = rec_data.get("checker", {})
+                                        if isinstance(rec_checker, dict):
+                                            checker_dec = rec_checker.get("decision")
+                                        elif rec_checker:
+                                            checker_dec = str(rec_checker)
+                                    except (json.JSONDecodeError, OSError):
+                                        pass
+
+                                # レコードが未記録または commit が空の場合、フェーズ範囲 (initial_checkpoint..HEAD) から探す
+                                if not task_commit and initial_checkpoint != "UNKNOWN" and head_commit != "UNKNOWN":
+                                    try:
+                                        rev_spec = (
+                                            f"{initial_checkpoint}..{head_commit}"
+                                            if initial_checkpoint != head_commit
+                                            else head_commit
+                                        )
+                                        log_res = subprocess.run(
+                                            ["git", "log", "-1", f"--grep=\\[refs:[[:space:]]*{task_id}\\]", "--format=%H", rev_spec],
+                                            cwd=effective_repo,
+                                            capture_output=True,
+                                            text=True,
+                                            check=False,
+                                        )
+                                        if log_res.returncode == 0 and log_res.stdout.strip():
+                                            task_commit = log_res.stdout.strip()
+                                    except OSError:
+                                        pass
+
+                                # 実際のコミットオブジェクトから committed_tree_sha を照合取得
+                                if task_commit:
+                                    try:
+                                        tree_res = subprocess.run(
+                                            ["git", "rev-parse", f"{task_commit}^{{tree}}"],
+                                            cwd=effective_repo,
+                                            capture_output=True,
+                                            text=True,
+                                            check=False,
+                                        )
+                                        if tree_res.returncode == 0 and tree_res.stdout.strip():
+                                            committed_tree_sha = tree_res.stdout.strip()
+                                    except OSError:
+                                        pass
+
+                                completed_tasks.append({
+                                    "task_id": task_id,
+                                    "title": title,
+                                    "commit": task_commit,
+                                    "evidence_tree_sha": evidence_tree_sha,
+                                    "committed_tree_sha": committed_tree_sha,
+                                    "checker_decision": checker_dec,
+                                })
+            except OSError:
+                pass
+
+        # 5. 独立監査結果 (audit_stage) の読み込み
+        audit_stage_data: dict[str, Any] | None = None
+        for cand_audit in [
+            effective_repo / ".git" / "nightly_evidence" / "audit_stage.json",
+            effective_repo / ".dev" / "audit_stage.json",
+        ]:
+            if cand_audit.is_file():
+                try:
+                    audit_stage_data = json.loads(cand_audit.read_text(encoding="utf-8"))
+                    break
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+        # 6. 隔離ブランチの検出
+        quarantined_count = 0
+        try:
+            br_res = subprocess.run(
+                ["git", "branch", "--list", "quarantine/*"],
+                cwd=effective_repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if br_res.returncode == 0 and br_res.stdout.strip():
+                quarantined_count = len([
+                    b for b in br_res.stdout.strip().splitlines() if b.strip()
+                ])
+        except OSError:
+            pass
+
+        status = "COMPLETED" if (total_tasks > 0 and succeeded_count == total_tasks) else "IN_PROGRESS"
+
+        summary_data: dict[str, Any] = {
+            "status": status,
+            "total_tasks": total_tasks,
+            "succeeded_count": succeeded_count,
+            "quarantined_count": quarantined_count,
+            "checkpoint": initial_checkpoint,
+            "initial_checkpoint": initial_checkpoint,
+            "final_commit": head_commit,
+            "completed_tasks": completed_tasks,
+        }
+        if audit_stage_data:
+            summary_data["audit_stage"] = audit_stage_data
+
+        self.write_report(effective_report_path, summary_data, repo_dir=effective_repo)
+        return effective_report_path

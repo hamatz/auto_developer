@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.8.0] - 2026-11-19
+
+### Major Milestone: Autonomous Governance, Multi-LLM Review Enforcement, Outcome Metrics, and Autonomous Reporting (Phases 63 - 65)
+
+Auto Developer v0.8.0 introduces an end-to-end framework for autonomous software governance: structured multi-LLM review enforcement, automated audit dispatching with remediation budgets, quantifiable engineering outcome metrics, and standalone morning brief reporting.
+
+### Added
+- **Audit Finding Severity Dispatching & Module Remediation Budget (Stage 7 / Phase 63 / WWW)**:
+  - **Severity-Based Triage**: Automatically routes high-severity defects (`P0`/`P1`) to `PLAN.md` tasks while channeling non-critical improvements (`P2`/`INFO`) to `BACKLOG.md`.
+  - **Repetitive Failure Circuit Breaker**: Enforces `max_consecutive_cycles` limit per target module to halt runaway feedback loops and escalate persistent failures to human engineers (`ESCALATED`).
+  - **Immutable Reproduction Tests**: Strictly protects existing reproduction test files (`AuditStore`) from overwriting during deduplication.
+  - **Dedicated Duplicate Suppression (`DUPLICATE`)**: Distinctly tags and reports suppressed duplicate audit findings, eliminating false-positive rejected alerts in the Morning Brief.
+- **Cross-Family Maker/Checker Policy Enforcement on `commit-step` (Phase 64 / XXX.1)**:
+  - **Strict Multi-Family Enforcement**: Enforces `verify_model_independence(maker_model, checker_model, strict=True)` at the commit gate. Automatically rejects commits with exit code 4 if Maker and Checker share the same LLM family (e.g. Gemini Maker vs Gemini Checker) or use ambiguous family identifiers (`pro`).
+  - **Structured Review Records**: Records `checker` provenance (`decision`, `reason`, `model`, `family`, `maker_model`, `maker_family`) directly inside cryptographic Evidence Records.
+- **Autonomous Engineering Metrics Foundation (`auto-dev metrics` & `METRICS.md`) (Phases 64 & 65 / XXX & YYY.1)**:
+  - **Transactional Event Logging (`MetricsLog`)**: Appends structured events (`verify_step`, `commit_step`, `rollback_step`, `checker_review`, `audit_stage`) to `.git/nightly_evidence/events.jsonl` under strict non-interference guarantees (metrics errors never fail critical development gates).
+  - **20 Quantifiable Metrics & Decision Mapping**: Computes development throughput, first-pass verification rate, verify attempts, rework ratio (`rework_tasks_ratio`), out-of-path commits (`out_of_path_commits`), and historical baselines from Git commit history across Phases 50–65.
+  - **CLI Metrics & Markdown Reporting**: `auto-dev metrics [--phase N] [--json] [--append-to PATH]` providing phase-level rollups and period-over-period delta comparisons.
+- **Standalone Autonomous Report Generation & Morning Brief Recovery (Phase 65 / YYY.2)**:
+  - **Standalone Reporting (`auto-dev report`)**: Generates and updates `NIGHTLY_REPORT.md` directly from Git HEAD, `PLAN.md`, evidence records, and `audit_stage.json` without requiring orchestrator `job_state.json`.
+  - **Brief & Bundler Integration**: Automatically refreshes `NIGHTLY_REPORT.md` on `auto-dev brief` and `auto-dev bundle` execution, eliminating stale report warnings in bundle verification.
+  - **Strict Tree SHA & Commit Ancestry Binding**: Verifies that Evidence Record commits are genuine ancestors of current HEAD before declaring tasks `APPROVE (Verified)`, preventing forged records from achieving verification.
+- **Test Suite Expansion**:
+  - Expanded test coverage from 471 tests to **560 tests (+89 tests)** across metrics, multi-family checks, standalone reports, and audit budgets.
+
+### Changed
+- Renamed `human_commits` to `out_of_path_commits` to accurately measure non-merge commits outside the `commit-step` pipeline.
+- Synchronized package version to `0.8.0` across `pyproject.toml`, `plugin.json`, and `auto_developer.__init__`.
+
+---
+
 ## [0.7.0] - 2026-11-16
 
 ### Major Milestone: Stage 4〜Stage 7 Completion — OS-Level Sandboxing, Multi-LLM Audit Boundary, Live Claude Opus 5.5 Independent Audit, and Evidence Integrity (Phases 19 - 62)

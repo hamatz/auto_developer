@@ -2,21 +2,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, cast
 
+from auto_developer.audit import detect_model_family, verify_model_independence
 from auto_developer.bundler import EvidenceBundler
 from auto_developer.dispatcher import TaskDispatcher
 from auto_developer.evidence import EvidenceStore
 from auto_developer.guard import GitGuard
+from auto_developer.metrics import MetricsLog
 from auto_developer.models import JobState
 from auto_developer.orchestrator import NightlyOrchestrator
 from auto_developer.reporter import MorningReporter
 from auto_developer.runner import CommandRunnerAdapter, MockRunnerAdapter, RunnerAdapter
 from auto_developer.verifier import DeterministicVerifier
 
-VERSION = "0.2.0"
+VERSION = "0.8.0"
 
 DEFAULT_VERIFY_SH = """#!/usr/bin/env bash
 set -euo pipefail
@@ -271,6 +275,10 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.add_parser("brief", help="Display morning brief of recent execution")
     subparsers.add_parser("morning-brief", help="Alias for brief")
 
+    # Subcommand: report
+    report_parser = subparsers.add_parser("report", help="Generate or refresh NIGHTLY_REPORT.md from git, PLAN.md, and evidence")
+    report_parser.add_argument("--out", type=Path, default=None, help="Output markdown path")
+
     # Subcommand: pre-flight
     subparsers.add_parser("pre-flight", help="Check clean working tree and print next pending task")
 
@@ -283,7 +291,9 @@ def main(argv: list[str] | None = None) -> int:
     commit_parser = subparsers.add_parser("commit-step", help="Commit current task and mark [x] in PLAN.md")
     commit_parser.add_argument("--task-id", type=str, required=True, help="Task ID to commit")
     commit_parser.add_argument("--checkpoint", type=str, default=None, help="Optional checkpoint commit hash to verify")
-    commit_parser.add_argument("--checker-decision", type=str, default=None, help="Checker review decision (e.g. APPROVE)")
+    commit_parser.add_argument("--maker-model", type=str, required=True, help="Model identifier for Maker")
+    commit_parser.add_argument("--checker-model", type=str, required=True, help="Model identifier for Checker")
+    commit_parser.add_argument("--checker-decision", type=str, required=True, help="Checker review decision (e.g. APPROVE)")
     commit_parser.add_argument("--checker-reason", type=str, default=None, help="Checker review justification")
     commit_parser.add_argument("--checker-json", type=str, default=None, help="Checker review structured JSON string")
 
@@ -292,6 +302,25 @@ def main(argv: list[str] | None = None) -> int:
     rollback_parser.add_argument("--checkpoint", type=str, required=True, help="Checkpoint commit hash")
     rollback_parser.add_argument("--task-id", type=str, required=True, help="Task ID to mark failed")
     rollback_parser.add_argument("--reason", type=str, default="Verification failed", help="Failure reason")
+
+    # Subcommand: record-review
+    review_parser = subparsers.add_parser("record-review", help="Record Checker review outcome to metrics log")
+    review_parser.add_argument("--task-id", type=str, required=True, help="Task ID")
+    review_parser.add_argument(
+        "--decision",
+        type=str,
+        required=True,
+        help="Review decision (APPROVE or REJECT)",
+    )
+    review_parser.add_argument("--checker-model", type=str, required=True, help="Checker model")
+    review_parser.add_argument("--maker-model", type=str, required=True, help="Maker model")
+    review_parser.add_argument("--reason", type=str, default="", help="Review reason")
+
+    # Subcommand: metrics (XXX.4)
+    metrics_parser = subparsers.add_parser("metrics", help="Aggregate metrics for a phase and compare with previous phase")
+    metrics_parser.add_argument("--phase", type=str, default=None, help="Target phase (e.g. 64 or 'Phase 64')")
+    metrics_parser.add_argument("--json", action="store_true", help="Output metrics as JSON")
+    metrics_parser.add_argument("--append-to", type=Path, default=None, help="Append phase section to file")
 
     # Subcommand: recover
     recover_parser = subparsers.add_parser("recover", help="Crash recovery and consistency tools")
@@ -365,6 +394,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     elif args.subcommand == "verify-step":
+        metrics = MetricsLog(repo_dir=work_dir, plan_path=plan_path)
+        start_time = time.time()
+        phase = metrics.get_current_phase()
         tasks = dispatcher.parse_plan(plan_path)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
         if not target:
@@ -378,13 +410,36 @@ def main(argv: list[str] | None = None) -> int:
         if not git_guard.check_protected_files_untouched(args.checkpoint):
             plan_path.write_text(original_plan_content, encoding="utf-8")
             print(f"CIRCUIT BREAKER: Protected file modified since {args.checkpoint}", file=sys.stderr)
+            attempt = metrics.count_verify_attempts(args.task_id, args.checkpoint, phase=phase) + 1
+            metrics.record_event(
+                "verify_step",
+                task_id=args.task_id,
+                checkpoint=args.checkpoint,
+                result="CIRCUIT_BREAKER",
+                exit_code=10,
+                duration_sec=round(time.time() - start_time, 2),
+                attempt=attempt,
+                phase=phase,
+            )
             return 10
         code, out = verifier.run_verification(
             verify_script, timeout_sec=args.timeout, cwd=work_dir
         )
+        duration_sec = round(time.time() - start_time, 2)
+        attempt = metrics.count_verify_attempts(args.task_id, args.checkpoint, phase=phase) + 1
         if code != 0:
             plan_path.write_text(original_plan_content, encoding="utf-8")
             print(f"VERIFICATION FAILED (Exit {code}):\n{out}", file=sys.stderr)
+            metrics.record_event(
+                "verify_step",
+                task_id=args.task_id,
+                checkpoint=args.checkpoint,
+                result="FAILED",
+                exit_code=code,
+                duration_sec=duration_sec,
+                attempt=attempt,
+                phase=phase,
+            )
             return code
         tree_sha = git_guard.get_working_tree_sha()
         spec_sha = git_guard.get_spec_sha(spec_path)
@@ -401,15 +456,68 @@ def main(argv: list[str] | None = None) -> int:
                 }
             },
         )
+        metrics.record_event(
+            "verify_step",
+            task_id=args.task_id,
+            checkpoint=args.checkpoint,
+            result="PASSED",
+            exit_code=0,
+            duration_sec=duration_sec,
+            attempt=attempt,
+            phase=phase,
+        )
         print(f"VERIFICATION PASSED (Evidence Token: {evidence['token']})")
         return 0
 
     elif args.subcommand == "commit-step":
+        metrics = MetricsLog(repo_dir=work_dir, plan_path=plan_path)
         tasks = dispatcher.parse_plan(plan_path)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
         if not target:
             print(f"ERROR: Task {args.task_id} not found in {plan_path}", file=sys.stderr)
             return 1
+
+        # Checker Policy 検査 (機能XXX.1 / AGENTS.md Rule 6)
+        decision = (args.checker_decision or "").strip().upper()
+        maker_fam = detect_model_family(args.maker_model)
+        checker_fam = detect_model_family(args.checker_model)
+
+        if decision != "APPROVE":
+            print(
+                f"CHECKER_POLICY_VIOLATION: Checker review decision must be APPROVE (got '{args.checker_decision}')",
+                file=sys.stderr,
+            )
+            metrics.record_event(
+                "commit_step",
+                task_id=args.task_id,
+                result="CHECKER_POLICY_VIOLATION",
+                commit=None,
+                checker_decision=decision,
+                checker_model=args.checker_model,
+                checker_family=checker_fam,
+                maker_model=args.maker_model,
+                maker_family=maker_fam,
+            )
+            return 4
+
+        is_independent, violation_msg = verify_model_independence(
+            args.maker_model, args.checker_model, strict=True
+        )
+        if not is_independent:
+            print(f"CHECKER_POLICY_VIOLATION: {violation_msg}", file=sys.stderr)
+            metrics.record_event(
+                "commit_step",
+                task_id=args.task_id,
+                result="CHECKER_POLICY_VIOLATION",
+                commit=None,
+                checker_decision=decision,
+                checker_model=args.checker_model,
+                checker_family=checker_fam,
+                maker_model=args.maker_model,
+                maker_family=maker_fam,
+            )
+            return 4
+
         current_tree_sha = git_guard.get_working_tree_sha()
         current_spec_sha = git_guard.get_spec_sha(spec_path)
         if not evidence_store.verify_and_consume(
@@ -423,6 +531,17 @@ def main(argv: list[str] | None = None) -> int:
                 "Evidence missing or working tree/spec was tampered after verify-step.",
                 file=sys.stderr,
             )
+            metrics.record_event(
+                "commit_step",
+                task_id=args.task_id,
+                result="EVIDENCE_ERROR",
+                commit=None,
+                checker_decision=decision,
+                checker_model=args.checker_model,
+                checker_family=checker_fam,
+                maker_model=args.maker_model,
+                maker_family=maker_fam,
+            )
             return 3
         commit_hash = git_guard.commit_task(target)
         committed_tree = git_guard.get_commit_tree_sha("HEAD")
@@ -431,24 +550,37 @@ def main(argv: list[str] | None = None) -> int:
                 f"FATAL INVARIANT BREACH: Committed tree {committed_tree} does not match verified tree {current_tree_sha}!",
                 file=sys.stderr,
             )
+            metrics.record_event(
+                "commit_step",
+                task_id=args.task_id,
+                result="EVIDENCE_ERROR",
+                commit=commit_hash,
+                checker_decision=decision,
+                checker_model=args.checker_model,
+                checker_family=checker_fam,
+                maker_model=args.maker_model,
+                maker_family=maker_fam,
+            )
             return 3
 
-        # Checker 査読メタデータの抽出 (機能Q)
-        checker_info: dict[str, Any] = {}
+        # Checker 査読メタデータの抽出 (機能Q / 機能XXX.1)
+        checker_info: dict[str, Any] = {
+            "decision": decision,
+            "reason": args.checker_reason or "",
+            "model": args.checker_model,
+            "family": checker_fam,
+            "maker_model": args.maker_model,
+            "maker_family": maker_fam,
+        }
         if args.checker_json:
             try:
-                checker_info = cast(dict[str, Any], json.loads(args.checker_json))
+                extra = cast(dict[str, Any], json.loads(args.checker_json))
+                if isinstance(extra, dict):
+                    for k, v in extra.items():
+                        if k not in checker_info:
+                            checker_info[k] = v
             except (json.JSONDecodeError, ValueError):
-                checker_info = {"raw": args.checker_json}
-        if args.checker_decision:
-            checker_info["decision"] = args.checker_decision
-        if args.checker_reason:
-            checker_info["reason"] = args.checker_reason
-        if not checker_info:
-            checker_info = {
-                "decision": "UNSPECIFIED",
-                "reason": "No checker review metadata provided via CLI",
-            }
+                checker_info["raw"] = args.checker_json
 
         evidence_store.archive_record(
             task_id=args.task_id,
@@ -462,10 +594,22 @@ def main(argv: list[str] | None = None) -> int:
             },
             checker_info=checker_info,
         )
+        metrics.record_event(
+            "commit_step",
+            task_id=args.task_id,
+            result="COMMITTED",
+            commit=commit_hash,
+            checker_decision=decision,
+            checker_model=args.checker_model,
+            checker_family=checker_fam,
+            maker_model=args.maker_model,
+            maker_family=maker_fam,
+        )
         print(f"COMMITTED: {commit_hash}")
         return 0
 
     elif args.subcommand == "rollback-step":
+        metrics = MetricsLog(repo_dir=work_dir, plan_path=plan_path)
         tasks = dispatcher.parse_plan(plan_path)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
         task_id = target.task_id if target else args.task_id
@@ -485,7 +629,79 @@ def main(argv: list[str] | None = None) -> int:
                     "attempt_1_log": args.reason,
                 },
             )
+        metrics.record_event(
+            "rollback_step",
+            task_id=task_id,
+            checkpoint=args.checkpoint,
+            quarantine_branch=quarantine_branch or None,
+            reason=args.reason or "",
+        )
         print(f"ROLLED BACK TO {args.checkpoint} (Work quarantined to: {quarantine_branch or 'none'})")
+        return 0
+
+    elif args.subcommand == "record-review":
+        dec = (args.decision or "").strip().upper()
+        if dec not in ("APPROVE", "REJECT"):
+            print(f"ERROR: --decision must be APPROVE or REJECT (got '{args.decision}')", file=sys.stderr)
+            return 2
+        maker_fam = detect_model_family(args.maker_model)
+        checker_fam = detect_model_family(args.checker_model)
+        metrics = MetricsLog(repo_dir=work_dir, plan_path=plan_path)
+        metrics.record_event(
+            "checker_review",
+            task_id=args.task_id,
+            decision=dec,
+            checker_model=args.checker_model,
+            checker_family=checker_fam,
+            maker_model=args.maker_model,
+            maker_family=maker_fam,
+            reason=args.reason or "",
+        )
+        return 0
+
+    elif args.subcommand == "metrics":
+        metrics = MetricsLog(repo_dir=work_dir, plan_path=plan_path)
+        target_phase = args.phase or metrics.get_current_phase()
+        result = metrics.compute_phase_metrics(target_phase)
+        if getattr(args, "append_to", None):
+            target_file: Path = args.append_to
+            target_phase_name = str(result.get("phase", ""))
+            m_num = re.search(r"\d+", target_phase_name)
+            if m_num:
+                p_num_str = re.escape(m_num.group(0))
+                section_pattern = re.compile(rf"^##\s+Phase\s+{p_num_str}\b", re.MULTILINE)
+                err_label = f"## Phase {m_num.group(0)}"
+            else:
+                escaped_name = re.escape(target_phase_name)
+                section_pattern = re.compile(rf"^##\s+{escaped_name}\b", re.MULTILINE)
+                err_label = f"## {target_phase_name}"
+
+            if target_file.exists():
+                existing_text = target_file.read_text(encoding="utf-8")
+                if section_pattern.search(existing_text):
+                    print(
+                        f"ERROR: Section '{err_label}' already exists in {target_file}",
+                        file=sys.stderr,
+                    )
+                    return 1
+            report_text = metrics.format_metrics_report(result)
+            with open(target_file, "a", encoding="utf-8") as f:
+                f.write(f"\n{report_text}\n")
+            return 0
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(metrics.format_metrics_report(result))
+        return 0
+
+    elif args.subcommand == "report":
+        out_p = args.out or report_path
+        gen_p = reporter.generate_standalone_report(
+            report_path=out_p,
+            repo_dir=work_dir,
+            plan_path=plan_path,
+        )
+        print(f"REPORT GENERATED: {gen_p}")
         return 0
 
     elif args.subcommand in ("brief", "morning-brief"):
@@ -500,14 +716,31 @@ def main(argv: list[str] | None = None) -> int:
                 "completed_tasks": state.completed_tasks,
                 "quarantined_task": state.quarantined_task,
             }
+            try:
+                reporter.write_report(report_path, summary, repo_dir=work_dir)
+            except Exception as e:  # noqa: BLE001
+                print(f"REPORT_WARNING: Failed to write report from job_state: {e}", file=sys.stderr)
             print(reporter.format_console_brief(summary))
             return 0
-        elif report_path.exists():
-            print(report_path.read_text(encoding="utf-8"))
-            return 0
         else:
-            print("No execution state or report found. Have you run the orchestrator yet?", file=sys.stderr)
-            return 1
+            try:
+                gen_p = reporter.generate_standalone_report(
+                    report_path=report_path,
+                    repo_dir=work_dir,
+                    plan_path=plan_path,
+                )
+                if gen_p.exists():
+                    print(gen_p.read_text(encoding="utf-8"))
+                    return 0
+            except Exception as e:  # noqa: BLE001
+                print(f"REPORT_WARNING: Failed to generate standalone report: {e}", file=sys.stderr)
+
+            if report_path.exists():
+                print(report_path.read_text(encoding="utf-8"))
+                return 0
+            else:
+                print("No execution state or report found. Have you run the orchestrator yet?", file=sys.stderr)
+                return 1
 
     elif args.subcommand == "recover":
         from auto_developer.recovery import RecoveryEngine
@@ -570,6 +803,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if rec_result.success else 1
 
     elif args.subcommand == "bundle":
+        try:
+            reporter.generate_standalone_report(
+                report_path=report_path,
+                repo_dir=work_dir,
+                plan_path=plan_path,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"REPORT_WARNING: Failed to refresh report before bundle: {e}", file=sys.stderr)
+
         bundler = EvidenceBundler(repo_dir=work_dir)
         out_path = bundler.create_bundle(dest_path=args.out, job_id=args.job_id)
         print(f"BUNDLE CREATED: {out_path}")

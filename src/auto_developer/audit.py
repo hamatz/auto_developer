@@ -15,6 +15,7 @@ VALID_STATUSES: frozenset[str] = frozenset(
         "BACKLOGGED",
         "NOTED",
         "ESCALATED",
+        "DUPLICATE",
     }
 )
 
@@ -853,12 +854,15 @@ class IndependentAuditRunner:
         rejected: list[tuple[AuditFinding, str]] = []
         backlogged: list[AuditFinding] = []
         escalated: list[AuditFinding] = []
+        duplicates: list[AuditFinding] = []
 
         for finding in findings:
             if finding.status == "BACKLOGGED":
                 backlogged.append(finding)
             elif finding.status == "ESCALATED":
                 escalated.append(finding)
+            elif finding.status == "DUPLICATE":
+                duplicates.append(finding)
             elif finding.status != "DISPATCHED":
                 reason = finding.red_verification_reason or finding.status or "UNKNOWN_REJECTION"
                 rejected.append((finding, reason))
@@ -868,9 +872,11 @@ class IndependentAuditRunner:
             "rejected": rejected,
             "backlogged": backlogged,
             "escalated": escalated,
+            "duplicates": duplicates,
             "total_processed": len(findings),
             "genuine_count": len(dispatched),
             "rejected_count": len(rejected),
+            "duplicate_count": len(duplicates),
         }
 
 

@@ -7,46 +7,42 @@
 -->
 
 ## 現在の目標
-- Phase 63: 監査サイクルの終了保証 — 重要度トリアージ・修正予算・リリース判定の分離（SPEC.md 機能WWW）
-  - LESSONS.md 2026-11-16「P2モグラ叩きの底なし沼化」の Rule を、文章ではなく dispatcher / bundler / reporter の作りに置く。
-  - 本フェーズ自体を通常パイプライン（Maker → verify-step → Checker → commit-step）で実装する（ドッグフーディング）。
-- スコープ外: 複数Workerの同時並行Git編集、SPEC.md の自律書き換え、クラウド分散実行、メタ監査制限・予算リセット CLI・重要度自動降格（WWW スコープ外）。
-- AUD-1001（P2）は本フェーズの方針に従い PLAN から BACKLOG.md へ移した。本フェーズでは着手しない。
+- Phase 65: v0.8.0 リリース確定と自律レポート復旧・計測指標の適正化（SPEC.md 機能YYY）
+  - 計測指標の実態との乖離解消（`human_commits` → `out_of_path_commits` 改名、`rework_tasks_ratio` の追加、METRICS.md の Phase 64 確定値更新）。
+  - NIGHTLY_REPORT.md の自動生成とモーニングブリーフ復旧（対話型 `/nightly-run` でも完全なレポートを生成・表示、bundle / brief 連携）。
+  - バージョン整合（0.8.0）とリリースドキュメント整備（CHANGELOG.md, docs/releases/v0.8.0.md）。
+  - 最新 HEAD に対する実 Claude Opus 5.5 本番監査の実行と完全性検証済み Evidence Bundle の生成・検証（AUDIT_OUTDATED 解消）。
+- スコープ外: Web UI ダッシュボード、自動リリースデプロイ。
 
-## 作業手順（Phase 63・LESSONS.md 2026-11-15 の教訓に基づく）
-- Maker と Checker は別系統のモデルにする（AGENTS.md Rule 6）。Maker が Gemini 系のとき、Checker は異系統の Claude Opus 5.5（swarm にて model: "claude-opus-5-5-medium"）を明示指定して実行する。commit-step の `--checker-reason` に Checker のモデル指定（claude-opus-5.5）を書く。
+## 作業手順（Phase 65・LESSONS.md に基づく）
+- Maker と Checker は別系統のモデルにする（AGENTS.md Rule 6）。
+  - Maker: Gemini 3.8 Flash (`gemini-3.8-flash`)
+  - Checker: Claude Opus 5.5 (`claude-opus-5-5-medium`、Anthropic API 利用。環境変数 `ANTHROPIC_API_KEY` を利用)
 - Checker への入力は要約・再構成しない。以下をファイルに書き出し、Checker にはそのパスを渡して直接読ませる:
-  1. `awk '/^- \[ \] 機能WWW/,/^## 3\./' SPEC.md > .dev/checker/spec_www.md`
+  1. `awk '/^- \[ \] 機能YYY/,/^## 3\./' SPEC.md > .dev/checker/spec_yyy.md`
   2. `git add -N . && git diff <checkpoint> > .dev/checker/diff_task<n>.patch`（未追跡ファイルも差分に含める）
-- verify-step の前に `git status --porcelain` を確認し、意図しないファイル（実験の生成物など）がないことを確かめる。実験・挙動確認は必ず `mktemp -d` で作った一時ディレクトリで行い、リポジトリ直下で実行しない。
-- Evidence Record は手書きしない。各ステップで以下の正規経路のみを使う:
+- verify-step の前に `git status --porcelain` を確認し、意図しないファイルがないことを確かめる。
+- **査読記録の順序厳守**:
   1. `python3 scripts/nightly_orchestrator.py verify-step --checkpoint <checkpoint> --task-id <n>`
   2. Checker 査読（APPROVE / REJECT）
-  3. `python3 scripts/nightly_orchestrator.py commit-step --task-id <n> --checkpoint <checkpoint> --checker-decision <decision> --checker-reason "<reason>"`
-  `.git/nightly_evidence/` 配下のファイルを直接編集・作成しない。正規経路が失敗した場合は止まってこのファイルに記録する。
-- Bundle 生成後に SPEC.md や追跡ファイルを変更しない（Evidence の spec_sha と不一致になる）。SPEC の完了マークは次フェーズの準備コミットで付ける。
+  3. **Checker 査読直後、commit-step の前に** `python3 scripts/nightly_orchestrator.py record-review --task-id <n> --decision <decision> --checker-model <checker> --maker-model <maker> --reason "<reason>"` を実行する（REJECT 率・手戻りの正確な記録のため）。
+  4. Checker が REJECT した場合は commit-step を呼ばず、手直しして再度 1 からやり直す。
+  5. Checker が APPROVE した場合のみ `python3 scripts/nightly_orchestrator.py commit-step --task-id <n> --checkpoint <checkpoint> --maker-model <maker> --checker-model <checker> --checker-decision APPROVE --checker-reason "<reason>"` を実行する。
+- Bundle 生成後に SPEC.md や追跡ファイルを変更しない。SPEC の完了マークは次フェーズの準備コミットで付ける。
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- WWW.1: 既存の監査取り込みテスト（`tests/test_immunity_and_red_acceptance.py`, `tests/test_independent_audit_runner.py` 等）で、P2 の finding が `DISPATCHED` になることを前提にしている箇所があれば、`BACKLOGGED` を期待するよう変更する。P0/P1 の挙動は変えない。
-- WWW.4: `tests/test_nightly_orchestrator.py` 等で、Checker のテキスト出力 "PASS" のみで承認されることを前提にしている箇所があれば、判定行（APPROVE / REJECT）を出力する形に変更する。
-- WWW.6: 既存テストの変更は想定しない。Red になっている免疫テスト（`tests/immunity/test_immunity_audit_budget.py` の reused 系 2 件）は人間が追加したもので、変更せずに Green にする。
-- WWW.2 改訂: 既存テストで「指摘 0 件または再報告のみのサイクル後にエスカレーション済みモジュールへ再登録できる」ことを前提にしている箇所があれば、sticky 化に合わせて変更してよい。免疫テストは変更しない。
-- 上記以外の既存テストは変更しない。免疫テスト（`tests/immunity/**`）は変更しない（本フェーズの免疫テスト草案は `docs/proposals/phase63/` にあり、完了後に人間が配置する）。
+- YYY.1: 既存テストで `human_commits` を検証している箇所を `out_of_path_commits` に更新する。
+- 上記以外の既存テストは変更しない。免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [x] 1. Checker 判定のテキスト・フォールバックを Fail-Closed にする（部分文字列 PASS による承認の廃止、判定行の一意性要求）（Red-First）（WWW.4）
-- [x] 2. 重要度トリアージ: P2 → BACKLOG.md（Red 検証なし）、INFO → AuditStore のみ、P0/P1 → 従来経路。VALID_STATUSES 拡張と監査プロンプトへの重要度定義の埋め込み（Red-First）（WWW.0 / WWW.1）
-- [x] 3. 修正予算: process_findings を監査サイクルの正規入口にし、モジュール単位の連続サイクル上限と ESCALATED 引き渡しを実装（Red-First）（WWW.2）
-- [x] 4. リリース判定の分離: find_release_blockers と verify_bundle の RELEASE_BLOCKED、Bundle への BACKLOG.md 同梱と backlog_count（Red-First）（WWW.3）
-- [x] 5. Morning Brief に DISPATCHED / BACKLOGGED / ESCALATED を分けて表示し、ESCALATED を判断待ちに列挙（Red-First）（WWW.5）
-- [x] 6. finding_id 再利用への耐性: process_findings の冒頭で ID 衝突を判定し、同一指摘は重複させず、内容の異なる衝突は AUD-018 の規則で採番し直してから振り分ける（全経路共通）（Red-First: tests/immunity の reused 系 2 件が Red であることを確認してから着手）（WWW.6）
-- [x] 7. エスカレーションの sticky 化とリセット条件の厳格化: 台帳に escalated: true を持たせ人間が消すまで解除しない。再報告（抑止分を含む REJECTED 以外の P0/P1）があるサイクルでは streak を 0 に戻さない（Red-First: tests/immunity の persistent / rereport 系 2 件が Red であることを確認してから着手）（WWW.2 改訂）
+- [x] 1. 指標の適正化: human_commits → out_of_path_commits 改名、rework_tasks_ratio の追加、METRICS.md の Phase 64 最終数値更新と注記（Red-First）（YYY.1）
+- [x] 2. NIGHTLY_REPORT.md の自動生成とモーニングブリーフ復旧: 独立 report 生成機能、auto-dev brief および bundle との連携（Red-First）（YYY.2）
+- [x] 3. バージョン整合（0.8.0）とリリースドキュメント整備（CHANGELOG.md, docs/releases/v0.8.0.md）（YYY.3）
+- [x] 4. 最新 HEAD に対する実 Claude Opus 5.5 本番監査の実行と完全性検証済み Evidence Bundle の生成・検証（YYY.4）
 
 ## 止まっていること・判断待ち
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [済] 免疫テストを `tests/immunity/` に配置（`__init__.py` 作成、src の sys.path 追加）。
-- [済] WWW.6 の免疫テスト（reused 系 2 件）を Red-First で追加。
-- [済] WWW.2 改訂の免疫テスト（persistent / rereport / human reset の 3 件）を Red-First で追加。
-- [済] ステップ 7 の完了後の Proof 確認（f299d39: P2 60 件 → Maker タスク 60 件 / ad46d10: 0 件、免疫テスト 15/15 Green）と LESSONS.md 2026-11-16 の Rung / Immunity Test / Proof 更新、2026-11-18 の教訓追加。
+- [済] Phase 64 の後片付け（docs/proposals/phase64/ 削除、免疫テスト配置完了）。
+- ステップ 4 完了後: Evidence Bundle の最終確認および v0.8.0 タグ・リリースの承認。

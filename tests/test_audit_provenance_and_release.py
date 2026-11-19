@@ -1847,6 +1847,50 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             if str(Path(__file__).parent.parent / "scripts") in sys.path:
                 sys.path.remove(str(Path(__file__).parent.parent / "scripts"))
 
+    def test_auditor_client_timeout_argument_and_default(self) -> None:
+        """YYY.4: auditor_client が --timeout 引数をサポートし、デフォルト300秒および指定値が urlopen に渡されること。"""
+        import io
+        from unittest.mock import MagicMock, patch
+
+        fake_api_response = {
+            "id": "msg_01XFDUDYJACGeCrJwHGQAngV",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3-opus-20240229",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "```json\n[]\n```"}],
+            "usage": {"input_tokens": 120, "output_tokens": 15},
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(fake_api_response).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        # 1. デフォルト値の検証 (300秒)
+        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+            from scripts.auditor_client import main as auditor_main
+            old_stdout = sys.stdout
+            sys.stdout = io.StringIO()
+            try:
+                code_def = auditor_main(["--model", "claude-opus-5-5-medium", "--prompt", "Audit spec", "--api-key", "test-key-1234"])
+            finally:
+                sys.stdout = old_stdout
+
+        self.assertEqual(code_def, 0)
+        self.assertEqual(mock_urlopen.call_args.kwargs.get("timeout"), 300)
+
+        # 2. 明示的指定値の検証 (150秒)
+        with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+            old_stdout = sys.stdout
+            sys.stdout = io.StringIO()
+            try:
+                code_cust = auditor_main(["--model", "claude-opus-5-5-medium", "--prompt", "Audit spec", "--api-key", "test-key-1234", "--timeout", "150"])
+            finally:
+                sys.stdout = old_stdout
+
+        self.assertEqual(code_cust, 0)
+        self.assertEqual(mock_urlopen.call_args.kwargs.get("timeout"), 150)
+
 
 
 
