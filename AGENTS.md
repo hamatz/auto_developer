@@ -19,6 +19,11 @@ AGENTS.md は複数のエージェントツールが読む共通の置き場所�
 - 機密: 本物の .env は作業領域に存在しない。.env.example のダミー値を使うこと。
 - ゲートとテストの変更: .github/、受入テスト、免疫テストの変更・削除は人間のコードオーナー承認が必須。
   テストを書き換えて通すことはできない。
+- 異系統の査読（旧 Rule 6 の後半）: commit-step は Maker / Checker のモデル名と判定を必須で受け取り、
+  APPROVE 以外、同一モデル・同一系統・系統不明のいずれでもコミットを拒否する（終了コード 4）。
+  tests/immunity/test_immunity_checker_policy.py が保証する。モデル名は自己申告なので、実際に使ったモデルを書く。
+- 監査ループの終了: 監査の P2 は BACKLOG.md に回り、同一モジュールへの P0/P1 自動登録は連続上限で
+  人間にエスカレーションされる。tests/immunity/test_immunity_audit_budget.py が保証する。
 
 ---
 
@@ -33,7 +38,8 @@ AGENTS.md は複数のエージェントツールが読む共通の置き場所�
 
 ### 査読（Checker）
 6. 入力は SPEC.md と git diff のみ。実装時の会話ログは読まない。
-   MakerとChecker（監査役）には同一LLMモデルを用いず、独立した異系統LLM（例: Maker=Gemini 3.8 Flash, Reviewer=Claude Opus 5.5）を適用して思考・バイアスの癒着を排除する。
+   Checker の結果は APPROVE / REJECT とも、commit-step の前に record-review で記録する（計測のため）。
+   （異系統モデルの強制は機械化したため第1部へ移した。）
 7. 直接行ってよいのは、不要コードの削除と挙動を変えない改名・整理のみ。
    ロジックの追加・挙動の変更が必要なら、指摘として差し戻す。
 8. 直接修正した場合は、検証ゲートを再実行して成功を確認してから確定する。

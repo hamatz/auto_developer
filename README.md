@@ -100,7 +100,7 @@ flowchart TD
     Workers -->|"3. Green 実装完了 & 成果収集"| Preservation
     Preservation -->|"4. 監査済み成果引き渡し"| Gate
     Gate -->|"5. 独立外部監査へ提出"| Audit
-    Audit -.->|"【Level 7 自律作り直しループ】<br/>監査指摘・地雷を LESSONS.md に蓄積し Maker へフィードバック (Self-Refinement)"| Workers
+    Audit -.->|"【Level 7 自律作り直しループ】<br/>P0/P1 のみ修正予算内で Maker へ差し戻し<br/>P2 は BACKLOG.md・予算超過は人間へエスカレーション"| Workers
     Audit -->|"6. 合格承認 (APPROVED)"| Delivery
     MultiOrch -->|"7. 安全なクリーンアップ<br/>(失敗時は原本 Worktree を保護)"| Workers
 ```
@@ -118,13 +118,20 @@ Auto Developer は、**「内側の安全な TDD 門番ループ」** と **「�
    - さらに AST 静的構文解析と動的 `sys.settrace` 実行トレースにより、自明な無条件失敗テスト（`self.assertEqual(1, 2)` 等）を `TRIVIAL_RED` として検知し即時 Maker へ差し戻します。真正な Red（`PASSED_RED`）のみが通過を許可され、本番コードの安全な Green 化へと進みます。
 4. **非破壊的成果保全と独立統合ゲート（Atomic Preservation & IntegrationGate）**:
    - `os.link` による排他的・原子的 Evidence 保全を採用し、TOCTOU 競合による上書きを完全遮断。同一成果は冪等再利用し、異成果衝突時は Worktree 原本を安全に保護します。
-   - 独立した統合 Worktree での意味論的結合検証を経て、原子的 Release Candidate タグ（`refs/tags/rc/<job_id>`）を発行します。
+   - 独立した統合 Worktree で各チームブランチをマージし（コンフリクト時は推測せず中断）、結合検証スクリプトを実行したうえで、原子的 Release Candidate タグ（`refs/tags/rc/<job_id>`）を発行します。
 5. **暗号学的証跡と第三者検証（Evidence Bundle & Tamper-Proof Verifier）**:
    - Git Tree SHA、コミット SHA、Checker ログ、SPEC SHA がハッシュ拘束された不変の ZIP パッケージを生成。外部監査 CLI (`auto-dev verify-bundle`) により、改ざんや未検証成果の混入をオフラインかつ物理的に検出可能です。
 6. **Multi-LLM 独立監査境界 & 自律作り直しループ（Level 7 Outer Self-Refining Loop）**:
    - **【外側ループ】** レベル 6 までの「失敗したら止まって人間に朝レポートする（Fail-Fast & Freeze）」を超え、**真の自律夜間開発（Level 7）の核心**を担います。
    - Maker と独立第三者 Auditor（例: Gemini Maker vs Claude Opus / GPT 6.1 Auditor）を分離して思考の癒着を排除。
-   - 監査人が指摘した課題や拒絶（Findings）は、単に停止するのではなく即座に `LESSONS.md` へ地雷（Trap）として外部記憶化され、Maker へフィードバック。Maker はその教訓を元に自律的に「作り直し・再挑戦」のサイクルを回し、仕様（`SPEC.md`）と受入条件を完全に満たすまで粘り強く動き続けます。
+   - 監査人の指摘（Findings）は、再現テストの真正 Red 判定を経たうえで**重要度で振り分け**られます。P0/P1 だけが `PLAN.md` の修正タスクとして Maker に差し戻され、P2 は `BACKLOG.md`、INFO は記録のみです。
+   - 差し戻しには**修正予算**があります。同一モジュールへの P0/P1 自動登録が連続 `max_consecutive_cycles`（既定 5）サイクルに達すると、以後の指摘は `ESCALATED` として人間の判断待ちに回り、台帳を人間が消すまで自動登録は再開しません。「欠陥ゼロまで回し続ける」のではなく、「重大欠陥を潰し、終わらないループは止めて人間に渡す」設計です（v0.8.0 / LESSONS.md 2026-11-16）。
+   - 未解決の P0/P1 とエスカレーションはリリース判定（`verify-bundle` の `RELEASE_BLOCKED`）で止まり、P2 の残件はリリースを止めません。解決した指摘の教訓は `LESSONS.md` に記録されます。
+
+
+> [!NOTE] 現在の利用経路と実装範囲
+> `auto-dev` CLI と Antigravity スキル（`/nightly-run` など）が使うのは、**単一ワーカーの直列パイプライン**（Maker → 検証 → Checker → 証跡ゲートコミット）と独立監査ステージです。
+> 上図の複数チーム並列実行（`MultiTeamOrchestrator`）と統合ゲート（`IntegrationGate`）はライブラリとして実装・テスト済みですが、現時点では CLI・スキルからは呼び出されません。
 
 ---
 
@@ -250,8 +257,11 @@ EOF
 # オーケストレーターを起動（Maker と Checker のコマンドを指定）
 python3 scripts/nightly_orchestrator.py \
   --maker-cmd "python3 -c \"open('calc.py', 'w').write('def add(a, b): return a + b\n')\"" \
-  --checker-cmd "echo 'APPROVE: Looks good'"
+  --checker-cmd "printf 'Looks good\nDECISION: APPROVE\n'"
 ```
+
+> [!IMPORTANT] Checker の判定行
+> Checker の出力は、行全体が `APPROVE` / `REJECT`（または `DECISION: APPROVE` / `DECISION: REJECT`）の判定行をちょうど 1 種類含む必要があります。`APPROVE: Looks good` のように同じ行に説明を続けたり、判定行がなかったり、APPROVE と REJECT が両方あったりすると不承認（Fail-Closed）になり、作業は quarantine ブランチへ退避されます（JSON で `{"decision": "APPROVE"}` を返す形式も使えます）。
 
 実行すると、ターミナルに以下が出力され、自動的にコミットされます：
 ```text
@@ -260,7 +270,8 @@ python3 scripts/nightly_orchestrator.py \
   [Phase A: Maker] Running Maker for task 1...
   [Phase C: Verifier] Running scripts/verify_local.sh...
   [Phase D: Checker] Running independent review...
-  [Phase E: Commit] Checker approved. Issuing evidence and committing...
+  [Phase E: Commit] Checker approved. Finalizing plan and issuing evidence...
+All pending tasks completed!
 Execution complete! Report written to NIGHTLY_REPORT.md
 ```
 
@@ -333,6 +344,7 @@ auto-dev brief
 ```
 
 ### 4. 低レベルサブコマンド（エージェント連携・手動ステップ実行用）
+Antigravity の `/nightly-run` はこの経路を使います。
 ```bash
 # クリーンツリー検査と次タスク取得
 auto-dev pre-flight
@@ -340,16 +352,45 @@ auto-dev pre-flight
 # 不変条件検査 & 検証スクリプト実行（成功時に Evidence Token 発行）
 auto-dev verify-step --checkpoint <commit_hash> --task-id <id>
 
-# 証跡を検証してコミット（未検証の場合は拒否）
-auto-dev commit-step --task-id <id> --checkpoint <commit_hash>
+# Checker の査読結果を記録（APPROVE / REJECT とも、commit-step の前に。ゲートには影響しない計測用）
+auto-dev record-review --task-id <id> --decision APPROVE \
+  --maker-model gemini-3.8-flash --checker-model claude-opus-5-5-medium --reason "..."
+
+# 証跡を検証してコミット
+#   - Evidence Token がない／ツリーが改変されている → Exit 3
+#   - Checker の判定が APPROVE 以外、Maker と Checker が同一モデル・同一系統・系統不明（例: "pro"）→ Exit 4（Evidence は消費されない）
+auto-dev commit-step --task-id <id> --checkpoint <commit_hash> \
+  --maker-model gemini-3.8-flash --checker-model claude-opus-5-5-medium \
+  --checker-decision APPROVE --checker-reason "..."
 
 # 作業成果を quarantine ブランチへ退避コミットし、本線をチェックポイントへ復元
 auto-dev rollback-step --checkpoint <commit_hash> --task-id <id> --reason "原因"
 ```
 
+### 5. 計測とレポート
+```bash
+# フェーズごとの指標（初回通過率・手戻り率・Checker 差し戻し・監査の内訳・計画外ステップ等）と直前フェーズとの差分
+auto-dev metrics [--phase 64] [--json] [--append-to METRICS.md]
+
+# git・PLAN.md・証跡から NIGHTLY_REPORT.md（Morning Brief）を生成・更新
+auto-dev report [--out NIGHTLY_REPORT.md]
+```
+指標の定義と、それぞれをどの判断に使うかは [METRICS.md](METRICS.md) を参照してください。
+
+### 6. 証跡バンドルと第三者検証
+```bash
+auto-dev bundle [--out bundle.zip]          # 機密を除いた提出用 Evidence Bundle を生成
+auto-dev verify-bundle <bundle.zip> [--json] # 改ざん・未監査コード（AUDIT_OUTDATED）・未解決 P0/P1（RELEASE_BLOCKED）を検出
+```
+
+### 7. クラッシュ復旧
+```bash
+auto-dev recover [inspect|plan|apply] [--json]
+```
+
 ---
 
-## 🛡️ 厳格な 5 大安全ガードレール (Safety Invariants)
+## 🛡️ 厳格な安全ガードレール (Safety Invariants)
 
 1. **クリーンツリー事前検証 (Pre-flight Assertion)**
    - 起動時に `git status --porcelain` を検査。未コミット作業がある場合は起動を拒否し、作業破壊を防ぎます。
@@ -362,6 +403,12 @@ auto-dev rollback-step --checkpoint <commit_hash> --task-id <id> --reason "原�
 5. **実行状態の永続化と中断復旧 (Crash Recovery & Resume)**
    - `.dev/job_state.json` にフェーズと進捗を常時記録。プロセスがクラッシュしても `--resume` で不完全ツリーを自動復元し、安全に再開できます。
 
+6. **Checker 判定と異系統モデルの機械的検査 (Checker Policy Gate)**
+   - `commit-step` は Maker / Checker のモデル名と判定を必須引数で受け取り、APPROVE 以外、同一モデル・同一系統・系統不明のいずれでも Exit 4 でコミットを拒否します（AGENTS.md Rule 6 の機械化）。拒否時は Evidence を消費せず HEAD も動かしません。モデル名はエージェントの自己申告であり、取り違えは防げますが虚偽申告は防げません。
+7. **監査ループの終了保証 (Audit Triage & Fix Budget)**
+   - 監査指摘は重要度で振り分け（P0/P1 → PLAN、P2 → BACKLOG、INFO → 記録のみ）、同一モジュールへの連続自動登録は上限でエスカレーションして止めます。監査役が ID を振り直したり未解決の指摘を再報告し続けたりしても終わることを、免疫テスト（`tests/immunity/test_immunity_audit_budget.py`）で保証しています。
+8. **計測の非干渉 (Metrics Non-Interference)**
+   - 計測用イベントログ（`.git/nightly_evidence/events.jsonl`）の書き込みに失敗しても、検証・査読・コミット・隔離の結果は変わりません（`METRICS_WARNING` を出すのみ）。
 ---
 
 ## 🏗️ アーキテクチャと実装ロードマップ (Architecture & Roadmap Matrix)
@@ -370,17 +417,18 @@ Auto Developer は、単一ワーカーの厳格な直列実行（Stage 1）か�
 
 ### 実装状況・ロードマップ対比表
 
-現在、**Stage 1 〜 Stage 7 の全機能が実装・実証済み（Tested & Verified）** です。全 321 件の自動テストおよび第三者 LLM 監査に合格しています。
+Stage 1・2・6・7・8 は CLI / スキルから利用でき、Stage 3〜5 はライブラリとして実装・テスト済み（CLI・スキルからは未接続）です。自動テスト（550 件超）と、v0.7.0 からの差分に対する第三者 LLM（Claude Opus 5.5）監査を通過しています。
 
 | Stage | レイヤ / マイルストーン | 主な責務・コア機能 | 実装ステータス | 検証状況・実証エビデンス |
 | :--- | :--- | :--- | :--- | :--- |
 | **Stage 1** | **Single Worker Serial Pipeline** | ・EGM 規律 [Maker → Verify → Checker → Commit]<br/>・保護ファイル外部不変条件検査 (`SPEC.md`, `.github/**`)<br/>・決定論的 Evidence Token 発行 & ワンタイム消費<br/>・Quarantine 隔離退避 & 状態永続化 (`--resume`) | **実装・実証完了**<br/>(Phase 1〜15) | ✅ 自動検証ゲート合格<br/>✅ 受入テスト全件合格 |
 | **Stage 2** | **Evidence Bundling & Audit Tooling** | ・提出用 Evidence Bundle ZIP パッケージング<br/>・機密情報（`.env` 等）排除・サニタイズ<br/>・Tree SHA / Manifest 暗号学的拘束<br/>・独立監査 CLI (`auto-dev verify-bundle`) | **実装・実証完了**<br/>(Phase 16〜25) | ✅ 独立復元・改ざん検知テスト合格<br/>✅ 第三者監査検証合格 |
-| **Stage 3** | **Multi-Team Parallel Worktree Orchestration** | ・`MultiTeamOrchestrator` & `WorktreeManager`<br/>・チーム別 Worktree 物理分離 & `BoundaryGuard` 領空検査<br/>・`start_new_session` & 起動時 PGID 保持によるプロセス監督<br/>・決定論的孤児防止（親先行終了時の孫プロセス回収）<br/>・`os.link` による排他的・原子的 Evidence 保全 (TOCTOU 排除)<br/>・異ハッシュ衝突時の原本 Worktree 保護 & 冪等再利用 | **実装・実証完了**<br/>(Phase 26〜33) | ✅ 全 23 単体・E2E テスト合格<br/>✅ 2 プロセス同時保存独立試験合格<br/>✅ 孤児回収・ゾンビ排除実証合格 |
-| **Stage 4** | **Semantic Conflict Detection & Resolution** | ・複数チームブランチ統合時の意味論的矛盾・型不整合検出<br/>・型・インターフェース互換性自動解析<br/>・独立統合 Worktree での結合検証スクリプト自動実行<br/>・調停機構（Arbitrator）による競合検出と安全な差し戻し | **実装・実証完了**<br/>(Phase 34〜40) | ✅ 意味論的結合テスト合格<br/>✅ 競合検知・自動調停テスト合格 |
-| **Stage 5** | **Multi-Stage Delivery & Release Candidate** | ・Staging / Production 多段プロモーションパイプライン<br/>・原子的 Release Candidate タグ（`refs/tags/rc/<job_id>`）発行<br/>・Canary 独立検証 & 失敗時のクリーンアップ・安全ロールバック | **実装・実証完了**<br/>(Phase 41〜45) | ✅ RC 発行・昇格テスト合格<br/>✅ ロールバック検証テスト合格 |
+| **Stage 3** | **Multi-Team Parallel Worktree Orchestration** | ・`MultiTeamOrchestrator` & `WorktreeManager`<br/>・チーム別 Worktree 物理分離 & `BoundaryGuard` 領空検査<br/>・PGID ベースのプロセス監督と孤児回収<br/>・`os.link` による排他的・原子的 Evidence 保全 (TOCTOU 排除) | **ライブラリ実装**<br/>(Phase 26〜33)<br/>CLI 未接続 | ✅ 単体・E2E テスト合格<br/>✅ 孤児回収・ゾンビ排除実証 |
+| **Stage 4** | **Integration Gate** | ・独立統合 Worktree への各チームブランチのマージ<br/>・マージコンフリクト時の Fail-Closed 中断<br/>・統合後の結合検証スクリプト実行と失敗時の差し戻し | **ライブラリ実装**<br/>(Phase 34〜40)<br/>CLI 未接続 | ✅ 統合・コンフリクト検知テスト合格 |
+| **Stage 5** | **Release Candidate Promotion** | ・検証済み統合結果への原子的 Release Candidate タグ（`refs/tags/rc/<job_id>`）発行<br/>・検証失敗時のクリーンアップと中断ジョブの復旧 | **ライブラリ実装**<br/>(Phase 41〜45)<br/>CLI 未接続 | ✅ RC 発行・復旧テスト合格 |
 | **Stage 6** | **Failure Resilience, Auto-Healing & Process Supervision** | ・`auto-dev recover`（inspect / plan / apply）トランザクション復旧<br/>・SIGKILL・クラッシュ時の不整合自動診断 & 冪等修復<br/>・PGID ベースの確実なプロセスツリー回収 & ゾンビ誤認完全排除 | **実装・実証完了**<br/>(Phase 46〜48) | ✅ Pilot 04 カオステスト合格<br/>✅ 4 大クラッシュポイント復旧合格 |
-| **Stage 7** | **Independent Multi-LLM Audit & OS Sandbox Defense** | ・macOS `sandbox-exec`（デフォルト拒否 `deny file-read*` & 許可リスト）<br/>・Linux `bwrap`（Bubblewrap ネットワーク遮断 & 仮想環境個別マウント）<br/>・偽陽性 Red（Trivial / Fake Red）排除（AST 静的解析＋実行トレース）<br/>・Maker≠Auditor 異系統 LLM 独立監査境界 & REJECTED 不正記録 | **実装・実証完了**<br/>(Phase 49〜53) | ✅ 全 321 件テスト合格<br/>✅ 外部 LLM（GPT 6.1-Sol）監査合格<br/>✅ OS サンドボックス機密遮断実証 |
+| **Stage 7** | **Independent Multi-LLM Audit & OS Sandbox Defense** | ・macOS `sandbox-exec`（デフォルト拒否 `deny file-read*` & 許可リスト）<br/>・Linux `bwrap`（Bubblewrap ネットワーク遮断 & 仮想環境個別マウント）<br/>・偽陽性 Red（Trivial / Fake Red）排除（AST 静的解析＋実行トレース）<br/>・Maker≠Auditor 異系統 LLM 独立監査境界 & REJECTED 不正記録 | **実装・実証完了**<br/>(Phase 49〜53) | ✅ 外部 LLM（GPT 6.1-Sol）監査合格<br/>✅ OS サンドボックス機密遮断実証（CI は macOS）<br/>⚠️ Linux bwrap 経路は一部テストが環境依存 |
+| **Stage 8** | **Audit Governance & Outcome Metrics (v0.8.0)** | ・監査指摘の重要度振り分けと修正予算・sticky エスカレーション<br/>・finding_id 再採番・再報告・回帰への耐性<br/>・`commit-step` の Checker 判定・異系統モデル検査（Exit 4）<br/>・イベントログと `auto-dev metrics` / `METRICS.md` | **実装・実証完了**<br/>(Phase 63〜65) | ✅ 免疫テスト（監査ループ終了・Checker 方針・計測非干渉）合格<br/>✅ v0.7.0..HEAD の実 Claude Opus 5.5 監査（P0/P1 なし） |
 
 ---
 
@@ -394,25 +442,30 @@ auto_developer/
 ├── SPEC.md                    # プロダクト仕様書と保護不変条件
 ├── PLAN.md                    # タスク計画・ステート管理ファイル
 ├── LESSONS.md                 # 過去の地雷・設計ミスの外部記憶（Level 7 学習基盤）
+├── BACKLOG.md                 # リリースを止めない残件（監査 P2 など）
+├── METRICS.md                 # 指標の定義・判断との対応・フェーズ別の推移
+├── CHANGELOG.md               # 変更履歴（docs/releases/ にリリースノート）
+├── NIGHTLY_REPORT.md          # Morning Brief（auto-dev report で生成）
 ├── PROMPTS.md                 # Maker / Checker 無記憶プロンプト集
 ├── docs/designs/              # 詳細アーキテクチャ・設計仕様書
-├── src/auto_developer/        # コア実装パッケージ（全 19 モジュール）
+├── src/auto_developer/        # コア実装パッケージ（全 20 モジュール）
 │   ├── audit.py               # Multi-LLM 独立監査ポリシー・モデル判定・Finding 構造化
 │   ├── audit_store.py         # 監査証跡不変永続化ストア（REJECTED ログ記録）
 │   ├── boundary.py            # チーム担当範囲（領空）定義
 │   ├── bundler.py             # 暗号学的 Evidence Bundle ZIP 生成・検証
 │   ├── cli.py                 # auto-dev CLI エントリポイント
-│   ├── dispatcher.py          # 外部独立 LLM 監査ディスパッチャー
+│   ├── dispatcher.py          # PLAN.md タスク管理 & 監査指摘の重要度振り分け・修正予算
 │   ├── evidence.py            # 決定論的 Evidence Token 発行・消費
 │   ├── guard.py               # BoundaryGuard 領空検査・保護ファイル防壁
 │   ├── integration_gate.py    # 結合 Worktree 独立検証 & 原子的 RC 発行
 │   ├── manifest.py            # Bundle Manifest 構造化・SHA-256 拘束
+│   ├── metrics.py             # イベントログ（events.jsonl）とフェーズ集計
 │   ├── models.py              # コアデータモデル・列挙型定義
 │   ├── multi_team.py          # 並列チームオーケストレーター・PGID 監督
 │   ├── orchestrator.py        # NightlyOrchestrator コアエンジン
 │   ├── recovery.py            # トランザクショナル・クラッシュ復旧エンジン
 │   ├── reporter.py            # Morning Brief（意思決定支援レポート）生成
-│   ├── runner.py              # 独立監査ランナー
+│   ├── runner.py              # Maker / Checker 実行アダプター（外部コマンド連携・判定行解析）
 │   ├── verifier.py            # OS サンドボックス (bwrap / sandbox-exec) & RedTestVerifier
 │   └── worktree.py            # Git Worktree ライフサイクル管理 & ゼロロス保全
 ├── scripts/
@@ -423,8 +476,9 @@ auto_developer/
 │   ├── nightly-run/SKILL.md   # /nightly-run 自律パイプライン夜間実行
 │   ├── nightly-bundle/SKILL.md# /nightly-bundle 監査用 Evidence Bundle パッケージング
 │   └── nightly-verify/SKILL.md# /nightly-verify 独立第三者監査検証
-├── tests/                     # 包括的テストスイート（470+ tests）
+├── tests/                     # 包括的テストスイート（550+ tests）
 │   ├── immunity/              # 免疫テスト（改変不可の外部不変条件）
+│   ├── test_metrics.py        # イベントログ・指標集計テスト
 │   ├── test_red_verifier.py   # OS サンドボックス & 偽陽性 Red 排除テスト
 │   ├── test_audit_*.py        # Multi-LLM 独立監査境界テスト
 │   ├── test_multi_team*.py    # 並列 Worktree & 領空検査テスト
