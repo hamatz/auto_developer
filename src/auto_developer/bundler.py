@@ -11,6 +11,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+BUNDLE_FORMAT_VERSION = 2
+
+
+def _get_tool_version() -> str:
+    """パッケージのバージョン文字列を循環参照なしで取得する。"""
+    import auto_developer
+
+    version = getattr(auto_developer, "__version__", None)
+    if isinstance(version, str) and version:
+        return version
+    from auto_developer.cli import VERSION
+
+    return VERSION
+
 
 def find_release_blockers(plan_text: str) -> list[str]:
     """未完了の - [ ] 行のうち (Severity: P0 または (Severity: P1 を含む行、および - ESCALATED 行を返す (WWW.3)。"""
@@ -306,6 +320,8 @@ class EvidenceBundler:
 
             manifest_data: dict[str, Any] = {
                 "bundle_version": "1.0",
+                "format_version": BUNDLE_FORMAT_VERSION,
+                "tool_version": _get_tool_version(),
                 "generated_at": time.time(),
                 "job_id": actual_job_id,
                 "head_commit": head_commit,
@@ -373,8 +389,33 @@ class EvidenceBundler:
                 result.errors.append(f"Failed to parse bundle_manifest.json: {e}")
                 return result
 
+            if not isinstance(manifest_data, dict):
+                result.errors.append("bundle_manifest.json must contain a JSON object")
+                return result
+
             result.job_id = str(manifest_data.get("job_id", ""))
             result.head_commit = str(manifest_data.get("head_commit", ""))
+
+            format_version = manifest_data.get("format_version")
+            if isinstance(format_version, bool) or not isinstance(format_version, int):
+                result.errors.append(
+                    "Unsupported bundle format (format_version missing or invalid): "
+                    "v0.8 以前の形式です。v0.8.0 の auto-dev で検証してください。"
+                )
+                return result
+            if format_version < BUNDLE_FORMAT_VERSION:
+                result.errors.append(
+                    f"Unsupported bundle format_version={format_version}: "
+                    "v0.8 以前の形式です。v0.8.0 の auto-dev で検証してください。"
+                )
+                return result
+            if format_version > BUNDLE_FORMAT_VERSION:
+                result.errors.append(
+                    f"Unsupported bundle format_version={format_version}: "
+                    f"expected format_version={BUNDLE_FORMAT_VERSION}."
+                )
+                return result
+
             result.tasks = list(manifest_data.get("tasks", []))
             file_hashes: dict[str, str] = manifest_data.get("file_hashes", {})
             result.file_hashes = file_hashes

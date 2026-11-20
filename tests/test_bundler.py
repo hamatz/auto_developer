@@ -881,6 +881,114 @@ class TestEvidenceBundler(unittest.TestCase):
         self.assertTrue(res.is_valid)
         self.assertEqual(res.status, "VERIFIED")
 
+    def _rewrite_manifest(self, base_zip: Path, out_zip: Path, mutator) -> None:
+        """ZIP内の bundle_manifest.json だけを書き換えて新しい ZIP を作成するヘルパー。"""
+        with zipfile.ZipFile(base_zip, "r") as zf, zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as out_zf:
+            for name in zf.namelist():
+                if name == "bundle_manifest.json":
+                    manifest = json.loads(zf.read(name).decode("utf-8"))
+                    mutator(manifest)
+                    out_zf.writestr(name, json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
+                else:
+                    out_zf.writestr(name, zf.read(name))
+
+    def test_rel_1_bundle_records_format_version_and_tool_version(self):
+        """REL-1: bundle_manifest.json に format_version=2 (int) と tool_version (__version__) が記録されること。"""
+        import auto_developer
+        from auto_developer.cli import VERSION
+
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        out_zip = bundler.create_bundle(dest_path=self.repo / "rel1_bundle.zip")
+
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+
+        self.assertIn("format_version", manifest)
+        self.assertIs(type(manifest["format_version"]), int)
+        self.assertEqual(manifest["format_version"], 2)
+        self.assertEqual(manifest.get("tool_version"), auto_developer.__version__)
+        self.assertEqual(manifest.get("tool_version"), VERSION)
+
+    def test_rel_1_verify_bundle_rejects_missing_format_version_with_cli_exit_1(self):
+        """REL-1: format_version がない v0.8 以前の Bundle を verify_bundle / CLI verify-bundle が拒否し終了コード 1 を返すこと。"""
+        import io
+
+        from auto_developer.cli import main
+
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        base_zip = bundler.create_bundle(dest_path=self.repo / "rel1_base.zip")
+        legacy_zip = self.repo / "rel1_legacy_no_fv.zip"
+        self._rewrite_manifest(base_zip, legacy_zip, lambda m: m.pop("format_version", None))
+
+        res = bundler.verify_bundle(legacy_zip)
+        self.assertFalse(res.is_valid)
+        self.assertEqual(res.status, "INVALID")
+        self.assertTrue(
+            any("v0.8" in err and "v0.8.0" in err for err in res.errors),
+            f"Expected v0.8.0 guidance message in errors, got: {res.errors}",
+        )
+
+        # CLI verify-bundle (text & --json) returns exit code 1
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = captured
+            exit_code = main(["--work-dir", str(self.repo), "verify-bundle", str(legacy_zip)])
+        finally:
+            sys.stdout = old_stdout
+        self.assertEqual(exit_code, 1)
+        self.assertIn("v0.8.0", captured.getvalue())
+
+        captured_json = io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = captured_json
+            exit_code_json = main(["--work-dir", str(self.repo), "verify-bundle", str(legacy_zip), "--json"])
+        finally:
+            sys.stdout = old_stdout
+        self.assertEqual(exit_code_json, 1)
+        parsed = json.loads(captured_json.getvalue())
+        self.assertFalse(parsed["is_valid"])
+        self.assertEqual(parsed["status"], "INVALID")
+        self.assertTrue(any("v0.8.0" in err for err in parsed["errors"]))
+
+    def test_rel_1_verify_bundle_rejects_old_or_invalid_format_versions(self):
+        """REL-1: format_version が 2 未満または整数以外の不正値、および未対応バージョンの Bundle を拒否すること。"""
+        from auto_developer.cli import main
+
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        base_zip = bundler.create_bundle(dest_path=self.repo / "rel1_base_invalid.zip")
+
+        for idx, bad_fv in enumerate([1, 0, -1, None, "2", 2.0, True]):
+            bad_zip = self.repo / f"rel1_bad_fv_{idx}.zip"
+            self._rewrite_manifest(base_zip, bad_zip, lambda m, v=bad_fv: m.__setitem__("format_version", v))
+            res = bundler.verify_bundle(bad_zip)
+            self.assertFalse(res.is_valid, f"format_version={bad_fv!r} must be rejected")
+            self.assertEqual(res.status, "INVALID", f"format_version={bad_fv!r} must be INVALID")
+            self.assertTrue(
+                any("v0.8" in err and "v0.8.0" in err for err in res.errors),
+                f"Expected v0.8.0 guidance for format_version={bad_fv!r}, got: {res.errors}",
+            )
+            if bad_fv == 1:
+                self.assertEqual(main(["--work-dir", str(self.repo), "verify-bundle", str(bad_zip)]), 1)
+
+        # 未対応の将来バージョン (3) も拒否すること
+        future_zip = self.repo / "rel1_future_fv.zip"
+        self._rewrite_manifest(base_zip, future_zip, lambda m: m.__setitem__("format_version", 3))
+        res_future = bundler.verify_bundle(future_zip)
+        self.assertFalse(res_future.is_valid)
+        self.assertEqual(res_future.status, "INVALID")
+        self.assertTrue(any("format_version" in err for err in res_future.errors))
+
+        # 証跡なし (v0.8 なら INTEGRITY_ONLY -> exit 2) の旧形式 Bundle でも exit 1 (INVALID) で拒否すること
+        import shutil
+        shutil.rmtree(self.repo / ".git" / "nightly_evidence" / "records")
+        no_ev_zip = self.repo / "rel1_no_ev_base.zip"
+        bundler.create_bundle(dest_path=no_ev_zip)
+        no_ev_legacy_zip = self.repo / "rel1_no_ev_legacy.zip"
+        self._rewrite_manifest(no_ev_zip, no_ev_legacy_zip, lambda m: m.pop("format_version", None))
+        self.assertEqual(main(["--work-dir", str(self.repo), "verify-bundle", str(no_ev_legacy_zip)]), 1)
+
 
 
 
