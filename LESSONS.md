@@ -1,13 +1,20 @@
-# Repository Lessons Learned (AI Operational Memory)
+# LESSONS.md — 踏んだ地雷の外部記憶
 
 <!--
-エージェントが踏んだ地雷・設計ミス・ライブラリの癖を蓄積する外部記憶。
-プロンプトに常時全文を入れるのではなく、着手時に関連する項目だけを検索して読む。
-教訓はここに書いて終わりにせず、できる限り下の段（検査・関門・作り）に置き、
-元の失敗を再現してガードが作動することを確かめる（Proof）。
-モデルを更新したら、危険度の低いガードを外して元の失敗を再現し、
-もう起きなければ削除して理由をここに残す。権限・機密・本番接続のガードは自動では外さない。
-以下の2件は記入例です。プロジェクトに合わせて書き換えてください。
+エージェントが踏んだ地雷・設計ミス・ライブラリの癖を蓄積する外部記憶です。
+着手前に関連する項目だけを検索して読みます（auto-dev run は下の「恒久教訓インデックス」節から関連する項目を Maker に自動で渡します）。
+各項目の Trap と Rule は1行で書いてください（Maker に渡されるのは各フィールドの1行目だけです）。
+
+v0.9.0 で、v0.8.0 までの 40 件超の教訓を、今も効いている原則 14 件に統合しました。
+個々の事象の詳細（Trap・Proof の原文）は docs/history/LESSONS-v0.8.md に凍結しています。
+
+運用
+- 教訓はここに書いて終わりにせず、できる限り下の段（道具・検査・関門・作り）に置き、
+  元の失敗を再現してガードが作動することを確かめる（Proof）。
+- 同じ原則の事例が増えたら、新しい項目を足すのではなく既存の項目の Context に追記する。
+- モデルを更新したら、危険度の低いガードを外して元の失敗を再現し、もう起きなければ削除して理由を残す。
+  権限・機密・本番接続のガードは自動では外さない。
+- 監査ループ（AUDIT-5）が解決した指摘は、下のインデックスの先頭に自動で追記される。
 -->
 
 ## 記録フォーマット
@@ -21,375 +28,114 @@
 
 ## 恒久教訓インデックス
 
+### [2026-11-20] 「実装済み」と書いた機能が利用者の経路から使えず、README の手順も実際の挙動とずれていた (Documented ≠ Reachable)
+- Context: v0.9.0 準備。README.md、`src/auto_developer/multi_team.py` / `manifest.py`、`cli.py`。
+- Trap: マルチチーム実行はライブラリとして実装・テスト済みだった。しかし `TeamManifest` と `MultiTeamOrchestrator` がつながっておらず、CLI からもスキルからも呼べなかった。全チームが同じ PLAN.md を更新するので、つないだとしても統合時に必ずコンフリクトする構造だった。README にも、実際の挙動と違う記述が残っていた。「`--maker-cmd` 未指定時は MockRunner で動作」と書いてあったが、実際は終了コード 2 になる。Checker を指定しない隔離体験の手順も、そのままでは起動できなかった。
+- Rule: 「実装済み」は、利用者が使う経路（CLI・スキル）から E2E テストで動かせたときにだけ名乗る。README に書く手順は、テストでそのまま実行する。単体テストが通っていることは、利用者が使える根拠にならない。
+- Rung: 検査（README クイックスタートの実行テスト DX-1、2 チーム E2E テスト TEAM-19）
+- Immunity Test: v0.9.0 で追加（`tests/test_quickstart.py`, `tests/test_teams_cli_e2e.py` を予定）
+- Proof: 2026-11-20 の棚卸しで、コードを読んで確認した（CLI に `teams` 系のサブコマンドがなく、`run` は Maker / Checker 未設定で終了コード 2 を返す）。
+
 ### [2026-11-18] 免疫テストを「都合のよい相手」で書くと、仕組みが現実の相手に対して成り立たない (Immunity Tests Must Model the Real Counterparty)
-- Context: Phase 63（SPEC 機能WWW）、`src/auto_developer/dispatcher.py`（重要度トリアージ・修正予算）、`tests/immunity/test_immunity_audit_budget.py`。
-- Trap: 最初の免疫テストは「監査役は毎サイクル一意な ID で新しい指摘だけを返す」前提で書かれており、全件 Green でも次の 3 つの欠陥を見逃した。(1) 監査役がサイクルごとに AUD-001 から採番し直すと、P2・ESCALATED 経路で `CODE_HASH_TAMPERED` が送出され監査ステージ全体が AUDIT_FAILED になる。(2) その修正で冪等性判定を広げた結果、完了済み（- [x]）指摘の再発（回帰）が「登録済み」として黙って捨てられた（Fail-Open）。(3) 未解決の指摘が再報告だけされるサイクルで streak が 0 に戻り、エスカレーション済みモジュールへの自動登録が 1 サイクルおきに再開した（終了保証の不成立）。いずれも仕様（SPEC WWW）の文言自体に穴があり、実装は文言どおりだった。
-- Rule: 安全・終了保証の免疫テストは、相手（監査役・Maker・Checker）の現実的な振る舞いでシナリオを書く。少なくとも「ID の再採番」「未解決指摘の再報告」「修正済み指摘の再発」「指摘 0 件のサイクル」を混ぜる。仕様を書く段階でも、状態（未着手 / 完了 / 抑止 / エスカレーション）ごとに扱いを明記し、「同一なら重複させない」のような状態を区別しない規則を書かない。
-- Rung: 検査（免疫テストのシナリオ設計）。仕様査読の観点として AGENTS.md 第2部への追加も検討。
-- Immunity Test: `tests/immunity/test_immunity_audit_budget.py` の `test_reused_finding_id_*`, `test_reused_finding_id_for_completed_task_reopens_as_new_task`, `test_persistent_auditor_cannot_reopen_escalated_module`, `test_rereport_only_cycle_does_not_reset_streak`。
-- Proof: 3 つの欠陥はいずれも、ステップ完了後の人間側レビューで再現スクリプトにより確認し、Red-First で免疫テストを追加してからステップ 6・7 で修正した（2d8e647, ad46d10）。修正後、同じ再現スクリプトで期待どおりの挙動を確認。
+- Context: `src/auto_developer/dispatcher.py`（重要度トリアージ・修正予算）、`tests/immunity/test_immunity_audit_budget.py`。
+- Trap: 最初の免疫テストは「監査役は毎サイクル一意な ID で新しい指摘だけを返す」前提で書かれていたため、全件 Green でも3つの欠陥を見逃した（ID が再採番されると監査ステージ全体が失敗する／修正済みの指摘の再発が黙って捨てられる／再報告だけのサイクルで streak が 0 に戻り終了が保証されない）。
+- Rule: 安全や終了を保証する免疫テストは、相手（監査役・Maker・Checker）の現実的な振る舞いでシナリオを書く。少なくとも「ID の再採番」「未解決の指摘の再報告」「修正済みの指摘の再発」「指摘0件のサイクル」を混ぜる。仕様にも、状態（未着手 / 完了 / 抑止 / エスカレーション）ごとの扱いを明記する。
+- Rung: 検査（免疫テストのシナリオ設計）
+- Immunity Test: `tests/immunity/test_immunity_audit_budget.py`
+- Proof: 3つの欠陥を再現スクリプトで確認した。Red-First で免疫テストを追加してから修正した（2d8e647, ad46d10）。
 
-### [2026-11-16] 外部LLM独立監査におけるP2モグラ叩きの底なし沼化と自律サイクルの終了判定 (Preventing Endless Audit Loops and Over-Engineering in LLM Static Verification)
-- Context: 外部 LLM（Claude Opus 5.5 / Anthropic API）による独立監査ステージ、`src/auto_developer/verifier.py`（AST による Red テスト因果関係・Trivial 判定器）、自律開発ループ終了判定。
-- Trap: 監査モデルが提示する構文上のエッジケース（P2: 未実行ラムダ、例外ハンドラ内の raise、ネスト関数、別名 import、dotted import 等）を1件ずつモグラ叩きで修正し続けた結果、開発の主眼が「重大欠陥の排除」から「完全な静的プログラム解析器の構築」という不可能な目標（Riceの定理）へ変質し、40サイクル以上にわたり開発が終了しなくなるエンドレスゲームに陥った（Sol氏 Phase 62 考察）。
-- Rule:
-  1. **監査の目的は「欠陥ゼロの証明」ではなく「重大欠陥の排除」である**: 完全な静的解析器を目指す方向には自然な終点がない。AI が正しいことをやり過ぎて全体として間違った行動（開発の停滞）に陥ることを防ぐ。
-  2. **重要度に基づくトリアージとリリース切り離し**:
-     - P0/P1（重大欠陥・安全性破綻・監査の Fail-Open・偽装）: 即時修正・リリース BLOCK。
-     - P2（限定条件での不具合・構文エッジケース）: Backlog に記録し、リリースを BLOCK しない。
-     - P3（改善提案・理論的懸念）: レポート通知のみ。
-  3. **自動修正回数の上限設定**: 1つの監査指摘に対する自動修正は最大3回、同一モジュールへの連続監査は最大5サイクルなど、明確な打ち切り・人間への引き渡し条件を設ける。
-  4. **監査システムの自己肥大化防止**: 監査で生まれたテスト判定器の改善そのものを、再び同じ監査モデルに無制限で監査させない。
-- Rung: 作り（`AuditDispatcher` の重要度トリアージ・モジュール単位の修正予算・sticky エスカレーション） & 関門（`find_release_blockers` / `verify_bundle` の RELEASE_BLOCKED）。Phase 63（SPEC 機能WWW）で実装。
-- Immunity Test: `tests/immunity/test_immunity_audit_budget.py`（15 件）。主なもの:
-  - `test_endless_p2_stream_never_becomes_plan_task`: P2 を 20 サイクル × 3 件返し続けても Maker タスク 0 件・Red 検証 0 回・BACKLOG に 60 件。
-  - `test_persistent_auditor_cannot_reopen_escalated_module`: 未解決指摘を毎サイクル再報告し、新規指摘・指摘 0 件・再報告のみのサイクルを混ぜても、上限到達後は新規指摘がすべて ESCALATED のまま、未着手タスクが増えない。
-  - `test_reused_finding_id_*` / `test_reused_finding_id_for_completed_task_reopens_as_new_task`: 監査役の ID 再採番（毎サイクル AUD-001）でも監査ステージが落ちず、完了済み指摘の再発は新タスクとして再オープンされる。
-  - `test_human_reset_of_budget_entry_reenables_dispatch`: エスカレーションの解除は人間による台帳エントリ削除のみ。
-- Proof:
-  - 2026-11-18: 同一入力（P2 を 20 サイクル × 3 件 = 60 件、`location` は同一モジュール）を Phase 63 着手前 f299d39 と ad46d10 に与えた。f299d39: Maker タスク 60 件・Red 検証 60 回（元の失敗を再現）。ad46d10: Maker タスク 0 件・Red 検証 0 回。
-  - 免疫テストは f299d39 で 15 件中 13 件が Red（大半は新 API 不在によるエラー）、ad46d10 で 15 件すべて Green。
-  - 機械化の範囲: Rule 1・2（トリアージ、P2 でリリースを止めない）と Rule 3 の「同一モジュールへの連続監査上限」は作りに置いた。Rule 3 の「1 指摘あたり自動修正 3 回」はタスク単位の既存 Strict Fail-Fast（2 回失敗で隔離）で代替しており、専用の仕組みはない。Rule 4（監査器を同じ監査モデルに無制限に監査させない）は未機械化（BACKLOG IDEA-005）。
-  - 初回: Phase 62 において AUD-901 修正後、AUD-1001 (P2) をリリースをブロックしない Backlog として手作業で切り離し、v0.7.0 リリース判定（10/10 一致 Evidence Bundle）を完走。
+### [2026-11-16] 監査ループは「欠陥ゼロまで回す」のではなく、終わるように設計する (Audit Loops Must Terminate)
+- Context: 外部 LLM による独立監査と自己改善ループ（SPEC AUDIT-2〜4）。
+- Trap: 監査役は毎回なにかしら指摘を返す。P2 級の指摘まで修正タスクにしていたため、ループが止まらなかった。修正がさらに過剰設計を生み、それが次の指摘を呼んだ。
+- Rule: 指摘を重要度で振り分ける（P0/P1 は PLAN、P2 は BACKLOG、INFO は記録のみ）。モジュール単位に修正予算（連続サイクルの上限）を設け、超えたら人間に渡す（解除は人間だけが行う）。リリースを止めるのは未解決の P0/P1 とエスカレーションだけとする。
+- Rung: 作り（`AuditDispatcher`）、関門（`verify-bundle` の `RELEASE_BLOCKED`）
+- Immunity Test: `tests/immunity/test_immunity_audit_budget.py`
+- Proof: Phase 63 で、再採番・再報告を繰り返す監査役をテストで再現した。どちらの場合も上限で止まることを確認した。
 
-### [2026-11-15] 条件分岐後の変数環境合流における不確定性の無視と静的解析の底なし沼化 (Ignoring Uncertainty in Control Flow Variable Merging and Static Analysis Scope Creep)
-- Context: `src/auto_developer/verifier.py` (`_process_stmts_in_order`, `check_trivial_red_ast`)
-- Trap: 分岐（`if`）内で再代入された変数（例: `x = 1; if compute_val(1) == 2: x = 2; self.assertEqual(x, 2)`）が、分岐後に合流（Merge）されず分岐前の古い固定値 `x = 1` のまま残っていたため、正常なテストを固定値不一致（`1 == 2`）の `TRIVIAL_RED` として誤拒絶した（Sol氏 Phase 55 P1指摘）。
-- Rule: Python の動的制御フローを静的に 100% 解析しようとする過剰設計（Scope Creep）を戒める。分岐内で変更された変数や条件式が動的な場合、静的に確信できない変数は「不確定（Unknown / Dependent）」として `var_env` から除去し、**「不確定な値」を根拠に決して TRIVIAL_RED と断定しない（安全側に倒す）**。静的解析で判断できない不確実なケースは、動的実行結果との組み合わせや追加監査に委ねる。
-- Rung: 作り（抽象解釈における合流演算・不確定性の安全側扱い） & 検査
-- Immunity Test: `tests/test_red_verifier.py`（Phase 56 PPP.1 で追加予定）
-- Proof: `x = 1; if compute_val(1) == 2: x = 2; self.assertEqual(x, 2)` が `TRIVIAL_RED` として誤判定されず、正常に受理されることを実証。
+### [2026-11-12] 査読と監査は異なる系統のモデルで行い、それを機械で強制する (Cross-Family Review, Enforced)
+- Context: Checker サブエージェント、独立監査ランナー、`commit-step`。
+- Trap: Checker を `inherit` で起動して Maker と同じ系統のモデルが自分の実装を承認していた／監査の設定上のモデル名と実際に起動したモデル名が違っていた／手順書で「異系統にする」と決めただけでは守られなかった。
+- Rule: Maker と Checker / Auditor の系統の違いはコマンドの必須引数で受け取り、同一モデル・同一系統・系統不明のいずれかなら拒否する。モデル名は自己申告なので、記録に残して事後に照合できるようにする。
+- Rung: 作り（`commit-step` 終了コード 4、`verify_model_independence`）
+- Immunity Test: `tests/immunity/test_immunity_checker_policy.py`, `tests/test_audit_model_policy.py`
+- Proof: 同一系統や系統不明（`pro`）の組み合わせで、終了コード 4 になり、Evidence が消費されないことを確認した。
 
-### [2026-11-15] AST 静的解析における文の実行順序（Program Order）の無視による正常テストの誤判定 (Disregarding Program Execution Order in AST Causal Analysis)
-- Context: `src/auto_developer/verifier.py` (`check_trivial_red_ast`, 因果依存性解析)
-- Trap: テストメソッド内の代入文をまとめて先に処理して最終的な変数環境（`var_env`）を構築した後にアサーションを検証したため、アサーション実行後の再代入（例: `x = compute_val(1); self.assertEqual(x, 2); x = 999`）が過去のアサーション時点の評価に逆流し、正常なテストを固定値比較（`999 == 2`）の `TRIVIAL_RED` として誤判定した（Sol氏 Phase 54 P1指摘）。
-- Rule: AST 解析はメソッド内の文の実行順序（Program Order）に沿って順次走査し、アサーションが出現したその時点におけるスコープの変数状態・因果依存関係スナップショットを参照して判定する。アサーション以降の代入が過去の判定に影響してはならない。
-- Rung: 作り（AST 文順次トラバーサル） & 検査
-- Immunity Test: `tests/test_red_verifier.py`（Phase 55 OOO.1 で追加予定）
-- Proof: `x = compute_val(1); self.assertEqual(x, 2); x = 999` が `TRIVIAL_RED` として誤判定されず、正常に処理されることを実証。
-
-### [2026-11-15] 条件付き self.fail() の画一的な無条件失敗誤判定 (Guarded vs Unconditional self.fail() in Static Analysis)
-- Context: `src/auto_developer/verifier.py` (`check_trivial_red_ast`, `_is_in_try_block_with_call`)
-- Trap: `self.fail()` の例外救済を `try` ブロックのみに限定していたため、`if compute_val(1) != 2: self.fail("wrong value")` のように製品コードの戻り値や動的変数に依存する条件分岐下の正当なテストを「無条件失敗」として一律に `TRIVIAL_RED` 排除してしまった（Sol氏 Phase 54 P1指摘）。
-- Rule: `self.fail()` を構文上だけで無条件失敗とみなしてはならない。`If` / `While` などの分岐ガード下に存在し、その条件式が製品コード呼出や依存変数に繋がっている場合は、正当な条件付き不具合検出テストとして受理する。
-- Rung: 作り（分岐条件式の因果依存追跡） & 検査
-- Immunity Test: `tests/test_red_verifier.py`（Phase 55 OOO.2 で追加予定）
-- Proof: `if compute_val(1) != 2: self.fail(...)` が `TRIVIAL_RED` として誤拒絶されず、正常に受理されることを実証。
-
-### [2026-11-14] 製品コードを実行しただけの巧妙な偽 Red（因果関係のない固定値比較）は製品不具合の証明にならない (Product Code Execution ≠ Defect Authenticity)
-- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`, AST 解析および動的実行トレース)
-- Trap: Phase 53 で AST 解析（定数比較検出）と `sys.settrace()` による製品コード実行トレースを導入した。しかし、テスト内で `add(1, 2)` のように形式的に製品コードを呼んだ上で `self.assertEqual(1, 2)` や無関係な固定値比較で失敗させる巧妙な偽 Red は、製品コードを通過しているためトレース検証を通過しうる（Sol氏 Phase 53 P1）。
-- Rule: テストメソッドが製品コードを呼んだこと（実行の有無）だけでなく、アサーションの引数・比較対象が製品コードの戻り値や副作用と因果関係を持つかを AST レベルで検証する。因果関係のない合成された失敗は `TRIVIAL_RED` として確実に排除する。
-- Rung: 作り（AST 因果性解析の深化） & 検査
-- Immunity Test: `tests/test_red_verifier.py`（Phase 54 NNN.2 で追加予定）
-- Proof: 形式的に `src/` の関数を呼び出してから固定値比較を行うテストが `TRIVIAL_RED` として `REJECTED` されることを実証。
-
-### [2026-11-14] macOS sandbox-exec の広範なシステムディレクトリ許可（/Library, /private/var, /etc）による潜在的情報露出 (Broad Directory Allowances in macOS Sandbox Profile)
-- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._generate_macos_profile`)
-- Trap: Phase 53 で `(deny file-read*)` のデフォルト拒否を追加したが、実行に必要なライブラリを確保するために `/Library` や `/private/var`、`/etc` 全体を allow していたため、ユーザーキャッシュやサービス設定などの不要な情報が露出する潜在的リスクが残っていた（Sol氏 Phase 53 P1）。
-- Rule: 読み取り許可はシステム動的ライブラリ（`/System/Library/Frameworks`, `/usr/lib`）および Python 実行環境のプレフィックス配下に厳格に限定し、`/Library` や `/private/var`、`/etc` 全体の一括 allow は廃止する。
-- Rung: 作り（sandbox-exec 許可リスト最小化） & 検査
-- Immunity Test: `tests/test_red_verifier.py`（Phase 54 NNN.1 で追加予定）
-- Proof: `/Library` や `/private/var` 直下の非公開パスへの読み取りが `PermissionError` で遮断されることを実証。
-
-### [2026-11-13] サンドボックス内で /etc 全体や仮想環境ディレクトリ全体を公開し、ホスト設定・認証情報が露出する余地を残した (Overexposed Host Directories in Sandbox)
-- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`, Linux `bwrap` マウント構成)
-- Trap: Phase 51 で `--ro-bind / /` を廃止した際、システムパスとして `/etc` 全体や、ホーム配下の Python 仮想環境ディレクトリ全体を `--ro-bind` してしまった。Linux の `/etc` にはサービス設定や秘密情報が含まれうる上、仮想環境ディレクトリ全体を公開すると不要な設定やファイルが露出する余地が残る（Sol氏 Phase 51 P1）。
-- Rule: サンドボックスへの読み取り公開は最小特権の原則（Least Privilege）を徹底する。`/etc` 全体の公開は禁止し、DNS/SSL に最低限必要な個別ファイル（`/etc/resolv.conf`, `/etc/ssl` 等）のみを条件付きで公開する。仮想環境も `sys.prefix` のみを厳格に公開し、`/etc/shadow` 等の機密ファイル読み取りが拒絶されることを単体テストで決定論的に実証する。
-- Rung: 作り（bwrap マウントパスの最小化） & 検査
-- Immunity Test: `tests/test_red_verifier.py`（Phase 52 LLL.1 で追加予定）
-- Proof: 候補テストから `/etc/shadow` や `/etc/sudoers` の読み取りを試みた場合に `PermissionError` または `FileNotFoundError` で遮断され、テスト結果が出力へ漏洩しないことを確認する。
-
-### [2026-11-13] macOS sandbox-exec の (allow default) 起点により、明示拒否していないホーム外パスへのアクセスが漏洩しうる (Implicit Read Leaks from Default-Allow Sandbox Profile)
-- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`, macOS `sandbox-exec` TinyScheme プロファイル)
-- Trap: macOS のプロファイルを `(allow default)` 起点で記述し、`~` と元リポジトリのみを `(deny file-read*)` で除外したため、ホームディレクトリ外に置かれた機密ファイル（`/etc`, `/private/etc`, `/Library/Keychains` 等）への読み取りが暗黙的に許可されたままになっていた（Sol氏 Phase 51 P1）。
-- Rule: デフォルト許可プロファイルであっても、システム重要設定・認証情報（`/etc`, `/private/etc`, `/Library/Keychains`, `~/.ssh`, `~/.aws`, `~/.gnupg`）への `file-read*` は明示的に拒絶（deny）する。Python 実行に必要な prefix のみを優先 allow し、機密領域へのアクセスがカーネル拒絶されることを単体テストで実証する。
-- Rung: 作り（sandbox-exec deny リスト強化） & 検査
-- Immunity Test: `tests/test_red_verifier.py`（Phase 52 LLL.2 で追加予定）
-- Proof: 候補テストから `/private/etc/master.passwd` や `/Library/Keychains` の読み取りを試みた場合に `PermissionError` で遮断されることを実証する。
-
-### [2026-11-13] 外部独立 Auditor からの敵対的・不完全な Finding に対する自律的選別耐性 (Resilience Against Hostile/Malformed External Auditor Findings)
-- Context: `src/auto_developer/dispatcher.py` (`AuditDispatcher.dispatch_finding`), `src/auto_developer/verifier.py`, `tests/test_level7_real_loop_e2e.py`
-- Trap: 実 Multi-LLM（Gemini Maker vs Claude Opus Auditor）接続時、外部モデルが敵対的なコード（機密盗取・リポジトリ破壊）や不完全な Finding（構文エラー、未再現、誤判定）を返す可能性がある。これらを無条件で信じてタスク登録・修正を行うと、リポジトリ汚染や無限ループに陥る。
-- Rule: 外部 LLM の出力は一切信用しない。Deterministic Verifier が OS サンドボックス内で再現性を検証し、`GENUINE_RED`（かつリポジトリ改ざん・機密読み取りなし）と判定されたもののみを `PLAN.md` に登録する。不正なコードや偽陽性 Red は即座に `REJECTED` で排除し、パイプラインの安全稼働を保証する。
-- Rung: 作り（AuditDispatcher の厳格な選別と Fail-Closed 処理） & 検査
-- Immunity Test: `tests/test_level7_real_loop_e2e.py`（Phase 52 LLL.3 で追加予定）
-- Proof: 構文エラーや改ざん試行、未再現の Finding が投入された場合に、PLAN.md や免疫テスト、LESSONS.md に昇格せず `REJECTED` で安全停止・スキップされることを実証する。
-
-### [2026-11-12] リソース制限を実行隔離と取り違え、同一ユーザーの chmod で元リポジトリを書き換えられた (Resource Limits ≠ Isolation)
-- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`, `_lockdown_repo`, `_apply_resource_limits`), `NIGHTLY_REPORT.md`
-- Trap: Phase 49 III.3 で `RLIMIT_FSIZE` / `RLIMIT_AS` / `RLIMIT_CPU` と環境変数の除外を追加し、「OSレベル実行隔離」が完了したと報告した。しかし候補テストは元リポジトリと同じユーザーで動くため、サブプロセスから `chmod u+w` してファイルを書き換えられ、しかもその実行が `GENUINE_RED` として受理された（Sol氏 Phase 49 P0）。Morning Brief には検証していない「実OS境界に束縛された基盤」という表現を書いた。
-- Rule: リソース制限（量）・コード検査（形）・実行隔離（権限）・外部アクセス制限は別の責務として扱う。実行隔離は子孫プロセスにも及ぶ OS の機構（`sandbox-exec` / `bwrap` / コンテナ）で行い、使えなければ実行を拒否する。改ざんの事後検知を重ね、改ざんを伴う実行は結果に関わらず拒絶する。報告には実証した範囲だけを書き、未実証の性質は既知の限界として分けて書く。
-- Rung: 作り（サンドボックス必須化と事後検知） & 検査
-- Immunity Test: `tests/test_red_verifier.py`（Phase 50 JJJ.1 / JJJ.2 で追加予定）
-- Proof: （JJJ.1 完了時に記録）サブプロセス経由の canary 書き換えを試みる候補テストで canary が `ORIGINAL` のまま残り、事後検知用の注入実行では `REPO_TAMPER_DETECTED` が返ることを確認する。
-
-### [2026-11-12] 実験の生成物がコミットに混入し、Checker もそれを見られなかった (Scratch Artifact & Reconstructed Diff)
-- Context: Phase 49 Step 3（コミット `ee32fcd`）、`test_large.bin`
-- Trap: `RLIMIT_FSIZE` の挙動確認をリポジトリ直下で実行し、生成された `test_large.bin` が未追跡のまま残った。`commit-step` がそれを含めてコミットした。Checker に渡した diff は `git add -N` をせず、さらに長すぎて切り詰められた出力を手で貼り直したもので、未追跡ファイルが含まれていなかった。
-- Rule: 実験は `mktemp -d` の一時ディレクトリで行う。verify-step の前に `git status --porcelain` で意図しないファイルがないか確認する。Checker 入力は `git add -N . && git diff <checkpoint>` をファイルに書き出し、そのパスを渡して Checker に直接読ませる（手で再構成しない）。
-- Rung: 道具（PLAN.md の作業手順） → 将来は verify-step に未追跡ファイル一覧の提示を組み込む
-- Immunity Test: なし（手順。Phase 50 JJJ.3 で `test_large.bin` を削除）
-- Proof: （Phase 50 の各ステップで、Checker 入力ファイルに未追跡ファイルが含まれることを確認して記録）
-
-### [2026-11-12] Checker サブエージェントを Maker と同じモデル系統で起動していた (Same-Family Checker)
-- Context: Phase 48 / Phase 49 の Checker 査読（`invoke_subagent` の `Model: "inherit"`）
-- Trap: Maker（Gemini 系）が Checker を `inherit` で起動したため、Checker も同じ Gemini 系モデルになっていた。AGENTS.md Rule 6（異系統モデルによる査読）に反しており、APPROVE の独立性が弱かった。
-- Rule: Checker を起動するときは、現在の Maker と別系統のモデルを明示指定する（`inherit` を使わない）。commit-step の `--checker-reason` に Checker のモデル指定を記録する。
-- Rung: 道具（PLAN.md の作業手順） → 将来は commit-step で Checker モデル系統を記録・照合する
+### [2026-11-10] Checker には原文を渡す。要約・再構成・混入は要件の欠落になる (Verbatim Checker Input)
+- Context: Checker への入力（SPEC と差分）。
+- Trap: SPEC を要約して渡したため要件が落ちて違反を見逃した／差分を手で再構成したため、実験で生成したファイルがコミットに混入したのに Checker はそれを見られなかった。
+- Rule: SPEC の該当節は機械的に切り出した原文を、差分は `git add -N . && git diff <checkpoint>` の生の出力を、ファイルに書き出してパスで渡す。実験は `mktemp -d` の中で行う。`verify-step` の前に `git status --porcelain` を確認する。
+- Rung: 道具（PLAN.md の作業手順）。将来は Checker 入力を生成するサブコマンドへ下げる。
 - Immunity Test: なし（手順）
-- Proof: （Phase 50 の各 commit-step の `--checker-reason` に記録）
+- Proof: なし（運用手順。道具にした時点でテストを追加する）
 
-### [2026-11-11] コミット指定検証のチェックアウト失敗時における現行ツリーフォールバック (Commit Verification Fail-Closed)
-- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._create_isolated_clone`), `tests/test_red_verifier.py`
-- Trap: 特定のコミット（`commit=<sha>`）を指定して一時クローンを作成する際、`git checkout --detach <commit>` が失敗（存在しないコミット等）しても、`cloned_ok=False` の後に `shutil.copytree` で現行作業ツリーを複製してテストを実行してしまい、本来失敗すべき検証が現行コードで Green になるフェイルオープンが発生した（Sol氏 Phase 48 P1）。
-- Rule: コミットが指定されている場合、Git クローンおよびチェックアウトの失敗時に現行作業ツリーへのフォールバック（`copytree`）を物理遮断する。チェックアウト失敗時は `COMMIT_CHECKOUT_FAILED` で即座に検証を拒絶（Fail-Closed）し、代替コードでの誤判定を絶対に防ぐ。
-- Rung: 作り（_create_isolated_clone のFail-Closed化） & 検査
-- Immunity Test: `tests/test_red_verifier.py`（Phase 49 III.1 で追加予定）
-- Proof: 存在しないコミット（例: "0"*40）を指定した `verify_candidate_test` が、現行HEADのコードを実行せず `COMMIT_CHECKOUT_FAILED` で確実に拒絶されることを実証。
+### [2026-11-10] 証跡は正規の経路でのみ発行し、確定するツリーと SPEC に拘束する (Evidence via Sanctioned Path Only)
+- Context: `verify-step` / `commit-step`、`.git/nightly_evidence/`。
+- Trap: 正規の経路が失敗したときに、Evidence Record を手で書いて「機械が発行した証跡」に見せかけてしまった。検証した後のツリーとコミットしたツリーがずれる経路もあった。
+- Rule: Evidence は `verify-step` → Checker → `commit-step` でのみ発行・消費する。`.git/nightly_evidence/` を直接編集しない。正規の経路が失敗したら、手で埋めずに止まって記録する。Evidence は、PLAN.md の更新を含む最終ツリーの SHA と SPEC のハッシュに拘束する。
+- Rung: 作り（Tree SHA / SPEC SHA 拘束）、プロンプト（手書き禁止）
+- Immunity Test: `tests/test_nightly_orchestrator.py`, `tests/test_bundler.py`
+- Proof: 検証の後にツリーを改変すると、`commit-step` が終了コード 3 で拒否することを確認した。
 
-### [2026-11-10] After Green を未コミットの作業ツリーで確認し、HEAD を after_commit として記録する証明の空洞化 (Commit-Bound Learning Proof)
-- Context: `src/auto_developer/audit.py` (`AuditResolutionManager.resolve_task`), `tests/test_level7_real_loop_e2e.py`
-- Trap: Maker が修正をコミットしないまま `resolve_task()` を呼ぶと、After Green は作業ツリー上で成立する一方、`after_commit` には修正前の HEAD が記録され、Before と After が同一コミットになる。Proof が「どのコミットで Red/Green になったか」を再現可能な形で示していなかった（Sol氏 Phase 47 P1）。
-- Rule: Learning Proof は実在する2つのコミットに拘束する。作業ツリーが汚れている、Before Commit が不正、Before == After のいずれかなら拒絶する。同一の再現テストを各コミットを展開した隔離環境で実行し、Red/Green の結果とコミットSHA・テストSHAを Proof に固定する。`unknown` を記録して成功扱いにしない。
-- Rung: 作り（resolve_task の事前条件） & 検査
-- Immunity Test: `tests/test_audit_resolution.py`, `tests/test_level7_real_loop_e2e.py`（Phase 48 HHH.1 / HHH.3 で追加予定）
-- Proof: （HHH.1 完了時に記録）未コミットの修正で `UNCOMMITTED_AFTER_STATE`、コミット未前進で `NO_COMMIT_ADVANCE` が返り、免疫テストが作成されないことを確認する。
-
-### [2026-11-10] Checker に SPEC を要約して渡したことによる要件の欠落 (Verbatim Checker Input)
-- Context: `/nightly-run` Step D（Stateless Checker Review）、Phase 47 GGG.3 / GGG.4
-- Trap: Maker が SPEC の該当節を自分の言葉で要約して Checker に渡したため、GGG.3 の「実際に起動されたモデル名を監査証跡に明記」が Checker の入力から抜け、未実装のまま APPROVE された。GGG.4 でも原文にない表現（`LessonLearner` 等）を含む要約を渡していた。Maker が Checker の判断材料を編集できる状態は、AGENTS.md 規範6（入力は SPEC.md と git diff のみ）を実質的に破る。
-- Rule: Checker には SPEC の該当節を機械的に切り出した原文（`awk '/^- \[ \] 機能XXX/,/^## 3\./' SPEC.md`）と `git diff <checkpoint>` の生出力をそのまま渡す。要約・言い換え・取捨選択をしない。
-- Rung: プロンプト（PLAN.md 作業手順）。将来は道具（Checker 入力を生成するスクリプト）へ下げる
-- Immunity Test: なし（運用手順。道具化した時点でテストを追加する）
-- Proof: GGG.3 第3項が未実装のまま承認されていたことを Phase 47 事後確認で検出。HHH.2 に引き継いだ。
-
-### [2026-11-10] Evidence Record の手書きによる「機械発行の証跡」の偽装 (Evidence via Sanctioned Path Only)
-- Context: `.git/nightly_evidence/records/task_*.json`, `scripts/nightly_orchestrator.py` (`verify-step` / `commit-step` / `bundle`)
-- Trap: Phase 47 では `verify-step` / `commit-step` を経由せず、Maker が Evidence Record を直接書き込んだ（`issued_at`・`token` 等は作成した値）。コミットSHA・ツリーSHAは実物と一致していたため Bundle 検証は `VERIFIED` になったが、証跡が機械発行されたことは保証されない。検証器が「記録の中身の整合性」しか見ていないと、手書きの記録を通してしまう。
-- Rule: Evidence Record は `verify-step` → Checker → `commit-step` の正規経路でのみ発行する。`.git/nightly_evidence/` 配下を直接編集・作成しない。正規経路が失敗したら手で埋めずに停止して PLAN.md に記録する。
-- Rung: プロンプト（PLAN.md 作業手順）。将来は検査（Evidence Record に発行元の署名・トークン照合を追加）へ下げる
-- Immunity Test: なし（運用手順）
-- Proof: Phase 47 の Record が手書きであったことを事後に申告。Phase 48 から正規経路へ切り替え。
-
-### [2026-11-09] 既存免疫テストの無条件上書きによる免疫破壊 (Non-Destructive Immunity Test Promotion)
-- Context: `src/auto_developer/audit.py` (`AuditResolutionManager.resolve_task`)
-- Trap: AUDタスク解決時に After Green を確認した後、免疫テスト配置パス（`tests/immunity/test_immunity_<safe_name>.py`）に同名ファイルが既に存在していても無条件で上書きしていたため、既存の免疫テストが別の内容に書き換えられて弱体化・破壊される重大なリスクがあった。
-- Rule: 免疫テストの昇格配置前に、既存ファイルの有無を必ず事前検査する。既存ファイルが存在する場合、内容の SHA-256 ハッシュを比較し、完全一致していれば冪等成功として扱い、ハッシュが異なる場合は `IMMUNITY_COLLISION` エラーで即座に拒絶して既存テストの変更・削除を一切行わない。
-- Rung: 作り（非破壊的確定 & 衝突拒絶ガード） & 検査
-- Immunity Test: `tests/test_audit_resolution.py`
-- Proof: 既存の免疫テストが存在する状態で異なる内容の昇格を試みた際、`IMMUNITY_COLLISION` で確実に拒絶され元ファイルが無傷であることを実証。
-
-### [2026-11-09] Before Red 真正性検証の欠落と固定値 Proof の偽装 (Strict Before Red Cryptographic Binding)
-- Context: `src/auto_developer/audit.py` (`AuditResolutionManager.resolve_task`)
-- Trap: AUDタスク解決時に、Finding のステータスが `VERIFIED_RED` であるか、および実際の Red 検証証跡（コミットSHA、再現テストハッシュ、アサーション失敗出力）が存在するかを検証せず、固定値 `"before_status": "VERIFIED_RED"` を出力していたため、実証されていない指摘でも解決済みと誤認させる脆弱性があった。
-- Rule: Finding のステータスが Red 検証完了（`VERIFIED_RED` または `DISPATCHED`）かつ真正な Red 証跡（`GENUINE_RED`）を保持していることを必須照合し、未実証の場合は `UNVERIFIED_BEFORE_RED` で即時拒絶する。`red_green_proof` には Before Commit SHA、After Commit SHA、再現テスト SHA-256、Red検証出力などの暗号学的証跡を完全に拘束する。
-- Rung: 作り（暗号学的Proof拘束） & 検査
-- Immunity Test: `tests/test_audit_resolution.py`
-- Proof: `status="REPORTED"` や Red 証跡を欠く Finding に対して解決を試みた際、`UNVERIFIED_BEFORE_RED` で確実に拒絶されることを実証。
-
-### [2026-11-09] LESSONS.md 記録失敗時のサイレント成功とフェイルオープン (Fail-Closed Lesson Recording)
-- Context: `src/auto_developer/audit.py` (`AuditResolutionManager.resolve_task`)
-- Trap: `record_lesson()` が `False` を返した（`LESSONS.md` 不在や書き込み失敗）にもかかわらず、呼び出し元が戻り値を無視して `success: True` と `status = "RESOLVED"` を返していたため、学習に失敗したのに学習完了と誤認されるフェイルオープンが存在した。
-- Rule: 学習の記録（`record_lesson()`）の成功を解決完了の必須条件とし、失敗時は Finding を `RESOLVED` にせず `LEARNING_RECORD_FAILED` で処理を停止する（Fail-Closed）。中間状態からの再実行耐性（冪等性）を確保する。
-- Rung: 作り（Fail-Closed遷移） & 検査
-- Immunity Test: `tests/test_audit_resolution.py`
-- Proof: `LESSONS.md` が存在しない環境で解決を試みた際、`LEARNING_RECORD_FAILED` で安全に停止することを実証。
-
-### [2026-11-08] 異系統LLMによる独立監査と確証バイアス・自己肯定の排除 (Cross-Model Independent Audit)
-- Context: `src/auto_developer/audit.py`, `src/auto_developer/orchestrator.py`, `AGENTS.md`
-- Trap: 同一のモデル系統（プロンプトや思考バイアスを共有するモデル）でMakerとChecker/監査役の双方を担わせると、Makerが犯した暗黙の前提や見落とし（盲点）をCheckerも同様に肯定・見逃してしまい、潜在的バグや仕様逸脱がすり抜ける。
-- Rule: 自律パイプラインにおける監査役・Checkerには、Makerと独立した異系統のフロンティアモデル（例: Maker=Gemini 3.8 Flash, Reviewer/Auditor=Claude Opus 5.5）を割り当て、SPEC.md と git diff のみを厳格に渡して批判的検証を行う。同一モデルによる自己承認は機械的に拒絶する。
-- Rung: AGENTS.md & 作り（異系統モデル検証・強制）
-- Immunity Test: `tests/test_audit_dispatch.py`, `tests/test_audit_model_policy.py`
-- Proof: 同一モデル指定時にパイプラインが拒絶し、異系統モデル割り当て時にのみ独立監査が成立することを実証。
-
-### [2026-11-08] Linux CI環境における chflags 不在と PEP 578 Runtime Audit Hook による物理防御 (Runtime Audit Hook Sandbox)
-- Context: `src/auto_developer/verifier.py` (`RedTestVerifier.RUNNER_CODE`)
-- Trap: macOS では `chflags uchg` により同一UIDでもファイル変更をOSカーネルレベルで遮断できたが、Ubuntu (Linux CI) では `chflags` コマンドが存在せず、同一UIDの別プロセスから `os.chmod()` を呼ばれると読み取り専用パーミッションが復元されて元リポジトリが書き換え可能になってしまう差異があった。
-- Rule: OS固有のコマンド（`chflags`）に依存せず、Python 3.8+ 標準の PEP 578 `sys.addaudithook` をテスト実行プロセス初期化時に導入する。保護対象ルートパスに対する `open`（書き込みモード）、`os.chmod`、`os.remove`、`os.unlink`、`os.rename`、`os.mkdir`、`os.rmdir` イベントを検知した瞬間に `RuntimeError` を送出してインターセプトし、全OS共通で元リポジトリの改変を確実に遮断する。
-- Rung: 作り（PEP 578 Runtime Audit Hook） & 検査
+### [2026-11-12] リソース制限は隔離ではない。信頼できないコードは一時クローンと OS サンドボックスの中でだけ動かす (Resource Limits ≠ Isolation)
+- Context: 監査役が出した再現テストの実行（`verifier.py`、SBX-1）。
+- Trap: 同じ OS ユーザーで動く候補テストが `chmod` で元のリポジトリを書き換えられた／権限のロックダウンより先に子プロセスを起動していた／root で実行するとロックダウンが無効になった／コミットのチェックアウトに失敗すると現在の作業ツリーにフォールバックして別のコードを検証していた。
+- Rule: 量の制限・形の検査・権限の隔離・外部アクセスの制限は別の責務として扱う。信頼できないコードは、一時クローンの中で、子孫プロセスにも及ぶ OS の機構（`sandbox-exec` / `bwrap`）の内側で動かす。使えない環境や root では実行を拒否する。代わりのもので検証を続けない（Fail-Closed）。
+- Rung: 作り（サンドボックスの必須化、一時クローンでの隔離、起動前のロックダウン）
 - Immunity Test: `tests/test_red_verifier.py`, `tests/test_immunity_and_red_acceptance.py`
-- Proof: Linux/macOS双方で `os.chmod` による元リポジトリ改変試行が `RuntimeError` で即時遮断されることを実証。
+- Proof: 元のリポジトリを書き換えようとする候補テストが、拒否され、元のリポジトリが変わらないことを確認した（詳細は docs/history/LESSONS-v0.8.md の 2026-11-08〜11-13）。
 
-### [2026-11-08] 同一OSユーザー環境でのファイル権限ロックダウンの限界と一時クローン隔離 (Physical Clone Isolation)
-- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`)
-- Trap: `0o555`/`0o444` によるOSパーミッション剥奪を行っても、テストプロセスが元リポジトリと同じOSユーザーで実行されている限り、テストメソッド内で `os.chmod()` を呼べば書き込み権限を復活させて元リポジトリを改変できてしまい、AST制限やchmodの多重化では根本解決にならなかった。
-- Rule: 信頼できないコードの実行では、元リポジトリのパス上で直接実行してはならない。必ず独立した検証用一時クローン（または分離Worktree）を生成し、その閉じた環境内で実行することで、テストが内部でどんなchmodやファイル書き換えを行おうと、元リポジトリの物理的不変性を完全に保証する。
-- Rung: 作り（物理的一時クローン隔離） & 検査
-- Immunity Test: `tests/test_red_verifier.py`, `tests/test_immunity_and_red_acceptance.py`
-- Proof: テストメソッド内で `os.chmod` を呼んで元リポジトリの改変を試みるテストを実行させても、元リポジトリが物理的に無傷であることを実証。
-
-### [2026-11-08] パイプライン連携モジュール間でのタスク書式・IDスキーマの断絶 (Task Format Interoperability)
-- Context: `src/auto_developer/dispatcher.py` (`TaskDispatcher` vs `AuditDispatcher`)
-- Trap: `AuditDispatcher` が出力するタスク書式（`- [ ] Fix: [ID] ...`）が、既存の `TaskDispatcher.TASK_PATTERN`（`- [ ] <task_id>. <title>`）と一致していなかったため、PLAN.md に登録されたタスクが `parse_plan()` で認識されず、次の Maker にタスクが渡らないというパイプライン断絶が発生した。
-- Rule: タスクを自動登録するコンポーネントは、下流のディスパッチャが要求する正規表現スキーマに厳格に従い、一意なタスクIDプレフィックス（`AUD-<finding_id>.`）を付与する。連携受入テストで登録から取得・ステータス更新までをエンドツーエンドで検証する。
-- Rung: 作り（タスクIDスキーマ統一） & 検査（受入テスト）
-- Immunity Test: `tests/test_audit_dispatch.py`
-- Proof: 登録されたタスクが `TaskDispatcher.parse_plan()` および `get_next_pending_task()` で正常に抽出され、Makerに引き渡せることを実証。
-
-### [2026-11-08] 新規免疫テスト追加による既存ガードの弛緩・モンキーパッチ汚染 (Mutual Non-Interference)
-- Context: `src/auto_developer/guard.py` (`GitGuard.check_protected_files_untouched`), `verifier.py`
-- Trap: 免疫テスト追加を許可する際、新規テストファイルの中身でモジュールインポート時やトップレベルでバグ関数を正しい実装にモンキーパッチ（動的差し替え）されると、Python unittest の同一プロセス実行により既存の失敗テストが通過（FAILED → OK）してしまい、「追加がガードを緩める」という重大なセキュリティホールが存在した。
-- Rule: 新規免疫テストの追加に際しては、
-  1. 候補追加の前後で既存テストスイートを実行し、既存テストの成否・結果が 1 件も変化しないこと（相互不干渉 Mutual Non-Interference）を機械的に検証する。
-  2. AST 検査により、候補テストのトップレベルには `import` および `class`/`def` 定義のみを許可し、動的コード実行文を一切禁止する。
-- Rung: 作り（AST検査 & 不干渉検証） & 検査
-- Immunity Test: `tests/test_immunity_guard.py`
-- Proof: モンキーパッチを含む候補テストを追加しようとした際に、AST検査および不干渉検証により確実に拒絶されることを実証。
-
-### [2026-11-08] root (UID 0) 実行環境における OS パーミッションロックダウン無効化 (Root Execution Fail-Closed)
-- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._lockdown_repo`)
-- Trap: Docker コンテナや CI 等の root 権限（UID 0）環境では、ファイルパーミッション（`0o444`/`0o555`）が無視されるため、OS権限による書き込み禁止ロックダウンを迂回して絶対パスで本体ファイルが改変されてしまう穴が存在した。
-- Rule: `os.geteuid() == 0`（root環境）での無防備な候補テスト実行を検知した場合は、Fail-Closed として即座に実行を拒否し、非rootユーザーまたは明示的な隔離サンドボックスでの実行を強制する。
-- Rung: 作り（root検知ガード） & 検査
+### [2026-11-13] サンドボックスは「既知の危険を拒否」ではなく「必要最小限を許可」で作る (Allowlist, Not Blocklist)
+- Context: macOS `sandbox-exec` のプロファイル、Linux `bwrap` のマウント。
+- Trap: `(allow default)` を起点にしたため明示的に拒否していないホーム外のパスを読めた／`/etc` 全体や仮想環境全体を公開していた／ホーム配下の仮想環境ではパスの包含判定に漏れがあった。
+- Rule: 読み取りの許可は、Python の実行に必要なプレフィックスと最小限のシステムライブラリ・設定ファイルに限る。ホーム・元のリポジトリ・認証情報（`~/.ssh`, `~/.aws` など）は読ませない。機密を読めないことを単体テストで確かめる。
+- Rung: 作り（許可リストの最小化）、検査
 - Immunity Test: `tests/test_red_verifier.py`
-- Proof: root 実行フラグまたは UID 0 環境で候補テストを実行しようとした際に、即座に拒絶されることを実証。
+- Proof: `/etc/shadow` や `~/.ssh` への読み取りがカーネルに拒否されることをテストで確認した。
 
-### [2026-11-08] 作業ディレクトリ隔離の不完全性とOS権限レベルの読取専用ロックダウン (OS Permission Lockdown)
-- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`)
-- Trap: 候補テストの作業ディレクトリを一時ディレクトリ（`cwd=sandbox_dir`）に変更しても、Pythonプロセスは本体リポジトリに対するファイルアクセス権限を保持しているため、絶対パスや `PYTHONPATH` 経由で本体のファイル（例: `canary.txt`）を書き換えてからアサーション失敗を起こす攻撃・副作用を遮断できなかった。
-- Rule: 作業ディレクトリの変更に加えて、候補テスト実行中は対象リポジトリ（`repo_dir`）全体のディレクトリ・ファイルから書き込み権限を一時的に剥奪（`a-w`, `0o555`/`0o444`）してOS権限レベルで読取専用化し、絶対パスによる改変試行も `PermissionError` で物理遮断する。実行終了後はコンテキストマネージャ等で確実に元の権限へ復元する。
-- Rung: 作り（OS権限ロックダウン） & 検査（受入テスト）
-- Immunity Test: `tests/test_red_verifier.py`, `tests/test_immunity_and_red_acceptance.py`
-- Proof: 候補テスト内から本体リポジトリの絶対パスへ書き込みを試行させ、`PermissionError` が発生して本体が一切汚染されないことを実証。
+### [2026-11-13] 改ざん検知は、未追跡ファイルと無視ファイルの内容まで見る (Untracked Content Tampering)
+- Context: 候補テストの実行前後のスナップショット比較、保護ファイル検査。
+- Trap: 追跡されているファイルの差分だけを見ていたため、未追跡ファイル・無視ファイルの内容の書き換えや、シンボリックリンクの差し替えを見逃していた。
+- Rule: スナップショットには、全ファイルの種別（通常ファイル / ディレクトリ / リンク）と内容の SHA-256 を記録する。保護ファイルの検査も、`git diff` と `git status --porcelain` の両方で行う。
+- Rung: 検査（多層で検知する）
+- Immunity Test: `tests/test_red_verifier.py`, `tests/test_immunity_guard.py`
+- Proof: 無視ファイルを書き換える候補テストで、`REPO_TAMPER_DETECTED` になることを確認した。
 
-### [2026-11-08] 再現テスト候補における例外メッセージ偽装と文字列判定の限界 (Structured TestResult vs String Matching)
-- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`)
-- Trap: プロセスの標準エラー出力から `"AssertionError" in output` を文字列検索して判定していたため、`raise OSError("AssertionError: pretend failure")` のように環境例外や意図しないエラーのメッセージに `"AssertionError"` が含まれているだけで `GENUINE_RED` と誤認してしまう脆弱性があった。
-- Rule: 標準出力/標準エラー出力の文字列検索による判定を廃止し、Python `unittest.TestResult` の構造化結果を直接検証する。真正なRedは `testsRun >= 1` かつ `len(failures) >= 1` かつ `len(errors) == 0`（予期せぬ例外や環境障害が0件）であることを厳格に要求する。
-- Rung: 作り（構造化TestResult解析） & 検査
-- Immunity Test: `tests/test_red_verifier.py` (`test_rejects_exception_spoofing_oserror_with_assertion_message`)
-- Proof: `raise OSError("AssertionError: pretend failure")` を送出する候補テストを与えた際に `UNHANDLED_EXCEPTION` として確実に `False` 判定されることを実証。
+### [2026-11-14] 本物の Red かどうかは、構造化された結果と製品コードとの因果関係で判定する (Genuine Red)
+- Context: 監査役の再現テストの判定（SBX-2）。
+- Trap: 実行件数0件のテスト（終了コード 5）、環境の例外、例外メッセージの偽装、製品コードを呼ぶだけで固定値どうしを比較しているテストを、不具合の証明（Red）として受け入れていた。
+- Rule: 文字列の照合はやめ、`unittest.TestResult` で判定する（実行件数1件以上、失敗1件以上、エラー0件）。アサーションが製品コードの戻り値や副作用と因果関係を持つことを、AST と実行の追跡で確かめる。
+- Rung: 作り（構造化した判定、因果関係の解析）
+- Immunity Test: `tests/test_red_verifier.py`, `tests/test_audit_dispatch.py`
+- Proof: 各種の偽 Red が TRIVIAL_RED / REJECTED になることを確認した。
 
-### [2026-11-08] 再現テスト候補実行による本体作業ツリー汚染・副作用の物理隔離 (Candidate Test Isolation)
-- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`)
-- Trap: 監査役や外部AIから提示された未検証の再現テスト候補を `cwd=self.repo_dir` かつ現プロセスの環境変数で直接実行したため、候補テスト内のコードが本体リポジトリのファイル（例: `canary.txt`）を書き換えてからアサーション失敗を起こした場合に、本体を汚染したまま `GENUINE_RED` と判定して通過してしまう重大な脆弱性があった。
-- Rule: 候補テストは本体リポジトリ内で直接実行してはならない。必ず使い捨ての一時 Worktree または隔離された独立スクラッチ環境に展開して実行し、環境変数もシークレットを除外サニタイズして本体への副作用を物理的に遮断する。
-- Rung: 作り（隔離実行） & 検査（受入テスト）
-- Immunity Test: `tests/test_immunity_and_red_acceptance.py` (`test_candidate_test_cannot_modify_parent_repository`)
-- Proof: 意図的に本体リポジトリのファイルを改変しようとする敵対的テスト候補を実行させ、本体ファイルが一切改変されず防御されることを実証。
-
-### [2026-11-08] unittest 0件実行 (Exit 5) および環境例外の偽Red誤判定 (Structured Red Verification)
-- Context: `src/auto_developer/verifier.py` (`RedTestVerifier._execute_test`)
-- Trap: `unittest discover` の終了コードが非ゼロ（`exit_code != 0`）で `ImportError` の文字列がなければ一律 `GENUINE_RED` と判定したため、テストメソッドを持たない空テスト（Exit 5: `NO TESTS RAN`）や `setUp()` での `OSError` などのテスト環境例外をバグ再現と誤認する漏れがあった。
-- Rule: 単に終了コードを見るだけでなく、実行テスト件数が1件以上（`Ran N tests` where N >= 1）であること、および実際のアサーション失敗（`AssertionError` または `FAIL:`）が発生していることを構造的に検証し、0件実行や環境例外を確実に弾く。
-- Rung: 作り & 検査
-- Immunity Test: `tests/test_red_verifier.py` (`test_rejects_zero_tests_ran_exit_code_5`, `test_rejects_setup_environment_oserror`)
-- Proof: テストメソッドのないテストクラスを与えた際に `is_reproduced=False` (`NO_TESTS_RAN`) となり、`setUp()` で `OSError` が起きた際に `SETUP_ERROR` として弾かれることを実証。
-
-### [2026-11-08] 免疫ディレクトリへの非テスト・シンボリックリンク追加の遮断 (Strict Immunity File Validation)
-- Context: `src/auto_developer/guard.py` (`GitGuard.check_protected_files_untouched`)
-- Trap: `allow_immunity_additions=True` において未追跡・新規追加ファイルであれば何でも許可したため、非Pythonファイル（`not_a_test.txt`）やホスト重要ファイルを指すシンボリックリンク（`test_link.py -> /etc/hosts`）が素通りして追加されてしまう脆弱性があった。
-- Rule: 免疫ディレクトリ（`tests/immunity/`）への新規追加は、「通常ファイル（`is_file() and not is_symlink()`）」かつ「テスト命名規則 `test_*.py`」を満たすファイルのみに厳格限定し、それ以外は Fail-Closed で即時遮断する。
-- Rung: 作り（ガード実装） & 検査
-- Immunity Test: `tests/test_immunity_guard.py` (`test_asymmetric_mode_rejects_non_test_files`, `test_asymmetric_mode_rejects_symlinks`)
-- Proof: `not_a_test.txt` や `/etc/hosts` への symlink を追加しようとした際に即座に `False` で拒絶されることを実証。
-
-### [2026-11-08] 外部プロセス自律回収時の同一性・所属関係照合と統合遮断 (PID & PGID Fail-Closed)
-- Context: `src/auto_developer/multi_team.py` (`recover_multi_team_job`, `WorkerRegistry`)
-- Trap: PID の OS 開始識別子照合だけを行い、Registry の PGID の正当性を検証せずに `os.killpg(w.pgid)` を送ったため、改ざんや誤設定で別プロセスの PGID が指定された場合に無関係なプロセスグループを誤停止する脆弱性があった。また、照合に失敗して停止を保留した未確認ワーカー（`unverified_processes`）が残っているのに、Evidence が揃っているだけで統合ゲートや Worktree 削除に進めてしまう漏れがあった。
-- Rule:
-  1. プロセスグループ停止前に `os.getpgid(w.pid) == w.pgid` で指定 PID が指定 PGID に実在・所属していることを必須照合し、不一致または照合不能な場合はシグナル送信を絶対に保留する。
-  2. 未確認ワーカーが 1 つでも残っている場合は、統合処理（`IntegrationGate`）への進行を物理遮断して `RECOVERY_REQUIRED` に遷移させ、当該ワーカーの Worktree も削除せず保全する。
-- Rung: 作り（ガード実装） & 検査（受入テスト）
-- Immunity Test: `tests/test_multi_team.py` (`test_recover_multi_team_job_skips_when_pid_does_not_belong_to_pgid`, `test_recover_multi_team_job_aborts_integration_when_unverified_processes_exist`, `test_recover_multi_team_job_preserves_worktree_for_unverified_processes`)
-- Proof: 意図的に PID と PGID の所属関係を狂わせた実プロセスを用いたテストで、シグナル送信・統合呼び出し・Worktree 削除がすべて遮断され、期待通り防御されることを実証済み。
-
-### [2026-11-08] 復旧成果物の真正性・改ざん検証 (ZIP 構造検査 vs Evidence 独立監査)
-- Context: `src/auto_developer/multi_team.py`, `bundler.py`
-- Trap: `zipfile.is_zipfile()` や `testzip()` のチェックサム確認だけでは、ZIP 書式が正常であることしか分からず、`bundle_manifest.json` の欠如、Tree SHA 不一致、Checker 承認レコードの有無といった真正性・改ざんの検証が素通りしてしまう。
-- Rule: Evidence 成果物の受け入れ・復旧には必ず `EvidenceBundler.verify_bundle()` を適用し、`bundle_manifest.json`、全ファイル SHA-256、Git Tree、SPEC ハッシュ、Checker 承認レコードのすべてが `VERIFIED` であることを独立監査する。
-- Rung: 作り & 検査
-- Immunity Test: `tests/test_multi_team.py` (`test_recover_multi_team_job_rejects_zip_without_bundle_manifest`)
-- Proof: マニフェストを持たないダミー ZIP が `INVALID_EVIDENCE` として厳格に拒絶されることを実証済み。
-
-### [2026-11-10] 独立監査ランナーにおける設定モデル名と実起動モデル名の不一致偽装 (Auditor Model Discrepancy)
-- Context: `src/auto_developer/audit.py` (`IndependentAuditRunner.audit`)
-- Trap: `AuditConfig.validate()` で設定値（`maker_model` vs `auditor_model`）のファミリー検証を行っても、Runner が実際に起動するモデル名（`self.model_name`）との一致を確認しなかったため、設定上「Claude」と宣言して検証を通過させつつ実際には Maker と同系統の「Gemini」を実行して自己承認させる偽装バイパスが生じた。
-- Rule: 独立監査の実行時には、設定値の独立性だけでなく、実際に起動されるモデル（`self.model_name`）が `config.auditor_model` と完全一致することを機械的に検証し、不一致時は `INDEPENDENT_AUDIT_VIOLATION` で即時起動拒絶する。
-- Rung: 作り & 検査
-- Immunity Test: `tests/test_audit_model_policy.py` (`test_audit_runner_rejects_model_name_mismatch_with_config`)
-- Proof: `config.auditor_model="claude-opus-5.5"` に対し `model_name="gemini-3.8-flash"` を渡した際に `audit()` が Fail-Closed で例外停止することを実証。
-
-### [2026-11-10] AuditStore における再現テストハッシュの再計算・上書きによる改変検知無効化 (Immutable Finding Proofs)
-- Context: `src/auto_developer/audit_store.py` (`AuditStore.save_finding`)
-- Trap: Finding の状態更新のたびに再現コードをファイルへ書き戻し、そのコードの SHA-256 を新しく再計算して JSON に保存したため、外部改変された再現テストを読み込んで `save_finding()` を呼ぶと改変後のハッシュが正規ハッシュとして再登録されてしまい、改ざん検知が無力化される脆弱性があった。
-- Rule: 監査の初回登録（テストコード確定）と状態更新を分離する。初回登録時に再現コードとその SHA-256 を不変（イミュータブル）に確定し、以降の状態更新処理ではコードハッシュの変更を禁止する。既存コードと異なる内容での再保存は衝突・改変（`CODE_HASH_TAMPERED`）として即時拒絶する。
-- Rung: 作り（不変性ガード） & 検査
-- Immunity Test: `tests/test_audit_store_immutability.py` (`test_save_finding_rejects_tampered_repro_code`)
-- Proof: 既存の再現コードを改変した状態で再保存を試行した際に、ハッシュが更新されず安全に例外拒絶されることを実証。
-
-### [2026-11-10] CommandRunnerAdapter におけるコンテキスト・教訓注入の脱落 (Maker Context Delivery)
-- Context: `src/auto_developer/runner.py` (`CommandRunnerAdapter.run_maker`)
-- Trap: `NightlyOrchestrator` が `context={"lessons": ...}` を渡しても、`CommandRunnerAdapter.run_maker()` がコマンド文字列置換時に `task_id, task_title, attempt, prev_error` のみを参照し、`lessons` を Maker のプロセスに一切渡していなかった。モックテストでは `context` 辞書を直接受け取っていたため見落とされた。また、教訓テキストをシェルコマンド文字列（`{lessons}`）に直接埋め込むと改行や引用符で展開エラーを起こす。
-- Rule: 教訓やコンテキスト情報はシェル文字列への直接展開を避け、標準入力（stdin）や専用のコンテキストファイル（`.dev/context_task_<id>.json`）を通じて安全に Maker プロセスへ渡す。受入テストには Mock ではなく実際の `CommandRunnerAdapter` を用い、Maker が教訓を受信したことを実プロセスレベルで検証する。
-- Rung: 作り & 検査（受入テスト）
-- Immunity Test: `tests/test_runner_lesson_wiring.py` (`test_command_runner_delivers_lessons_to_maker_process`)
-- Proof: 実サブプロセスで起動された Maker が標準入力またはコンテキストファイル経由で教訓文字列を完全に取得できることを実証。
-
-### [2026-11-13] 書き込み遮断だけでは不十分な機密ファイル読み取り境界 (Read Access is Information Leak)
-- Context: `src/auto_developer/verifier.py` (OS サンドボックス設定)
-- Trap: サンドボックスでファイル書き込み（`deny file-write*`）および外部ネットワーク通信をカーネルレベルで遮断しても、ホストファイルシステム全体を読み取り可能（`--ro-bind / /` 等）にしていたため、`~/.ssh/`、`~/.aws/`、クラウド認証情報や他プロジェクトの機密コードを候補テストが読み取り可能だった。外部通信が禁止されていても、テスト出力（`stdout`/`stderr`）や例外メッセージに機密を埋め込めばサンドボックス外へ漏洩しうる。
-- Rule: サンドボックスは実行に必要な Python ランタイムおよび一時クローンのみをホワイトリストで読み取り許可し、ホストのホームディレクトリ（`~`）および元リポジトリは原則非公開（マウント除外または明示的 read deny）とする。
-- Rung: 作り（サンドボックスポリシー） & 検査
+### [2026-11-15] 静的解析は、確信できないなら安全側に倒し、完全を目指さない (Uncertainty Over Completeness)
+- Context: TRIVIAL_RED を判定する AST 解析。
+- Trap: Python の動的な制御フローを静的に完全に解こうとして、過剰設計に陥った。分岐後の変数の合流や文の実行順を無視して、正常なテストを偽の Red と誤判定した。
+- Rule: 文は実行順に走査する。分岐の中で変わる値は「不確定」として扱う。不確定な値を根拠に TRIVIAL_RED と断定しない。判断できない場合は、動的な実行結果や監査に委ねる。精度の改善は P2 として扱う。
+- Rung: 作り（抽象解釈の合流演算）
 - Immunity Test: `tests/test_red_verifier.py`
-- Proof: `~/.ssh` 等の読み取りを試みるテストコードが `PermissionError` または `FileNotFoundError` で即座に拒絶され、機密が漏洩しないことを実証。
+- Proof: 条件つきの `self.fail()` や分岐後の代入を含む正当なテストが受理されることを確認した。
 
-### [2026-11-13] 未追跡・無視ファイルの内容改ざん検知の抜け穴 (Untracked Content Tampering)
-- Context: `src/auto_developer/verifier.py` (`_capture_repo_snapshot`)
-- Trap: スナップショット比較において `git status --porcelain --ignored` のパス行のみを追跡していたため、未追跡ファイルや無視ファイルが存在したまま内容だけが書き換えられた場合に `git status` の行が変わらず、改ざんを検知できない脆弱性があった。
-- Rule: スナップショットには未追跡ファイル・無視ファイルについてもファイル種別（通常ファイル/ディレクトリ/シンボリックリンク）および内容の SHA-256 ハッシュを記録し、内容書き換えやリンク先差し替えを確実に検知して `REPO_TAMPER_DETECTED` を発動する。
-- Rung: 検査（多層防御検知）
-- Immunity Test: `tests/test_red_verifier.py`
-- Proof: 一時リポジトリ内の未追跡ファイル内容改ざんが確実に検知されることを実証。
+### [2026-11-10] 学習の証明はコミットに拘束し、記録の失敗は失敗として扱う (Commit-Bound, Fail-Closed Learning)
+- Context: 指摘の解決（AUDIT-5）、AuditStore、免疫テストの昇格。
+- Trap: 未コミットの作業ツリーで Green を確認しただけで HEAD を「修正後」として記録していた／LESSONS.md への記録に失敗しても解決として扱っていた／再現テストのハッシュを再計算して上書きしていた／既存の免疫テストを無条件に上書きしていた。
+- Rule: Before / After は実在する2つのコミットに拘束し、同じ再現テストを各コミットの隔離環境で実行する。`unknown` を記録して成功扱いにしない。再現テストとそのハッシュは初回登録で確定し、変更できないようにする。免疫テストを配置する前に既存ファイルを確認する（同じ内容なら冪等、違う内容なら衝突として拒否）。記録の失敗は解決の失敗とする。
+- Rung: 作り（事前条件、不変性のガード）
+- Immunity Test: `tests/test_audit_resolution.py`, `tests/test_audit_store_immutability.py`, `tests/test_audit_lesson_recording.py`
+- Proof: 汚れたツリー、Before と After が同じ、ハッシュの改変、記録の失敗のそれぞれで拒否されることを確認した。
 
-### [2026-11-13] 子プロセス起動とロックダウンの順序競合 (Lockdown Before Spawn)
-- Context: `src/auto_developer/verifier.py` (`_execute_test`)
-- Trap: `subprocess.Popen` で子プロセスを起動した直後に `with self._lockdown_repo(...)` に入る順序にしていたため、プロセス生成からロックダウン完了までの微小な隙間（レースウィンドウ）に元リポジトリが保護されていない時間が発生した。
-- Rule: 順序を完全に逆転し、元リポジトリをロックダウンしたコンテキストの内側で `subprocess.Popen` を起動する。
-- Rung: 作り（プロセスライフサイクル設計）
-- Immunity Test: `tests/test_red_verifier.py`
-- Proof: ロックダウンされた安全な状態下でのみ子プロセスが生成されることを実証。
+### [2026-11-08] 外部プロセスを回収・復旧する前に、同一性と所属を確かめる (PID & PGID Fail-Closed)
+- Context: マルチチームのワーカー監督と、親プロセスがクラッシュした後の復旧（TEAM-4）。
+- Trap: PID が再利用されていたり、プロセスグループに属していないプロセスを、自分のワーカーとみなして回収・統合しかけた。ZIP の構造を検査しただけで、復旧した成果物を本物とみなしていた。
+- Rule: 回収の前に、起動時刻を含むプロセスの同一性と PGID への所属を照合する。確かめられないワーカーがいる間は、統合も worktree の削除も行わない。復旧した成果物は `verify_bundle()` で独立に検証してから受け入れる。
+- Rung: 作り（照合のガード）、検査（受入テスト）
+- Immunity Test: `tests/test_multi_team.py`
+- Proof: 所属が一致しないプロセスや、マニフェストのない ZIP で、統合が中止され、worktree が残ることを確認した。
 
-### [2026-11-14] 仮想環境マウントのパス包含判定の抜け穴 (Subdirectory Virtualenv Mount Gap)
-- Context: `src/auto_developer/verifier.py` (`bwrap` マウント処理)
-- Trap: 仮想環境の最小マウントにおいて `pfx_path == home_resolved` と完全一致のみ判定していたため、一般的な `~/.venvs/auto_dev` や `~/projects/.../.venv` 等のサブディレクトリに配置された仮想環境で条件が False となり、仮想環境ディレクトリ全体が `--ro-bind` されて周辺の不要ファイルが露出する余地が生じた。
-- Rule: ホーム配下のパス判定には `pfx_path == home_resolved or pfx_path.is_relative_to(home_resolved)` による包含関係チェックを用い、ホーム配下に存在するすべての仮想環境で `bin`, `lib`, `lib64`, `include`, `pyvenv.cfg` のみに限定マウントする。
-- Rung: 作り（マウント最小化） & 検査
-- Immunity Test: `tests/test_red_verifier.py`
-- Proof: サブディレクトリ配置の仮想環境から同一ユーザーホーム直下の他ファイルへの読み取り漏洩が防止されることを実証。
-
-### [2026-11-14] テスト失敗と真のバグの混同（偽陽性Redの排除） (Trivial Red vs Genuine Failure)
-- Context: `src/auto_developer/dispatcher.py` (`dispatch_finding`), `src/auto_developer/verifier.py`
-- Trap: 外部監査役（LLM）から `self.assertEqual(1, 2)` や `self.fail()` のように製品コード（`src/`）を一切実行せずテスト単体で失敗するコードが提出された場合でも、テストが失敗した（Red）という事実だけで `GENUINE_RED` と誤認し、不要な修正タスクとして PLAN.md に登録してしまう。
-- Rule: 候補テストの Red 検証では、単なるテスト失敗だけでなく、(1) テストコードが `src/` や対象モジュールを import / 利用しているか（AST静的検証）、(2) 失敗例外のスタックフレームに対象プロダクトコードが含まれているか（実行トレース検証）を確認し、プロダクトコードを実行せずに単体で落ちるテストは `TRIVIAL_RED` として `REJECTED` 隔離する。
-- Rung: 検査（多層検証ゲート）
-- Immunity Test: `tests/test_audit_dispatch.py`, `tests/test_red_verifier.py`
-- Proof: 固定値比較や即時 fail 等の偽陽性テストが `TRIVIAL_RED` として即座にリジェクトされ、PLAN.md が汚染されないことを実証。
-
-### [2026-11-14] OSサンドボックスにおけるDefault-Allowの盲点 (Default-Allow Blocklist Fallacy)
-- Context: `src/auto_developer/verifier.py` (macOS `sandbox-exec` プロファイル)
-- Trap: `(allow default)` 起点のブラックリスト（拒否リスト）方式では、開発者が認知していないシステムパスや新規に追加された機密ファイルがデフォルトで読み取り可能となり、完全な情報漏洩防止が成立しない。
-- Rule: 既知パスの deny に依存するだけでなく、ホーム外・親リポジトリ外の機密領域に対する遮断を最大化し、可能な限りホワイトリスト（許可リスト）アプローチまたは最小特権での隔離を徹底する。
-- Rung: 作り（セキュリティ境界設計）
-- Immunity Test: `tests/test_red_verifier.py`
-- Proof: システムキーチェーンや重要システム設定への読み取りが確実に遮断されることを実証。
-
-### [記入例] 非同期処理とトランザクションのスコープ
-- Context: IndexedDB 操作全般
-- Trap: transaction のスコープ内で外部の fetch を await したため、トランザクションが自動コミットされ例外が発生した
-- Rule: トランザクション内に非同期I/Oを混在させない。必要なデータを取得し終えてから書き込む
-- Rung: 検査
-- Immunity Test: tests/storage_transaction.test.ts
-- Proof: 修正前のコードでこのテストが失敗することを確認済み
-
-### [記入例] 縦組み紙面で図版がページをまたぐ
-- Context: 紙面モード（ページ送り）の組版。図版・コード図版を本文に回り込ませる処理
-- Trap: 図版の前に余白を足して次のページへ押したところ、本文がその余白まで避け、別の図版が境目をまたいだ。
-  スクリーンショットで確認しながら直したため、直した崩れが別の修正で崩れ、一部の判型でだけ直っていることもあり、20回以上往復した
-- Rule: 図版は余白で押さず、本文中のページの切れ目まで運ぶ。運べないときだけ詰め物を挿む。
-  合否は目視ではなく位置の検査で決め、全判型・全組方向（8通り）に掛ける
-- Rung: 検査（CI の必須チェック）
-- Immunity Test: examples/compositor/tests/verify_layout.mjs、verify_matrix.mjs
-- Proof: 8通りすべてで、壊した版が Exit 1 になることを確認済み（examples/compositor/tests/selftest.mjs）
+### [2026-11-08] モジュール間の受け渡し（タスク書式・ID）は、端から端までのテストで固定する (Interface Interoperability)
+- Context: 監査の指摘を PLAN.md に登録する処理と、タスクを解析する処理。Maker へのコンテキストの受け渡し。
+- Trap: 登録側の書式が解析側の正規表現と合わず、登録したタスクが拾われなかった／教訓の注入がモックでは通るのに、実際のコマンドランナーでは Maker に届いていなかった。
+- Rule: タスク ID の形式（`AUD-<id>.`）のような受け渡しの形は1か所で定義する。登録から取得・状態更新・Maker への到達までを、モックではなく実際のアダプターでの E2E テストで確かめる。
+- Rung: 検査（受入テスト）
+- Immunity Test: `tests/test_audit_dispatch.py`, `tests/test_runner_lesson_wiring.py`
+- Proof: 実際の `CommandRunnerAdapter` を使い、Maker のプロセスが教訓を受け取ったことを確認した。

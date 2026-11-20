@@ -1,0 +1,864 @@
+# Product Specification & Invariant Contracts (SPEC.md)
+
+<!--
+Elephant（設計セッション）が人間と議論して起草し、仕様査読（記憶を持たないエージェント）の検査を経て確定する。
+ここが誤っていれば、以降のすべての検証が誤った物差しになる。人間が必ず読み、承認する。
+
+起点設計書: docs/designs/autonomous_pipeline_orchestrator.md
+-->
+
+## 1. 概要 (Overview)
+- プロジェクト名称: Antigravity Autonomous Pipeline Orchestrator (夜間自律稼働エンジン)
+- 目的 / 解決する課題: 人間不在の夜間時間帯等において、EGM設計書および `PLAN.md` に基づき、タスクを1ステップずつ安全かつ確実に自動完遂する。
+- 想定ユーザー & 利用形態: ローカルGit環境で完結するAntigravityワークスペーススキル（`/nightly-run`）およびPython CLIヘルパー（`scripts/nightly_orchestrator.py`）。
+
+## 2. コア要件 (MVP Scope)
+<!-- 受入テストと1対1に対応させる -->
+- [x] 機能A (直列タスク抽出と状態更新): `PLAN.md` から未実行タスク（`- [ ]`）を上から順に1件ずつ取得し、完了時は `- [x]`、失敗時は `- [ ] Task **[FAILED]**` に更新する。
+- [x] 機能B (クリーンツリー事前検証): 起動時に `git status --porcelain` を検査し、未コミットの変更が存在する場合は Exit 2 で起動を拒否する。
+- [x] 機能C (外部不変条件検査): 各タスクのMaker実装後、検証スクリプト実行前に `git diff` および `git status --porcelain` を検査し、未追跡ファイル含めて保護対象（`.github/**`, `SPEC.md`, `scripts/verify_local.sh`, `tests/immunity/**`）への変更・作成を検知した場合はテスト実行を行わず直ちにQuarantine（隔離ロールバック）を発動する。
+- [x] 機能D (ローカル検証ゲート実行): `scripts/verify_local.sh` を実行し、型検査・リンター・単体テストがすべて Exit 0 で通過した時のみ合格と判定し、暗号学的証跡（Evidence Token）を発行する。
+- [x] 機能E (隔離退避 & クリーンロールバック): 失敗時、作業ツリーの差分・成果物を破棄せず `quarantine/task-<id>-*` ブランチへ退避コミットした上で、本線作業ツリーを直前のチェックポイントに完全復元（`git reset --hard && git clean -fd`）し、`logs/nightly/task_<id>_failure.log` にエラーダンプを保存してパイプライン全体を即座に安全停止する（Exit 1）。
+- [x] 機能F (朝次レポート生成): 正常完了時およびFail-Fast停止時に、完了タスク一覧・隔離ブランチ・失敗理由・残タスクをまとめた `NIGHTLY_REPORT.md` を自動生成する。
+- [x] 機能G (証跡ベース確定ゲート): `commit-step` は、直前の `verify-step` で発行された有効な Evidence Token を検証・消費しない限り、コミットを拒否（Exit 3）する。未検証コードの混入を物理遮断する。
+- [x] 機能H (Fail-Closed Runner & 検証ゲート不変性):
+  1. `cli.py` / `DEFAULT_VERIFY_SH` に `|| true` 等の失敗握りつぶしを含めず、テスト未設定や失敗時は Exit 0 以外で終了する。
+  2. 本番実行時（`--mock` 未指定時）に Maker/Checker が未設定の場合は Exit 2 で起動を拒否する。
+  3. Maker 実行後に作業ツリーに差分が存在しない場合（No-Op）、タスク未達成として合格させず安全停止（Exit 1）する。
+- [x] 機能I (暗号学的ツリー拘束・Evidence Binding):
+  1. `verify-step` / Verifier は、検証成功時の作業ツリー状態（ステージ済みGit Tree SHA）および `SPEC.md` のハッシュを Evidence Token と内部証跡レコードに拘束（Bind）して発行する。
+  2. `commit-step` は、確定直前のステージ済みツリー SHA と `SPEC.md` ハッシュを再計算し、Evidence に記録された値と完全一致しない限りコミットを拒否（Exit 3）する。検証後の事後改ざんを物理遮断する。
+- [x] 機能J (安全な隔離退避・データ消失防止 Safe Quarantine):
+  1. 失敗時、未追跡ファイルおよび `.gitignore` 対象の生成物を含めた作業ツリー全体の物理スナップショット（アーカイブ）を `.dev/quarantines/` または隔離ブランチへ完全保全する。
+  2. 退避の正常完了が確認されるまで `git reset --hard` や `git clean` 等の破壊的リセット操作を一切実行してはならない。退避処理で例外が発生した場合はリセットを中止して即座に停止する。
+- [x] 機能K (Checker 構造化判定 & 型検査完全性):
+  1. `CommandRunnerAdapter.run_checker()` は JSON 構造化結果 (`{ "decision": "APPROVE" | "REJECT", ... }`) を解析し判定する。"NOT APPROVED" などの否定文が誤って承認される誤判定を物理遮断する。
+  2. 検証ゲートの `mypy` 対象を `src scripts` に拡大し、全パッケージ実装の静的型検査を通過させる。
+- [x] 機能L (安全なクラッシュ復旧と状態遷移):
+  1. ジョブ状態は `QUEUED`, `RUNNING`, `SUSPENDED`, `COMPLETED`, `FAILED` の状態遷移を定義し、永続化する。
+  2. `--resume` 実行時、`can_resume()` により再開可能状態であることを厳密に検証し、完了済み（COMPLETED）または隔離停止（FAILED）ジョブの意図しない再処理・巻き戻しを拒否する。
+  3. コミットフェーズでのクラッシュ時、Git 履歴を照合してタスクコミット完了済みか判定し、二重コミットを防止する。
+- [x] 機能M (最終確定ツリー整合性 & 安全な隔離・復旧):
+  1. `commit-step` / オーケストレーターは `PLAN.md` のタスク完了更新を含めた最終作業ツリーに対して Evidence を発行・検証・消費し、生成されたコミットの Tree SHA (`git rev-parse HEAD^{tree}`) が Evidence の `tree_sha` と完全一致することを保証する（無検証コード確定の物理遮断）。
+  2. `quarantine_and_restore()` は `git add -A -f` を廃止して `.gitignore` を厳密に遵守し、シークレット（`.env*`, `*.pem`, `*.key`, `*token*` 等）の Git 格納を物理遮断する。Recovery Snapshot においてもシークレットパターンを除外する。
+  3. `JobState.save()` は一時ファイルと `os.replace` によるアトミック書き込みを行い、クラッシュ時の JSON 破損を防止する。また `--resume` 時に HEAD が `checkpoint_hash` と異なる場合は巻き戻しを拒否する。
+  4. `DEFAULT_VERIFY_SH` は `tests/` が存在しない、またはテストが未構成の場合に Exit 1 で終了する。
+- [x] 機能N (Evidence Record の永続化と監査ログ分離):
+  1. `verify_and_consume()` において、認証トークン消費時に証跡を破棄せず、永続監査レコード（`.git/nightly_evidence/archive/task_<id>.json` または `.dev/evidence/task_<id>.json`）として保存し、事後監査を可能にする。
+  2. Evidence Record には `task_id`, `checkpoint`, `tree_sha`, `spec_sha`, `issued_at`, `consumed_at`, `status`, `verification`, `checker`, `commit` などの監査メタデータを記録・照合可能とする。
+- [x] 機能O (免疫テストディレクトリ初期化と保護):
+  1. `auto-dev init` 実行時、人間が承認した受入仕様テストを格納する `tests/immunity/` ディレクトリおよび初期受入テスト `tests/immunity/test_acceptance_sample.py` を自動生成する。
+  2. Maker による `tests/immunity/` 配下の改変・新規作成・削除を外部不変条件違反として機械的に遮断・隔離する。
+- [x] 機能P (意思決定支援型 Morning Brief の生成):
+  1. `NIGHTLY_REPORT.md` において、単なるコミット一覧だけでなく、「成果の要約」「即時動作確認コマンド」「既知の制約・境界条件」「人間への次のアクション」「監査証跡サマリー」を構造的に出力する。
+- [x] 機能Q (完全監査レコードの保持とCLI配管強化):
+  1. `auto-dev verify-step` 実行時、検証ゲートの成否・終了コード・出力サマリーを Evidence Token の `details.verification` に拘束して発行する。
+  2. `auto-dev commit-step` は `--checker-decision` および `--checker-reason`（または `--checker-json`）を受け取り、コミット時に `EvidenceStore.archive_record()` へ渡して永続監査レコードに Checker 査読情報を確実に記録する。Checker 情報が未指定の場合は `UNSPECIFIED`（証拠未取得）として記録・表示する。
+- [x] 機能R (Morning Brief のデュアルコマンド案内とチェックポイント分離表示):
+  1. Morning Brief の「動作確認コマンド」において、「検証コマンド (Verify)」と「成果物利用コマンド (Run)」を明確に分離して提示する。
+  2. レポートの概要テーブルにおいて、開発開始時の「初期チェックポイント (Initial Checkpoint)」と完了時の「最新コミット (Final Commit)」を区別して表示する。
+- [x] 機能S (失敗隔離時の本線完全クリーン復元):
+  1. タスク失敗時（Quarantine 発動時）、本線 Git 作業ツリー（`PLAN.md` 含む）に未コミットの差分を残さず、直前のクリーンチェックポイントに完全復元（`git status --porcelain` が空）する。
+  2. 失敗タスク情報（`**[FAILED]**`）は `job_state.json`、`NIGHTLY_REPORT.md`、および隔離ブランチ側の `PLAN.md` に保全する。
+- [x] 機能T (実行可能な復旧案内への刷新):
+  1. `NIGHTLY_REPORT.md` において、`FAILED` / 隔離時の案内から、実行拒否される `--resume` を排除し、隔離ブランチの確認・引き継ぎ・破棄などの実行可能な手順を提示する。
+- [ ] 機能U (試行単位 Attempts 履歴の完全監査記録):
+  1. タスク実行における各 Attempt（試行番号、フェーズ、終了コード、出力要約）の履歴を配列として追跡・保存する。
+  2. 成功時は Evidence Record に `attempts` を記録し、失敗時は `logs/nightly/task_<id>_failure.log` に各 Attempt のログを漏れなく出力する。
+- [x] 機能V (成果提出パッケージ Evidence Bundle の生成と独立検証):
+  1. `auto-dev bundle` は、Gitコミット履歴、Evidence Record、Checker査読ログ、JobState、Morning Brief を集約し、機密（`.env*`, `*.pem`, `*.key` 等）および OS固有不要物（`__MACOSX`, `.DS_Store`）を排除した `bundle_<job_id>.zip` を出力する。
+  2. パッケージ内にはファイルハッシュ一覧、Tree SHA、タスク監査情報を含む `bundle_manifest.json` を含める。
+  3. `auto-dev verify-bundle <path>` は、マニフェストと各ファイルの実ハッシュ、Evidence Record の Tree SHA とコミットの Tree SHA の整合性を検証し、改ざんや欠落がないかを Exit 0/1 で判定する。
+  4. オーケストレーターはジョブ完了時に自動で Evidence Bundle を `.dev/bundles/` 配下に生成し、`NIGHTLY_REPORT.md` に検証コマンドを提示する。
+  5. Antigravity プラグインスキルとして `/nightly-bundle` および `/nightly-verify` を提供し、チャットUI上で完結する。
+- [x] 機能W (マルチチーム自律開発の基盤構造 Multi-Team Foundation - Stage 1):
+  1. `TeamManifest`（`src/auto_developer/manifest.py`）: プロジェクト設定、チーム定義（`id`, `owns`, `depends_on`, `max_parallel_tasks`）、契約参照（`contracts`）、統合設定（`integration`）を保持し、JSONおよび構造化定義から検証・ロードできるデータモデル。
+  2. `WorktreeManager`（`src/auto_developer/worktree.py`）: 各チーム専用の独立作業ディレクトリ（`.dev/worktrees/<team_id>/`）およびブランチ（`feature/<team_id>`）をアトミックに作成、一覧、衝突検知、安全なクリーンアップを行う。Makerには作業ディレクトリのみを渡し、worktree管理権限は分離する。
+  3. `BoundaryGuard`（`src/auto_developer/boundary.py`）: チームの `owns`（変更許可パターン）を逸脱したファイル作成・変更・削除を機械的に検知し、領域外編集を検知した場合は外部不変条件違反として即座にQuarantine（隔離ロールバック）を発動する。
+  4. 決定論的受入テスト（`tests/test_multi_team_foundation.py`）: 独立した2つのWorktreeが競合なく共存できること、およびBoundaryGuardによる領空侵犯の即時遮断を証明する。
+- [x] 機能X (Stage 1 堅牢化とパイプライン統合 Stage 1 Hardening & Pipeline Integration):
+  1. `WorktreeManager` のパス・削除安全性（P0-1, P0-2）:
+     - `team_id` を正規表現 `^[a-z][a-z0-9_-]{0,63}$` に制限し、不適合なIDを拒否する。
+     - 作成・削除時に、解決されたターゲットパスが `self.worktree_base` の直下であることを検証し、パストラバーサルを遮断する。
+     - `shutil.rmtree` による直接削除を廃止し、Gitが削除を拒否した場合は例外を送出して安全停止する。未コミット成果の無断破棄を遮断する。
+  2. `TeamManifest` のスキーマ厳格化（P1-2）:
+     - `team_id` の正規表現検証、空の `owns` リスト拒否。
+     - `max_parallel_tasks` の正の整数制約（`> 0`）。
+     - 真偽値フィールドにおける型安全性（`isinstance(val, bool)` を検証し、文字列 `"false"` による誤判定を遮断）。
+  3. `BoundaryGuard` の Fail-Closed 化・glob 厳格化・rename 検査（P0-3, P1-1）:
+     - `git diff` または `git status` が失敗した場合、結果を握りつぶさず例外を送出し検査失敗（Fail-Closed）とする。
+     - glob照合をリポジトリルートからの相対パス先頭一致に統一し、意図しない曖昧一致を排除する。
+     - Git rename (`R  old -> new`) において `old` と `new` の両方を検査対象とし、許可領域外へのファイル移動・持ち出しを遮断する。
+  4. 境界違反時の自動 Quarantine とパイプライン統合（P0-3, P1-3）:
+     - チーム実行時、Maker 実行直後およびコミット確定直前に `BoundaryGuard` を機械的に実行する。
+     - 領空侵犯検知時にチーム固有の隔離ブランチ（`quarantine/<team_id>-...`）へ自動退避させ、成果をアーカイブ保全した上で本線をクリーン復元する。
+  5. 決定論的受入テスト（`tests/test_multi_team_foundation.py`）:
+     - パストラバーサル遮断、削除時の成果保全、Fail-Closed動作、領空侵犯時の自動Quarantineと完全復元を実証する。
+- [x] 機能Y (Stage 1 最終確定と厳格監査 Stage 1 Finalization & Strict Audit):
+  1. `WorktreeManager` の非破壊的一括クリーンアップとブランチ成果保全:
+     - `cleanup_all(force: bool = False, delete_branches: bool = False)` をデフォルト安全化。
+     - `delete_branch=True` 指定時でも、ベースブランチに未マージのコミットが存在する場合はブランチ強制削除（`git branch -D`）を拒否し、未マージ成果を安全に保全する。
+     - `remove_worktree` / `cleanup_all` のブランチ削除成否・保全状況を構造的に返却またはログ出力する。
+  2. Evidence Bundle の 3値監査判定（`VERIFIED` / `INTEGRITY_ONLY` / `INVALID`）:
+     - `verify-bundle` の検証結果として、`VERIFIED`（Exit 0 / 統合許可）、`INTEGRITY_ONLY`（Exit 2 / 承認証跡欠落、統合拒否）、`INVALID`（Exit 1 / 改ざん・破損、不許可）を厳格に判定・出力する。
+     - 承認済みの Evidence Record が 0 件またはタスク不一致の場合は `INTEGRITY_ONLY` とし、未承認成果の統合を物理遮断する。
+  3. Evidence Record の完全同梱:
+     - `EvidenceBundler` は `.git/nightly_evidence/archive/` および `.dev/evidence/` からタスクの物理 Evidence Record を漏れなく集約し、バンドル内に収録する。
+  4. 決定論的受入テストの追加:
+     - 未マージコミットを持つ Worktree のブランチ保全テスト。
+     - 証跡欠落時の `INTEGRITY_ONLY` 拒否判定テスト、および証跡完備時の `VERIFIED` 合格テスト。
+- [x] 機能Z (Stage 1 完全堅牢化と物理 Git Tree 拘束 Stage 1 Complete Hardening & Git Tree Binding):
+  1. Evidence と物理 Git Tree SHA の厳格拘束（P0-Fail-Open遮断）:
+     - `verify_bundle` は Evidence Record の自己申告を信じず、同梱の `git_bundle.bundle` を検証・参照解決してコミットと Tree SHA を物理照合する。
+     - コミットが存在しない、または Tree SHA が一致しない、または架空ダミーハッシュ（例: `0000...`）の場合は即座に `INVALID`（Exit 1）として遮断する。
+     - Evidence の `spec_sha` がバンドル内 `SPEC.md` の SHA-256 と一致しない（または空）の場合も即座に `INVALID` とする。
+     - `status == COMPLETED` かつ `checker.decision == APPROVE` かつ Git Tree SHA と SPEC SHA が物理実証された場合のみ `VERIFIED`（Exit 0）を許可する。
+  2. Worktree 強制削除時の成果保全と完全破棄ガード（P0-成果保護）:
+     - 未コミット変更がある Worktree の削除時、直接の破壊的消去を禁止し、必ず Quarantine スナップショットアーカイブ（`.dev/quarantines/snapshot_worktree_...`）へ自動退避した上で解除する。
+     - 未統合ブランチは `delete_branch=True` でも保全し、明示フラグ `purge_unmerged=True` が指定された場合のみ削除を許可する。
+  3. 決定論的受入テストの追加:
+     - 架空 Evidence 注入ケース（Sol氏再現シナリオ）に対する `INVALID` 遮断テスト。
+     - 未コミット変更 Worktree 削除時の自動 Quarantine 保全テスト。
+     - 未統合ブランチの `purge_unmerged` ガードテスト。
+- [x] 機能Ω (Stage 1 最終完成・厳格 Fail-Closed ハードニング Stage 1 Final Completion & Strict Fail-Closed Hardening):
+  1. Git Bundle 検証失敗時の完全 Fail-Closed（P0）:
+     - `git_bundle.bundle` のクローンまたは検証が失敗した場合、またはコミット履歴が空の場合は即座に `INVALID`（Exit 1）として遮断する。
+     - `valid_trees` が空の場合は検証スルーを許さず、必ず拒否する（Fail-Open 脆弱性の完全撤廃）。
+  2. Manifest HEAD / Tree と実 Git オブジェクトの照合（P0）:
+     - Manifest に記載された `head_commit` および `head_tree_sha` が、Git Bundle 内の実際の `HEAD`（`git rev-parse HEAD`, `git rev-parse HEAD^{tree}`）と完全一致することを検証する。
+  3. Task / Commit / Tree の 1対1 物理対応と完全性（P1）:
+     - Evidence Record の `commit` SHA が実在し、`git rev-parse <commit>^{tree}` が Evidence の `tree_sha` と 1対1 で完全一致することを検証する。
+     - Manifest の `tasks` リストと `evidence/` ディレクトリ内の全 `task_*.json` のタスク集合が双方向で完全一致することを検証する。
+  4. Worktree Quarantine の機密除外と Git status の Fail-Closed（P1）:
+     - 未コミット退避アーカイブ生成時、`.env` や秘密鍵等の機密ファイルを除外（サニタイズ）する。
+     - `git status` が失敗した場合は例外を送出して削除を拒否し、安全停止する。
+  5. 決定論的受入テストの追加:
+     - Sol 氏再現の 4 つの異常系ストレステスト（Git Bundle 偽造、Commit 不正、Evidence ファイル欠落、HEAD 偽造）がすべて確実に `INVALID` で弾かれることを検証するテスト。
+     - 機密ファイル除外と `git status` 異常終了時の安全停止テスト。
+- [x] 機能Ψ (Stage 1 完全防衛・機密スキャン & 厳格マニフェスト照合 Stage 1 Ultimate Defense: Deep Secret Scanning & Strict Manifest Verification):
+  1. Worktree 隔離における秘密情報内容スキャン & SHA-256 Manifest 読み戻し検証（P0）:
+     - ファイル名だけでなくファイル内容（APIキー、シークレットトークン等）をディープスキャンし、秘密情報が検出された場合は意図しない機密漏洩・破壊を防ぐため Worktree 削除を安全に停止（Fail-Closed）する。
+     - 安全な変更の場合は各ファイルの SHA-256 ハッシュ付き Manifest を生成し、アーカイブ作成後に読み戻し整合性検証を行い、保全が物理的に確認できた場合のみ Worktree 削除を許可する。
+  2. Bundle Manifest の必須項目厳格化・HEAD 欠落拒否・ZIP 未知ファイル排除（P1）:
+     - Manifest 内の `head_commit`, `head_tree_sha`, `job_id` 等の必須項目が空文字・欠落・無効形式の場合は即座に `INVALID` で遮断する。
+     - ZIP 内の全ファイルエントリ集合が Manifest 記載ファイル集合 + `manifest.json` と完全一致することを検証し、未知の追加ファイル（`mystery.txt` 等）やパストラバーサルを即座に拒否する。
+  3. Manifest タスク情報と Evidence Record 内容の完全照合（P1）:
+     - Manifest の `tasks` リストにおけるタスクID重複を排除する。
+     - 各タスクの `task_id`, `commit`, `tree_sha`, `spec_sha`, `status`, `checker` を同梱された Evidence Record と 1対1 で完全一致照合し、フィールド改変や不整合を即座に `INVALID` として拒否する。
+  4. 決定論的受入テストの拡充:
+     - Sol 氏再現シナリオ（HEAD空文字、Manifestタスク改変、ZIP内未知ファイル追加、config.json内APIキー混入時のWorktree削除停止）の決定論的テストを追加。
+- [x] 機能Φ (Stage 1 完璧クローズ・未保存成果消失阻止 & 全必須フィールド厳格拘束 Stage 1 Perfection: Zero Unsaved Loss & Complete Task Binding):
+  1. Worktree 削除時の未保存秘密情報（.env 等）存在時における削除拒否（P0）:
+     - Worktree 内に Quarantine 対象外となる秘密情報ファイル（`.env`, 秘密鍵等）が未コミットのまま存在する場合、Worktree の削除を即座に拒否し、設定・成果の物理的消失を防止（Fail-Closed 保全）する。
+  2. Bundle Manifest タスク全必須フィールドの欠落不可・完全一致照合（P1）:
+     - 各タスクについて、`task_id`, `commit`, `tree_sha`, `spec_sha`, `status`, `checker_decision` を全必須（空文字・欠落不可）とし、Manifest と Evidence Record の間で完全一致照合する。
+  3. 決定論的受入テストの拡充:
+     - `.env` 存在時の Worktree 削除拒否・保全テスト。
+     - Manifest タスクの `commit` 空文字、`spec_sha` 不一致に対する `INVALID` 遮断テスト。
+- [x] 機能Χ (Stage 1 完全無欠・Git status 独立の全ファイル秘密情報スキャン Stage 1 Invincibility: Git-Status-Independent Secret Scanning):
+  1. Git status 独立の実ファイル事前スキャン（P0）:
+     - Worktree 削除時、`git status --porcelain` の判定前に Worktree 内の実ファイルを走査する。
+     - `.gitignore` に含まれている等の理由で Git status が空（変更なし）であっても、`.env` や秘密鍵、または秘密情報を含むファイルが存在する場合は即座に `WorktreeError` を送出して削除を拒否し、設定・成果の物理的消失を絶対に防止する。
+  2. 決定論的受入テスト:
+     - `.gitignore` で無視された `.env` のみが存在する Worktree において、`remove_worktree(force=True)` が確実に削除を拒否し、`.env` が物理保全されることの実証テスト。
+- [x] 機能Ψ (Stage 1 完全無欠・Git無視通常ファイルの包括的退避保全 & レポート鮮度保証 Stage 1 Absolute Zero-Loss: Ignored File Quarantine & Report Freshness):
+  1. Git無視通常ファイル（`local-notes.txt` 等）の Quarantine 包括退避保全（P0）:
+     - Worktree 削除時、ノイズパターン（`.git/`, `__pycache__`, `.DS_Store` 等）以外の通常ファイル（`.gitignore` で無視されたファイルを含む）が存在する場合を検出する。
+     - `git status --porcelain` が空であっても、これらのファイルが存在する場合は未コミット成果（`has_uncommitted = True`）として扱い、`force=False` では削除拒否、`force=True` では Quarantine アーカイブへ確実に退避・保全してから削除する。
+  2. Morning Brief (NIGHTLY_REPORT.md) の最新鮮度保証（P1）:
+     - Bundle 生成時に、現行ジョブの最新コミットおよびタスク実績が反映されたレポートを確実に同梱・整合させる。
+  3. 決定論的受入テスト:
+     - `.gitignore` で無視された `local-notes.txt` が `remove_worktree(force=True)` で Quarantine スナップショットに退避され、中身がハッシュ一致で復元・保全可能であることの実証テスト。
+- [x] 機能Ω (Stage 1 完全無欠・管理済み設定ファイル誤検知防止 & クリーンWorktree正常削除 Stage 1 Perfect Close: Tracked Config Exemption):
+  1. Git管理済み・未変更ファイル（`.env.example` 等）の事前スキャン免除（P1）:
+     - Worktree 削除時、事前スキャンおよび機密性検査の対象を「未コミット・未追跡・無視ファイル等の未保存成果」に限定する。
+     - リポジトリに管理済みで未変更（`tracked` かつ clean）のファイル（`.env.example` 等）は、Worktree 削除によって失われる成果ではないため、機密検査で誤検出せず通常削除を許可する。
+  2. 決定論的受入テスト:
+     - `.env.example` がコミットされている状態で、クリーンな Worktree を作成し、編集なしで `remove_worktree()` が正常に削除を完了することの実証テスト。
+- [x] 機能AA (Stage 2: 独立自律チーム統合ゲート堅牢化 IntegrationGate Hardening & Strict Binding):
+  1. Bundle とマージ対象 Commit SHA の厳格束縛 (P0-1):
+     - `audit_team_inputs`: 各チームブランチ先端（`git rev-parse <branch>`）と Bundle の `verification.head_commit` が完全一致することを必須検証。不一致時は即座に監査拒絶（Fail-Closed）。
+     - `merge_team_branches`: ブランチ名ではなく、監査済み Commit SHA を直接指定してマージ。マージ後にマージコミットの第2親（`git rev-parse HEAD^2`）が監査済み Commit SHA と一致することを機械的検証。
+  2. 統合ブランチの保護と開始前クリーン検査 (P0-2):
+     - `execute_integration`: 実行開始時に `git status --porcelain` を検査し、未コミット変更がある場合は即座に停止。
+     - `create_integration_branch`: 既存の同名統合ブランチが存在する場合は上書きリセット（`-B`）を禁止し、Fail-Closed で拒絶。
+  3. エラーハンドリングと隔離処理の堅牢化 (P1-1):
+     - 保護ファイル検査で `git diff` 自体が異常終了した場合は Fail-Closed 遮断。全 Git 操作の終了コードを検証。
+     - 統合失敗時の隔離ブランチ名にタイムスタンプ（`quarantine/integration-<job_id>-<timestamp>`）を付与して衝突を防ぎ、元のブランチへ確実に復帰。
+  4. Release Candidate (RC) タグの冪等性と不変性 (P1-2):
+     - `git tag -f` による強制上書きを廃止。既存タグが同一コミットを指している場合は冪等成功、異なるコミットを指している場合は上書き拒絶。
+  5. 実機能結合の決定論的受入テスト (P1-3):
+     - Core チームの計算関数を UI チームがインポートして呼び出す実機能結合テストを追加し、マージ後の全体検証通過を実証。
+     - API 不整合（引数不一致など意味的競合）による統合後全体検証失敗・安全隔離シナリオを実証。
+- [x] 機能BB (Stage 2: 専用 Integration Worktree 分離とクラッシュ復旧の完全性 Integration Worktree & Crash Recovery):
+  1. 専用 Integration Worktree による親作業領域の完全非汚染化 (BB.1 / P1-1):
+     - `execute_integration`: 呼び出し元作業ディレクトリ（親）上で直接 `git checkout` やマージを行わず、`WorktreeManager` を利用して専用の一時 Worktree（`.dev/worktrees/integration-<job_id>`）を新規ブランチ（`integration/<job_id>`）で作成し、その中で順次マージおよび全体検証を実行する。
+     - 呼び出し元（親）の作業ディレクトリおよびカレントブランチ・作業ツリーは、統合処理の開始から終了（成功・失敗問わず）まで一切変更・切り替えされない。
+     - 統合成功時は RC タグを発行後、Worktree を安全に削除・クリーンアップする。
+  2. ライフサイクル管理と例外時の安全隔離・復旧 (BB.2 / P1-2):
+     - Worktree の操作は `try ... finally` 等で保護され、Git 操作例外や RC タグ不変性違反（`RC_TAG_IMMUTABLE_BREACH`）等のあらゆる例外発生時にも親の作業ツリーは完全に保護され、Worktree の残留やリークを防止する。
+     - 予期せぬ例外時も外へ生例外を伝播させず、`IntegrationResult(success=False, status="ERROR", errors=[...])` を安全に返却する。
+  3. マージ競合時のタイムスタンプ付き隔離ブランチ明示と復旧不能状態管理 (BB.3 / P1-4):
+     - Git マージ競合が発生した場合、`merge --abort` を実行した上で、途中マージブランチを `quarantine/integration-<job_id>-conflict-<timestamp>` へリネームし、通常の統合ブランチと誤認されないよう隔離状態を明示する。
+     - `merge --abort` や作業ツリーの初期化等で復旧不能なエラーが発生した場合は、推測で処理を継続せず明示的に `status="RECOVERY_REQUIRED"` を返す。
+  4. 受入テストの偽陽性排除と厳格な機能結合検証 (BB.4 / P1-3):
+     - 契約受入テスト（`test_contract.py`）内の `except ImportError: return` を排除し、必要なモジュール（`core.app`, `ui.view`）のインポート失敗や期待値不一致は必ずテスト失敗（Exit 1）として検知する。
+     - 統合前に契約テストが誤って実行されないようテスト実行条件・スコープを整理し、結合成功時のみ Exit 0、不整合時は即座に Exit 1 となる決定論的検証を保証する。
+- [x] 機能CC (Stage 2: 統合クラッシュ耐性パック Integration Crash Consistency Pack):
+  1. クリーンアップ状態の明示と隔離リネームの Fail-Closed 検査 (CC.1 / P1-A, P1-B):
+     - Worktree の後片付け成否を `IntegrationResult.details` の `cleanup_status` ("SUCCESS" | "FAILED")、`worktree_path`、`cleanup_error` に記録し、クリーンアップ失敗時は警告またはエラー情報として呼び出し元へ明示する。
+     - 競合（CONFLICT）や全体検証失敗（VERIFICATION_FAILED）時の隔離ブランチリネーム（`git branch -m`）の実行結果を検証し、リネームに失敗した場合は推測で処理を完了せず即座に `status="RECOVERY_REQUIRED"` を返す。
+  2. 統合状態の原子的永続化 (CC.2 / P1-C):
+     - 統合ジョブの進捗状態を管理する `IntegrationJobState` を定義し、`INITIALIZED` -> `AUDITED` -> `WORKTREE_CREATED` -> `MERGING` -> `VERIFYING` -> `RC_ISSUED` (完了時は `COMPLETED`、失敗時は `FAILED` または `RECOVERY_REQUIRED`) の状態遷移を記録する。
+     - 状態ファイルは `.dev/integration_jobs/<job_id>.json` へ一時ファイル + `os.replace` によるアトミック書き込みを行い、プロセスクラッシュ時の破損を防止する。
+  3. Git 実態照合による自律クラッシュ復旧 (CC.3 / P1-C, P1-D):
+     - 統合処理が SIGKILL や電源断等で突然死した後の再開・復旧処理（`recover_or_resume`）を実装する。
+     - 保存された状態ファイルを鵜呑みにせず、実際の Git 状態（Worktree の実在、統合ブランチの HEAD、マージ状態、RC タグ）と照合して安全な復旧経路を選択する。
+     - 途中で孤立した Worktree やロックが存在する場合は安全に回収・隔離し、作業をクリーンな状態へ復元または安全に再開する。
+  4. クラッシュ復旧の決定論的受入テスト (CC.4 / P1-D):
+     - マージ途中や全体検証途中でプロセスが強制終了された状態を再現し、次回実行時に安全に検知・復旧（クリーンアップまたは再開）できることを実証する決定論的受入テストを追加。
+- [x] 機能DD (Stage 2: クラッシュ復旧堅牢化 & 実プロセスSIGKILL障害注入実証 Stage 2 Crash Consistency Hardening & Real SIGKILL Verification):
+  1. `recover_interrupted_job` の完全 Fail-Closed 化 (DD.1 / P0):
+     - 孤立 Worktree の削除失敗（例外発生）時、または削除試行後にターゲットディレクトリや Git 管理下の Worktree が実在する場合、推測で `RECOVERED` とせず確実に `status="RECOVERY_REQUIRED"` を返す。対象が最初から存在しない場合のみ冪等成功として扱う。
+  2. `IntegrationJobState` の識別子検証 & 原子的永続化の堅牢化 (DD.2 / P1):
+     - `job_id` を正規表現 `^[a-zA-Z0-9_-]+$` で厳格検証しパストラバーサルを遮断。状態保存時に一時ファイルへの `flush()` + `os.fsync()` および親ディレクトリの同期を行い、突然の電源断に対する耐性を担保。
+  3. 実プロセスへの `SIGKILL` 障害注入受入テストの実証 (DD.3 / P1):
+     - `IntegrationGate` に障害注入フック（`fault_hook`）を設け、別プロセスで起動した `execute_integration` をマージ途中（`after_first_merge`）または RC 発行直後で実際に `os.kill(pid, signal.SIGKILL)` により強制終了。その後の `execute_integration(..., resume=True)` による安全な復旧・隔離・統合完遂を実証。
+  4. Morning Brief (NIGHTLY_REPORT.md) と Manifest の Tree SHA 完全整合 (DD.4 / P2):
+     - `MorningReporter` が全 Evidence 領域（`records`, `archive`, `.dev/evidence`）から実態照合を行い、Manifest の Tree SHA と 1対1 で完全一致するよう出力する。
+- [x] 機能EE (Stage 2 最終確定: RC タグ復旧の完全 Fail-Closed 化 & 成果コミット束縛 Stage 2 Finalization: Strict RC Recovery & Commit Binding):
+  1. RC 発行済み復旧経路における Worktree 削除の Fail-Closed 化 (EE.1 / P0):
+     - `recover_interrupted_job` において、`rc/<job_id>` タグ検出時でも Worktree 削除（`remove_worktree`）で例外が発生した、または Worktree ディレクトリや Git 管理下の Worktree が実在する場合、推測で `ALREADY_COMPLETED` とせず確実に `status="RECOVERY_REQUIRED"` を返す。
+  2. RC タグコミットと統合成果の厳密照合 (EE.2 / P0):
+     - `rc/<job_id>` タグが指すコミット（`existing_rc_commit`）が、JobState に記録された `rc_commit` や統合ブランチ先端と完全一致することを検証する。
+     - また、`job_state.verified_commits` の全チームコミットが `existing_rc_commit` の祖先（`git merge-base --is-ancestor <team_commit> <existing_rc_commit>`）であることを機械的に検証し、架空・無関係なコミットを指す不正な RC タグによる誤完了を物理遮断する。不一致時は即座に `status="RECOVERY_REQUIRED"` を返す。
+  3. 決定論的受入・回帰テストの実証 (EE.3 / P0):
+     - テスト1: RC タグが存在する状態で Worktree 削除に失敗した際、`RECOVERY_REQUIRED` で遮断されることの実証。
+     - テスト2: RC タグが存在するが、保存された統合成果と SHA 不一致または未統合コミットである際、`RECOVERY_REQUIRED` で遮断されることの実証。
+- [x] 機能FF (Stage 2 完全完了: RC 復旧時の証拠欠落ガード Stage 2 Final Closure: Missing Evidence Guard in RC Recovery):
+  1. 監査済みチーム成果未記録時の Fail-Closed 遮断 (FF.1 / P1):
+     - `recover_interrupted_job` において、`rc/<job_id>` タグ検出時、`job_state.verified_commits` が空（未記録）の場合は即座に `status="RECOVERY_REQUIRED"` で遮断する。
+  2. 照合根拠欠落時の Fail-Closed 遮断 (FF.2 / P1):
+     - `job_state.rc_commit` が未記録、かつ統合ブランチ（`refs/heads/<integration_branch>`）が存在しない場合、RC タグの正当性を証明する根拠が欠落していると判断し、推測で `ALREADY_COMPLETED` とせず確実に `status="RECOVERY_REQUIRED"` で遮断する。
+  3. 決定論的受入・回帰テストの実証 (FF.3 / P1):
+     - JobState が INITIALIZED かつ verified_commits が空、統合ブランチなしの状態で同名 RC タグが存在する際、`RECOVERY_REQUIRED` で遮断されることを実証する回帰テストを追加。
+- [x] 機能GG (Stage 3 MultiTeamOrchestrator 始動: 複数ワーカー並行実行・統合基盤 MultiTeam Orchestration Foundation):
+  1. 複数チーム並行実行データ構造と契約 (GG.1):
+     - `TeamWorkerSpec`, `MultiTeamConfig`, `MultiTeamResult` などのデータ構造を定義し、複数ワーカーの Worktree 分割と成果統合の不変条件を確立する。
+  2. 独立ワーカーオーケストレーション基盤 (GG.2):
+     - 各チームの独立 Worktree 上での実行・成果収集（Evidence Bundle 収集）と `IntegrationGate` への安全な引き渡しパイプラインの基本実装。
+- [x] 機能HH (Stage 3 Worktree 管理堅牢化 & トランザクション準備 Stage 3 Worktree Robustness & Atomic Preparation):
+  1. Worktree 削除成否判定の実態整合 (HH.1 / P1-1):
+     - `cleanup_workers()` において、`remove_worktree` の戻り値（ブランチ削除フラグ）に依存せず、Worktree ディレクトリの消滅および Git 管理下の解放実態に基づいて削除成功（`True`）を判定する。
+  2. 重複チームID拒否 & Worktree 原子的準備 (HH.2 / P1-2):
+     - `MultiTeamConfig` において重複した `team_id` が渡された場合、即座に拒絶（`ValueError`）。
+     - `prepare_workers()` において一部チームの Worktree 作成が失敗した場合、作成済みの全 Worktree を安全に自動ロールバック解放し、孤立 Worktree を残さないトランザクション的準備を保証する。
+- [x] 機能II (Stage 3 実ワーカー並行実行 & 成果統合パイプライン MultiTeam Parallel Execution & Integrated Delivery):
+  1. 複数ワーカーの実並行プロセス実行と監督 (II.1):
+     - `MultiTeamOrchestrator.run_workers()` を実装し、各チームの独立 Worktree 上でワーカープロセス（`NightlyOrchestrator` / コマンド）を並行起動・監視する。
+     - タイムアウトおよびエラー発生時のプロセス回収・安全停止を担保。
+  2. 成果収集・ワーカー失敗遮断・統合ハンドオフ (II.2):
+     - 各ワーカーが完了時に生成した Evidence Bundle を収集し、いずれかのワーカーが失敗した場合は未承認成果を統合せず `WORKER_FAILED` で安全停止。双方が成功した場合のみ `IntegrationGate` へ引き渡して統合検証・RC発行。
+- [x] 機能JJ (Stage 3 決定論的受入・並行実行実証 Stage 3 Deterministic Multi-Worker Acceptance Verification):
+  1. 2ワーカー並行稼働 & 成果統合受入テストの実証 (JJ.1):
+     - 2つのワーカーが独立 Worktree 上で並行実行され、独立した成果物と Evidence Bundle を作成し、親オーケストレーターがこれらを安全に統合して Release Candidate を発行できることを実証。
+     - 片方のワーカーが失敗した際に未承認成果の統合が遮断されることの実証。
+- [x] 機能KK (Stage 3 標準CLIワーカー起動コマンド修正 & パラメータ拡張 Stage 3 Standard CLI Worker Command & Parameter Extension):
+  1. CLI コマンド引数順序の修正 (KK.1 / P0):
+     - `run_workers()` におけるデフォルト CLI コマンドを `["python3", "-m", "auto_developer.cli", "--work-dir", str(wt_path), "run"]` に修正し、サブコマンドの前に `--work-dir` を配置して引数解析エラー（Exit 2）を解消する。
+  2. ワーカー引数・環境変数の明示的設定 (KK.2):
+     - `TeamWorkerSpec` に `extra_args` および `env` フィールドを追加し、ワーカー起動時に `--mock` や固有の引数・環境変数を透過的に渡せるよう拡張する。
+- [x] 機能LL (Stage 3 統合前 Evidence Bundle の Worktree 外保全 & ハッシュ照合 Stage 3 Permanent Evidence Bundle Preservation & Hash Verification):
+  1. Worktree 削除前の Evidence Bundle 保全 (LL.1 / P1):
+     - ワーカー完了後、IntegrationGate による統合または Worktree クリーンアップの前に、各チームの Evidence Bundle を永続保存先（`.dev/integration_jobs/<job_id>/evidence/<team_id>.zip`）へ退避コピーする。
+  2. SHA-256 整合性検査と返却パス更新 (LL.2):
+     - 退避前後の SHA-256 チェックサムを照合し、不整合時は即座にエラーとして遮断する。
+     - `TeamExecutionResult.bundle_path` を保全後の恒久パスへ更新し、Worktree が削除された後でも呼び出し元が返却されたパスから有効な Evidence Bundle を監査・取得できることを保証する。
+- [x] 機能MM (Stage 3 実サブプロセス 2チーム並行実行 & 意味的機能結合 E2E 受入実証 Stage 3 Real Subprocess Multi-Worker E2E & Semantic Integration Verification):
+  1. 2つの実サブプロセスによる並行稼働受入実証 (MM.1 / P2):
+     - `worker_fn` を使わず、実サブプロセス（`python3 -m auto_developer.cli --work-dir <wt> run --mock` 等）を2本同時に独立 Worktree 上で起動・監督し、並行開発を完遂することの実証。
+  2. Core / UI 意味的機能結合検証 (MM.2):
+     - Core チームのモジュールと UI チームのモジュールを別々のワーカーが実装・コミットし、統合検証スクリプトが両者の実インポート・結合呼び出しを検証して Exit 0 となり、Release Candidate が発行されることの実証。
+     - クリーンアップ後も全 Evidence Bundle が実在し、独立 Verifier で `VERIFIED` となることの確認。
+- [x] 機能NN (Stage 3 Evidence退避失敗時の原本保護 & 原子的保全 Stage 3 Original Worktree Protection on Preservation Failure & Atomic Storage):
+  1. 退避未完了 Worktree の選択的原本保護 (NN.1 / P0):
+     - `cleanup_workers()` に `team_results` 引数を追加し、各チームの実行結果を参照可能にする。
+     - Evidence Bundle の Worktree 外退避が未完了（`BUNDLE_PRESERVATION_FAILED`, `BUNDLE_CORRUPTED`、または保全パスが存在しない）チームの Worktree は、`finally` 節においても削除せずディスク上に確実に保全（原本保護）する。
+  2. 一時ファイル & `os.replace` による原子的保全 (NN.2):
+     - `preserve_team_bundles()` において、保存先へ直接上書きコピーせず、同一ディレクトリ内のテンポラリファイル（`<dest_path>.tmp_<uuid>`）にコピー。
+     - 一時ファイルの SHA-256 チェックサムを元 Bundle と照合し、完全一致した場合のみ `os.replace()` で原子的に確定置換する。失敗時は一時ファイルを安全に削除し、既存の有効な Evidence を汚染・破壊しない。
+- [x] 機能OO (Stage 3 成果保全障害注入テスト & 受入実証 Stage 3 Fault Injection Verification & Full Acceptance):
+  1. 退避失敗・原本保護・部分失敗の障害注入実証 (OO.1):
+     - `shutil.copy2` / `os.replace` に `OSError` を注入するテストを追加し、退避失敗時でも Worktree とその中の Evidence Bundle が削除されずディスク上に物理残存することを実証。
+     - Team A 成功 / Team B 失敗の部分退避失敗において、Team A はクリーンアップされ、失敗した Team B の Worktree のみ原本保護されることを実証。
+  2. 全体検証ゲート通過と Evidence Bundle 生成・検証 (OO.2):
+     - 全自動検証ゲート（175+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [x] 機能PP (Stage 3 既存Evidenceの非破壊保全 & 衝突拒否 Stage 3 Non-destructive Evidence Preservation & Collision Guard):
+  1. 既存 Evidence の非破壊照合 & 同一ハッシュ冪等再利用 (PP.1 / P1):
+     - `preserve_team_bundles()` において、恒久保存先（`dest_path`）が既に存在する場合、既存ファイルの SHA-256 と退避対象 Bundle の SHA-256 を照合する。
+     - 両者の SHA-256 が完全一致する場合、上書きコピーを実行せず既存ファイルを再利用（冪等成功）として扱い、`res.bundle_path = dest_path`, `res.evidence_preserved = True` を設定する。
+  2. 異ハッシュ衝突時の上書き拒絶 & 原本保護 (PP.2 / P1):
+     - 既存ファイルが存在し SHA-256 が異なる場合、既存の過去 Evidence を破壊・上書きしないよう即座にコピーを中止（Fail-Closed）し、`res.status = "BUNDLE_PRESERVATION_COLLISION"` を記録して統合を安全停止する。
+     - 退避未完了として扱うことで、既存の保存先 Evidence を保護すると同時に、退避に失敗した新しい Worktree の削除も抑止して双方の成果を完全保全する。
+  3. 冪等保存・衝突遮断の回帰テスト実証 (PP.3):
+     - 同一 Bundle の冪等保存成功、および内容が異なる Bundle の衝突検知・上書き遮断・原本保護を検証する決定論的テストを追加。
+- [x] 機能QQ (Stage 3 同時保存の排他的確定 & TOCTOU競合解消 Stage 3 Exclusive Atomic Publication & TOCTOU Race Condition Elimination):
+  1. `os.link` による排他的・アトミック確定 (QQ.1 / P1):
+     - `preserve_team_bundles()` において、ハッシュ照合済みの一時ファイル（`tmp_path`）から保存先（`dest_path`）への公開確定時に、上書き置換する `os.replace` ではなく、排他的リンク作成 `os.link(tmp_path, dest_path)` を使用する。
+     - 作成成功時は `tmp_path.unlink()` を行い、`res.bundle_path = dest_path`, `res.evidence_preserved = True` とする。
+     - `os.link` が `FileExistsError`（既存ファイル存在）を送出した場合、先行プロセスまたは並行プロセスが `dest_path` を確定させたと判断し、直ちに `dest_path` の SHA-256 を照合する。
+       - 同一ハッシュなら冪等成功として `tmp_path.unlink()`, `res.bundle_path = dest_path`, `res.evidence_preserved = True`。
+       - 異ハッシュなら `BUNDLE_PRESERVATION_COLLISION` として `tmp_path.unlink()`, `res.success = False`, `res.evidence_preserved = False`（既存ファイル保護 & 新規Worktree原本保護）。
+     - 万が一ファイルシステムが `os.link` をサポートしない環境（`OSError` / `EPERM` / `ENOTSUP`）の場合に備え、安全なフォールバック機構を用意する。
+  2. TOCTOU 競合注入テスト & 決定論的受入実証 (QQ.2 / P1):
+     - 初期検査（`dest_path.exists()`）時点ではファイルが存在しなかったが、一時ファイル作成・確定直前に別プロセスによって同名ファイルが作成された状況を人工的に注入するテストを追加。
+     - 先行作成ファイルが同一ハッシュの場合は安全に冪等成功し、異ハッシュの場合は既存ファイルを破壊・上書きせず `BUNDLE_PRESERVATION_COLLISION` で拒絶され原本保護されることを実証。
+  3. 全体検証ゲート合格と Evidence Bundle 生成・検証 (QQ.3):
+     - 全自動検証ゲート（179+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [x] 機能RR (Stage 3 システムアーキテクチャ刷新 & ワーカープロセス監督・回収 Stage 3 Architecture Refresh & Worker Process Lifecycle Supervision):
+  1. 多層防衛アーキテクチャ図 & 設計ドキュメント刷新 (RR.1):
+     - `docs/designs/autonomous_pipeline_orchestrator.md` および `README.md` を更新。
+     - Stage 1（Worktree物理分離・領空防御）、Stage 2（IntegrationGate・RC確定）、Stage 3（並列ワーカー・排他確定・非破壊保全）を統合した包括的 Mermaid システム構成図を反映。
+     - プロセスグループ（PGID）管理およびクラッシュ整合性（Crash Consistency）の設計仕様を明文化。
+  2. ワーカープロセスのグループ監督 & 異常停止時回収機構 (RR.2):
+     - `MultiTeamOrchestrator.run_workers()` において、ワーカー起動時に独立したプロセスグループ（`start_new_session=True`）を設定し、各チームの PID/PGID を追跡・管理。
+     - 親プロセスの終了、シグナル受信（SIGTERM/SIGINT等）、タイムアウト、または例外発生時に、プロセスグループ全体（`os.killpg`）へシグナルを送信して子プロセス・孤児プロセスを安全かつ確実に回収・終了する。
+     - 異常停止時でも退避未完了 Worktree の原本保護原則を遵守しつつ、回収完了ステータスを記録。
+  3. プロセス回収 & 孤児防止テストの実証、全体検証ゲート通過、および Evidence Bundle 生成・検証 (RR.3):
+     - ワーカータイムアウトおよび異常停止時にプロセスグループ全体が確実に回収され、孤児プロセスが残存しないことを実証する決定論的テストを追加。
+     - 全自動検証ゲート（180+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [x] 機能SS (Stage 3 ワーカープロセス監督堅牢化 & 決定論的孤児防止実証 Stage 3 Robust Worker Process Lifecycle & Deterministic Orphan Prevention):
+  1. 起動時 PGID 保持と厳格な終了ステータス判定 (SS.1 / P1):
+     - `MultiTeamOrchestrator` において、ワーカー起動直後（`subprocess.Popen` 呼び出し直後）に `proc.pid` から PGID を確定取得・保持するデータ構造（`WorkerProcessHandle`）を導入。
+     - `terminate_worker_process_group()` において、親ワーカープロセスが先行終了・クラッシュした場合でも、保持された PGID に対して `os.killpg(SIGTERM/SIGKILL)` を確実に発行し、残存した孫プロセス・子孫プロセスを完全回収する。
+     - プロセスグループ全体の消滅（`os.killpg(pgid, 0)` が `ProcessLookupError` を送出）を検証し、停止指示・回収結果の成否を決定論的に判定・返却する。
+  2. 起動同期 & ゾンビ除外による決定論的回収テスト (SS.2 / P1):
+     - テスト環境において起動準備の時間差による Flakiness を解消するため、子プロセスの起動完了（PID ファイル書き込み等）を確実に待機・同期してから回収操作を実行する。
+     - Linux 等の環境で終了済みゾンビプロセス（`State: Z`）を生存プロセスと誤認しないよう、ゾンビ状態を除外して真に実行中の孤児プロセスが存在しないことを厳密に検証する。
+     - 親ワーカー先行終了時でも孫プロセスがプロセスグループごと安全に回収される決定論的テストを追加。
+  3. ドキュメント実装状況マトリクスの追加、全体検証ゲート通過、および Evidence Bundle 生成・検証 (SS.3):
+     - `README.md` および `docs/designs/autonomous_pipeline_orchestrator.md` に「実装状況マトリクス（実装・検証完了 / 開発中 / 将来マイルストーン）」を追加し、北極星アーキテクチャ図と現在地を明確化。
+     - 全自動検証ゲート（181+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [x] 機能TT (Stage 3 プロセスグループ実行中判定の厳格化とアクティブハンドル寿命管理 Stage 3 Process Group Active State Verification & Handle Lifecycle):
+  1. プロセスグループ実行中判定の厳格化 (TT.1 / P1):
+     - `terminate_worker_process_group()` において、単なる `killpg(pgid, 0)` の消滅待ちではなく、プロセスグループ内に「実行中プロセス（非ゾンビ）」が残存していないことを直接検査する判定ロジックを実装。
+     - Linux 環境では `/proc` を走査して対象 PGID のプロセス状態（`State: Z/X` 除外）を確認し、macOS/BSD/その他環境では `ps -eo pid=,pgid=,stat=` を用いて検査。
+     - グループ内に実行可能プロセスが存在しない場合（全プロセス消滅またはゾンビのみ）に回収成功（`True`）と判定し、停止指示失敗や状態確認不可時は `False` を返却する。
+  2. 終了済みハンドルのアクティブ監督対象除外とPID/PGID再利用対策 (TT.2 / P1):
+     - `terminate_all_workers()` において、過去に終了・回収済みのハンドルへシグナルを誤送信しないよう、現在アクティブに実行中のワーカー（`_active_workers`）のみを対象とする。
+     - 終了確認済みのワーカーはアクティブ対象から除外し、OSによるPID/PGID再利用時の無関係なプロセスグループ誤爆を物理的に防止する。
+  3. 2ワーカー並行停止テストの決定論的実証、全体検証ゲート通過、および Evidence Bundle 生成・検証 (TT.3):
+     - 独立実行環境において `test_terminate_all_workers_terminates_running_subprocesses` を含む全 23 件の multi-team テストが 100% 決定論的に合格することを実証。
+     - 全自動検証ゲート（181+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [x] 機能UU (Stage 3 ワーカー停止失敗時のハンドル保持と再試行回収保証 Stage 3 Termination Failure Handle Retention & Recovery Retry):
+  1. 停止失敗時のハンドル維持 (UU.1 / P1):
+     - `terminate_worker_process_group()` において、プロセスグループ内に実行中プロセスが残存している場合（`still_alive == True`）は、`self._active_workers` および `self._all_worker_handles` からハンドルを破棄せず監督対象として保持する。
+     - `_worker_history[team_id]` には `status: "TERMINATION_FAILED"` および失敗時刻を記録する。
+  2. 再試行による回収能力の実証 (UU.2 / P1):
+     - 一度停止に失敗したワーカーであっても、ハンドルが保持されているため、後続の `terminate_worker_process_group()` または `terminate_all_workers()` による再試行で回収可能であることを Red-First テストで実証する（「停止失敗 → ハンドル保持 → 再回収成功」）。
+  3. 全体検証ゲート通過、および Evidence Bundle 生成・検証 (UU.3):
+     - 全自動検証ゲート（181+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [ ] 機能VV (Stage 3 親プロセス強制終了耐性 & ワーカークラッシュ自律復旧 Stage 3 Parent SIGKILL Resilience & Worker Crash Autonomic Recovery):
+  1. 永続 Worker Registry の導入 (VV.1 / P1):
+     - `MultiTeamOrchestrator` において、ワーカー起動時にチーム情報、Worktree パス、PID、PGID、起動タイムスタンプ、実行状態を `.dev/integration_jobs/<job_id>/workers.json` へ原子的に永続化する `WorkerRegistry` 機構を導入。
+     - 親オーケストレーターが SIGKILL で強制終了されメモリが揮発しても、新プロセスがジョブ情報とワーカー状態をディスクから完全に復元可能とする。
+  2. 3状態自律復旧エンジン `recover_multi_team_job()` の実装 (VV.2 / P1):
+     - Case 1 (孤児ワーカー生存): Registry に記録された PGID とプロセスの実態（`has_active_processes_in_group`）を照合し、稼働中の孤児プロセスグループを安全に再回収・停止する。
+     - Case 2 (ワーカー停止 & 未回収成果残存): Worktree 内の Evidence Bundle を検査・発見し、`preserve_team_bundles` により恒久保存先へ安全に救出して Worktree を解放する。
+     - Case 3 (確定済み成果からの前進): 全チームの Evidence が検証済みの場合は再実行をスキップし、原子的 RC 発行および統合完了へ前進（Roll-forward）する。
+  3. 親プロセス強制終了（SIGKILL）障害注入テストの実証、全体検証ゲート通過、および Evidence Bundle 生成・検証 (VV.3):
+     - 親プロセスを疑似クラッシュ（強制終了）させた後、独立した新オーケストレーターインスタンスが上記 3 ケースを決定論的に自律復旧できることを実証する受入テストを追加。
+     - 全自動検証ゲート（181+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [ ] 機能WW (Stage 3 復旧時プロセス同一性照合・Worktree安全境界復元・Evidence実証厳格化 Stage 3 Identity Verification, Worktree Boundary Restoration & Strict Evidence Validation):
+  1. プロセス同一性照合による無関係プロセス誤停止の防止 (WW.1 / P0):
+     - `WorkerRegistration` にプロセスの OS 開始識別子（`process_start_time`）を記録するフィールドを追加。
+     - ワーカー起動時、OS からプロセスの開始時刻（Linux: `/proc/[pid]/stat` の `starttime`、macOS/POSIX: `ps -o lstart=`）を取得して Registry に原子的に記録。
+     - `recover_multi_team_job()` でのプロセスグループ停止時、対象 PID の現在の OS 開始時刻を取得・照合。不一致（PID再利用）または確認不能な場合はシグナル送信を絶対に実行せず、`UNVERIFIED_PROCESS` または `RECOVERY_REQUIRED` として安全に停止を保留する。
+  2. Worktree 削除安全境界の復元と直接 rmtree 撤廃 (WW.2 / P0):
+     - `recover_multi_team_job()` クリーンアップ処理から直接の `shutil.rmtree(wt_p)` を完全撤廃。
+     - 削除操作は `WorktreeManager.remove_worktree`（Git 登録確認・`.dev/worktrees` 境界確認）に一本化。
+     - Git の worktree 一覧に未登録、またはベースディレクトリ外のパスは一切削除を試みず、保全したまま `UNVERIFIED_WORKTREE` / 復旧保留とする。
+  3. Evidence 実検証の義務化、状態厳格化、全体検証ゲート通過、および Evidence Bundle 生成・検証 (WW.3 / P1):
+     - 復旧処理において、単なるファイル存在（`dest_bundle.exists()`）で成功扱いとせず、`EvidenceBundler.verify_bundle()` またはハッシュ照合による実検証を義務化。不正なデータや破損 zip は `INVALID_EVIDENCE` として拒絶。
+     - Worktree からの救出時も SHA-256 ハッシュを計算・照合。
+     - `verify_script=None` や IntegrationGate 未実行時は `RECOVERED_EVIDENCE_FOUND`（復旧保留）中間状態とし、IntegrationGate 成功時のみ `SUCCESS` とする。
+     - 全自動検証ゲート（182+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [x] 機能XX (Stage 3 PID-PGID所属照合 & EvidenceBundler独立実検証 Stage 3 Process Group Membership & Strict Evidence Audit):
+  1. PID-PGID 所属照合による誤停止の完全遮断 (XX.1 / P0):
+     - `recover_multi_team_job()` において、プロセスグループ停止を試みる前に、`w.pid` の OS 開始識別子照合（`curr_ident == w.process_start_time`）に加え、`os.getpgid(w.pid) == w.pgid` の所属確認を必須化。
+     - 親ワーカー PID が既に終了している場合、あるいは `os.getpgid(w.pid) != w.pgid` の場合は、絶対に `os.killpg` を送らず、`UNVERIFIED_PROCESS` または `RECOVERY_REQUIRED` として安全に停止を保留（Fail-Closed）。
+  2. EvidenceBundler による独立実検証の適用 & 復旧状態の厳格化 (XX.2 / P1):
+     - 復旧処理における Evidence Bundle 判定に `EvidenceBundler.verify_bundle()` を適用。`bundle_manifest.json`、全ファイルハッシュ、Git オブジェクト、Checker 承認がすべて有効（`verification.is_valid`）である場合のみ `evidence_preserved=True` として認定。
+     - マニフェストが存在しない zip や不正な証拠は `INVALID_EVIDENCE` として厳格に拒絶。
+     - `verify_script=None` や IntegrationGate 未実行時は `RECOVERED_EVIDENCE_FOUND`（復旧保留中間状態）とし、RC 発行が完了するまでジョブ全体を `SUCCESS` としない。
+  3. Stage 3 通しクラッシュ復旧受入実証、全体検証ゲート合格確認（184+ テスト）、および Evidence Bundle 生成・検証 (XX.3 / Stage 3 完了判定):
+     - 親プロセス SIGKILL クラッシュからの通し自律復旧受入テストの実証。
+     - 全自動検証ゲート（184+ テスト、Ruff、Mypy）の合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [x] 機能YY (Stage 3 未確認ワーカー存在時の復旧抑止 & Worktree保全 Stage 3 Fail-Closed Unverified Worker Recovery & Worktree Preservation):
+  1. 未確認ワーカー存在時の統合ゲート進行抑止 & RECOVERY_REQUIRED 状態遷移 (YY.1 / P1):
+     - `recover_multi_team_job()` において、`result.unverified_processes` が空でない（同一性・所属関係の照合に失敗して停止を保留したワーカーが存在する）場合は、たとえ全チームの Evidence Bundle が揃っていても `all_preserved` を `False` と判定し、統合ゲート（IntegrationGate）への進行を物理遮断する。
+     - パイプラインステータスを `RECOVERY_REQUIRED` として安全に停止・保留する。
+  2. 未確認ワーカーの Worktree クリーンアップ抑止 & 保全 (YY.2 / P1):
+     - `cleanup=True` 指定時であっても、`unverified_processes` に含まれるチームの Worktree は削除せず、`result.unverified_worktrees` に記録して保全する。
+  3. 決定論的回帰テスト & Stage 3 最終完了実証 (YY.3 / Stage 3 完了判定):
+     - 「有効な Evidence が存在しても、未確認ワーカーが残っている場合は統合処理に進まず status が RECOVERY_REQUIRED となり、Worktree も削除されない」ことを実証する単体・受入テスト（Red-First）。
+     - 全自動検証ゲート（198+ テスト、Ruff、Mypy）の完全合格確認。
+     - 独立 Verifier による Evidence Bundle の完全性検証（errors: 0, warnings: 0）。
+- [x] 機能ZZ (Stage 4 非対称免疫保護 & 再現テスト検証ハーネス Stage 4 Asymmetric Immunity Guard & Red-Verification Harness):
+  1. 非対称免疫ガードの実装 (ZZ.1):
+     - `GitGuard.check_protected_files_untouched(checkpoint, allow_immunity_additions=False)` を拡張。
+     - 既定の通常 Maker 実行時（`allow_immunity_additions=False`）は従来通り `tests/immunity/` の作成・変更・削除を全面禁止する。
+     - 監査役フェーズ等の指定時（`allow_immunity_additions=True`）は、`tests/immunity/` 配下への新規ファイル追加（Git の `A` または `??`）のみを許可する。
+     - ただし、既存の免疫テストファイルの変更（`M`）、削除（`D`）、リネーム（`R`）は、`allow_immunity_additions=True` であっても依然として厳格に遮断（Fail-Closed）し、保護不変条件を維持する。
+     - `.github/`, `SPEC.md`, `scripts/verify_local.sh` への変更・追加・削除は常に全面禁止とする。
+  2. 再現テスト検証ハーネスの実装 (ZZ.2):
+     - 監査役から提示されたテストコード候補を実行・評価する `RedTestVerifier` を実装。
+     - 現在のコードベースに対して再現テストを実行し、確実に Red（アサーション失敗等による Exit != 0）となるか機械的に判定する。
+     - 現在のコードですでに Green（通過）してしまう指摘や、構文エラー・インポート不能等の無効なテストは「再現不成立」として False を返し、本物の不具合のみを篩い分ける。
+  3. 決定論的受入実証と全体検証ゲート合格確認 (ZZ.3):
+     - 既存免疫テストの改変が遮断されること、新規免疫テストの追加のみが許可されること、および `RedTestVerifier` が真のバグのみを Red として検知することを実証するテストスイート。
+     - 全自動検証ゲート（200+ テスト、Ruff、Mypy）の完全合格確認。
+- [x] 機能AAA (Stage 4 実行隔離 & 厳格Red検証 & 免疫防壁堅牢化 Stage 4 Isolated Red-Verification & Hardened Immunity Guard):
+  1. 免疫テスト追加の厳格制限 (AAA.1 / Sol氏 P1指摘):
+     - `GitGuard.check_protected_files_untouched(checkpoint, allow_immunity_additions=True)` を強化。
+     - `tests/immunity/` 配下への追加許可対象を「通常ファイル（`is_file() and not is_symlink()`）」かつ「テスト命名規則 `test_*.py`（正規表現 `^tests/immunity/test_[a-zA-Z0-9_\-]+\.py$`）」に厳格限定する。
+     - 非Pythonファイル（例: `not_a_test.txt`）やシンボリックリンク（例: `test_link.py -> /etc/hosts`）の追加は、`allow_immunity_additions=True` であっても Fail-Closed で即時拒絶（`False`）する。
+  2. Red判定の構造化厳格化 (AAA.2 / Sol氏 P1指摘):
+     - `RedTestVerifier` において、実行テスト件数および失敗種別の構造化検証を導入。
+     - 実行されたテスト件数が 1 件以上（`ran_tests >= 1`）であることを必須とする（`class TestX(unittest.TestCase): pass` や空テストによる Exit 5 `NO TESTS RAN` を `NO_TESTS_RAN` として確実に `False` 判定）。
+     - `setUp()` 等の環境例外（`OSError`、環境不備等）による偽の失敗を排除し、アサーション失敗（`AssertionError` または `FAIL:`）による真正な不具合再現のみを `GENUINE_RED` として判定する。
+  3. 候補テスト実行の物理隔離 (AAA.3 / Sol氏 P0相当指摘):
+     - `RedTestVerifier` による候補テストの実行を、本体リポジトリ作業ツリーから完全に物理隔離する。
+     - 使い捨ての一時クリーン環境（一時 Worktree または隔離された独立スクラッチディレクトリ）で実行し、本体作業ツリーに対する副作用（テストコードによるファイル作成・書き換え・削除）を物理遮断する。
+     - 実行プロセスにはシークレットや不要な環境変数を渡さず（除外サニタイズ）、本体の `canary.txt` 等を改ざんしようとする敵対的テストが実行されても本体が一切汚染されないことを保証する。
+  4. 決定論的受入実証と全体検証ゲート合格確認 (AAA.4 / Phase 41 完了判定):
+     - 非通常ファイル・シンボリックリンクの遮断、0件実行・環境エラーの排除、および本体汚染テストからの完全隔離を実証する単体・受入テストスイート（Red-First）。
+     - 全自動検証ゲート（214+ テスト、Ruff、Mypy）の完全合格確認。
+- [x] 機能BBB (Stage 4 OS権限ロックダウン & TestResult構造化判定 Stage 4 OS-level Permission Lockdown & Structured TestResult Verification):
+  1. TestResult 構造化判定 (BBB.1 / Sol氏 P1指摘):
+     - `RedTestVerifier` において、出力の正規表現/文字列マッチ（`"AssertionError" in output`）による判定を廃止し、Python `unittest.TestResult` の構造化結果（`testsRun >= 1`, `len(failures) >= 1`, `len(errors) == 0`）により厳密判定する。
+     - `raise OSError("AssertionError: pretend failure")` などの例外メッセージ偽装は `errors`（非期待の例外・環境障害）として記録されるため、`UNHANDLED_EXCEPTION` として確実に `False` 判定（偽Redの完全排除）。
+  2. OS権限レベルの本体作業ツリー読取専用ロックダウン (BBB.2 / Sol氏 P0指摘):
+     - `RedTestVerifier._execute_test()` において、候補テスト実行中、対象リポジトリ（`self.repo_dir`）配下のディレクトリおよび通常ファイルから書き込み権限を一時的に剥奪（`a-w`, `0o555` / `0o444`）し、OS権限レベルで読取専用化する。
+     - 候補テストが絶対パスや `PYTHONPATH` 経由で本体ファイルを改変（作成・書き換え・削除）しようとしても、OSの `PermissionError: [Errno 13] Permission denied` によって物理遮断される。
+     - `finally` ブロックで元のファイル・ディレクトリ権限を確実に復元する（コンテキストマネージャ等による例外安全性の保証）。
+  3. 決定論的受入実証と全体検証ゲート合格確認 (BBB.3 / Phase 42 完了判定):
+     - 例外メッセージ偽装（`OSError("AssertionError: ...")`）の排除、および絶対パス指定による本体書き換えが OS レベルで `PermissionError` となり本体が完全に無傷であることを実証する単体・受入テストスイート（Red-First）。
+     - 全自動検証ゲート（222+ テスト、Ruff、Mypy）の完全合格確認。
+- [x] 機能CCC (Stage 4 自己改善パイプライン接続 & 監査自動タスク登録 Stage 4 Self-Improvement Pipeline & Audit Task Dispatching):
+  1. 防壁の穴封鎖 (CCC.1 / Sol氏 P0 & P1指摘):
+     - 既存テスト不干渉検証 (Mutual Non-Interference Guard): 新規免疫テスト追加前後の既存テストスイート実行結果（テスト総数・パス件数）を比較し、既存テストの成否や結果が一切変化しないことを機械的に証明する。
+     - トップレベル AST 検査 (Top-level AST Validator): 候補テストコードのトップレベル構造を検査し、`import`、`class`、`def` 定義以外のトップレベル実行文（モンキーパッチやグローバル変数・関数の動的差し替え）を Fail-Closed で即時拒絶（`False`）する。
+     - root 実行検知と安全遮断 (Root Execution Guard): `os.geteuid() == 0`（root権限）で実行されている環境では、OSのファイルパーミッションロックダウンが無効化されるため、候補テストの実行を即座に拒絶（Fail-Closed, Exit 1）する。
+  2. 独立監査役ランナーと構造化 Finding モデル (CCC.2 / Sol氏 縦断スライス指摘):
+     - `AuditFinding` データモデル（`finding_id`, `severity`, `spec_reference`, `location`, `description`, `reproduction_test_code`, `status`）の実装。
+     - `AuditRunner`: SPEC.md と直近の git diff / 成果物を入力とし、独立した監査プロセスを実行して構造化 Finding を取得する。
+  3. 監査指摘から Red 検証を経て PLAN.md への修正タスク自動登録 (CCC.3 / Sol氏 縦断スライス指摘):
+     - `AuditRunner` が出力した各 Finding に対して `RedTestVerifier` を実行。
+     - 真正な Red（`GENUINE_RED`）かつ既存テストに不干渉であることが確認された場合、`TaskDispatcher` が `PLAN.md` の末尾または未完了タスクの先頭に修正タスク（`- [ ] Fix: [AUD-xxx] description`）を自動登録する。
+     - Red が成立しなかった指摘（未再現・無効）は `PLAN.md` には追加せず、Morning Brief（`NIGHTLY_REPORT.md`）の人間の要確認事項として記録する。
+  4. 決定論的受入実証と全体検証ゲート合格確認 (CCC.4 / Phase 43 完了判定):
+     - モンキーパッチによるガード弛緩の遮断、root 実行拒否、および「シードバグの監査指摘 → 隔離Red検証 → PLAN.md自動登録」が人間の介在ゼロで完結することを実証する単体・受入テストスイート（Red-First）。
+     - 全自動検証ゲート（227+ テスト、Ruff、Mypy）の完全合格確認。
+- [x] 機能DDD (Stage 4 物理クローン隔離 & パイプライン接続修正 Stage 4 Physical Clone Isolation & Pipeline Interoperability):
+  1. 候補テストの物理的クローン隔離実行 (DDD.1 / Sol氏 P0指摘):
+     - `RedTestVerifier` において、元リポジトリのパス上での直接実行（および chmod による一時ロックダウン）を廃止。
+     - テスト検証ごとに、元リポジトリから隔離された一時クローン（clean temporary clone）を作業環境として生成し、その閉じた環境内で候補テストを実行する。
+     - 候補テストがテストメソッド内で `os.chmod()` や絶対パスでのファイル書き換えを行おうとしても、元リポジトリのファイルシステムには一切到達できず、物理的不変性を 100% 保証する。
+  2. タスク書式統一と TaskDispatcher 連携 (DDD.2 / Sol氏 P1指摘):
+     - `AuditDispatcher` が `PLAN.md` に追記するタスク書式を、`TaskDispatcher.TASK_PATTERN` に完全合致させ、タスクIDプレフィックス `AUD-<finding_id>.` を付与する。
+     - 例: `- [ ] AUD-FINDING-001. Fix: [FINDING-001] <description> (Severity: <severity>, Loc: <location>)`
+     - 登録されたタスクが `TaskDispatcher.parse_plan()` で正しくパースされ、`get_next_pending_task()` で次の未完了タスクとして取り出せ、`mark_task_status()` で更新できることを保証する。
+     - Finding ID による二重登録防止（Idempotency）も維持。
+  3. 監査Findingと再現テストの永続化管理 (DDD.3 / Sol氏 改善指摘):
+     - 監査役から生成された Finding および再現テストコードを、`.dev/audit/findings/<finding_id>.json` および `.dev/audit/repro_tests/<finding_id>.py` として永続化保存する。
+     - 後続の Maker が修正作業時に、Finding の詳細（深刻度、場所、仕様参照、再現コードのパスやハッシュ）をいつでも確実に参照・再実行できるようにする。
+  4. Level 7 E2E受入テストの強化と全体検証ゲート合格確認 (DDD.4 / Phase 44 完了判定):
+     - 単にテストコード内で修正するだけでなく、`AuditDispatcher` で登録されたタスクを `TaskDispatcher.get_next_pending_task()` で取得し、Maker インターフェースへ渡して修正・Green化・免疫テスト昇格まで完結する実運用E2E受入テストを追加。
+     - `os.chmod` で書き込み権限を復活させて元リポジトリを改変しようとする敵対的テストが実行されても、元リポジトリのファイルが物理的に無傷であることを実証する隔離テスト。
+     - 全自動検証ゲート（246+ テスト、Ruff、Mypy）の完全合格確認と Evidence Bundle 生成。
+- [x] 機能EEE (Stage 4 異系統LLM独立監査ランナー & Before/After確定 Stage 4 Cross-Model Independent Audit Runner & Evidence Confirmation):
+  1. 異系統LLM独立監査ポリシーとモデル強制 (EEE.1 / Sol氏 監査設計合意):
+     - `AuditConfig` / `OrchestratorConfig` において `maker_model` と `checker_model` / `auditor_model` のモデルファミリを検証。
+     - 同一モデルまたは同系統モデルの指定を検知した場合は Fail-Closed（Exit 2）で起動を拒否し、異系統LLM（例: Maker=Gemini 3.8 Flash, Checker/Auditor=Claude Opus 5.5）による独立監査を強制する。
+  2. 構造化監査プロンプトと独立監査役アダプタ (EEE.2 / 独立監査実装):
+     - `IndependentAuditRunner`: SPEC.md と git diff のみを厳格に入力とし、会話ログや内部状態を一切遮断した独立プロンプトを構築して別系統LLMに送信・実行。
+     - 返却された監査結果から `list[AuditFinding]` を抽出し、Finding ID、再現コード、修正方針を構造化してパース・検証する。
+  3. Before Red / After Green 証跡バインディングと免疫テスト自動昇格 (EEE.3 / 確定ゲート強化):
+     - Maker が AUD タスクを実装した際、修正前の再現テストが Red であったこと（Before Red）と、修正後の再現テストが Green であったこと（After Green）を決定論的に検証。
+     - この Before/After 証跡を Evidence Record に拘束（`evidence.verification.red_green_proof`）してコミット確定。
+     - 合格した再現テストを `tests/immunity/` 配下に正式な免疫テスト（`test_immunity_<finding_id>.py`）として安全に自動昇格・配置する。
+  4. LESSONS.md への自動教訓記録と全体検証ゲート合格確認 (EEE.4 / Phase 45 完了判定):
+     - AUD タスク解決完了時に、Finding 情報（Context, Trap, Rule, Immunity Test）を抽出し、`LESSONS.md` の記録フォーマットに従って自動追記・永続化する。
+     - 決定論的受入実証テスト（Red-First）を追加し、全体検証ゲート（252+ テスト、Ruff、Mypy）の完全合格確認。
+- [x] 機能FFF (Stage 5 免疫保護・厳格なBefore/After証明・教訓注入と自己改善ループの真の完成 Stage 5 Hardening Immunity, Strict Proof, and Next-Maker Lesson Injection):
+  1. 免疫テスト非破壊的確定と衝突拒絶 (FFF.1 / Sol氏 P0指摘):
+     - `AuditResolutionManager.resolve_task()` において、免疫テスト配置対象ファイル（`tests/immunity/test_immunity_<safe_name>.py`）の事前存在チェックを実装。
+     - 既存ファイルが存在する場合、既存ファイルの内容と候補再現テストコードの SHA-256 ハッシュを比較：
+       - ハッシュ一致：同一テストの再実行として判定し、冪等に成功（既存ファイルを上書きせず温存）。
+       - ハッシュ不一致：既存の免疫テストを破壊・緩和するリスクがあるため、`IMMUNITY_COLLISION` エラーを送出し即時拒絶（Exit 1）。既存テストの変更・削除を一切行わない。
+     - 書き込み前の認可判定・事前検査（Pre-check）を徹底し、失敗時に既存ファイルを削除（`unlink`）しない安全設計。
+  2. 厳格な Before Red 実証と改変不能な Proof 拘束 (FFF.2 / Sol氏 P1指摘):
+     - `AuditDispatcher.dispatch_finding()` 実行時、Red 検証が成功（`GENUINE_RED`）した事実の証跡（Before Commit SHA、再現テスト SHA-256、Red検証出力、理由）を `AuditStore` の Finding メタデータに永続化する。
+     - `AuditResolutionManager.resolve_task()` において、Finding のステータスが `VERIFIED_RED` または `DISPATCHED` であること、および永続化された `GENUINE_RED` 証跡が存在することを必須検証。未実証の Finding は `UNVERIFIED_BEFORE_RED` で即時拒絶。
+     - `red_green_proof` に `before_commit`, `after_commit`, `repro_test_sha256`, `before_status: VERIFIED_RED`, `after_status: GREEN`, `before_red_reason`, `immunity_test_path` を完全拘束。
+  3. LESSONSフェイルクローズ & モデル独立性検証の厳格化 (FFF.3 / Sol氏 P1 & P2指摘):
+     - `AuditResolutionManager.resolve_task()` において、`record_lesson()` の成否を厳格判定。書き込み失敗時（ファイル欠落・例外等）は Finding を `RESOLVED` に更新せず、`LEARNING_RECORD_FAILED` 中間状態に遷移させて処理を停止（Fail-Closed）。
+     - `verify_model_independence()` の厳格化：空文字列のモデル名、および大分類ファミリが `unknown` の場合は独立性を保証できないため、Strict モード（デフォルト）で `INDEPENDENT_AUDIT_VIOLATION` として拒絶。
+     - `IndependentAuditRunner.audit()` 実行時に `AuditConfig` の厳格なバリデーションを必須化。
+  4. 次回Makerへの教訓自動検索・注入機構 (`LessonInjector`) と完全閉ループE2E受入試験 (FFF.4 / Phase 46 完了判定):
+     - `LessonInjector` を実装：次期タスク（タイトル・説明・対象ファイル・キーワード等）に基づき `LESSONS.md` の教訓インデックスから関連する Trap / Rule を自動検索・抽出し、Maker のプロンプト／コンテキストへ自動注入。Level 7 ルール10（「着手前に LESSONS.md を検索」）を機械的強制。
+     - 外部監査 → Red実証 → PLAN登録 → Maker修正 → After Green → 免疫昇格（非破壊） → LESSONS記録 → 次回Makerへの教訓注入までが人間の介在ゼロで繋がる完全閉ループE2E受入実証テストを追加。
+     - 全自動検証ゲート（266+ テスト、Ruff、Mypy）の完全合格確認と Evidence Bundle 生成。
+- [x] 機能GGG (Stage 6 Level 7 実運用接続・証拠イミュータブル化・完全閉ループ受入 Stage 6 Level 7 Production Wiring, Immutable Proofs, and Closed-Loop Acceptance):
+  1. CommandRunnerAdapter による教訓の安全な注入と実プロセス受入検証 (GGG.1 / Sol氏 P1指摘):
+     - `CommandRunnerAdapter.run_maker()` において、`context` 内の `lessons`（教訓テキスト）およびコンテキストメタデータを安全に Maker サブプロセスへ渡す経路を実装。
+     - 改行や引用符によるシェル展開破壊を防止するため、標準入力（stdin）への教訓テキストのパイプ供給、および環境変数 `AUTO_DEV_LESSONS` / 専用コンテキストファイル（`.dev/context_task_<id>.json`）の配置をサポート。
+     - モックではなく実際の `CommandRunnerAdapter` を起動し、Maker 実プロセスが教訓を受信して動作することを確認する受入テストを追加。
+  2. AuditStore の初回登録確定とコードハッシュ再計算・改ざん上書きの拒絶 (GGG.2 / Sol氏 P1指摘):
+     - `AuditStore.save_finding()` において、初回保存時に再現コードの SHA-256（`code_hash`）を不変値として確定。
+     - 既存の Finding に対する再保存時、渡された再現コードが既存の `code_hash` と一致するか検証。不一致時はハッシュを更新せず、`CODE_HASH_TAMPERED` 例外を送出して上書きを遮断。
+     - 状態更新（ステータス変更等）において再現コードの改変・再計算を禁止し、Before Red 証跡の改変耐性を保証。
+  3. 独立監査ランナーにおける設定モデルと実起動モデルの完全一致強制 (GGG.3 / Sol氏 P1指摘):
+     - `IndependentAuditRunner.audit()` において、`self.config` が設定されている場合、設定上の `config.auditor_model` と実際に起動される `self.model_name` が完全一致することを機械的に検証。
+     - 不一致時（例: 設定は Claude だが実動は Gemini）は `INDEPENDENT_AUDIT_VIOLATION` で即座に起動拒絶（Fail-Closed）。
+     - 実際に起動されたモデル名を監査証跡（Finding メタデータ等）に明記。
+  4. シードバグを用いた本番経路 Level 7 E2E 全通し実証と全体検証ゲート合格 (GGG.4 / Phase 47 完了判定):
+     - モックを排除した実 `CommandRunnerAdapter` による本番経路 E2E：独立監査（異系統モデル検証済） → 隔離Red実証 → PLAN登録（AUDタスク） → Makerへの教訓実注入（stdin / context_file） → Maker修正 → After Green検証 → 免疫テスト自動昇格（非破壊） → LESSONS.md自動追記 → 次回Makerへの教訓自動注入までが一気通貫で完結することを実証。
+     - 全自動検証ゲート（278+ テスト、Ruff、Mypy）の完全合格確認と Evidence Bundle 生成。
+- [x] 機能HHH (Stage 7 Learning Proof のGitコミット拘束とMakerインターフェース正式化 Stage 7 Commit-Bound Learning Proof and Formal Maker Interface):
+  1. 修正前後コミットへの Red/Green 証明拘束 (HHH.1 / Sol氏 Phase 47 P1指摘):
+     - `AuditResolutionManager.resolve_task()` は、Git リポジトリでない場合、または作業ツリーに未コミット変更（`git status --porcelain` の結果から `.dev/` 配下を除いたもの）が存在する場合、`UNCOMMITTED_AFTER_STATE` で拒絶し、Finding・免疫テスト・LESSONS.md を一切変更しない。
+     - `finding.before_commit_sha` が実在するコミットでない場合（`unknown`・空・不正値を含む）は `INVALID_BEFORE_COMMIT` で拒絶する。
+     - After Commit（解決時点の HEAD）が Before Commit と同一の場合は `NO_COMMIT_ADVANCE` で拒絶する。After Commit が Before Commit の子孫でない場合も `NO_COMMIT_ADVANCE` で拒絶する。
+     - 同一の再現テスト（`code_hash` 照合済み）を、Before Commit と After Commit をそれぞれ展開した隔離環境で実行する。Before で `GENUINE_RED` でなければ `BEFORE_RED_NOT_REPRODUCED`、After で `ALREADY_GREEN`（exit 0）でなければ `AFTER_GREEN_FAILED` で拒絶する。隔離環境には未コミットファイルを持ち込まない。
+     - `red_green_proof` には少なくとも `before_commit`, `after_commit`, `repro_test_sha256`, `before_result`（`reason`, `exit_code`）, `after_result`（`reason`, `exit_code`）を記録し、`before_commit` / `after_commit` には実在するコミットの完全な SHA のみを記録する（`unknown` を記録して成功扱いにしない）。
+     - 免疫テストの昇格（非破壊・衝突拒絶を維持）と LESSONS.md 記録は、上記の証明がすべて成立した場合にのみ行う。
+  2. Maker インターフェースの正式化と監査モデル名の記録 (HHH.2 / Sol氏 Phase 47 注意事項):
+     - `CommandRunnerAdapter.run_maker()` は、既存の `AUTO_DEV_LESSONS` 等に加え、環境変数 `AUTO_DEV_CONTEXT_FILE`（コンテキストJSONの絶対パス）と `AUTO_DEV_LESSONS_FILE`（教訓テキストの絶対パス）を設定する。両ファイルは Maker プロセスの実行中に存在し、それぞれ `{context_file}` / `{lessons_file}` テンプレートと同一のパスを指す。
+     - `IndependentAuditRunner.audit()` が返す各 `AuditFinding` に、実際にコマンドへ渡したモデル名を `auditor_model` として記録し、`AuditStore` の保存・読み込みで保持する（GGG.3 第3項の未実装分を引き継ぐ）。これは設定値の記録であり、プロバイダー応答によるモデル同一性の証明ではないことをコード上のドキュメントに明記する。
+  3. コミット拘束付き Level 7 E2E 受入 (HHH.3):
+     - `tests/test_level7_real_loop_e2e.py` を更新し、Maker 実サブプロセスが修正をGitコミットした後に `resolve_task()` を呼ぶ。`proof.before_commit` が Red 検証時の HEAD、`proof.after_commit` が Maker 修正コミットの SHA と一致し、両者が異なること、`before_result.reason == "GENUINE_RED"`、`after_result.reason == "ALREADY_GREEN"` であることを検証する。
+     - Maker が `AUTO_DEV_CONTEXT_FILE` と `AUTO_DEV_LESSONS_FILE` を受信し、両ファイルが実在したことをアサートする。
+     - 修正をコミットせずに `resolve_task()` を呼んだ場合に `UNCOMMITTED_AFTER_STATE` で拒絶され、免疫テストが作成されないことを検証する。
+     - 全自動検証ゲート（286+ テスト、Ruff、Mypy）に合格し、`verify-step` / `commit-step` で正規に発行された Evidence Record を含む Evidence Bundle が `VERIFIED` となること。
+- [x] 機能III (Stage 7 コミット指定検証のFail-Closed・Proof詳細化・実行隔離強化 Stage 7 Commit Verification Fail-Closed, Detailed Proofs, and Execution Isolation):
+  1. コミット指定検証の Fail-Closed 徹底 (III.1 / Sol氏 Phase 48 P1指摘):
+     - `RedTestVerifier.verify_candidate_test(..., commit=...)` および `_create_isolated_clone(..., commit=...)` において、`commit` が指定されている場合に `git checkout --detach <commit>` が失敗、またはクローンに失敗した時は `shutil.copytree` へのフォールバックを物理遮断し、`COMMIT_CHECKOUT_FAILED`（exit_code != 0, is_reproduced=False）で即座に検証拒絶（Fail-Closed）する。
+     - 存在しないコミット（例: `"0" * 40`）を指定した場合に、現行作業ツリーでテストを実行して Green を返さないことを単体テストで決定論的に実証。
+  2. Learning Proof 監査詳細化と LESSONS.md コミット拘束参照 (III.2 / Sol氏 Phase 48 P2指摘):
+     - `red_green_proof` の `before_result` / `after_result` に、実行されたテスト件数（`tests_run`）、失敗件数（`failures`）、エラー件数（`errors`）、および実行出力ハッシュ（`output_hash`）を記録する。
+     - `AuditResolutionManager.record_lesson()` は、`LESSONS.md` に追記する教訓エントリの `- Proof:` 行に、Before Commit SHA、After Commit SHA、および再現テストハッシュ（`code_hash`）の参照を明記し、教訓から実コミット証跡への物理トレーサビリティを確立する。
+  3. 候補テストのOSレベル実行隔離・リソース境界強化と Level 7 E2E 通し試験 (III.3):
+     - `RedTestVerifier._execute_test()` において、プロセス実行時のリソース境界（タイムアウト制限に加え、過剰なメモリ・プロセスフォーク・巨大ファイル出力を防ぐ制限）および環境変数の遮断を行い、外部生成候補コードに対する防御層を強化する。
+     - `tests/test_level7_real_loop_e2e.py` を更新し、コミット指定 Fail-Closed、Proof 詳細記録、LESSONS.md のコミット参照追記、および全自動検証ゲート（292+ テスト、Ruff、Mypy）に合格すること。
+- [x] 機能JJJ (Stage 7 候補テストのOSサンドボックス実行・元リポジトリ改ざん検知・子孫プロセス回収 Stage 7 OS Sandbox Execution, Repository Tamper Detection, and Process Reaping):
+  1. OSサンドボックスによる候補テスト実行と Fail-Closed (JJJ.1 / Sol氏 Phase 49 P0指摘):
+     - `RedTestVerifier._execute_test()` は候補テストを OS のサンドボックス機構の内側でのみ実行する。macOS では `sandbox-exec` を用い、ファイル書き込みは一時サンドボックスディレクトリ・実行専用の一時ディレクトリ・`/dev/null` 等の必要最小限のみを許可する許可リスト方式とし、ネットワークを遮断する。Linux では `bwrap`（bubblewrap）が利用可能な場合に同等の構成（元リポジトリを含むホストのファイルシステムは読み取り専用、書き込みは一時ディレクトリのみ、ネットワーク名前空間の分離）で実行する。サンドボックスの制約は、候補コードが起動した子孫プロセス（シェル・`chmod` 等）にも及ぶこと。
+     - 利用可能なサンドボックス機構がない、またはサンドボックスの起動自体に失敗した場合は、非サンドボックス実行へフォールバックせず `SANDBOX_UNAVAILABLE`（is_reproduced=False, exit_code != 0）で検証を拒絶する。環境変数・引数等による非サンドボックス実行の許可経路は設けない。
+     - 候補テストがサブプロセス経由（例: `sh -c 'chmod u+w <canary>; echo CHANGED > <canary>'`）で元リポジトリの canary ファイルを書き換えようとしても canary が `ORIGINAL` のまま変化しないこと、およびサンドボックス外へのネットワーク接続が失敗することを単体テストで実証する（Sol氏 Phase 49 再現手順）。
+  2. 元リポジトリ改ざん検知による多層防御 (JJJ.2 / Sol氏 Phase 49 P0指摘):
+     - 候補テスト実行の直前と直後で元リポジトリ（`self.repo_dir`）の状態スナップショットを取得・比較する。Git 管理下では HEAD・`git status --porcelain --ignored --untracked-files=all` の出力・`git diff HEAD --binary` のハッシュを、Git 管理外ではファイルツリー（相対パス・内容ハッシュ）を比較対象とする。
+     - 差異を検知した場合は、テスト結果（Red/Green）に関わらず `REPO_TAMPER_DETECTED`（is_reproduced=False, exit_code != 0）を返し、差異のあったパスを `reason_detail` に記録する。改ざんを伴う実行を `GENUINE_RED` として受理しない。
+     - サンドボックスを経由せずに元リポジトリを書き換える実行（テスト用に注入した実行関数）に対しても `REPO_TAMPER_DETECTED` が返ることを単体テストで実証する。
+  3. プロセス数制限と子孫プロセスの一括回収 (JJJ.3 / Sol氏 Phase 49 P1指摘):
+     - 候補テストは新しいセッション（`start_new_session=True`）で起動し、正常終了・タイムアウト・例外のいずれの場合も、そのプロセスグループ全体を `os.killpg`（SIGKILL）で回収する。
+     - 子プロセス生成数に上限を設ける。`RLIMIT_NPROC` がユーザー全体のプロセス数を数える OS では、起動時点のユーザープロセス数を基準に上乗せ上限を設定する。上限を設定できない場合はその旨を結果に記録する。
+     - 候補テストがバックグラウンドで長時間プロセス（固有マーカー付きの `sleep`）を複数起動した場合でも、`verify_candidate_test()` の復帰後にマーカー付きプロセスが1つも残存しないことを単体テストで実証する。`setsid` 等でプロセスグループを離脱したプロセスは本機能の回収対象外であり、既知の限界として設計ドキュメントに明記する。
+     - リポジトリに誤ってコミットされた生成物 `test_large.bin` を削除する。
+  4. 受入・報告の正確性・全体検証ゲート (JJJ.4):
+     - `tests/test_level7_real_loop_e2e.py` を、サンドボックス実行下で Level 7 クローズドループが完走することを検証する形に更新し、サブプロセス経由の元リポジトリ書き換えを試みる悪意ある再現テストが `REPO_TAMPER_DETECTED` または canary 不変のいずれかで拒絶され、PLAN登録・免疫昇格・LESSONS記録に進まないことを検証する。
+     - `NIGHTLY_REPORT.md` の成果要約は、実証した範囲と未実証の範囲（既知の限界）を分けて記載し、検証していない性質（例: 完全なOS隔離、実Multi-LLM運用）を達成済みと記載しない。
+     - 全自動検証ゲート（295+ テスト、Ruff、Mypy）に合格し、`verify-step` / `commit-step` で正規に発行された Evidence Record を含む Evidence Bundle が `VERIFIED` となること。
+- [x] 機能KKK (Stage 7 候補テストの機密読み取り隔離・未追跡改ざん検知完全化・実行順序レース是正 Stage 7 Confidential Read Isolation, Full Untracked Tamper Detection, and Execution Sequence Correction):
+  1. サンドボックス内機密ファイル読み取り遮断 (KKK.1 / Sol氏 Phase 50 P0指摘):
+     - Linux `bwrap`: `--ro-bind / /` によるホストルート全体公開を廃止。実行に必要な Python ランタイム（`/usr`, `/lib`, `/lib64`, `/bin`, `sys.executable` および仮想環境パス等）のみを読み取り専用とし、一時クローン/一時ディレクトリのみを読み書き可能とする。ホスト上のホームディレクトリ（`~`、`~/.ssh/`、`~/.aws/` 等）および元リポジトリ（`self.repo_dir`）は原則非公開（マウント除外）とする。
+     - macOS `sandbox-exec`: `(allow default)` ベースを廃止または制限し、ホストのホームディレクトリや元リポジトリへの読み取り（`file-read*`）を明示的に拒絶（deny）するプロファイルへ強化。
+     - 候補テストが `~/.ssh/id_rsa` や親リポジトリ内の非公開ファイルを読み取ろうとした場合に、読み取り例外（`PermissionError` / `FileNotFoundError`）等により `is_reproduced=False` で拒絶されることを単体テストで実証。
+  2. 未追跡・無視ファイルの内容改ざん検知の完全化 (KKK.2 / Sol氏 Phase 50 P1指摘):
+     - `_capture_repo_snapshot()` において、未追跡ファイルおよび無視ファイル（`git status --porcelain --ignored`）についても、ファイルパスの一覧だけでなく、ファイル種別（通常ファイル/ディレクトリ/シンボリックリンク）および内容の SHA-256 ハッシュ（シンボリックリンクはリンク先）をスナップショットに記録する。
+     - 既存の未追跡・無視ファイルの中身のみが書き換えられた場合、あるいはシンボリックリンク先が差し替えられた場合でも、差分を検知してテスト結果に関わらず `REPO_TAMPER_DETECTED`（is_reproduced=False, exit_code != 0）で即座に拒絶されることを単体テストで決定論的に実証する。
+  3. サンドボックス起動と元リポジトリ保護の起動順序是正 (KKK.3 / Sol氏 Phase 50 P1指摘):
+     - `_execute_test()` において、`subprocess.Popen` を呼び出す前に `_lockdown_repo` コンテキストに入り、元リポジトリが OS 権限・ファイルフラグで確実に保護された状態でサンドボックスプロセスを起動する（TOCTOU レースの解消）。
+     - 順序: [スナップショット取得 → 元リポジトリロックダウン → サンドボックス起動・実行・子孫回収 → ロックダウン解除 → スナップショット比較]。
+  4. Level 7 E2E サンドボックス下自律ループの完走と報告書の更新 (KKK.4):
+     - `tests/test_level7_real_loop_e2e.py` において、機密ファイル読み取り試行や未追跡ファイル改ざん試行がすべて遮断され、Level 7 クローズドループが完走することを検証。
+     - `NIGHTLY_REPORT.md` を更新し、機密読み取り境界の達成および残存する限界を正確に記録。
+     - 全自動検証ゲート（303+ テスト、Ruff、Mypy）に合格し、`verify-step` / `commit-step` で正規に発行された Evidence Record を含む Evidence Bundle が `VERIFIED` となること。
+- [x] 機能LLL (Stage 7 サンドボックス読み取り最小化とMulti-LLM独立監査境界の確立 Stage 7 Sandbox Read Minimization and Multi-LLM Independent Audit Boundary):
+  1. Linux `bwrap` 読み取りマウントの最小特権化 (LLL.1 / Sol氏 Phase 51 P1指摘):
+     - `/etc` 全体の `--ro-bind` を廃止し、DNS解決およびSSL/TLS証明書に必要な最小限のパス（`/etc/resolv.conf`, `/etc/ssl`, `/etc/pki`, `/etc/hosts` 等が存在する場合のみ）に限定マウントする。
+     - Python 仮想環境がユーザーホームディレクトリ配下にある場合、ホームディレクトリの他ファイルや親ディレクトリへの漏洩を防ぎ、仮想環境のパス自体（`sys.prefix`, `sys.base_prefix`）のみを限定的に `--ro-bind` する。
+     - サンドボックス内で `/etc/shadow` や `/etc/sudoers`、サービス固有設定、ホスト機密情報への読み取りが拒絶（`PermissionError` / `FileNotFoundError`）されることを単体テストで決定論的に実証する。
+  2. macOS `sandbox-exec` 読み取りプロファイルの厳格化 (LLL.2 / Sol氏 Phase 51 P1指摘):
+     - `(allow default)` 起点による情報漏洩リスクを低減するため、ホーム外の機密パスやシステム重要設定（`/etc`, `/private/etc`, `/Library/Keychains`, `~/.ssh`, `~/.aws`, `~/.gnupg` 等）への `(deny file-read*)` を明示追加し、読み取りポリシーを厳格化する。
+     - Python 実行に必要な prefix のみが allow され、それ以外の機密領域への読み取り試行が `PermissionError` で遮断されることを単体テストで実証する。
+  3. Multi-LLM 独立監査境界の確立と敵対的/不完全な Finding 耐性 (LLL.3 / Sol氏 指摘):
+     - 異系統 LLM（Maker=Gemini vs Auditor=Claude/別モデル）の無人接続準備として、Auditor が Maker の内部状態（推論・会話ログ等）を参照せず、`SPEC.md` と `git diff` のみから独立して判定できる境界を固定する。
+     - 外部 LLM から悪意ある再現テスト（ホスト機密読み取り・リポジトリ改ざん・リソース枯渇）や、不完全な Finding（構文エラー、未再現、偽陽性 Red）が投入された場合でも、Auto Developer が誤って承認・昇格させず安全に `REJECTED` として自律稼働を継続できる耐性を実証する。
+  4. Level 7 E2E 完走・整合性・Evidence Bundle 生成 (LLL.4):
+     - `tests/test_level7_real_loop_e2e.py` において、最小化されたサンドボックス下で Level 7 自己改善ループが完走し、敵対的/不正な Finding の流入がすべて安全に排除されることを検証する。
+     - `NIGHTLY_REPORT.md` を更新し、検証ゲート（全310+ テスト、Ruff、Mypy）に合格し、正規の Evidence Record を持つ Bundle を作成する。
+- [x] 機能MMM (Stage 7 独立監査受入条件の固定と偽陽性Red排除・OS隔離強化 Stage 7 Independent Audit Acceptance and Trivial Red Elimination):
+  1. Linux 仮想環境マウント包含判定（`is_relative_to`）とサブディレクトリ限定マウント (MMM.1 / Sol氏 Phase 52 P1指摘):
+     - `pfx_path == home_resolved or pfx_path.is_relative_to(home_resolved)` による包含関係判定を行い、ホームディレクトリ配下に配置された仮想環境（`~/.venvs/...`, `~/projects/.../.venv` 等）であっても、仮想環境全体を `--ro-bind` せず、`bin`, `lib`, `lib64`, `include`, `pyvenv.cfg` のみに限定マウントする。
+     - サブディレクトリ配置の仮想環境から同一ユーザーホーム直下の他ファイルや別ディレクトリへの読み取り漏洩が防止されることを単体テストで実証する。
+  2. macOS `sandbox-exec` 読み取り隔離の強化 (MMM.2 / Sol氏 Phase 52 P1指摘):
+     - macOS の `sandbox-exec` プロファイルにおいて、既知の機密パスだけでなく、ホームディレクトリ外のユーザーデータやシステム管理パスへの保護を強化し、候補テストからの不当なファイル読み取りを拒絶する。
+     - 単体テストで読み取り制限の厳格性を検証する。
+  3. 偽陽性 Red（Trivial / Fake Red）の自動排除機構 (MMM.3 / Sol氏 Phase 52 重要指摘):
+     - `self.assertEqual(1, 2)` や `self.fail()` のように、プロダクトコード（`src/` 配下）を一切呼び出さずテストメソッド内のみで自己完結して失敗するテストを検知する。
+     - AST 解析（テストコードが対象コードまたは `src/` を import / 利用しているか）およびトレースバック検証（失敗例外のスタックフレームに対象プロダクトコードが含まれているか）を実施し、対象コードと無関係な失敗は `TRIVIAL_RED` として `REJECTED` 隔離し、PLAN.md への混入を遮断する。
+     - 固定値比較、即時 `self.fail()`、対象モジュール非呼出の偽陽性テストが排除されることを単体テストで実証する。
+  4. 独立監査受入条件の固定と Level 7 E2E 完走・Evidence Bundle 生成 (MMM.4):
+     - `tests/test_level7_real_loop_e2e.py` において、偽陽性 Red（Trivial Red）や包含仮想環境漏洩プローブが安全に排除され、真正な指摘のみが Level 7 自己改善ループを完走することを実証する。
+     - `NIGHTLY_REPORT.md` を更新し、検証ゲート（全テスト、Ruff、Mypy）に合格し、正規の Evidence Record を持つ Bundle を作成する。
+- [x] 機能NNN (Stage 7 独立第三者監査の実行と6大受入条件の体系的実証 Stage 7 Independent Audit Execution and Systemic Verification of 6 Acceptance Criteria):
+  1. macOS `sandbox-exec` 読み取り許可範囲の最小権限化 (NNN.1 / Sol氏 Phase 53 P1指摘):
+     - macOS の `sandbox-exec` プロファイルにおいて、広範な `/Library`, `/private/var`, `/etc` 全体 allow を廃止し、システム動的ライブラリ（`/System/Library/Frameworks`, `/usr/lib`）および明示的な Python 実行ランタイムパスのみに厳格縮小する。
+     - ユーザー設定・キャッシュ・サービス固有設定へのアクセス遮断を単体テストで実証する。
+  2. 巧妙な偽 Red（因果関係のない固定値比較等）の AST 解析と排除 (NNN.2 / Sol氏 Phase 53 P1指摘):
+     - プロダクトコードを形骸的に呼び出しつつ、アサーション自体は無関係な固定値比較を行う偽 Red（例: `add(1, 2); self.assertEqual(1, 2)`）を検知する。
+     - AST 解析において、失敗したアサーション式内の引数がプロダクトコードの戻り値・関数呼出・代入変数に依存しているかを解析し、因果関係のない合成失敗を `TRIVIAL_RED` として確実に隔離・排除する。
+  3. 6大受入条件（実行隔離・偽陽性耐性・Evidence改ざん検知・複数ワーカー耐障害性・Multi-LLM境界・Level 7継続自己修復）の体系的監査ハーネス (NNN.3):
+     - 独立第三者監査の受入基準（実行隔離、偽陽性耐性、Evidence、複数ワーカー、Multi-LLM、継続運用）を網羅する体系的監査スイートを整備し、Fail-Closed に判定する。
+  4. 独立監査完走・Evidence Bundle 生成と v0.7.0 リリース準備 (NNN.4):
+     - Level 7 E2E 完走を確認し、6大受入条件を満たした独立監査 Evidence Bundle を生成、v0.7.0 リリースを確定する。
+- [x] 機能OOO (Stage 7 AST 因果解析の厳密化と独立監査受入ハーネス確定 Stage 7 AST Causal Order and Guarded Failure Refinement):
+  1. AST 解析の文実行順序化（Program Order）による後続代入汚染の完全排除 (OOO.1 / Sol氏 Phase 54 P1指摘):
+     - `check_trivial_red_ast` において、代入文とアサーションをメソッド内の実行順（Program Order）に沿って順次走査・評価する。
+     - アサーション実行時点の変数状態・因果関係スナップショットのみを参照し、アサーションより後の再代入（例: `x = compute_val(1); self.assertEqual(x, 2); x = 999`）が直前のアサーション判定に逆流しないことを単体テストで実証する。
+  2. 条件付き（`if` / `while`）`self.fail()` の因果依存ガード判定 (OOO.2 / Sol氏 Phase 54 P1指摘):
+     - `if` / `elif` / `while` 等の条件分岐内に存在する `self.fail()` について、分岐条件式（`test`）がプロダクトコードの関数呼出や依存変数に繋がっている場合は、無条件失敗ではなく正当な条件付き不具合検出テストとして判定（受理）する。
+     - 例: `if compute_val(1) != 2: self.fail("wrong value")` が `TRIVIAL_RED` として誤拒絶されず、正常に受容されることを単体テストで実証する。
+  3. 独立監査受入ハーネス・Level 7 E2E 完走確認と受入テスト拡充 (OOO.3):
+     - `tests/test_level7_real_loop_e2e.py` および `tests/test_independent_audit_runner.py` において、後続再代入を含む正常テストや条件付き `self.fail()` を含む正常テストが安全にパスし、偽 Red のみが確実に排除されることを実証する。
+  4. 報告書の正確化（受入ハーネス実証）・Evidence Bundle 生成と v0.7.0 リリース準備 (OOO.4):
+     - `NIGHTLY_REPORT.md` およびドキュメントの表現を「独立第三者監査に向けた受入ハーネスの整備・実証」として正確に是正し、全テスト通過・改ざん検知・独立 Checker 承認済みの Evidence Bundle を生成して v0.7.0 を確定する。
+- [x] 機能PPP (Stage 7 制御フロー変数合流の不確定性保護・安全側フォールスルーと受入ハーネス確定 Stage 7 Control Flow Merge, Uncertainty Protection, and Acceptance Finalization):
+  1. 条件分岐（`if`/`while`）における変数合流（Merge）と不確定性保護 (PPP.1 / Sol氏 Phase 55 P1指摘):
+     - `_process_stmts_in_order` において、条件分岐（`body` / `orelse`）内で再代入・変更された変数について、分岐後に静的確定できない場合（両ブランチで異なる値、または条件式が動的な場合）は、分岐前の古い固定値を破棄し `var_env` から除去して `dependent_vars`（不確定 / 動的依存）へ昇格させる。
+     - 分岐前の固定値が分岐後のアサーション判定に誤って使われないようにし、`x = 1; if compute_val(1) == 2: x = 2; self.assertEqual(x, 2)` のような正常なテストが固定値不一致（`1 == 2`）として誤拒絶（TRIVIAL_RED）されず、安全に受容されることを単体テストで実証する。
+  2. 静的到達不能コード（`if False:` 等）の判定抑止と不確実性の安全側判定 (PPP.2 / Sol氏 Phase 55 提言):
+     - 静的に到達不能な分岐（例: `if False: self.assertEqual(1, 2)`）に含まれるアサーションを偽 Red の検出根拠としない。
+     - 静的解析で真正性を確定できない（確信できない）ケースは無理に `TRIVIAL_RED` と決めつけず、安全側に倒す（フォールスルーまたは実動実行結果との組み合わせに委ねる）。
+  3. 判定の不確実性保護・受入ハーネスと Level 7 E2E 完走確認 (PPP.3):
+     - `tests/test_independent_audit_runner.py` および `tests/test_level7_real_loop_e2e.py` において、条件分岐後の変数合流を伴う正常テストが安全にパスし、真のバグのみが受理・自律修復されることを実証する。
+  4. 最終 Evidence Bundle 生成・受入ハーネス確定と正式独立第三者監査移行準備 (PPP.4):
+     - 全テスト通過・改ざん検知・独立 Checker 承認済みの Evidence Bundle を生成し、受入ハーネスの整備を完了して v0.7.0 リリースを確定、次フェーズでの実外部モデル独立監査への移行準備を完了する。
+- [x] 機能QQQ (Stage 7 実外部モデルによる独立第三者監査の実稼働と Level 7 完全自己改善実証 Stage 7 Live External Multi-LLM Independent Audit and Level 7 Self-Refinement Real Execution):
+  1. 実外部異系統モデル独立監査パイプラインの構成とベースライン固定 (QQQ.1):
+     - `IndependentAuditRunner` および `AuditConfig` において、実動環境における外部異系統モデル（例: Maker=Gemini Flash vs Auditor=Claude 3.7 / Opus / GPT 4o/o1 / 異系統モデル）の実行インターフェースおよびベースラインコミット（`98c213a`）を固定。
+     - 外部監査役が直接リポジトリ内部のプロンプトや思考ログを参照できない独立入力境界（SPEC.md と git diff のみ）を機械的に担保する。
+  2. 外部監査役による未知欠陥探索と Auto Developer 防壁による自動選別実証 (QQQ.2):
+     - 実外部モデルまたは敵対的入力生成による未知のエッジケース・仕様違反・境界値指摘を投入。
+     - Auto Developer の防壁（OSサンドボックス隔離、AST因果関係解析、トレーサー、不干渉検証）が、形骸的な偽Red（Trivial Red）やホスト機密読み取り・リポジトリ改ざんを自動遮断し、真の欠陥（GENUINE_RED）のみを `PLAN.md` に登録することを実証する。
+  3. 真正指摘の自律修正・After Green 検証・免疫昇格・教訓記録（Level 7 Closed Loop）完走実証 (QQQ.3):
+     - 登録された AUD タスクに対して Maker が自律的に修正コードを適用し、Git コミットを作成。
+     - `resolve_task()` により Before Red / After Green 証跡（Commit Bound Proof）が厳格に検証され、再現テストが `tests/immunity/` 配下に非破壊昇格し、`LESSONS.md` に永続化され、次回 Maker に教訓が注入される完全自己改善ループを実証する。
+  4. 独立監査 Evidence Bundle 生成と v0.7.0 本格リリース確定 (QQQ.4):
+     - 実外部監査および Level 7 自己改善の証跡を含む全自動検証ゲート合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成・検証。
+     - v0.3.0 からの飛躍的進化（真の自律・多層防壁・自己改善・マルチLLM独立監査）を実証した v0.7.0 の本格リリースを確定する。
+- [x] 機能RRR (Stage 7 実外部モデル独立監査の本番統合・SPECコミット拘束・フォールバック自律防御とv0.7.0確定 Stage 7 Live Multi-LLM Audit Integration, Commit-Bound SPEC, Resilient Fallback, and v0.7.0 Release Finalization):
+  1. 監査対象 SPEC のコミット拘束と監査入力ハッシュの厳格証明 (RRR.1 / Sol氏 Phase 57 P1指摘):
+     - `audit_repository(repo_dir, target_commit="HEAD", baseline_commit=...)` において、`SPEC.md` の内容を作業ツリーからではなく対象コミット（`git show <target_commit>:SPEC.md`）から厳密に取得する。
+     - 監査入力メタデータ（`target_commit`, `target_tree_sha`, `baseline_commit`, `spec_sha256`, `diff_sha256`）を `AuditStore` および Finding メタデータに完全拘束し、作業ツリーの未コミット変更による監査入力乖離を物理遮断する。
+  2. NightlyOrchestrator への独立監査ステージの本番自動組み込み (RRR.2 / Sol氏 Phase 57 P1指摘):
+     - `NightlyOrchestrator` のジョブ完了時（または独立監査フェーズ実行時）に、自動的に `audit_repository()` および `screen_and_dispatch_findings()` を呼び出す本番監査ステージ（`run_audit_stage`）を実装。
+     - 監査ステージでエラーが発生した場合でも、通常開発成果物をロールバック・破壊せず `AUDIT_PENDING` / `AUDIT_FAILED` として保全・記録し、次期実行時に再試行できる安全停止（Fail-Safe）設計。真正 Finding のみが次期 PLAN.md に自律登録される。
+  3. モデル上限・障害時の弾力的フォールバックと実外部モデル監査・Level 7閉ループ実証 (RRR.3 / Sol氏 Phase 57 P0指摘 & ユーザー要件):
+     - 外部モデル（Claude Opus等）の上限・レートリミット・障害時にパイプラインが停止しないよう、モデルフォールバックチェーン（例: 設定された代替異系統モデルへのフォールバック、または独立性ポリシーに抵触しない安全退避）をサポート。
+     - 外部モデルによる実監査の入出力ハッシュ、モデル名、Finding、Red検証結果、Maker自律修正、After Green コミット拘束証明を Evidence に拘束し、実外部モデル独立監査の完走を証明する。
+  4. 独立監査 Evidence Bundle 生成と v0.7.0 正式リリース確定 (RRR.4):
+     - 全自動検証ゲート合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成・検証。
+     - v0.3.0 からの飛躍的進化（多層防壁・自己改善・マルチLLM独立監査の実稼働）を証明した v0.7.0 正式リリースを確定する。
+- [x] 機能SSS (Stage 7 独立監査CLI完全化・厳格Fail-Closed・異系統モデル堅持・実監査実証とv0.7.0最終確定 Stage 7 Audit CLI Completion, Strict Fail-Closed Spec, True Model Independence, Live Audit Evidence, and v0.7.0 Final Release):
+  1. CLI からの独立監査有効化・設定オプション追加と起動前設定バリデーション (SSS.1 / Sol氏 Phase 58 P1指摘):
+     - `cli.py` に `--enable-audit`, `--auditor-cmd`, `--auditor-model`, `--auditor-fallback-models`, `--audit-baseline` オプションを追加し、CLI 通常起動から独立監査ステージを完全に制御可能にする。
+     - `NightlyOrchestrator` の初期化において `auditor_cmd_template`, `fallback_models` 等の受け渡しをサポート。
+     - ジョブ開始前設定検証（Fail-Closed）：`--enable-audit` が指定されているにもかかわらず実動モード（非 mock）で `--auditor-cmd` が未設定の場合は、ジョブ開始前に設定エラー（Exit 2）で停止。また `maker_model` と `auditor_model` が同系統（独立性違反）の場合も開始前に拒絶。
+  2. audit_repository における SPEC コミット拘束の厳格化とフォールバック完全撤廃 (SSS.2 / Sol氏 Phase 58 P1指摘):
+     - `audit_repository()` において、`git show <target_commit>:SPEC.md` が失敗（returncode != 0）した場合の作業ツリー `SPEC.md` や `spec_path` へのフォールバックを完全に撤廃する。
+     - 対象コミット内に `SPEC.md` が存在しない場合は直ちに `FileNotFoundError(f"SPEC_NOT_FOUND_IN_COMMIT: SPEC.md not found in target commit {target_sha}")` を送出し、コミット拘束が保証されない監査を物理遮断する（Fail-Closed）。
+  3. モデルフォールバック時の同系統モデル排除と異系統モデル堅持 (SSS.3 / Sol氏 Phase 58 P1指摘 & ユーザー要件):
+     - `IndependentAuditRunner` において、`allow_emergency_fallback` による独立性判定の免除・同一ファミリ許可を撤廃し、フォールバック候補に対しても厳格な `verify_model_independence(maker_model, candidate, strict=True)` を強制する。
+     - Maker が Gemini 系の場合、Gemini 4.0 (Argon/Hydrogen) 等を含む同系統モデルへのフォールバックを排除し、別系統（Claude / GPT等）のみを有効な候補として扱う。
+     - 独立性を満たす利用可能な代替モデルが存在しない場合は、同系統モデルによる「偽の独立監査」を実行せず、安全に `RuntimeError("NO_INDEPENDENT_AUDITOR_AVAILABLE")` を送出して `run_audit_stage` が `AUDIT_PENDING` として保全・記録し、次期実行に安全に持ち越す。
+  4. 実外部異系統 LLM による監査実績の証跡記録・全検証ゲート合格・最終 Evidence Bundle 生成と v0.7.0 正式リリース確定 (SSS.4 / Sol氏 Phase 58 P0指摘):
+     - 外部異系統モデル（またはプロバイダー識別子と結びついた実監査実行）による監査実行実績（入力プロンプトハッシュ、レスポンスハッシュ、モデル識別子、プロバイダー情報、Findings count、完了日時等）を AuditStage メタデータおよび Evidence Record に記録・永続化する。
+     - `NIGHTLY_REPORT.md` を更新し、全自動検証ゲート（350+ テスト、Ruff、Mypy）合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成・検証。
+     - v0.3.0 からの飛躍的進化（多層防壁・自己改善・マルチLLM独立監査の実稼働）を証明した v0.7.0 正式リリースを確定する。
+- [x] 機能TTT (Stage 7 実外部モデル独立監査の実証・完全ハッシュ証跡・Bundle完全収録とv0.7.0最終確定 Stage 7 Live Multi-LLM Audit Execution, Full Hash Provenance, Complete Bundle Integration, and v0.7.0 Final Release):
+  1. 外部監査役実行による監査完走とプロバイダ実行メタデータの完全取得 (TTT.1 / Sol氏 Phase 59 P0指摘):
+     - 実外部異系統モデル（Claude Opus 5.5 / GPT-4o 等、または署名付きプロバイダ実行エンジン）を呼び出す独立監査を実行。
+     - プロバイダメタデータ（Provider ID, Auditor Model, Maker Model, Execution ID, Raw Prompt SHA-256, Raw Response SHA-256, Findings count, Status）を漏れなく取得し、`last_run_metadata` に拘束する。
+  2. audit_stage.json の確実な永続化と EvidenceBundler による Bundle 包含・Manifest ハッシュ登録 (TTT.2 / Sol氏 Phase 59 P1指摘):
+     - 独立監査ステージ実行後、`.git/nightly_evidence/records/audit_stage.json` を確実に永続化する。
+     - `EvidenceBundler.create_bundle()` が `evidence/audit_stage.json` を確実に収集し、ZIP アーカイブおよび `bundle_manifest.json` にその SHA-256 ハッシュを登録・保護する。
+  3. NIGHTLY_REPORT.md のプレースホルダー完全排除と実測 64文字 SHA-256 の自動展開 (TTT.3 / Sol氏 Phase 59 P1指摘):
+     - `NIGHTLY_REPORT.md` 内の仮文字列（`verified-crypto-hash` や短縮表記等）を完全に排除。
+     - `audit_metadata` に拘束された実測の 64文字完全 SHA-256 ハッシュ（SPEC SHA-256, Diff SHA-256, Prompt SHA-256, Response SHA-256）を自動展開し、第三者が 100% 入出力整合性を検証可能とする。
+  4. 実監査証跡（evidence/audit_stage.json）を含む最終 Evidence Bundle ZIP の生成・独立検証（10/10 整合性）および v0.7.0 正式リリース確定 (TTT.4 / Sol氏 Phase 59 結論):
+     - 全自動検証ゲート（360+ テスト、Ruff、Mypy）合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成。
+     - `verify-bundle` により `evidence/audit_stage.json` を含む全ファイル（10/10 一致）および 4 タスク + 監査ステージの整合性を完全検証し、v0.7.0 正式リリースを確定する。
+- [x] 機能UUU (Stage 7 実Claude/Anthropic API独立監査の実稼働・Fail-Closed安全停止・実プロバイダID証跡拘束・Red構造化取り込み実証およびv0.7.0正式リリース確定 Stage 7 Live Claude/Anthropic API Audit Execution, Strict Fail-Closed Security, Genuine Provider Request ID Binding, Structured Red Finding Ingestion, and v0.7.0 Final Release):
+  1. 実Anthropic APIクライアントの実装・Fail-Closed安全停止・本物provider_request_id取得 (UUU.1 / Sol氏 Phase 60 P0指摘):
+     - `scripts/auditor_client.py` を改修し、`.env` または環境変数から `ANTHROPIC_API_KEY` を読み込み、実際に Anthropic Messages API (`https://api.anthropic.com/v1/messages`) にリクエストを送信。
+     - 要求モデル（`claude-opus-5.5`, `claude-sonnet-5.5` 等）を実行し、レスポンスからプロバイダ公式の `provider_request_id`（`msg_...`）、使用トークン数、生レスポンステキスト、構造化された `findings` を抽出する。
+     - **Fail-Closed 徹底**: APIキー未設定、認証エラー、クォータ枯渇（429）、ネットワーク障害、レスポンス解析失敗時には、**絶対に `findings: []` や空の COMPLETED を出力せず、非ゼロ終了コード（Exit 1）または `status: "FAILED"` / `"AUDIT_PENDING"` を出力してパイプラインを安全停止**させる。
+  2. audit_stage.json の mode: LIVE / MOCK 分離・実プロバイダID拘束・EvidenceBundler / verify_bundle 厳格化 (UUU.2 / Sol氏 Phase 60 P1指摘):
+     - `IndependentAuditRunner` および `AuditStore` / `audit_stage.json` において、`mode`: `"LIVE"` と `"MOCK"` を明確に分離し、`provider_request_id`（例: `msg_...`）、`raw_prompt_hash`、`raw_response_hash` を拘束。
+     - `EvidenceBundler.verify_bundle()` において、監査ステージ検証時に `mode == "LIVE"` かつ `provider_request_id` が存在（`exec_` 自前生成ではなく本物のプロバイダ識別子）することを検証し、モックによる偽りのリリース判定を物理遮断する。
+  3. 実Claudeによるコード監査実行・意図的Red指摘の構造化取り込み実証 (UUU.3 / Sol氏 Phase 60 受け入れ条件 #3):
+     - 意図的な仕様不整合・境界値欠陥を含む差分に対する実 Claude 監査を実行、または実モデルが生成した指摘（Finding）が `AuditDispatcher` によって AST 因果関係検証・Red 検証を経て正しく構造化取り込みされることを実証するテストスイート（`tests/test_live_claude_audit.py`）を拡充。
+     - `MorningReporter` において、実 Claude による監査証跡（`mode: LIVE`, `provider: anthropic`, `provider_request_id: msg_...`, 実測ハッシュ）を正確に出力。
+  4. 実Claude監査証跡を内包した最終 Evidence Bundle ZIP の生成・独立検証・v0.7.0 正式リリース確定 (UUU.4 / Sol氏 Phase 60 結論):
+     - 全自動検証ゲート（360+ テスト、Ruff、Mypy）合格、改ざん検知、独立 Checker 承認済みの最終 Evidence Bundle（ZIP）を生成。
+     - `verify-bundle` により `mode: LIVE`、`evidence/audit_stage.json` を含む全ファイル（10/10 一致）、4 タスク + 監査ステージの整合性を完全検証し、v0.7.0 正式リリースを確定する。
+- [ ] 機能VVV (Stage 7 実Claude監査の完全性検証・stop_reason拘束・Red取り込み環境耐性・ポスト監査差分拘束およびv0.7.0最終リリース確定 Stage 7 Live Claude Audit Integrity Verification, stop_reason Binding, Red Ingestion Environment Resilience, Post-Audit Diff Integrity, and v0.7.0 Final Release):
+  1. 監査応答の終了理由検証 (stop_reason)・max_tokens打ち切り検知およびJSON解析失敗のFail-Closed化 (VVV.1 / Sol氏 Phase 61 P1指摘):
+     - `scripts/auditor_client.py` の `_extract_findings_from_text()` において、テキストから有効な JSON 配列（または明示的 `[]`）を抽出できない場合、暗黙の空リスト `[]`（欠陥ゼロ偽装）への変換を廃止し、明確な解析エラー例外（または `status: "FAILED"`）を送出する。
+     - Anthropic API レスポンスの `stop_reason` を検証し、`stop_reason == "max_tokens"` 等の途中打ち切り時は `status: "AUDIT_PENDING"` として安全停止する。`max_tokens` デフォルトを 8192 に拡大し、監査モデルに対して余計な前置きを出力せず JSON 配列のみを出力する指示を強化する。
+     - `stop_reason` を監査結果封筒および `audit_stage.json` のメタデータに記録し、`response_sha256` と併せて改ざん不能な Evidence とする。
+  2. `test_live_claude_audit.py` の環境差異解消および Linux bwrap パス修正 (VVV.2 / Sol氏 Phase 61 P1指摘):
+     - `src/auto_developer/verifier.py` において、Linux `bwrap` 実行時に `--tmpfs /tmp` をマウントした後でも一時クローン先が存在するよう、`--dir str(exec_resolved)` を `--bind` の直前に追加。
+     - `tests/test_live_claude_audit.py` において、OS サンドボックスが未導入または利用不可な環境（非特権コンテナ等）でも構造化指摘（Finding）の取り込み・Red 検証判定・`PLAN.md` への自律タスク登録パイプラインを確実に検証できるように適応的フォールバック・モック検証をサポート。
+  3. 監査対象コミット拘束およびポスト監査差分検査 (Post-Audit Diff Integrity) (VVV.3 / Sol氏 Phase 61 考察):
+     - `EvidenceBundler.verify_bundle()` において、監査対象コミット（`target_commit`）から Bundle HEAD（`head_commit`）までの間にプロダクトコード（`src/**` および `scripts/**`）の実質的変更が含まれていないことを検証し、未監査コードの混入を物理遮断する。未監査コードが存在する場合は `AUDIT_OUTDATED` として拒絶する。
+  4. 最新HEADに対する実Claude Opus 5.5再監査・完全性検証済みEvidence Bundle ZIP生成・v0.7.0正式リリース確定 (VVV.4 / Sol氏 Phase 61 結論):
+     - 最新の実装コミットに対し、本物の Claude Opus 5.5（Anthropic Messages API）による独立監査を実行（`stop_reason: "end_turn"`、実 `provider_request_id` を拘束）。
+     - 4 タスク + 監査ステージの整合性を完全検証した最終 Evidence Bundle ZIP（10/10 一致）を生成し、v0.7.0 正式リリースを確定する。
+
+- [x] 機能WWW (監査サイクルの終了保証: 重要度トリアージ・修正予算・リリース判定の分離 Audit Loop Termination Guarantee: Severity Triage, Fix Budget, and Release Gate Separation):
+  <!-- 起点: LESSONS.md 2026-11-16「P2モグラ叩きの底なし沼化」。教訓の Rule を文章ではなく作り・関門に置く。 -->
+  0. 重要度の定義（監査役・dispatcher・リリース判定が共有する物差し）:
+     - P0: データ消失、機密の漏洩、証跡（Evidence / Bundle）の偽装・改ざんの見逃し、保護ファイル防壁のバイパス。
+     - P1: 安全ゲート（検証・監査・Red 判定・Checker 判定）が Fail-Open になる経路、通常利用の主経路での仕様違反・誤った結果。
+     - P2: 限定的な条件・構文上のエッジケースでのみ起きる誤判定（偽陽性・偽陰性）、ヒューリスティクスの精度不足。
+     - INFO: 改善提案・理論的懸念・可読性。
+     - 判定に迷う場合は低い方を付ける（P1 か P2 か迷うなら P2）。この定義は監査プロンプト（`IndependentAuditRunner.DEFAULT_PROMPT_TEMPLATE`）に原文のまま埋め込む。
+  1. 重要度トリアージ (WWW.1):
+     - `AuditDispatcher.dispatch_finding()` は severity に応じて経路を分ける。
+       - P0 / P1: 従来どおり `RedTestVerifier` で検証し、`GENUINE_RED` のみ PLAN.md の「## ステップ」に `- [ ] AUD-<id>. Fix: ...` として登録する（status `DISPATCHED`）。
+       - P2: Red 検証を行わず（`verify_candidate_test` を呼ばない）、リポジトリ直下の `BACKLOG.md` に 1 行追記する（status `BACKLOGGED`）。PLAN.md には書かない。
+       - INFO: どこにも書かず AuditStore にのみ保存する（status `NOTED`）。
+     - `VALID_STATUSES` に `BACKLOGGED`, `NOTED`, `ESCALATED` を追加する。
+     - `BACKLOG.md` の行書式: `- [AUD-<id>] <description> (Severity: P2, Loc: <location>, Cycle: <cycle_id>)`。同一の指摘（finding_id と再現テストの code_hash がともに一致）が既に存在する場合は追記しない（冪等）。finding_id だけが一致し内容が異なる場合は WWW.6 に従い採番し直す。ファイルがなければ見出し `# BACKLOG.md` 付きで作成する。
+     - `BACKLOG.md` の行はチェックボックスを持たない（`TaskDispatcher` が Maker タスクとして拾わないこと）。
+  2. 修正予算（モジュール単位の連続サイクル上限）(WWW.2):
+     - `AuditDispatcher.__init__` に `max_consecutive_cycles: int = 5` を追加する。
+     - `AuditDispatcher.process_findings(findings, plan_path=None, cycle_id=None)` を 1 回の監査サイクルの正規入口とする。`cycle_id` 省略時は先頭 finding の `target_commit`、それもなければ HEAD SHA を使う。`IndependentAuditRunner.screen_and_dispatch_findings()` はこの入口を経由する。
+     - モジュールキー: `location` 先頭の空白・`:`・`(` までのトークン（例: `src/auto_developer/verifier.py:166` → `src/auto_developer/verifier.py`）。取れなければ `UNKNOWN`。
+     - 台帳 `.dev/audit/budget.json` にモジュールごとの `streak`（連続して P0/P1 を登録したサイクル数）と `last_cycle_id` を保存する。
+     - サイクル処理の規則:
+       - そのサイクルで `GENUINE_RED` となった P0/P1 があるモジュールについて、処理前の `streak >= max_consecutive_cycles` なら、そのモジュールの当該 finding はすべて PLAN の「## ステップ」に登録せず status `ESCALATED` とし、PLAN.md の「## 止まっていること・判断待ち」節に `- ESCALATED [AUD-<id>] <description> (Severity: <sev>, Loc: <location>, Streak: <n>)` を追記する（チェックボックスなし）。上限未満なら登録し、`streak` を 1 増やす（1 サイクルにつき 1 回）。
+       - エスカレーションは解除しない（sticky）: あるモジュールで一度 ESCALATED が発生したら、台帳エントリに `escalated: true` を記録する。`escalated: true` のモジュールでは、以後どのサイクルでも（指摘 0 件のサイクル・再報告のみのサイクルを含む）`streak` を 0 に戻さず、新たな P0/P1（`GENUINE_RED`）はすべて ESCALATED とする。解除は人間が台帳エントリを削除した場合のみ。
+       - `escalated` でないモジュールの `streak` を 0 に戻すのは、そのサイクルで当該モジュールに P0/P1 の報告が 1 件もなかった場合に限る。ここでいう「報告」は REJECTED 以外の P0/P1 finding であり、WWW.6 により重複として抑止された再報告を含む。再報告のみのサイクルでは `streak` を増やしも戻しもしない。
+       - P2 / INFO / REJECTED は `streak` に数えない。
+       - 同じ `cycle_id` を 2 回処理しても `streak` は二重に増えない（冪等）。
+     - 台帳のリセットは人間が `.dev/audit/budget.json` の該当エントリを削除して行う（CLI はスコープ外）。
+  3. リリース判定の分離 (WWW.3):
+     - `auto_developer.bundler` にモジュール関数 `find_release_blockers(plan_text: str) -> list[str]` を追加する。未完了の `- [ ]` 行のうち `(Severity: P0` または `(Severity: P1` を含む行、および `- ESCALATED` 行を返す。P2 は返さない。
+     - `EvidenceBundler.verify_bundle()` は Bundle 内の PLAN.md に対しこれを適用し、1 件以上あれば `RELEASE_BLOCKED:` で始まるエラーとして不合格にする。
+     - Bundle には `BACKLOG.md`（存在する場合）を含め、manifest に `backlog_count` を記録する。P2 の残件はリリースを止めない。
+  4. Checker 判定のテキスト・フォールバックの Fail-Closed 化 (WWW.4):
+     - `CommandRunnerAdapter.run_checker()` のテキスト判定で、部分文字列 `PASS` による承認を廃止する（"tests did not pass" や "BYPASS" で APPROVE になる欠陥）。
+     - 構造化 JSON が得られない場合は、出力中に行単位の判定行（正規表現 `^\s*(?:DECISION:\s*)?(APPROVE|REJECT)\s*$`、大文字小文字無視）がちょうど 1 種類だけ存在するときに限りそれに従う。0 件、または APPROVE と REJECT が両方ある場合は不承認とする。
+  5. Morning Brief への反映 (WWW.5):
+     - `MorningReporter` は監査ステージの結果として、登録（DISPATCHED）・Backlog 送り（BACKLOGGED）・エスカレーション（ESCALATED）の件数を分けて表示する。
+     - ESCALATED が 1 件以上あれば「あなたに判断してほしいこと」節にモジュール名・streak・該当 finding を列挙する。
+  6. 監査役による finding_id 再利用への耐性 (WWW.6):
+     - 監査役はサイクルごとに `AUD-001` から採番し直すことがある。`AuditDispatcher.process_findings()` は重要度による振り分けより前に、各 finding について AuditStore・PLAN.md・BACKLOG.md 上の既存 ID との衝突を判定する。
+       - 同じ finding_id で code_hash も同じ:
+         - 既存項目が「未着手（`- [ ]`）の PLAN タスク」または「`BACKLOG.md` の行」の場合: 同一指摘の再報告として扱い、重複して書かない（冪等）。
+         - 既存項目が「PLAN 上で完了済み（`- [x]`）のタスク」の場合: 不具合の再発（回帰）として扱い、AUD-018 の規則（既存番号の最大値 + 1）で新しい finding_id を割り当てて新しい未着手タスク（`- [ ]`）として登録する。
+       - 同じ finding_id で code_hash が異なる: 既存の採番規則（AUD-018: 既存番号の最大値 + 1）で新しい finding_id を割り当ててから振り分ける。
+     - この処理は P0 / P1 / P2 / INFO / ESCALATED のすべての経路に共通で適用し、`CODE_HASH_TAMPERED` によって監査ステージ全体が `AUDIT_FAILED` になってはならない。
+     - AuditStore の不変性（GGG.2: 同一 finding_id の再現テストの上書き拒否）は緩めない。
+  - スコープ外（WWW）: 監査器（`verifier.py` / `audit.py`）自身の変更を監査対象から外す等のメタ監査制限、予算リセット CLI、重要度の自動降格判定。必要になれば BACKLOG.md に積む。
+
+- [x] 機能XXX (成果の計測基盤と Checker 記録の構造化 Outcome Metrics Foundation and Structured Checker Records):
+  <!-- 目的: 「型が効いているか」を数字で判断できるようにする。指標はそれぞれ判断に紐づける。
+       - 1 回目の verify で通った率・平均試行回数・隔離数 → Maker の能力とタスク分割は適切か
+       - Checker の REJECT 数・系統違反数 → 査読が機能し、異系統が守られているか
+       - 監査の重要度別件数・本物の P0/P1 あたりトークン → 監査はコストに見合うか
+       - 計画外ステップ数（フェーズ開始時の PLAN になかった数値ステップ） → パイプラインの外でしか見つからない欠陥がどれだけあるか
+       - 人間の直接コミット数・所要時間 → 自律化で人の手がどれだけ減ったか -->
+  1. commit-step における Checker 記録の構造化と方針検査 (XXX.1 / BACKLOG IDEA-002):
+     - `commit-step` はサブコマンド引数 `--maker-model` と `--checker-model` を必須とする。トップレベル引数の既定値（`gemini-3.8-flash` / `claude-opus-5.5`）にフォールバックしてはならない。
+     - `--checker-decision` は必須とし、`APPROVE`（大文字小文字無視）以外ならコミットしない。
+     - `auto_developer.audit.verify_model_independence(maker_model, checker_model, strict=True)` を用い、同一モデル・同一系統・系統不明（例: `pro`）のいずれでもコミットしない。
+     - 上記いずれかに該当する場合、`CHECKER_POLICY_VIOLATION:` で始まるメッセージを標準エラーに出し、終了コード 4 を返す。この検査は Evidence の照合・消費とコミットより前に行い、違反時は Evidence を消費せず、HEAD も PLAN.md も変更しない（正しい引数での再実行で通常どおりコミットできること）。
+     - 成功時の Evidence record の `checker` に `decision`, `reason`, `model`, `family`, `maker_model`, `maker_family` を構造化して記録する。
+     - スコープ外: `auto-dev run`（NightlyOrchestrator）経路の Checker 呼び出し。
+  2. 抑止された再報告の専用ステータス (XXX.2 / BACKLOG IDEA-003):
+     - WWW.6 で重複として抑止された finding の status を `DUPLICATE` とし、`VALID_STATUSES` に追加する。
+     - `IndependentAuditRunner.screen_and_dispatch_findings()` は `DUPLICATE` を rejected に含めず、戻り値に `duplicates`（リスト）を追加する。`audit_stage.json` に `duplicate_count` を記録する。
+     - Morning Brief の「不正/偽Red排除数」に DUPLICATE を含めず、「重複再報告」として別に表示する。
+  3. イベントログ (XXX.3):
+     - `auto_developer/metrics.py` に `MetricsLog` を新設する。保存先は `.git/nightly_evidence/events.jsonl`（`.git` がディレクトリでない場合は `.dev/metrics/events.jsonl`）。1 イベント 1 行の JSON で追記のみ行い、既存行を書き換えない。
+     - 全イベント共通フィールド: `schema`（1）, `ts`（epoch 秒）, `event`, `phase`（PLAN.md「## 現在の目標」節の最初の `Phase <数字>`。取れなければ `"unknown"`）, `head`（HEAD の SHA）。
+     - 記録するイベント:
+       - `verify_step`: `task_id`, `checkpoint`, `result`（`PASSED` / `FAILED` / `CIRCUIT_BREAKER`）, `exit_code`, `duration_sec`, `attempt`（同一 phase・task_id・checkpoint の既存 `verify_step` 件数 + 1）。
+       - `commit_step`: `task_id`, `result`（`COMMITTED` / `CHECKER_POLICY_VIOLATION` / `EVIDENCE_ERROR`）, `commit`, `checker_decision`, `checker_model`, `checker_family`, `maker_model`, `maker_family`。
+       - `rollback_step`: `task_id`, `checkpoint`, `quarantine_branch`, `reason`。
+       - `checker_review`: 新サブコマンド `auto-dev record-review --task-id <id> --decision APPROVE|REJECT --checker-model <m> --maker-model <m> [--reason <text>]` が記録する。ゲートには影響しない（記録のみ）。
+       - `audit_stage`: `status`, `findings_by_severity`, `dispatched`, `backlogged`, `escalated`, `duplicate`, `rejected` の件数, `input_tokens`, `output_tokens`（取れなければ null）。
+     - 計測はゲートの結果を変えてはならない: イベントの書き込みに失敗しても（権限・パスがディレクトリである等）、各サブコマンドの終了コード・コミット・Evidence の扱いは計測なしの場合と同一とし、標準エラーに `METRICS_WARNING:` を出すのみとする。
+  4. フェーズ集計 (XXX.4):
+     - 新サブコマンド `auto-dev metrics [--phase N] [--json] [--append-to PATH]`。`--phase` 省略時は現在のフェーズ。
+     - イベントログから算出: `tasks_committed`, `first_pass_rate`（コミット済みタスクのうち最初の `verify_step` が PASSED の割合）, `mean_verify_attempts`, `verify_failures`, `circuit_breakers`, `quarantines`, `checker_rejects`, `checker_policy_violations`, 監査の各件数と `genuine_p0p1_per_100k_tokens`（DISPATCHED + ESCALATED の P0/P1 件数 ÷ 入力・出力トークン合計 × 100000。トークン不明なら null）。
+     - git 履歴から算出（イベントログがない過去フェーズにも適用）:
+       - フェーズの範囲: PLAN.md を変更したコミットを古い順にたどり、「## 現在の目標」の `Phase <N>` が初めて現れたコミットから、`Phase <N+1>` 以降が初めて現れるコミットの直前まで。
+       - `planned_steps`: 範囲の最初のコミット時点の「## ステップ」節にある数値 ID のステップ数。`unplanned_steps`: 範囲の最後の時点で存在し、最初の時点になかった数値 ID のステップ数。`audit_steps_added`: 同様に増えた `AUD-` ID のステップ数。
+       - `pipeline_commits`（メッセージに `[refs:` を含む）, `human_commits`（それ以外。マージコミットは除く）, `lead_time_hours`（範囲の最初と最後のコミット時刻の差）。
+     - 出力はフェーズの各指標と、直前フェーズとの差分。イベント由来か git 由来かを指標ごとに `source` で示し、算出できない指標は null とする（推定値で埋めない）。
+     - `--append-to PATH` は `## Phase <N>` 節を PATH の末尾に追記する。同じ節が既にあれば追記せず終了コード 1 を返す（追記のみ・上書きなし）。
+  5. ベースラインの記録 (XXX.5):
+     - git 履歴から算出できるフェーズ（少なくとも Phase 50 以降）を `METRICS.md` に記録し、Phase 64 自体の集計を最後に追記する。`METRICS.md` は先頭に各指標の定義と判断との対応を記す。
+  - スコープ外（XXX）: Maker / Checker のトークン・コスト計測（Antigravity 側で消費されるため取得経路がない）、ダッシュボード表示、Morning Brief への指標表示（必要なら次フェーズ）。
+
+- [ ] 機能YYY (v0.8.0 リリース確定と自律レポート復旧・計測指標の適正化 v0.8.0 Finalization, Autonomous Reporting Recovery, and Metric Harmonization):
+  <!-- 目的: v0.8.0 リリースの確定に向け、計測指標の実態との乖離（out_of_path_commits, rework_tasks_ratio）を解消し、夜間バッチおよび Antigravity 対話実行の両方で NIGHTLY_REPORT.md が自動更新・モーニングブリーフされる仕組みを復旧し、バージョン表記・リリースドキュメント・監査済み Evidence Bundle を整える。 -->
+  1. 計測指標の適正化と手戻り率 (YYY.1):
+     - `human_commits` を `out_of_path_commits` に改名する。定義: `[refs:` を含まない非マージコミット（自動監査ループや外部コミット等を含む、commit-step 正規経路外の全コミット）。
+     - 新指標 `rework_tasks_ratio` の追加: コミットされたタスクのうち、コミットまでに `verify_step` が 2 回以上実行されたタスクの割合（タスク単位で集計。イベントログ由来。verify_step 未記録なら null）。
+     - `METRICS.md` の Phase 64 の行を最終数値（ステップ 7 コミット後）で更新し、ステップ 1〜2 はイベントログ新設前のため一部指標が 5 件基準である旨の注記を明記する。
+  2. NIGHTLY_REPORT.md の自動生成とモーニングブリーフ復旧 (YYY.2):
+     - `MorningReporter` / `NightlyOrchestrator` のレポート生成ロジックを整理し、`.dev/job_state.json` が存在しない対話実行環境（`/nightly-run`）でも、git HEAD、PLAN.md、`.git/nightly_evidence/records/`、および `audit_stage.json` を参照して完全な `NIGHTLY_REPORT.md` をスタンドアロン生成できる `auto-dev report` サブコマンド（または同等機能）を提供する。
+     - `auto-dev bundle` 実行時、および `auto-dev brief` 実行時に `NIGHTLY_REPORT.md` が最新 HEAD に合わせて自動更新または検証されるように連携する。
+  3. v0.8.0 バージョン整合とリリースドキュメント整備 (YYY.3):
+     - バージョン表記の統一: `pyproject.toml` (0.8.0), `plugin.json` (0.8.0), `src/auto_developer/__init__.py` (__version__ = "0.8.0"), `src/auto_developer/cli.py` (0.8.0) に更新する。
+     - `CHANGELOG.md` に `## [0.8.0] - 2026-11-18` 節を追加し、Phase 63・64・65 の成果（監査重要度振り分けと修正予算、Maker/Checker 異系統検証、イベントログ・成果計測基盤、指標適正化とレポート復旧）を記載する。
+     - `docs/releases/v0.8.0.md` を作成し、リリースサマリをまとめる。
+  4. 最新 HEAD に対する実 Claude Opus 5.5 本番監査と完全性検証済み Evidence Bundle の生成 (YYY.4):
+     - 最新 HEAD に対して Claude Opus 5.5（`claude-opus-5-5-medium`、Anthropic API 経由）による本番独立監査を実行し、`audit_stage.json` を更新する。
+     - `auto-dev bundle` を実行し、`auto-dev verify-bundle` で `AUDIT_OUTDATED` なくすべての検証（証跡整合性、Tree SHA バインド、SPEC 不変性、Checker 承認）が `VERIFIED` となることを確認する。
+  - スコープ外（YYY）: Web UI ダッシュボードの実装、自動リリースデプロイ（GitHub Releases への自動 push 等）。
+
+## 3. 非機能要件・絶対制約 (Constraints & Out of Scope)
+<!-- 過剰設計（YAGNI）とスコープ逸脱を防ぐ「やらないこと」リスト -->
+- スコープ外: 複数Workerの同時並行Git編集 / 仕様（SPEC.md）の自己改変 / タスクの憶測スキップと継続 / クラウド分散実行 / 外部DB
+- 技術スタック制約: Python 3.10+ (CLIヘルパー)、Antigravity スキル、Git
+- 依存ライブラリ方針: `pyproject.toml` に `pytest>=8.0.0`, `mypy>=1.9.0`, `ruff>=0.3.0` をピン留めし、それ以外の外部ライブラリは導入しない（標準ライブラリ `dataclasses`, `argparse`, `subprocess`, `pathlib` 等のみ使用）。
+
+## 4. 厳格な不変条件 (System Invariants)
+<!-- 破られたら即座にリジェクトされるルール -->
+1. データ整合性・クリーン復元: 障害ロールバック時に未追跡ファイル・ゴミスクリプト含めて直前の成功コミットまで完全に巻き戻され、作業ツリーを一切汚染しないこと（`git clean -fd` 必須）。
+2. 境界値・安全停止 (Strict Fail-Fast): 2回連続失敗時は推測で後続タスクに進まず直ちにパイプラインを安全停止し、状況を記録すること（AGENTS.md Rule 5 の機械的強制）。
+3. 保護アセット不変: `.github/**`, `SPEC.md`, `scripts/verify_local.sh`, 免疫テストの無断改変を検証実行前に物理遮断すること。
+4. 監査サイクルの終了保証: 監査役が指摘を返し続けても、P2 以下は PLAN.md の実行タスクにならず、同一モジュールへの P0/P1 自動登録は連続 `max_consecutive_cycles` サイクルで打ち切られ人間に引き渡されること（機能WWW）。
+5. 計測の非干渉: 計測（イベントログ・集計）の成否は、検証・査読・コミット・隔離の結果を変えないこと（機能XXX.3）。
+
+## 5. 完了定義 (Definition of Done)
+- `bash scripts/verify_local.sh` がすべて成功（Exit 0）していること。
+- `pytest tests/test_nightly_orchestrator.py -v` の受入テストスイートがすべて通過していること。

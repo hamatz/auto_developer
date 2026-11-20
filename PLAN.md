@@ -4,45 +4,59 @@
 現在のタスク進捗と次の一手。会話ログではなく、ここに状態を残す。
 実装エージェントは1回に1ステップだけを担当し、終わったらチェックを付けてコミットする。
 セッションが切れても、SPEC.md・このファイル・git の履歴を読めば作業を再開できる状態に保つ。
+前フェーズ（Phase 65）の PLAN は docs/history/PLAN-phase65.md に残している。
 -->
 
 ## 現在の目標
-- Phase 65: v0.8.0 リリース確定と自律レポート復旧・計測指標の適正化（SPEC.md 機能YYY）
-  - 計測指標の実態との乖離解消（`human_commits` → `out_of_path_commits` 改名、`rework_tasks_ratio` の追加、METRICS.md の Phase 64 確定値更新）。
-  - NIGHTLY_REPORT.md の自動生成とモーニングブリーフ復旧（対話型 `/nightly-run` でも完全なレポートを生成・表示、bundle / brief 連携）。
-  - バージョン整合（0.8.0）とリリースドキュメント整備（CHANGELOG.md, docs/releases/v0.8.0.md）。
-  - 最新 HEAD に対する実 Claude Opus 5.5 本番監査の実行と完全性検証済み Evidence Bundle の生成・検証（AUDIT_OUTDATED 解消）。
-- スコープ外: Web UI ダッシュボード、自動リリースデプロイ。
+- Phase 66: マルチチーム実行の CLI・スキル接続と Bundle 形式の更新（SPEC.md 5.1 TEAM-10〜19, 5.2 REL-1）
+  - `teams.json` と `plans/<team>.md` によるチーム定義。チームの文脈は、ブランチ名とコミット済みの `teams.json` から決める。
+  - `auto-dev teams init / prepare / integrate / run / status / cleanup / recover`。
+  - `/nightly-run` と `/nightly-setup` のチーム対応。
+  - 2チーム構成の E2E 受入テスト。
+- スコープ外: `depends_on` による段階実行、main への自動マージ、README の書き直し（Phase 67）。
 
-## 作業手順（Phase 65・LESSONS.md に基づく）
-- Maker と Checker は別系統のモデルにする（AGENTS.md Rule 6）。
+## v0.9.0 全体の流れ
+- Phase 66（本フェーズ・auto developer で実施）: 上記。
+- Phase 67（auto developer と人間で実施）: DX-1〜3（README クイックスタートの実行テスト、モデル名の既定値、`examples/two-teams/`）、REL-2（0.9.0 表記）、README.md（日本語）の書き直しと README.en.md、docs の再編、CONTRIBUTING.md、リリース。
+  - REL-3（CI のマトリクス化）は `.github/` の変更なので人間が行う。
+  - 参考: 2026-11-20 に Linux（Ubuntu・Python 3.10・bwrap あり）で全テストを実行したところ、567 件中 3 件が失敗した（`test_independent_audit_runner` の criterion_1、`test_red_verifier` の repo_tamper 2 件）。いずれも bwrap 経路の環境依存で、期待する失敗の種類が macOS を前提にしている。REL-3 の前に、これらを「Linux での正しい期待値」に直すか、明示的にスキップするかを決める。
+
+## 作業手順（Phase 66・LESSONS.md に基づく）
+- Maker と Checker は別系統のモデルにする（`commit-step` が終了コード 4 で強制する）。
   - Maker: Gemini 3.8 Flash (`gemini-3.8-flash`)
   - Checker: Claude Opus 5.5 (`claude-opus-5-5-medium`、Anthropic API 利用。環境変数 `ANTHROPIC_API_KEY` を利用)
-- Checker への入力は要約・再構成しない。以下をファイルに書き出し、Checker にはそのパスを渡して直接読ませる:
-  1. `awk '/^- \[ \] 機能YYY/,/^## 3\./' SPEC.md > .dev/checker/spec_yyy.md`
+- Checker への入力は要約・再構成しない。以下をファイルに書き出し、Checker にはそのパスを渡して直接読ませる。
+  1. `awk '/^## 5\./,/^## 6\./' SPEC.md > .dev/checker/spec_phase66.md`
+     （不変条件も必要なときは `awk '/^## 3\./,/^## 4\./' SPEC.md` を追記する）
   2. `git add -N . && git diff <checkpoint> > .dev/checker/diff_task<n>.patch`（未追跡ファイルも差分に含める）
-- verify-step の前に `git status --porcelain` を確認し、意図しないファイルがないことを確かめる。
-- **査読記録の順序厳守**:
-  1. `python3 scripts/nightly_orchestrator.py verify-step --checkpoint <checkpoint> --task-id <n>`
-  2. Checker 査読（APPROVE / REJECT）
-  3. **Checker 査読直後、commit-step の前に** `python3 scripts/nightly_orchestrator.py record-review --task-id <n> --decision <decision> --checker-model <checker> --maker-model <maker> --reason "<reason>"` を実行する（REJECT 率・手戻りの正確な記録のため）。
-  4. Checker が REJECT した場合は commit-step を呼ばず、手直しして再度 1 からやり直す。
-  5. Checker が APPROVE した場合のみ `python3 scripts/nightly_orchestrator.py commit-step --task-id <n> --checkpoint <checkpoint> --maker-model <maker> --checker-model <checker> --checker-decision APPROVE --checker-reason "<reason>"` を実行する。
-- Bundle 生成後に SPEC.md や追跡ファイルを変更しない。SPEC の完了マークは次フェーズの準備コミットで付ける。
+- verify-step の前に `git status --porcelain` を確認し、意図しないファイルがないことを確かめる。実験は `mktemp -d` の中で行う。
+- 査読記録の順序:
+  1. `auto-dev verify-step --checkpoint <checkpoint> --task-id <n>`
+  2. Checker の査読（APPROVE / REJECT）
+  3. 査読の直後、commit-step の前に `auto-dev record-review --task-id <n> --decision <decision> --checker-model <checker> --maker-model <maker> --reason "<reason>"`
+  4. REJECT なら commit-step を呼ばず、手直しして 1 からやり直す。
+  5. APPROVE なら `auto-dev commit-step --task-id <n> --checkpoint <checkpoint> --maker-model <maker> --checker-model <checker> --checker-decision APPROVE --checker-reason "<reason>"`
+- E2E テストで作る一時リポジトリ・worktree は、必ず `tempfile` の中に作る。このリポジトリの `.dev/worktrees/` には作らない。
+- Bundle を生成した後に、SPEC.md や追跡ファイルを変更しない。SPEC の完了マークは、次のフェーズの準備コミットで人間が付ける。
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-- YYY.1: 既存テストで `human_commits` を検証している箇所を `out_of_path_commits` に更新する。
+- ステップ 6（REL-1）: Bundle を検証する既存テストのうち、`format_version` のない manifest を合格として扱っているもの（`tests/test_bundler.py` など）は、新しい形式の manifest を生成するように更新してよい。この場合、変更したテスト名をコミットメッセージに列挙する。
 - 上記以外の既存テストは変更しない。免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [x] 1. 指標の適正化: human_commits → out_of_path_commits 改名、rework_tasks_ratio の追加、METRICS.md の Phase 64 最終数値更新と注記（Red-First）（YYY.1）
-- [x] 2. NIGHTLY_REPORT.md の自動生成とモーニングブリーフ復旧: 独立 report 生成機能、auto-dev brief および bundle との連携（Red-First）（YYY.2）
-- [x] 3. バージョン整合（0.8.0）とリリースドキュメント整備（CHANGELOG.md, docs/releases/v0.8.0.md）（YYY.3）
-- [x] 4. 最新 HEAD に対する実 Claude Opus 5.5 本番監査の実行と完全性検証済み Evidence Bundle の生成・検証（YYY.4）
+- [ ] 1. チーム定義ファイル `teams.json` の読み込みと検証（`plan` フィールド、`depends_on` の拒否、`owns` の重なりの拒否、`TEAMS_CONFIG_ERROR` / 終了コード 2）、および `auto-dev teams init`（Red-First）（TEAM-10, TEAM-12）
+- [ ] 2. チーム文脈の決定: worktree 内の `run` / `pre-flight` / `verify-step` / `commit-step` / `rollback-step` が、ブランチ `team/<id>` とコミット済みの `teams.json` から `owns`・計画ファイルを決め、担当範囲外の変更を検知する。`teams.json` を保護ファイルに追加し、`run` に `--team-id` / `--owns` / `--plan` を追加する（Red-First）（TEAM-11）
+- [ ] 3. `auto-dev teams prepare` / `teams status` / `teams cleanup`（前回のジョブが残っているときの拒否と案内を含む）（Red-First）（TEAM-13, TEAM-16）
+- [ ] 4. `auto-dev teams integrate`（完了確認、Bundle の生成・保全、統合ゲート、RC タグと取り込みコマンドの表示、失敗時に worktree を残す）（Red-First）（TEAM-14）
+- [ ] 5. `auto-dev teams run`（`--worker-timeout`、Maker / Checker / モデル名 / `--mock` の受け渡し）と `teams recover`、チームのジョブの結果を NIGHTLY_REPORT.md と `brief` に表示（Red-First）（TEAM-15, TEAM-16, TEAM-17）
+- [ ] 6. Bundle の `format_version` / `tool_version` と、旧形式の Bundle を拒否する処理（Red-First）（REL-1）
+- [ ] 7. 2チーム構成の E2E 受入テスト（一括実行経路・低レベルサブコマンド経路・担当範囲外の変更の隔離・設定エラー）（TEAM-19）
+- [ ] 8. スキルの改修: `/nightly-setup` のチーム初期化、`/nightly-run` のチーム経路（prepare → 各 worktree での直列ループ → integrate）（TEAM-18）
 
 ## 止まっていること・判断待ち
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [済] Phase 64 の後片付け（docs/proposals/phase64/ 削除、免疫テスト配置完了）。
-- ステップ 4 完了後: Evidence Bundle の最終確認および v0.8.0 タグ・リリースの承認。
+- [ ] Phase 66 の準備コミット: 新しい SPEC.md / LESSONS.md / PLAN.md、docs/history/ のアーカイブ。
+- [ ] このリポジトリの `scripts/verify_local.sh` の保護対象に `teams.json` を追加する（ステップ 2 の後。保護ファイルなので人間が行う）。
+- [ ] ステップ 8 の完了後: 実際のエージェント（Antigravity / Claude Code など）で `/nightly-run` のチーム経路を一度通して、動作を確認する。
