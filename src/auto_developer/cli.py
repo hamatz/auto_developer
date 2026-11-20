@@ -23,6 +23,12 @@ from auto_developer.manifest import (
 )
 from auto_developer.metrics import MetricsLog
 from auto_developer.models import JobState
+from auto_developer.multi_team import (
+    cleanup_teams_job,
+    format_teams_status_text,
+    get_teams_status,
+    prepare_teams_job,
+)
 from auto_developer.orchestrator import NightlyOrchestrator
 from auto_developer.reporter import MorningReporter
 from auto_developer.runner import CommandRunnerAdapter, MockRunnerAdapter, RunnerAdapter
@@ -524,6 +530,35 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Comma-separated team IDs (default: core,ui)",
     )
+    teams_prepare_parser = teams_subparsers.add_parser(
+        "prepare", help="Validate teams.json/clean tree and create per-team worktrees"
+    )
+    teams_prepare_parser.add_argument(
+        "--job-id", type=str, default=None, help="Optional job ID"
+    )
+    teams_prepare_parser.add_argument(
+        "--json", action="store_true", help="Output prepared job info in JSON format"
+    )
+    teams_status_parser = teams_subparsers.add_parser(
+        "status", help="Show per-team worktree, branch, task progress, worker, and quarantine status"
+    )
+    teams_status_parser.add_argument(
+        "--job-id", type=str, default=None, help="Optional job ID (defaults to latest job)"
+    )
+    teams_status_parser.add_argument(
+        "--json", action="store_true", help="Output team status in JSON format"
+    )
+    teams_cleanup_parser = teams_subparsers.add_parser(
+        "cleanup", help="Remove worktrees and team branches for a finished job"
+    )
+    teams_cleanup_parser.add_argument(
+        "--job-id", type=str, required=True, help="Job ID to clean up"
+    )
+    teams_cleanup_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force cleanup even if integration did not succeed or worktrees have uncommitted changes",
+    )
 
     args = parser.parse_args(argv)
 
@@ -557,6 +592,55 @@ def main(argv: list[str] | None = None) -> int:
                     return 2
                 return init_teams_project(work_dir, team_ids=raw_ids)
             return init_teams_project(work_dir, team_ids=None)
+        if args.teams_subcommand == "prepare":
+            prep_payload, prep_code, prep_err = prepare_teams_job(
+                work_dir, job_id=args.job_id
+            )
+            if prep_payload is None:
+                print(prep_err, file=sys.stderr)
+                return prep_code
+            if args.json:
+                print(json.dumps(prep_payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"Job ID: {prep_payload['job_id']}")
+                print(
+                    f"Base Ref: {prep_payload['base_ref']} ({str(prep_payload['base_commit'])[:7]})"
+                )
+                print("Worktrees prepared:")
+                for t in prep_payload["teams"]:
+                    print(
+                        f"  - {t['team_id']}: {t['worktree_path']} (branch: {t['branch']})"
+                    )
+            return 0
+        if args.teams_subcommand == "status":
+            status_payload, status_code, status_err = get_teams_status(
+                work_dir, job_id=args.job_id
+            )
+            if status_payload is None:
+                print(status_err, file=sys.stderr)
+                return status_code
+            if args.json:
+                print(json.dumps(status_payload, ensure_ascii=False, indent=2))
+            else:
+                print(format_teams_status_text(status_payload))
+            return 0
+        if args.teams_subcommand == "cleanup":
+            cln_payload, cln_code, cln_err = cleanup_teams_job(
+                work_dir, job_id=args.job_id, force=args.force
+            )
+            if cln_payload is None:
+                print(cln_err, file=sys.stderr)
+                return cln_code
+            print(
+                f"Cleaned up job '{cln_payload['job_id']}': "
+                f"removed {len(cln_payload['removed_worktrees'])} worktree(s), "
+                f"{len(cln_payload['removed_branches'])} branch(es)."
+            )
+            q_map = cln_payload.get("quarantine_branches") or {}
+            if q_map:
+                for q_tid, q_branch in q_map.items():
+                    print(f"  Quarantined '{q_tid}' work to branch: {q_branch}")
+            return 0
         teams_parser.print_help()
         return 2
 

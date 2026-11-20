@@ -9,6 +9,7 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -19,8 +20,18 @@ from pathlib import Path
 from typing import Any
 
 from auto_developer.bundler import EvidenceBundler
-from auto_developer.integration_gate import IntegrationGate, IntegrationResult, TeamIntegrationInput
-from auto_developer.worktree import WorktreeError, WorktreeManager
+from auto_developer.dispatcher import TaskDispatcher
+from auto_developer.guard import GitGuard
+from auto_developer.integration_gate import (
+    VALID_JOB_ID_PATTERN,
+    IntegrationGate,
+    IntegrationJobState,
+    IntegrationResult,
+    TeamIntegrationInput,
+)
+from auto_developer.manifest import ManifestValidationError, TeamManifest, load_teams_manifest
+from auto_developer.models import JobState
+from auto_developer.worktree import SECRET_PATTERNS, WorktreeError, WorktreeInfo, WorktreeManager
 
 logger = logging.getLogger(__name__)
 
@@ -1237,3 +1248,990 @@ class MultiTeamOrchestrator:
             release_candidate_tag=rc_tag,
             details=int_result.details,
         )
+
+
+def _run_git_cmd(repo_dir: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+    """Git コマンドを実行し、CompletedProcess を返す。"""
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _list_branches_with_prefix(repo_dir: Path, prefix: str) -> list[str]:
+    """指定プレフィックスを持つローカルブランチ一覧を返す。"""
+    proc = _run_git_cmd(repo_dir, ["for-each-ref", "--format=%(refname:short)", f"refs/heads/{prefix}"])
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _branch_exists(repo_dir: Path, branch: str) -> bool:
+    """ローカルブランチ refs/heads/<branch> が存在するか判定する。"""
+    proc = _run_git_cmd(repo_dir, ["rev-parse", "--verify", f"refs/heads/{branch}"])
+    return proc.returncode == 0
+
+
+def _team_job_record_path(repo_dir: Path, job_id: str) -> Path:
+    return repo_dir / ".dev" / "integration_jobs" / job_id / "job.json"
+
+
+def _save_team_job_record(repo_dir: Path, payload: dict[str, Any]) -> Path:
+    """マルチチームジョブの準備・状態レコードを原子的に保存する。"""
+    job_id = str(payload["job_id"])
+    target = _team_job_record_path(repo_dir, job_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.parent / f"job.json.tmp_{os.getpid()}_{time.time_ns()}"
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, target)
+    return target
+
+
+def _load_team_job_record(repo_dir: Path, job_id: str) -> dict[str, Any] | None:
+    """マルチチームジョブの job.json を読み込む。"""
+    target = _team_job_record_path(repo_dir, job_id)
+    if not target.is_file():
+        return None
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _find_latest_team_job_id(repo_dir: Path) -> str | None:
+    """integration_jobs 配下から最新のジョブ ID を特定する。"""
+    jobs_dir = repo_dir / ".dev" / "integration_jobs"
+    if not jobs_dir.is_dir():
+        return None
+
+    latest_by_id: dict[str, float] = {}
+    for entry in jobs_dir.iterdir():
+        if entry.is_file() and entry.suffix == ".json" and not entry.name.startswith("."):
+            jid = entry.stem
+            if not VALID_JOB_ID_PATTERN.match(jid):
+                continue
+            state = IntegrationJobState.load(jobs_dir, jid)
+            ts = state.updated_at if state is not None else entry.stat().st_mtime
+            latest_by_id[jid] = max(latest_by_id.get(jid, 0.0), ts)
+        elif entry.is_dir() and VALID_JOB_ID_PATTERN.match(entry.name):
+            jid = entry.name
+            job_rec = _load_team_job_record(repo_dir, jid)
+            if job_rec is not None:
+                ts = float(job_rec.get("updated_at") or job_rec.get("created_at") or (entry / "job.json").stat().st_mtime)
+                latest_by_id[jid] = max(latest_by_id.get(jid, 0.0), ts)
+            workers_file = entry / "workers.json"
+            if workers_file.is_file():
+                try:
+                    wdata = json.loads(workers_file.read_text(encoding="utf-8"))
+                    ts = float(wdata.get("updated_at") or workers_file.stat().st_mtime)
+                except (json.JSONDecodeError, OSError, ValueError):
+                    ts = workers_file.stat().st_mtime
+                latest_by_id[jid] = max(latest_by_id.get(jid, 0.0), ts)
+
+    if not latest_by_id:
+        return None
+    return max(latest_by_id, key=lambda k: latest_by_id[k])
+
+
+def _is_registered_worker_alive(reg: WorkerRegistration) -> bool:
+    """登録済みワーカープロセスが同一性・PGID を保って生存しているか確認する。"""
+    if reg.pgid <= 0 or not has_active_processes_in_group(reg.pgid):
+        return False
+    curr_ident = get_process_start_identifier(reg.pid)
+    if not reg.process_start_time or not curr_ident or curr_ident != reg.process_start_time:
+        return False
+    if hasattr(os, "getpgid"):
+        try:
+            return os.getpgid(reg.pid) == reg.pgid
+        except (ProcessLookupError, OSError):
+            return False
+    return True
+
+
+def _detect_leftover_team_resources(repo_dir: Path, manifest: TeamManifest) -> list[str]:
+    """前回のジョブの worktree・チームブランチ・未完了統合ブランチの残存を検出する。"""
+    leftovers: list[str] = []
+    wt_manager = WorktreeManager(repo_dir=repo_dir)
+    jobs_dir = repo_dir / ".dev" / "integration_jobs"
+
+    active_worktrees = wt_manager.list_worktrees()
+    seen_wt_paths: set[Path] = set()
+    for wt in active_worktrees:
+        seen_wt_paths.add(wt.path.resolve())
+        leftovers.append(f"worktree '{wt.team_id}' ({wt.path}, branch={wt.branch or 'detached'})")
+
+    if wt_manager.worktree_base.is_dir():
+        for child in sorted(wt_manager.worktree_base.iterdir()):
+            resolved = child.resolve()
+            if resolved not in seen_wt_paths and (child.is_dir() or child.is_file()):
+                leftovers.append(f"worktree directory '{child}'")
+
+    expected_branches = {f"team/{t.id}" for t in manifest.teams}
+    existing_team_branches = set(_list_branches_with_prefix(repo_dir, "team/"))
+    for br in sorted(expected_branches | existing_team_branches):
+        if br in existing_team_branches or _branch_exists(repo_dir, br):
+            leftovers.append(f"branch '{br}'")
+
+    for int_branch in sorted(_list_branches_with_prefix(repo_dir, "integration/")):
+        int_job_id = int_branch.removeprefix("integration/")
+        int_state = IntegrationJobState.load(jobs_dir, int_job_id)
+        job_rec = _load_team_job_record(repo_dir, int_job_id)
+        is_completed = int_state is not None and int_state.state == "COMPLETED"
+        is_cleaned = job_rec is not None and job_rec.get("status") == "CLEANED_UP"
+        if not is_completed and not is_cleaned:
+            leftovers.append(f"uncompleted integration branch '{int_branch}'")
+
+    return leftovers
+
+
+def prepare_teams_job(
+    repo_dir: Path,
+    job_id: str | None = None,
+) -> tuple[dict[str, Any] | None, int, str]:
+    """TEAM-13: クリーンツリーと teams.json を検査し、全チームの worktree を準備する。"""
+    resolved_repo = repo_dir.resolve()
+    if job_id is not None and not VALID_JOB_ID_PATTERN.match(job_id):
+        return (
+            None,
+            2,
+            f"TEAMS_PREPARE_ERROR: Invalid job_id '{job_id}': must match '^[a-zA-Z0-9_-]+$'.",
+        )
+
+    try:
+        manifest = load_teams_manifest(resolved_repo)
+    except (FileNotFoundError, ManifestValidationError, OSError) as err:
+        return None, 2, f"TEAMS_CONFIG_ERROR: {err}"
+
+    if not manifest.teams:
+        return None, 2, "TEAMS_CONFIG_ERROR: No teams defined in teams.json."
+
+    git_guard = GitGuard(repo_dir=resolved_repo)
+    try:
+        git_guard.assert_clean_working_tree()
+    except (RuntimeError, subprocess.SubprocessError) as err:
+        return None, 2, f"PRE-FLIGHT ERROR: {err}"
+
+    base_chk = _run_git_cmd(resolved_repo, ["rev-parse", "--verify", f"{manifest.base_ref}^{{commit}}"])
+    if base_chk.returncode != 0:
+        return (
+            None,
+            2,
+            f"TEAMS_CONFIG_ERROR: Base ref '{manifest.base_ref}' does not exist in repository.",
+        )
+    base_commit = base_chk.stdout.strip()
+
+    leftovers = _detect_leftover_team_resources(resolved_repo, manifest)
+    if leftovers:
+        items = ", ".join(leftovers[:5])
+        suffix = f" (+{len(leftovers) - 5} more)" if len(leftovers) > 5 else ""
+        msg = (
+            f"TEAMS_PREPARE_ERROR: Previous team job worktrees or branches still exist ({items}{suffix}). "
+            "Refusing to recreate worktrees.\n"
+            "Inspect with `auto-dev teams status`, clean up finished/aborted jobs with "
+            "`auto-dev teams cleanup --job-id <id>`, or recover interrupted jobs with "
+            "`auto-dev teams recover [--job-id <id>]`."
+        )
+        return None, 1, msg
+
+    effective_job_id = job_id or f"job-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+    jobs_dir = resolved_repo / ".dev" / "integration_jobs"
+    if (
+        _team_job_record_path(resolved_repo, effective_job_id).exists()
+        or (jobs_dir / f"{effective_job_id}.json").exists()
+        or (jobs_dir / effective_job_id / "workers.json").exists()
+    ):
+        return (
+            None,
+            1,
+            (
+                f"TEAMS_PREPARE_ERROR: Job '{effective_job_id}' already exists. "
+                "Use a new --job-id or inspect with `auto-dev teams status`."
+            ),
+        )
+
+    config = MultiTeamConfig(
+        job_id=effective_job_id,
+        teams=[
+            TeamWorkerSpec(team_id=team.id, base_branch=manifest.base_ref)
+            for team in manifest.teams
+        ],
+        base_branch=manifest.base_ref,
+    )
+    orchestrator = MultiTeamOrchestrator(repo_dir=resolved_repo)
+    try:
+        wt_paths = orchestrator.prepare_workers(config)
+    except (WorktreeError, OSError, subprocess.SubprocessError) as err:
+        return None, 1, f"TEAMS_PREPARE_ERROR: {err}"
+
+    now = time.time()
+    teams_info = [
+        {
+            "team_id": team.id,
+            "branch": f"team/{team.id}",
+            "worktree_path": str(wt_paths[team.id]),
+            "plan": team.plan,
+        }
+        for team in manifest.teams
+    ]
+    payload: dict[str, Any] = {
+        "job_id": effective_job_id,
+        "base_ref": manifest.base_ref,
+        "base_commit": base_commit,
+        "status": "PREPARED",
+        "created_at": now,
+        "updated_at": now,
+        "worktrees": {tid: str(path) for tid, path in wt_paths.items()},
+        "teams": teams_info,
+    }
+    _save_team_job_record(resolved_repo, payload)
+    return payload, 0, ""
+
+
+def _parse_plan_counts(
+    wt_path: Path,
+    repo_dir: Path,
+    plan_rel: str,
+    branch: str,
+    wt_exists: bool,
+    branch_exists: bool,
+) -> tuple[int, int, int]:
+    """チーム計画ファイルの完了数・全タスク数・失敗数を返す。"""
+    lines: list[str] = []
+    wt_plan = wt_path / plan_rel
+    if wt_exists and wt_plan.is_file():
+        lines = wt_plan.read_text(encoding="utf-8").splitlines()
+    elif branch_exists:
+        proc = _run_git_cmd(repo_dir, ["show", f"{branch}:{plan_rel}"])
+        if proc.returncode == 0:
+            lines = proc.stdout.splitlines()
+    if not lines and (repo_dir / plan_rel).is_file():
+        lines = (repo_dir / plan_rel).read_text(encoding="utf-8").splitlines()
+
+    total = 0
+    completed = 0
+    failed = 0
+    for line in lines:
+        match = TaskDispatcher.TASK_PATTERN.match(line)
+        if match:
+            total += 1
+            check_box, _, _ = match.groups()
+            if check_box.lower() == "x":
+                completed += 1
+            elif "**[FAILED]**" in line:
+                failed += 1
+    return completed, total, failed
+
+
+def _sanitize_team_token(team_id: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_\-]", "_", team_id)
+
+
+def _collect_team_quarantine_branches(
+    team_id: str,
+    all_quarantines: list[str],
+    all_team_ids: list[str],
+    wt_job_state: JobState | None,
+) -> list[str]:
+    """指定チームに属する隔離ブランチ一覧を抽出する。"""
+    clean_team = _sanitize_team_token(team_id)
+    prefix = f"quarantine/{clean_team}-"
+    longer_prefixes: list[str] = []
+    for other in all_team_ids:
+        if other == team_id:
+            continue
+        other_clean = _sanitize_team_token(other)
+        if other_clean.startswith(f"{clean_team}-"):
+            longer_prefixes.append(f"quarantine/{other_clean}-")
+    matched: set[str] = set()
+    for qb in all_quarantines:
+        if qb.startswith(prefix) and not any(qb.startswith(lp) for lp in longer_prefixes):
+            matched.add(qb)
+    if wt_job_state and isinstance(wt_job_state.quarantined_task, dict):
+        q_branch = wt_job_state.quarantined_task.get("quarantined_branch")
+        if isinstance(q_branch, str) and q_branch:
+            matched.add(q_branch)
+    return sorted(matched)
+
+
+def get_teams_status(
+    repo_dir: Path,
+    job_id: str | None = None,
+) -> tuple[dict[str, Any] | None, int, str]:
+    """TEAM-16: チームごとに worktree・ブランチ・完了数/全タスク数・ワーカー状態・隔離ブランチを集計する。"""
+    resolved_repo = repo_dir.resolve()
+    jobs_dir = resolved_repo / ".dev" / "integration_jobs"
+
+    if job_id is not None:
+        if not VALID_JOB_ID_PATTERN.match(job_id):
+            return None, 2, f"TEAMS_STATUS_ERROR: Invalid job_id '{job_id}'."
+        has_job = (
+            _team_job_record_path(resolved_repo, job_id).is_file()
+            or (jobs_dir / f"{job_id}.json").is_file()
+            or (jobs_dir / job_id / "workers.json").is_file()
+        )
+        if not has_job:
+            return None, 1, f"TEAMS_STATUS_ERROR: Job '{job_id}' not found."
+        resolved_job_id: str | None = job_id
+    else:
+        resolved_job_id = _find_latest_team_job_id(resolved_repo)
+
+    job_rec = _load_team_job_record(resolved_repo, resolved_job_id) if resolved_job_id else None
+    workers = WorkerRegistry(resolved_repo, resolved_job_id).load() if resolved_job_id else {}
+    int_state = IntegrationJobState.load(jobs_dir, resolved_job_id) if resolved_job_id else None
+
+    manifest: TeamManifest | None = None
+    try:
+        manifest = load_teams_manifest(resolved_repo)
+    except (FileNotFoundError, ManifestValidationError, OSError):
+        manifest = None
+
+    wt_manager = WorktreeManager(repo_dir=resolved_repo)
+    live_wts: dict[str, WorktreeInfo] = {
+        wt.team_id: wt
+        for wt in wt_manager.list_worktrees()
+        if not wt.team_id.startswith("int-")
+    }
+
+    ordered_team_ids: list[str] = []
+    job_teams_by_id: dict[str, dict[str, Any]] = {}
+    if job_rec and isinstance(job_rec.get("teams"), list):
+        for entry in job_rec["teams"]:
+            if isinstance(entry, dict) and entry.get("team_id"):
+                tid = str(entry["team_id"])
+                job_teams_by_id[tid] = entry
+                if tid not in ordered_team_ids:
+                    ordered_team_ids.append(tid)
+    if manifest is not None:
+        for team in manifest.teams:
+            if team.id not in ordered_team_ids:
+                ordered_team_ids.append(team.id)
+    for tid in workers:
+        if tid not in ordered_team_ids:
+            ordered_team_ids.append(tid)
+    if int_state is not None:
+        for tid in int_state.verified_commits:
+            if tid not in ordered_team_ids:
+                ordered_team_ids.append(tid)
+    for tid in live_wts:
+        if tid not in ordered_team_ids:
+            ordered_team_ids.append(tid)
+
+    manifest_by_id = {t.id: t for t in manifest.teams} if manifest is not None else {}
+    all_quarantines = _list_branches_with_prefix(resolved_repo, "quarantine/")
+    existing_branches = set(_list_branches_with_prefix(resolved_repo, ""))
+
+    team_statuses: list[dict[str, Any]] = []
+    for tid in ordered_team_ids:
+        wt_info = live_wts.get(tid)
+        reg = workers.get(tid)
+        rec_entry = job_teams_by_id.get(tid, {})
+        m_team = manifest_by_id.get(tid)
+
+        if wt_info is not None:
+            wt_path = wt_info.path
+        elif reg is not None and reg.worktree_path:
+            wt_path = Path(reg.worktree_path)
+        elif rec_entry.get("worktree_path"):
+            wt_path = Path(str(rec_entry["worktree_path"]))
+        else:
+            wt_path = (wt_manager.worktree_base / tid).resolve()
+
+        wt_exists = wt_info is not None and wt_path.exists()
+        branch = (
+            (wt_info.branch if wt_info and wt_info.branch else "")
+            or (reg.branch_name if reg and reg.branch_name else "")
+            or str(rec_entry.get("branch") or "")
+            or f"team/{tid}"
+        )
+        branch_exists = branch in existing_branches or _branch_exists(resolved_repo, branch)
+
+        plan_rel = (
+            (m_team.plan if m_team is not None else "")
+            or str(rec_entry.get("plan") or "")
+            or f"plans/{tid}.md"
+        )
+        completed_tasks, total_tasks, failed_tasks = _parse_plan_counts(
+            wt_path=wt_path,
+            repo_dir=resolved_repo,
+            plan_rel=plan_rel,
+            branch=branch,
+            wt_exists=wt_exists,
+            branch_exists=branch_exists,
+        )
+
+        wt_job_state: JobState | None = None
+        wt_state_file = wt_path / ".dev" / "job_state.json"
+        if wt_exists and wt_state_file.is_file():
+            try:
+                wt_job_state = JobState.load(wt_state_file)
+            except (OSError, json.JSONDecodeError, ValueError):
+                wt_job_state = None
+
+        quarantines = _collect_team_quarantine_branches(
+            team_id=tid,
+            all_quarantines=all_quarantines,
+            all_team_ids=ordered_team_ids,
+            wt_job_state=wt_job_state,
+        )
+
+        if reg is not None:
+            if reg.status == "RUNNING" and not _is_registered_worker_alive(reg):
+                worker_status = "STALE"
+            else:
+                worker_status = reg.status
+        elif wt_job_state is not None:
+            worker_status = wt_job_state.status
+        elif quarantines or failed_tasks > 0:
+            worker_status = "FAILED"
+        elif total_tasks > 0 and completed_tasks == total_tasks:
+            worker_status = "COMPLETED"
+        elif wt_exists:
+            worker_status = "PREPARED"
+        elif job_rec is not None and job_rec.get("status") == "CLEANED_UP":
+            worker_status = "CLEANED_UP"
+        else:
+            worker_status = "UNKNOWN"
+
+        team_statuses.append(
+            {
+                "team_id": tid,
+                "worktree_path": str(wt_path),
+                "worktree_exists": wt_exists,
+                "branch": branch,
+                "branch_exists": branch_exists,
+                "plan": plan_rel,
+                "completed_tasks": completed_tasks,
+                "total_tasks": total_tasks,
+                "failed_tasks": failed_tasks,
+                "worker_status": worker_status,
+                "quarantine_branches": quarantines,
+            }
+        )
+
+    overall_state = (
+        int_state.state
+        if int_state is not None
+        else (str(job_rec.get("status")) if job_rec else ("ACTIVE" if live_wts else "NO_JOB"))
+    )
+    return (
+        {
+            "job_id": resolved_job_id,
+            "job_state": overall_state,
+            "rc_tag": int_state.rc_tag if int_state else None,
+            "teams": team_statuses,
+        },
+        0,
+        "",
+    )
+
+
+def format_teams_status_text(status_data: dict[str, Any]) -> str:
+    """teams status の人間向けテキスト出力を整形する。"""
+    lines = [
+        "=== AUTO DEVELOPER / TEAMS STATUS ===",
+        f" Job ID:    {status_data.get('job_id') or '(none)'}",
+        f" Job State: {status_data.get('job_state')}",
+    ]
+    if status_data.get("rc_tag"):
+        lines.append(f" RC Tag:    {status_data['rc_tag']}")
+    teams = status_data.get("teams") or []
+    if not teams:
+        lines.append(" Teams:     (none)")
+        return "\n".join(lines)
+
+    lines.append(" Teams:")
+    for t in teams:
+        wt_flag = "exists" if t["worktree_exists"] else "missing"
+        br_flag = "exists" if t["branch_exists"] else "missing"
+        q_list = ", ".join(t["quarantine_branches"]) if t["quarantine_branches"] else "none"
+        lines.append(
+            f"  - {t['team_id']}: status={t['worker_status']} | "
+            f"tasks={t['completed_tasks']}/{t['total_tasks']} | "
+            f"branch={t['branch']} ({br_flag}) | "
+            f"worktree={t['worktree_path']} ({wt_flag}) | "
+            f"quarantine={q_list}"
+        )
+    return "\n".join(lines)
+
+
+def _resolve_rc_ref(
+    resolved_repo: Path,
+    job_id: str,
+    int_state: IntegrationJobState | None,
+) -> str | None:
+    """統合完了済みジョブの RC コミットまたはタグを Git 上で検証・解決する。"""
+    candidates: list[str] = []
+    if int_state is not None:
+        if int_state.rc_commit:
+            candidates.append(int_state.rc_commit)
+        if int_state.rc_tag:
+            candidates.append(f"refs/tags/{int_state.rc_tag}")
+    candidates.append(f"refs/tags/rc/{job_id}")
+
+    for ref in candidates:
+        chk = _run_git_cmd(resolved_repo, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
+        if chk.returncode == 0:
+            return ref
+    return None
+
+
+def _is_secret_rel_path(rel_path: str) -> bool:
+    """INV-5: 相対パスが機密ファイルパターンに該当するか判定する。"""
+    p = Path(rel_path)
+    if GitGuard.is_secret_file(p.name) or any(GitGuard.is_secret_file(part) for part in p.parts):
+        return True
+    return any(pat.search(p.name) for pat in SECRET_PATTERNS)
+
+
+def _parse_porcelain_z(raw: bytes) -> list[tuple[str, str, str | None]]:
+    """git status --porcelain -z -uall の NUL 区切り出力を (xy, path, old_path) に分解する。"""
+    tokens = [tok for tok in raw.decode("utf-8", errors="surrogateescape").split("\0") if tok]
+    entries: list[tuple[str, str, str | None]] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if len(token) < 4:
+            i += 1
+            continue
+        xy = token[:2]
+        path1 = token[3:]
+        if xy[0] in ("R", "C") or xy[1] in ("R", "C"):
+            old_path = tokens[i + 1] if i + 1 < len(tokens) else None
+            entries.append((xy, path1, old_path))
+            i += 2
+        else:
+            entries.append((xy, path1, None))
+            i += 1
+    return entries
+
+
+def _build_quarantine_commit_from_worktree(
+    wt_dir: Path,
+    parent_sha: str | None,
+    team_id: str,
+) -> tuple[str, list[str]]:
+    """一時インデックスを使い、機密ファイルを除外した worktree の変更を隔離コミットとして作成する。"""
+    with tempfile.TemporaryDirectory() as tmp_idx_dir:
+        tmp_index = Path(tmp_idx_dir) / "index"
+        idx_env = os.environ.copy()
+        idx_env["GIT_INDEX_FILE"] = str(tmp_index)
+
+        if parent_sha is not None:
+            rt = subprocess.run(
+                ["git", "read-tree", parent_sha],
+                cwd=wt_dir,
+                env=idx_env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if rt.returncode != 0:
+                raise RuntimeError(f"git read-tree failed for team '{team_id}': {rt.stderr.strip()}")
+
+        st_proc = subprocess.run(
+            ["git", "status", "--porcelain", "-z", "-uall"],
+            cwd=wt_dir,
+            capture_output=True,
+            check=False,
+        )
+        if st_proc.returncode != 0:
+            raise RuntimeError(f"git status failed in '{wt_dir}': {st_proc.stderr.decode(errors='replace')}")
+
+        excluded_secrets: list[str] = []
+        for xy, rel_path, old_path in _parse_porcelain_z(st_proc.stdout):
+            if old_path:
+                subprocess.run(
+                    ["git", "update-index", "--force-remove", "--", old_path],
+                    cwd=wt_dir,
+                    env=idx_env,
+                    capture_output=True,
+                    check=False,
+                )
+            full_path = wt_dir / rel_path
+            if "D" in xy and not full_path.exists():
+                subprocess.run(
+                    ["git", "update-index", "--force-remove", "--", rel_path],
+                    cwd=wt_dir,
+                    env=idx_env,
+                    capture_output=True,
+                    check=False,
+                )
+                continue
+            if not full_path.is_file() or full_path.is_symlink():
+                continue
+            if _is_secret_rel_path(rel_path) or GitGuard.has_secret_content(full_path.read_bytes()):
+                excluded_secrets.append(rel_path)
+                subprocess.run(
+                    ["git", "update-index", "--force-remove", "--", rel_path],
+                    cwd=wt_dir,
+                    env=idx_env,
+                    capture_output=True,
+                    check=False,
+                )
+                continue
+            upd = subprocess.run(
+                ["git", "update-index", "--add", "--", rel_path],
+                cwd=wt_dir,
+                env=idx_env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if upd.returncode != 0:
+                raise RuntimeError(f"git update-index failed for '{rel_path}': {upd.stderr.strip()}")
+
+        wt_proc = subprocess.run(
+            ["git", "write-tree"],
+            cwd=wt_dir,
+            env=idx_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if wt_proc.returncode != 0:
+            raise RuntimeError(f"git write-tree failed for team '{team_id}': {wt_proc.stderr.strip()}")
+        tree_sha = wt_proc.stdout.strip()
+
+        cmd = ["git", "commit-tree", tree_sha]
+        if parent_sha is not None:
+            cmd.extend(["-p", parent_sha])
+        cmd.extend(["-m", f"quarantine: save team '{team_id}' work before cleanup"])
+        ct_proc = subprocess.run(
+            cmd,
+            cwd=wt_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if ct_proc.returncode != 0:
+            raise RuntimeError(f"git commit-tree failed for team '{team_id}': {ct_proc.stderr.strip()}")
+        return ct_proc.stdout.strip(), excluded_secrets
+
+
+def _quarantine_team_before_cleanup(
+    resolved_repo: Path,
+    team_id: str,
+    branch: str,
+    wt_dir: Path | None,
+    rc_ref: str | None,
+    base_commit: str | None,
+) -> str | None:
+    """INV-3 / INV-5: 削除前に未コミット変更と RC 未取り込みコミットを quarantine/* ブランチへ退避・検証する。"""
+    wt_exists = wt_dir is not None and wt_dir.is_dir()
+    has_uncommitted = False
+    if wt_exists and wt_dir is not None:
+        st_proc = _run_git_cmd(wt_dir, ["status", "--porcelain"])
+        if st_proc.returncode != 0:
+            raise RuntimeError(f"git status failed in worktree '{wt_dir}': {st_proc.stderr.strip()}")
+        has_uncommitted = bool(st_proc.stdout.strip())
+
+    parent_sha: str | None = None
+    if _branch_exists(resolved_repo, branch):
+        rev = _run_git_cmd(resolved_repo, ["rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}"])
+        if rev.returncode == 0:
+            parent_sha = rev.stdout.strip()
+    elif wt_exists and wt_dir is not None:
+        rev = _run_git_cmd(wt_dir, ["rev-parse", "--verify", "HEAD^{commit}"])
+        if rev.returncode == 0:
+            parent_sha = rev.stdout.strip()
+
+    has_unmerged_commits = False
+    if parent_sha is not None:
+        merged_rc = (
+            rc_ref is not None
+            and _run_git_cmd(resolved_repo, ["merge-base", "--is-ancestor", parent_sha, rc_ref]).returncode == 0
+        )
+        if not merged_rc:
+            at_base = (
+                base_commit is not None
+                and _run_git_cmd(resolved_repo, ["merge-base", "--is-ancestor", parent_sha, base_commit]).returncode == 0
+            )
+            has_unmerged_commits = not at_base
+
+    if not has_uncommitted and not has_unmerged_commits:
+        return None
+
+    clean_team = _sanitize_team_token(team_id)
+    ts = int(time.time())
+    q_branch = f"quarantine/{clean_team}-cleanup-{ts}"
+    counter = 1
+    while _branch_exists(resolved_repo, q_branch):
+        q_branch = f"quarantine/{clean_team}-cleanup-{ts}-{counter}"
+        counter += 1
+
+    excluded_secrets: list[str] = []
+    if has_uncommitted and wt_dir is not None:
+        target_commit_sha, excluded_secrets = _build_quarantine_commit_from_worktree(
+            wt_dir, parent_sha, team_id
+        )
+    else:
+        if parent_sha is None:
+            raise RuntimeError(f"Cannot quarantine team '{team_id}': no commit found for branch '{branch}'.")
+        target_commit_sha = parent_sha
+
+    br_proc = _run_git_cmd(resolved_repo, ["branch", q_branch, target_commit_sha])
+    if br_proc.returncode != 0:
+        raise RuntimeError(f"Failed to create quarantine branch '{q_branch}': {br_proc.stderr.strip()}")
+
+    # INV-3: 退避先ブランチと履歴の物理検証
+    verify_ref = _run_git_cmd(resolved_repo, ["rev-parse", "--verify", f"refs/heads/{q_branch}^{{commit}}"])
+    if verify_ref.returncode != 0 or verify_ref.stdout.strip() != target_commit_sha:
+        raise RuntimeError(f"Quarantine verification failed: branch '{q_branch}' does not resolve to expected commit.")
+    if parent_sha is not None:
+        anc = _run_git_cmd(resolved_repo, ["merge-base", "--is-ancestor", parent_sha, target_commit_sha])
+        if anc.returncode != 0:
+            raise RuntimeError(f"Quarantine verification failed: commit history lost for '{q_branch}'.")
+    if excluded_secrets:
+        tree_files = set(
+            _run_git_cmd(resolved_repo, ["ls-tree", "-r", "--name-only", target_commit_sha]).stdout.splitlines()
+        )
+        leaked = [s for s in excluded_secrets if s in tree_files]
+        if leaked:
+            raise RuntimeError(f"INV-5 violation: secret files leaked into '{q_branch}': {leaked}")
+
+    return q_branch
+
+
+def _check_cleanup_preconditions(
+    resolved_repo: Path,
+    job_id: str,
+    team_targets: list[tuple[str, str]],
+    rc_ref: str | None,
+    wt_manager: WorktreeManager,
+) -> str | None:
+    """force なしでの cleanup 前に、RC 解決・未コミット変更・RC 取り込み済みを厳格検証する。"""
+    if rc_ref is None:
+        return (
+            f"TEAM_CLEANUP_ERROR: Cannot resolve RC commit or tag for job '{job_id}'. "
+            "Refusing to remove worktrees and team branches without --force."
+        )
+
+    live_wts = {wt.team_id: wt for wt in wt_manager.list_worktrees()}
+    for tid, branch in team_targets:
+        wt_info = live_wts.get(tid)
+        if wt_info is not None and wt_info.path.exists():
+            st_proc = _run_git_cmd(wt_info.path, ["status", "--porcelain"])
+            if st_proc.returncode != 0 or st_proc.stdout.strip():
+                return (
+                    f"TEAM_CLEANUP_ERROR: Worktree '{tid}' ({wt_info.path}) has uncommitted changes. "
+                    "Pass --force to quarantine and remove."
+                )
+        if _branch_exists(resolved_repo, branch):
+            anc = _run_git_cmd(resolved_repo, ["merge-base", "--is-ancestor", branch, rc_ref])
+            if anc.returncode != 0:
+                return (
+                    f"TEAM_CLEANUP_ERROR: Branch '{branch}' has commits not merged into '{rc_ref}'. "
+                    "Refusing to delete without --force."
+                )
+    return None
+
+
+def _collect_job_team_targets(
+    resolved_repo: Path,
+    int_state: IntegrationJobState | None,
+    job_rec: dict[str, Any] | None,
+    workers: dict[str, WorkerRegistration],
+) -> dict[str, tuple[str, Path | None]]:
+    """対象 job_id に紐づくチームのみを特定し、{team_id: (branch, recorded_wt_path)} を返す。"""
+    targets: dict[str, tuple[str, Path | None]] = {}
+    if job_rec and isinstance(job_rec.get("teams"), list):
+        for entry in job_rec["teams"]:
+            if isinstance(entry, dict) and entry.get("team_id"):
+                tid = str(entry["team_id"])
+                branch = str(entry.get("branch") or f"team/{tid}")
+                wt_p = Path(str(entry["worktree_path"])) if entry.get("worktree_path") else None
+                targets[tid] = (branch, wt_p)
+
+    for tid, reg in workers.items():
+        if tid not in targets:
+            wt_p = Path(reg.worktree_path) if reg.worktree_path else None
+            targets[tid] = (reg.branch_name or f"team/{tid}", wt_p)
+
+    if int_state is not None:
+        for tid in int_state.verified_commits:
+            targets.setdefault(tid, (f"team/{tid}", None))
+        for tid in int_state.merged_teams:
+            targets.setdefault(tid, (f"team/{tid}", None))
+
+    if not targets:
+        try:
+            manifest = load_teams_manifest(resolved_repo)
+            for t in manifest.teams:
+                targets[t.id] = (f"team/{t.id}", None)
+        except (FileNotFoundError, ManifestValidationError, OSError):
+            pass
+
+    return targets
+
+
+def cleanup_teams_job(
+    repo_dir: Path,
+    job_id: str,
+    force: bool = False,
+) -> tuple[dict[str, Any] | None, int, str]:
+    """TEAM-16: 統合成功ジョブの worktree とチームブランチを削除する（失敗ジョブは --force 時のみ隔離後に削除）。"""
+    resolved_repo = repo_dir.resolve()
+    if not VALID_JOB_ID_PATTERN.match(job_id):
+        return None, 2, f"TEAM_CLEANUP_ERROR: Invalid job_id '{job_id}'."
+
+    jobs_dir = resolved_repo / ".dev" / "integration_jobs"
+    int_state = IntegrationJobState.load(jobs_dir, job_id)
+    job_rec = _load_team_job_record(resolved_repo, job_id)
+    workers = WorkerRegistry(resolved_repo, job_id).load()
+
+    if int_state is None and job_rec is None and not workers:
+        return None, 1, f"TEAM_CLEANUP_ERROR: Job '{job_id}' not found."
+
+    integration_succeeded = int_state is not None and int_state.state == "COMPLETED"
+    if not integration_succeeded and not force:
+        state_label = (
+            int_state.state
+            if int_state is not None
+            else str(job_rec.get("status") if job_rec else "NOT_INTEGRATED")
+        )
+        return (
+            None,
+            1,
+            (
+                f"TEAM_CLEANUP_ERROR: Job '{job_id}' integration has not succeeded (state={state_label}). "
+                "Refusing to remove worktrees and team branches without --force."
+            ),
+        )
+
+    if not force:
+        for tid, reg in workers.items():
+            if reg.status == "RUNNING" and (
+                _is_registered_worker_alive(reg)
+                or (reg.pgid > 0 and has_active_processes_in_group(reg.pgid))
+            ):
+                return (
+                    None,
+                    1,
+                    (
+                        f"TEAM_CLEANUP_ERROR: Worker for team '{tid}' is still active or unverified "
+                        f"(PID={reg.pid}, PGID={reg.pgid}). Refusing cleanup without --force."
+                    ),
+                )
+
+    wt_manager = WorktreeManager(repo_dir=resolved_repo)
+    job_targets = _collect_job_team_targets(resolved_repo, int_state, job_rec, workers)
+    rc_ref = _resolve_rc_ref(resolved_repo, job_id, int_state)
+
+    team_targets = [(tid, branch) for tid, (branch, _) in job_targets.items()]
+    if not force:
+        pre_err = _check_cleanup_preconditions(resolved_repo, job_id, team_targets, rc_ref, wt_manager)
+        if pre_err is not None:
+            return None, 1, pre_err
+
+    live_wts = {wt.team_id: wt for wt in wt_manager.list_worktrees()}
+    base_commit: str | None = None
+    if job_rec and job_rec.get("base_commit"):
+        base_commit = str(job_rec["base_commit"])
+    elif int_state and int_state.base_commit:
+        base_commit = int_state.base_commit
+
+    # INV-3: --force 時は削除前に全チームの未コミット変更・未取り込みブランチを quarantine/* へ退避・検証する
+    quarantined_branches: dict[str, str] = {}
+    if force:
+        for tid, (branch, recorded_wt) in job_targets.items():
+            wt_info = live_wts.get(tid)
+            wt_dir = wt_info.path if wt_info is not None else (recorded_wt or (wt_manager.worktree_base / tid))
+            if wt_info is not None and wt_info.branch and wt_info.branch != branch:
+                continue
+            try:
+                q_branch = _quarantine_team_before_cleanup(
+                    resolved_repo=resolved_repo,
+                    team_id=tid,
+                    branch=branch,
+                    wt_dir=wt_dir if wt_dir.is_dir() else None,
+                    rc_ref=rc_ref,
+                    base_commit=base_commit,
+                )
+            except (RuntimeError, OSError, subprocess.SubprocessError) as err:
+                return (
+                    None,
+                    1,
+                    f"TEAM_CLEANUP_ERROR: Quarantine failed for team '{tid}'; aborting cleanup: {err}",
+                )
+            if q_branch is not None:
+                quarantined_branches[tid] = q_branch
+
+    removed_worktrees: list[str] = []
+    removed_branches: list[str] = []
+
+    for tid, (branch, recorded_wt) in job_targets.items():
+        wt_info = live_wts.get(tid)
+        if wt_info is not None and wt_info.branch and wt_info.branch != branch:
+            continue
+
+        wt_dir = wt_info.path if wt_info is not None else (recorded_wt or (wt_manager.worktree_base / tid))
+        if tid in live_wts or wt_dir.exists():
+            try:
+                deleted = wt_manager.remove_worktree(
+                    tid,
+                    force=force,
+                    delete_branch=True,
+                    purge_unmerged=True,
+                )
+            except WorktreeError as err:
+                # すでに quarantine/* へ非機密作業を退避検証済みで、INV-5 機密除外による拒否のみの場合は --force で強制削除する
+                err_msg = str(err)
+                is_secret_exclusion = (
+                    "excluded from quarantine" in err_msg or "Secret content detected" in err_msg
+                )
+                if force and is_secret_exclusion:
+                    rm_proc = _run_git_cmd(resolved_repo, ["worktree", "remove", "--force", str(wt_dir)])
+                    if rm_proc.returncode != 0:
+                        return (
+                            None,
+                            1,
+                            f"TEAM_CLEANUP_ERROR: Failed to force-remove worktree '{tid}': {rm_proc.stderr.strip()}",
+                        )
+                    deleted = False
+                else:
+                    return None, 1, f"TEAM_CLEANUP_ERROR: Failed to remove worktree '{tid}': {err}"
+            removed_worktrees.append(tid)
+            if deleted:
+                removed_branches.append(branch)
+
+        if _branch_exists(resolved_repo, branch):
+            del_proc = _run_git_cmd(resolved_repo, ["branch", "-D", branch])
+            if del_proc.returncode != 0:
+                return (
+                    None,
+                    1,
+                    f"TEAM_CLEANUP_ERROR: Failed to delete branch '{branch}': {del_proc.stderr.strip()}",
+                )
+            if branch not in removed_branches:
+                removed_branches.append(branch)
+
+    _run_git_cmd(resolved_repo, ["worktree", "prune"])
+    if wt_manager.worktree_base.is_dir():
+        try:
+            if not any(wt_manager.worktree_base.iterdir()):
+                wt_manager.worktree_base.rmdir()
+        except OSError:
+            pass
+
+    if job_rec is not None:
+        job_rec["status"] = "CLEANED_UP"
+        job_rec["updated_at"] = time.time()
+        if quarantined_branches:
+            job_rec["quarantine_branches"] = quarantined_branches
+        _save_team_job_record(resolved_repo, job_rec)
+
+    return (
+        {
+            "job_id": job_id,
+            "removed_worktrees": removed_worktrees,
+            "removed_branches": removed_branches,
+            "quarantine_branches": quarantined_branches,
+            "forced": force,
+        },
+        0,
+        "",
+    )
