@@ -1194,6 +1194,7 @@ class MultiTeamOrchestrator:
         team_results: dict[str, TeamExecutionResult],
         verify_script: Path | None = None,
         resume: bool = False,
+        timeout_sec: int = 300,
     ) -> MultiTeamResult:
         """全ワーカーの実行結果を収集・照合し、IntegrationGate へ安全に引き渡す。"""
         # LL.1, LL.2: 統合および Worktree 削除前に各チームの Evidence Bundle を退避保全
@@ -1234,6 +1235,7 @@ class MultiTeamOrchestrator:
             inputs=inputs,
             base_commit=config.base_branch,
             verify_script=verify_script or config.integration_verify_script,
+            timeout_sec=timeout_sec,
             resume=resume,
         )
 
@@ -2235,3 +2237,611 @@ def cleanup_teams_job(
         0,
         "",
     )
+
+
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def _check_team_plan_completed(plan_path: Path) -> tuple[bool, list[str]]:
+    """チーム計画ファイルの全タスクが完了済み (- [x] かつ未失敗) であるか検証する。"""
+    if not plan_path.is_file():
+        return False, [f"plan file not found: {plan_path.name}"]
+
+    stripped_doc = _HTML_COMMENT_RE.sub("", plan_path.read_text(encoding="utf-8"))
+    total = 0
+    issues: list[str] = []
+    for line in stripped_doc.splitlines():
+        match = TaskDispatcher.TASK_PATTERN.match(line)
+        if match:
+            total += 1
+            check_box, task_id, title = match.groups()
+            if "**[FAILED]**" in line:
+                issues.append(f"failed task {task_id}: {title.strip()}")
+            elif check_box.lower() != "x":
+                issues.append(f"incomplete task {task_id}: {title.strip()}")
+        elif re.match(r"^\s*-\s*\[\s\]\s+\S", line):
+            total += 1
+            issues.append(f"incomplete task: {line.strip()}")
+
+    if total == 0:
+        issues.append(f"no tasks found in {plan_path.name}")
+    return len(issues) == 0, issues
+
+
+def _collect_team_integrate_blockers(
+    resolved_repo: Path,
+    manifest: TeamManifest,
+    live_wts: dict[str, WorktreeInfo],
+) -> tuple[list[str], dict[str, Path]]:
+    """各チームの worktree 存在・ブランチ・クリーン状態・計画完了を検証する。"""
+    wt_manager = WorktreeManager(repo_dir=resolved_repo)
+    blockers: list[str] = []
+    team_wt_paths: dict[str, Path] = {}
+
+    for team in manifest.teams:
+        wt_info = live_wts.get(team.id)
+        expected_branch = f"team/{team.id}"
+        wt_path = wt_info.path if wt_info is not None else (wt_manager.worktree_base / team.id)
+
+        if wt_info is None or not wt_path.is_dir():
+            blockers.append(
+                f"team '{team.id}': worktree missing at {wt_path} (expected branch '{expected_branch}')"
+            )
+            continue
+
+        if wt_info.branch != expected_branch:
+            blockers.append(
+                f"team '{team.id}': worktree at {wt_path} is on branch '{wt_info.branch or 'detached'}' "
+                f"(expected '{expected_branch}')"
+            )
+            continue
+
+        st_proc = _run_git_cmd(wt_path, ["status", "--porcelain"])
+        if st_proc.returncode != 0:
+            blockers.append(
+                f"team '{team.id}': failed to check git status in {wt_path}: {st_proc.stderr.strip()}"
+            )
+            continue
+        if st_proc.stdout.strip():
+            dirty_preview = ", ".join(line.strip() for line in st_proc.stdout.splitlines()[:5])
+            blockers.append(
+                f"team '{team.id}': worktree {wt_path} is not clean ({dirty_preview})"
+            )
+            continue
+
+        plan_ok, plan_issues = _check_team_plan_completed(wt_path / team.plan)
+        if not plan_ok:
+            blockers.append(
+                f"team '{team.id}' ({team.plan}): {'; '.join(plan_issues)}"
+            )
+            continue
+
+        team_wt_paths[team.id] = wt_path
+
+    return blockers, team_wt_paths
+
+
+def _read_bundle_manifest(bundle_path: Path) -> dict[str, Any] | None:
+    """Bundle ZIP 内の bundle_manifest.json を読み取る。"""
+    if not bundle_path.is_file() or not zipfile.is_zipfile(bundle_path):
+        return None
+    try:
+        with zipfile.ZipFile(bundle_path, "r") as zf:
+            raw = zf.read("bundle_manifest.json")
+        data = json.loads(raw.decode("utf-8"))
+        return data if isinstance(data, dict) else None
+    except (zipfile.BadZipFile, KeyError, UnicodeDecodeError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _allowed_bundle_job_ids(job_id: str, team_id: str, wt_path: Path) -> set[str]:
+    """対象チーム・ジョブで有効な Bundle の job_id 候補を返す。"""
+    allowed = {job_id, f"{job_id}-{team_id}"}
+    wt_state_file = wt_path / ".dev" / "job_state.json"
+    if wt_state_file.is_file():
+        try:
+            wt_state = JobState.load(wt_state_file)
+            if wt_state.job_id:
+                allowed.add(wt_state.job_id)
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+    return allowed
+
+
+def _bundle_matches_head_and_job(
+    bundle_path: Path,
+    *,
+    job_id: str,
+    team_id: str,
+    head_commit: str,
+    head_tree: str,
+    wt_path: Path,
+) -> bool:
+    """既存 Bundle が現在の HEAD コミット・Tree SHA および対象ジョブと整合するか検査する。"""
+    manifest = _read_bundle_manifest(bundle_path)
+    if manifest is None:
+        return False
+    if str(manifest.get("head_commit") or "").strip() != head_commit:
+        return False
+    if str(manifest.get("head_tree_sha") or "").strip() != head_tree:
+        return False
+    manifest_job_id = str(manifest.get("job_id") or "").strip()
+    return bool(manifest_job_id) and manifest_job_id in _allowed_bundle_job_ids(job_id, team_id, wt_path)
+
+
+def _archive_superseded_team_bundle(
+    preserved_path: Path,
+    *,
+    team_id: str,
+    head_commit: str,
+    head_tree: str,
+    int_state: IntegrationJobState | None,
+) -> None:
+    """前回の統合失敗後にチームが新しいコミットへ進んだ場合、旧試行の保全済み Bundle を退避する。"""
+    if not preserved_path.is_file():
+        return
+    if int_state is None or int_state.state not in ("FAILED", "CONFLICT", "RECOVERED"):
+        return
+    manifest = _read_bundle_manifest(preserved_path)
+    if (
+        manifest is not None
+        and str(manifest.get("head_commit") or "").strip() == head_commit
+        and str(manifest.get("head_tree_sha") or "").strip() == head_tree
+    ):
+        return
+    old_sha = str((manifest or {}).get("head_commit") or "unknown")[:7]
+    superseded_dir = preserved_path.parent / "superseded"
+    superseded_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = superseded_dir / f"{team_id}_{old_sha}_{time.time_ns()}.zip"
+    os.replace(preserved_path, archive_path)
+
+
+def _resolve_or_create_team_bundle(
+    resolved_repo: Path,
+    job_id: str,
+    team_id: str,
+    wt_path: Path,
+    *,
+    head_commit: str,
+    head_tree: str,
+) -> Path:
+    """チームの Bundle を取得する（現 HEAD・ジョブに一致するものがなければ新しく生成する）。"""
+    bundles_dir = wt_path / ".dev" / "bundles"
+    if bundles_dir.is_dir():
+        zips = sorted(bundles_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for candidate in zips:
+            if _bundle_matches_head_and_job(
+                candidate,
+                job_id=job_id,
+                team_id=team_id,
+                head_commit=head_commit,
+                head_tree=head_tree,
+                wt_path=wt_path,
+            ):
+                return candidate
+
+    preserved_path = resolved_repo / ".dev" / "integration_jobs" / job_id / "evidence" / f"{team_id}.zip"
+    if _bundle_matches_head_and_job(
+        preserved_path,
+        job_id=job_id,
+        team_id=team_id,
+        head_commit=head_commit,
+        head_tree=head_tree,
+        wt_path=wt_path,
+    ):
+        return preserved_path
+
+    dest_path = bundles_dir / f"bundle_{job_id}-{team_id}-{head_commit[:7]}.zip"
+    return EvidenceBundler(repo_dir=wt_path).create_bundle(
+        dest_path=dest_path,
+        job_id=f"{job_id}-{team_id}",
+    )
+
+
+def _extract_offending_teams(
+    multi_res: MultiTeamResult,
+    manifest: TeamManifest,
+) -> list[str]:
+    """統合失敗結果から原因となったチーム ID 一覧を抽出する。"""
+    teams: list[str] = []
+
+    def _add(tid: str | None) -> None:
+        if tid and tid not in teams:
+            teams.append(tid)
+
+    for tid in multi_res.details.get("failed_teams") or []:
+        _add(str(tid))
+    _add(multi_res.details.get("conflict_team"))
+
+    int_res = multi_res.integration_result
+    if int_res is not None:
+        _add(int_res.details.get("conflict_team"))
+        for tid, info in int_res.audited_bundles.items():
+            if isinstance(info, dict) and (not info.get("is_valid") or info.get("status") != "VERIFIED"):
+                _add(tid)
+        for err in int_res.errors:
+            for m in re.finditer(r"Team '([a-zA-Z0-9_-]+)'", err):
+                _add(m.group(1))
+
+    if not teams and int_res is not None and int_res.status == "VERIFICATION_FAILED":
+        for t in manifest.teams:
+            _add(t.id)
+    return teams
+
+
+def _build_integrate_success_payload(
+    job_id: str,
+    base_ref: str,
+    rc_tag: str,
+    rc_commit: str,
+    preserved_bundles: dict[str, str],
+    *,
+    already_integrated: bool = False,
+) -> dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "success": True,
+        "status": "ALREADY_INTEGRATED" if already_integrated else "SUCCESS",
+        "base_ref": base_ref,
+        "rc_tag": rc_tag,
+        "rc_commit": rc_commit,
+        "integration_branch": f"integration/{job_id}",
+        "preserved_bundles": preserved_bundles,
+        "merge_commands": [
+            f"git diff {base_ref}..{rc_tag}",
+            f"git checkout {base_ref} && git merge --no-ff {rc_tag}",
+        ],
+    }
+
+
+def _format_integrate_failure_message(
+    job_id: str,
+    multi_res: MultiTeamResult,
+    manifest: TeamManifest,
+    team_wt_paths: dict[str, Path],
+) -> str:
+    """統合ゲート失敗時の原因チーム・保全状態・次の手順を整形する。"""
+    offending = _extract_offending_teams(multi_res, manifest)
+    lines = [f"TEAMS_INTEGRATE_ERROR: Integration failed for job '{job_id}' (status={multi_res.status})."]
+    if offending:
+        lines.append(f"Offending team(s): {', '.join(offending)}")
+
+    err_details: list[str] = []
+    if multi_res.integration_result and multi_res.integration_result.errors:
+        err_details.extend(multi_res.integration_result.errors)
+    elif multi_res.details.get("error"):
+        err_details.append(str(multi_res.details["error"]))
+
+    for tid in offending:
+        t_res = multi_res.team_results.get(tid)
+        if t_res and t_res.details.get("bundle_error"):
+            err_details.append(f"team '{tid}': {t_res.details['bundle_error']}")
+
+    if err_details:
+        lines.append("Details:")
+        for detail in err_details[:5]:
+            lines.append(f"  - {detail}")
+
+    int_res = multi_res.integration_result
+    if int_res and int_res.integration_branch and int_res.integration_branch.startswith("quarantine/"):
+        lines.append(f"Quarantine branch: {int_res.integration_branch}")
+
+    kept = ", ".join(f"{tid}={path}" for tid, path in team_wt_paths.items())
+    lines.append(f"Worktrees preserved (not deleted): {kept}")
+    lines.append("Next steps:")
+    lines.append(f"  1. Inspect status: `auto-dev teams status --job-id {job_id}`")
+    if multi_res.status == "CONFLICT" and offending:
+        lines.append(
+            f"  2. Resolve the conflict in team '{offending[0]}' worktree "
+            f"({team_wt_paths.get(offending[0])}) against '{manifest.base_ref}', verify and commit."
+        )
+    elif multi_res.status == "VERIFICATION_FAILED":
+        lines.append(
+            "  2. Inspect the quarantined integration branch and fix the cross-team issue "
+            "in the offending team worktree(s)."
+        )
+    else:
+        lines.append(
+            "  2. Fix the bundle/evidence issue in the offending team worktree(s) "
+            "(ensure tasks are committed via `verify-step` and `commit-step`)."
+        )
+    lines.append(
+        f"  3. To start a fresh job after fixing or discarding, clean up with "
+        f"`auto-dev teams cleanup --job-id {job_id} --force`."
+    )
+    return "\n".join(lines)
+
+
+def integrate_teams_job(
+    repo_dir: Path,
+    job_id: str,
+    verify_script: Path | None = None,
+    timeout_sec: int = 300,
+) -> tuple[dict[str, Any] | None, int, str]:
+    """TEAM-14: 完了・クリーン確認、Bundle 生成/保全、IntegrationGate 実行を行う。"""
+    resolved_repo = repo_dir.resolve()
+    if not VALID_JOB_ID_PATTERN.match(job_id):
+        return (
+            None,
+            2,
+            f"TEAMS_INTEGRATE_ERROR: Invalid job_id '{job_id}': must match '^[a-zA-Z0-9_-]+$'.",
+        )
+
+    try:
+        manifest = load_teams_manifest(resolved_repo)
+    except (FileNotFoundError, ManifestValidationError, OSError) as err:
+        return None, 2, f"TEAMS_CONFIG_ERROR: {err}"
+
+    if not manifest.teams:
+        return None, 2, "TEAMS_CONFIG_ERROR: No teams defined in teams.json."
+
+    jobs_dir = resolved_repo / ".dev" / "integration_jobs"
+    job_rec = _load_team_job_record(resolved_repo, job_id)
+    int_state = IntegrationJobState.load(jobs_dir, job_id)
+    workers = WorkerRegistry(resolved_repo, job_id).load()
+
+    if int_state is None and job_rec is None and not workers:
+        return (
+            None,
+            1,
+            (
+                f"TEAMS_INTEGRATE_ERROR: Job '{job_id}' not found.\n"
+                f"Next: inspect existing jobs with `auto-dev teams status`, "
+                f"or prepare a job with `auto-dev teams prepare --job-id {job_id}`."
+            ),
+        )
+
+    for tid, reg in workers.items():
+        if reg.status == "RUNNING" and (
+            _is_registered_worker_alive(reg)
+            or (reg.pgid > 0 and has_active_processes_in_group(reg.pgid))
+        ):
+            return (
+                None,
+                1,
+                (
+                    f"TEAMS_INTEGRATE_ERROR: Worker for team '{tid}' is still active "
+                    f"(PID={reg.pid}, PGID={reg.pgid}). Worktrees preserved.\n"
+                    f"Next: wait for completion and check `auto-dev teams status --job-id {job_id}`."
+                ),
+            )
+
+    base_chk = _run_git_cmd(resolved_repo, ["rev-parse", "--verify", f"{manifest.base_ref}^{{commit}}"])
+    if base_chk.returncode != 0:
+        return (
+            None,
+            2,
+            f"TEAMS_CONFIG_ERROR: Base ref '{manifest.base_ref}' does not exist in repository.",
+        )
+
+    if int_state is not None and int_state.state == "COMPLETED":
+        rc_ref = _resolve_rc_ref(resolved_repo, job_id, int_state)
+        heads_match = rc_ref is not None
+        if heads_match:
+            for team in manifest.teams:
+                expected_sha = int_state.verified_commits.get(team.id)
+                br_proc = _run_git_cmd(resolved_repo, ["rev-parse", "--verify", f"refs/heads/team/{team.id}"])
+                if expected_sha and (br_proc.returncode != 0 or br_proc.stdout.strip() != expected_sha):
+                    heads_match = False
+                    break
+        if heads_match:
+            rc_tag = int_state.rc_tag or f"rc/{job_id}"
+            rc_commit = int_state.rc_commit or _run_git_cmd(resolved_repo, ["rev-parse", f"refs/tags/{rc_tag}"]).stdout.strip()
+            preserved = {
+                t.id: str(jobs_dir / job_id / "evidence" / f"{t.id}.zip")
+                for t in manifest.teams
+                if (jobs_dir / job_id / "evidence" / f"{t.id}.zip").is_file()
+            }
+            return (
+                _build_integrate_success_payload(
+                    job_id,
+                    manifest.base_ref,
+                    rc_tag,
+                    rc_commit,
+                    preserved,
+                    already_integrated=True,
+                ),
+                0,
+                "",
+            )
+        return (
+            None,
+            1,
+            (
+                f"TEAMS_INTEGRATE_ERROR: Job '{job_id}' was already completed, "
+                "and team branches or RC tag have diverged.\n"
+                f"Next: inspect `auto-dev teams status --job-id {job_id}` or start a new job."
+            ),
+        )
+
+    cleaned_id = re.sub(r"[^a-z0-9_-]", "-", job_id.lower()).strip("-")
+    int_wt_team_id = f"int-{cleaned_id}"[:64]
+    wt_manager = WorktreeManager(repo_dir=resolved_repo)
+    if (
+        int_state is not None
+        and int_state.state not in ("FAILED", "CONFLICT", "RECOVERED")
+        and (
+            _branch_exists(resolved_repo, f"integration/{job_id}")
+            or (wt_manager.worktree_base / int_wt_team_id).exists()
+        )
+    ):
+        return (
+            None,
+            1,
+            (
+                f"TEAMS_INTEGRATE_ERROR: Integration job '{job_id}' was interrupted in state '{int_state.state}'.\n"
+                f"Next: run `auto-dev teams recover --job-id {job_id}` before retrying."
+            ),
+        )
+
+    main_status = _run_git_cmd(resolved_repo, ["status", "--porcelain"])
+    if main_status.returncode != 0 or main_status.stdout.strip():
+        dirty_preview = ", ".join(line.strip() for line in main_status.stdout.splitlines()[:5])
+        return (
+            None,
+            1,
+            (
+                f"TEAMS_INTEGRATE_ERROR: Main repository working tree at {resolved_repo} is not clean "
+                f"({dirty_preview or main_status.stderr.strip()}). Worktrees preserved.\n"
+                f"Next: commit or stash uncommitted changes in {resolved_repo}, "
+                f"then re-run `auto-dev teams integrate --job-id {job_id}`."
+            ),
+        )
+
+    live_wts: dict[str, WorktreeInfo] = {
+        wt.team_id: wt
+        for wt in wt_manager.list_worktrees()
+        if not wt.team_id.startswith("int-")
+    }
+    blockers, team_wt_paths = _collect_team_integrate_blockers(resolved_repo, manifest, live_wts)
+    if blockers:
+        details_block = "\n".join(f"  - {b}" for b in blockers)
+        return (
+            None,
+            1,
+            (
+                f"TEAMS_INTEGRATE_ERROR: Pre-integration checks failed for job '{job_id}':\n"
+                f"{details_block}\n"
+                "Worktrees have been preserved (not deleted).\n"
+                "Next steps:\n"
+                f"  1. Inspect status: `auto-dev teams status --job-id {job_id}`\n"
+                "  2. Complete remaining tasks and ensure clean committed state in the offending team worktree(s).\n"
+                f"  3. Re-run `auto-dev teams integrate --job-id {job_id}`."
+            ),
+        )
+
+    team_results: dict[str, TeamExecutionResult] = {}
+    for team in manifest.teams:
+        wt_path = team_wt_paths[team.id]
+        head_proc = _run_git_cmd(wt_path, ["rev-parse", "HEAD"])
+        tree_proc = _run_git_cmd(wt_path, ["rev-parse", "HEAD^{tree}"])
+        if (
+            head_proc.returncode != 0
+            or not head_proc.stdout.strip()
+            or tree_proc.returncode != 0
+            or not tree_proc.stdout.strip()
+        ):
+            return (
+                None,
+                1,
+                (
+                    f"TEAMS_INTEGRATE_ERROR: Failed to resolve HEAD/tree for team '{team.id}' in {wt_path}. "
+                    "Worktrees preserved.\n"
+                    f"Next: inspect `auto-dev teams status --job-id {job_id}`."
+                ),
+            )
+        head_commit = head_proc.stdout.strip()
+        head_tree = tree_proc.stdout.strip()
+        preserved_path = jobs_dir / job_id / "evidence" / f"{team.id}.zip"
+        _archive_superseded_team_bundle(
+            preserved_path,
+            team_id=team.id,
+            head_commit=head_commit,
+            head_tree=head_tree,
+            int_state=int_state,
+        )
+        try:
+            bundle_path = _resolve_or_create_team_bundle(
+                resolved_repo,
+                job_id,
+                team.id,
+                wt_path,
+                head_commit=head_commit,
+                head_tree=head_tree,
+            )
+        except (OSError, subprocess.SubprocessError, ValueError) as err:
+            return (
+                None,
+                1,
+                (
+                    f"TEAMS_INTEGRATE_ERROR: Failed to create bundle for team '{team.id}': {err}. "
+                    "Worktrees preserved.\n"
+                    f"Next: inspect worktree {wt_path} and retry `auto-dev teams integrate --job-id {job_id}`."
+                ),
+            )
+        team_results[team.id] = TeamExecutionResult(
+            team_id=team.id,
+            success=True,
+            status="SUCCESS",
+            branch=f"team/{team.id}",
+            head_commit=head_commit,
+            bundle_path=bundle_path,
+        )
+
+    config = MultiTeamConfig(
+        job_id=job_id,
+        teams=[
+            TeamWorkerSpec(team_id=team.id, base_branch=manifest.base_ref)
+            for team in manifest.teams
+        ],
+        base_branch=manifest.base_ref,
+        integration_verify_script=verify_script,
+    )
+    orchestrator = MultiTeamOrchestrator(repo_dir=resolved_repo)
+    multi_res = orchestrator.integrate_team_results(
+        config=config,
+        team_results=team_results,
+        verify_script=verify_script,
+        timeout_sec=timeout_sec,
+    )
+
+    if not multi_res.success:
+        if job_rec is not None:
+            job_rec["status"] = multi_res.status
+            job_rec["updated_at"] = time.time()
+            _save_team_job_record(resolved_repo, job_rec)
+        return (
+            None,
+            1,
+            _format_integrate_failure_message(job_id, multi_res, manifest, team_wt_paths),
+        )
+
+    rc_tag = multi_res.release_candidate_tag or f"rc/{job_id}"
+    rc_commit = multi_res.release_candidate_commit or ""
+    preserved_bundles = {
+        tid: str(res.bundle_path)
+        for tid, res in team_results.items()
+        if res.bundle_path is not None
+    }
+    if job_rec is not None:
+        job_rec["status"] = "INTEGRATED"
+        job_rec["rc_tag"] = rc_tag
+        job_rec["rc_commit"] = rc_commit
+        job_rec["integration_branch"] = f"integration/{job_id}"
+        job_rec["updated_at"] = time.time()
+        _save_team_job_record(resolved_repo, job_rec)
+
+    return (
+        _build_integrate_success_payload(
+            job_id,
+            manifest.base_ref,
+            rc_tag,
+            rc_commit,
+            preserved_bundles,
+        ),
+        0,
+        "",
+    )
+
+
+def format_teams_integrate_text(payload: dict[str, Any]) -> str:
+    """teams integrate 成功時の人間向け出力を整形する。"""
+    lines = [
+        "=== AUTO DEVELOPER / TEAMS INTEGRATION PASSED ===",
+        f" Job ID:    {payload['job_id']}",
+        f" Status:    {payload['status']}",
+        f" RC Tag:    {payload['rc_tag']}",
+    ]
+    if payload.get("rc_commit"):
+        lines.append(f" RC Commit: {payload['rc_commit']}")
+    lines.append(f" Base Ref:  {payload['base_ref']} (not modified)")
+    bundles = payload.get("preserved_bundles") or {}
+    if bundles:
+        lines.append(" Preserved Bundles:")
+        for tid, bpath in bundles.items():
+            lines.append(f"   - {tid}: {bpath}")
+    lines.append(f"Next steps (inspect and merge into '{payload['base_ref']}'):")
+    for cmd in payload.get("merge_commands") or []:
+        lines.append(f"  {cmd}")
+    lines.append(f"  auto-dev teams cleanup --job-id {payload['job_id']}")
+    return "\n".join(lines)

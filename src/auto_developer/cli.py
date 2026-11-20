@@ -25,8 +25,10 @@ from auto_developer.metrics import MetricsLog
 from auto_developer.models import JobState
 from auto_developer.multi_team import (
     cleanup_teams_job,
+    format_teams_integrate_text,
     format_teams_status_text,
     get_teams_status,
+    integrate_teams_job,
     prepare_teams_job,
 )
 from auto_developer.orchestrator import NightlyOrchestrator
@@ -559,6 +561,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Force cleanup even if integration did not succeed or worktrees have uncommitted changes",
     )
+    teams_integrate_parser = teams_subparsers.add_parser(
+        "integrate", help="Verify team completion/bundles and run IntegrationGate"
+    )
+    teams_integrate_parser.add_argument(
+        "--job-id", type=str, required=True, help="Job ID to integrate"
+    )
+    teams_integrate_parser.add_argument(
+        "--json", action="store_true", help="Output integration result in JSON format"
+    )
 
     args = parser.parse_args(argv)
 
@@ -640,6 +651,21 @@ def main(argv: list[str] | None = None) -> int:
             if q_map:
                 for q_tid, q_branch in q_map.items():
                     print(f"  Quarantined '{q_tid}' work to branch: {q_branch}")
+            return 0
+        if args.teams_subcommand == "integrate":
+            int_payload, int_code, int_err = integrate_teams_job(
+                work_dir,
+                job_id=args.job_id,
+                verify_script=args.verify_script,
+                timeout_sec=args.timeout,
+            )
+            if int_payload is None:
+                print(int_err, file=sys.stderr)
+                return int_code
+            if args.json:
+                print(json.dumps(int_payload, ensure_ascii=False, indent=2))
+            else:
+                print(format_teams_integrate_text(int_payload))
             return 0
         teams_parser.print_help()
         return 2
