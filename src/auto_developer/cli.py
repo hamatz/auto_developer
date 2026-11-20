@@ -13,6 +13,7 @@ from auto_developer.bundler import EvidenceBundler
 from auto_developer.dispatcher import TaskDispatcher
 from auto_developer.evidence import EvidenceStore
 from auto_developer.guard import GitGuard
+from auto_developer.manifest import ManifestValidationError, TeamManifest, load_teams_manifest
 from auto_developer.metrics import MetricsLog
 from auto_developer.models import JobState
 from auto_developer.orchestrator import NightlyOrchestrator
@@ -180,6 +181,113 @@ def init_project(target_dir: Path) -> int:
         print("  - tests/immunity/test_acceptance_sample.py already exists, skipping")
 
     print("\nInitialization complete! You can now run `auto-dev run` or `auto-dev --dry-run`.")
+    return 0
+
+
+def load_teams_manifest_or_error(
+    work_dir: Path,
+    *,
+    manifest_path: Path | None = None,
+) -> tuple[TeamManifest | None, int]:
+    """teams.json を読み込み、検証失敗時は TEAMS_CONFIG_ERROR: を出して終了コード 2 を返す。"""
+    try:
+        manifest = load_teams_manifest(work_dir, manifest_path=manifest_path)
+    except (FileNotFoundError, ManifestValidationError, OSError) as err:
+        print(f"TEAMS_CONFIG_ERROR: {err}", file=sys.stderr)
+        return None, 2
+    return manifest, 0
+
+
+def _build_team_plan_template(team_id: str) -> str:
+    return (
+        f"# PLAN ({team_id})\n\n"
+        "<!--\n"
+        f"チーム '{team_id}' のタスクリスト。\n"
+        "- [ ] 1. タスク名  (未実行)\n"
+        "- [x] 1. タスク名  (完了)\n"
+        "- [ ] 1. タスク名 **[FAILED]** (失敗・隔離)\n"
+        "-->\n\n"
+        "## 現在の目標\n"
+        f"- チーム `{team_id}` の実装と検証\n\n"
+        "## ステップ\n"
+        "- [ ] 1. 初期モジュールの実装\n"
+        "- [ ] 2. 単体テストの追加と検証\n"
+    )
+
+
+def init_teams_project(target_dir: Path, team_ids: list[str] | None = None) -> int:
+    """teams.json の雛形と各チームの plans/<team_id>.md を作成する（既存ファイルは上書きしない）。"""
+    print(f"Initializing multi-team configuration in: {target_dir}")
+    teams_json_path = target_dir / "teams.json"
+
+    if teams_json_path.exists():
+        manifest, err_code = load_teams_manifest_or_error(target_dir, manifest_path=teams_json_path)
+        if manifest is None:
+            return err_code
+        print("  - teams.json already exists, skipping")
+        if team_ids is not None:
+            if len(team_ids) != len(set(team_ids)):
+                print("TEAMS_CONFIG_ERROR: Duplicate team ID in --teams.", file=sys.stderr)
+                return 2
+            existing_ids = {t.id for t in manifest.teams}
+            unknown = [tid for tid in team_ids if tid not in existing_ids]
+            if unknown:
+                print(
+                    f"TEAMS_CONFIG_ERROR: teams.json already exists without teams {unknown}.",
+                    file=sys.stderr,
+                )
+                return 2
+            selected = set(team_ids)
+            team_plans = [(team.id, team.plan) for team in manifest.teams if team.id in selected]
+        else:
+            team_plans = [(team.id, team.plan) for team in manifest.teams]
+    else:
+        ids_to_use = list(team_ids) if team_ids is not None else ["core", "ui"]
+        manifest_payload = {
+            "version": 1,
+            "project": target_dir.name or "auto-developer-project",
+            "base": {
+                "ref": "main",
+                "require_clean": True,
+            },
+            "teams": [
+                {
+                    "id": tid,
+                    "plan": f"plans/{tid}.md",
+                    "owns": [f"src/{tid}/**"],
+                    "depends_on": [],
+                }
+                for tid in ids_to_use
+            ],
+            "integration": {
+                "strategy": "merge-sequential",
+                "require_team_evidence": True,
+                "reverify_after_merge": True,
+                "update_main": False,
+            },
+        }
+        try:
+            validated = TeamManifest.from_dict(manifest_payload, allow_depends_on=False)
+        except ManifestValidationError as err:
+            print(f"TEAMS_CONFIG_ERROR: {err}", file=sys.stderr)
+            return 2
+
+        teams_json_path.write_text(
+            json.dumps(manifest_payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        print("  ✓ Created teams.json")
+        team_plans = [(team.id, team.plan) for team in validated.teams]
+
+    for tid, plan_rel in team_plans:
+        plan_file = target_dir / plan_rel
+        if not plan_file.exists():
+            plan_file.parent.mkdir(parents=True, exist_ok=True)
+            plan_file.write_text(_build_team_plan_template(tid), encoding="utf-8")
+            print(f"  ✓ Created {plan_rel}")
+        else:
+            print(f"  - {plan_rel} already exists, skipping")
+
     return 0
 
 
@@ -351,6 +459,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Output verification result in JSON format",
     )
 
+    # Subcommand: teams
+    teams_parser = subparsers.add_parser("teams", help="Multi-team execution commands")
+    teams_subparsers = teams_parser.add_subparsers(
+        dest="teams_subcommand", help="Multi-team subcommand actions"
+    )
+    teams_init_parser = teams_subparsers.add_parser(
+        "init", help="Initialize teams.json and per-team plan files"
+    )
+    teams_init_parser.add_argument(
+        "--teams",
+        type=str,
+        default=None,
+        help="Comma-separated team IDs (default: core,ui)",
+    )
+
     args = parser.parse_args(argv)
 
     work_dir = args.work_dir.resolve()
@@ -369,6 +492,22 @@ def main(argv: list[str] | None = None) -> int:
     # Subcommand: init
     if args.subcommand == "init":
         return init_project(work_dir)
+
+    # Subcommand: teams
+    if args.subcommand == "teams":
+        if args.teams_subcommand == "init":
+            if args.teams is not None:
+                raw_ids = [s.strip() for s in args.teams.split(",") if s.strip()]
+                if not raw_ids:
+                    print(
+                        "TEAMS_CONFIG_ERROR: --teams must specify at least one team ID.",
+                        file=sys.stderr,
+                    )
+                    return 2
+                return init_teams_project(work_dir, team_ids=raw_ids)
+            return init_teams_project(work_dir, team_ids=None)
+        teams_parser.print_help()
+        return 2
 
     # Subcommand: pre-flight
     if args.subcommand == "pre-flight":

@@ -44,7 +44,7 @@
 - 上記以外の既存テストは変更しない。免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [ ] 1. チーム定義ファイル `teams.json` の読み込みと検証（`plan` フィールド、`depends_on` の拒否、`owns` の重なりの拒否、`TEAMS_CONFIG_ERROR` / 終了コード 2）、および `auto-dev teams init`（Red-First）（TEAM-10, TEAM-12）
+- [x] 1. チーム定義ファイル `teams.json` の読み込みと検証（`plan` フィールド、`depends_on` の拒否、`owns` の重なりの拒否、`TEAMS_CONFIG_ERROR` / 終了コード 2）、および `auto-dev teams init`（Red-First）（TEAM-10, TEAM-12）
 - [ ] 2. チーム文脈の決定: worktree 内の `run` / `pre-flight` / `verify-step` / `commit-step` / `rollback-step` が、ブランチ `team/<id>` とコミット済みの `teams.json` から `owns`・計画ファイルを決め、担当範囲外の変更を検知する。`teams.json` を保護ファイルに追加し、`run` に `--team-id` / `--owns` / `--plan` を追加する（Red-First）（TEAM-11）
 - [ ] 3. `auto-dev teams prepare` / `teams status` / `teams cleanup`（前回のジョブが残っているときの拒否と案内を含む）（Red-First）（TEAM-13, TEAM-16）
 - [ ] 4. `auto-dev teams integrate`（完了確認、Bundle の生成・保全、統合ゲート、RC タグと取り込みコマンドの表示、失敗時に worktree を残す）（Red-First）（TEAM-14）
