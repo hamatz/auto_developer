@@ -117,11 +117,13 @@ class GitGuard:
         re.compile(r"^SPEC\.md$"),
         re.compile(r"^scripts/verify_local\.sh$"),
         re.compile(r"^tests/immunity/"),
+        re.compile(r"^teams\.json$"),
     )
     BASE_PROTECTED_PATTERNS = (
         re.compile(r"^\.github/"),
         re.compile(r"^SPEC\.md$"),
         re.compile(r"^scripts/verify_local\.sh$"),
+        re.compile(r"^teams\.json$"),
     )
     IMMUNITY_PATTERN = re.compile(r"^tests/immunity/")
     VALID_IMMUNITY_FILE_PATTERN = re.compile(r"^tests/immunity/test_[a-zA-Z0-9_\-]+\.py$")

@@ -322,12 +322,12 @@ class IntegrationGate:
     ) -> tuple[bool, int, str]:
         """マージ後の統合ブランチ上で全体検証スクリプトを実行する。
 
-        保護ファイル（.github/**, SPEC.md, scripts/verify_local.sh, tests/immunity/**）が
+        保護ファイル（.github/**, SPEC.md, scripts/verify_local.sh, tests/immunity/**, teams.json）が
         意図せず変更されていないかも検証する。
         """
         run_dir = target_dir or self.repo_dir
         diff_proc = self._run_git(
-            ["diff", "--name-only", base_commit, "--", ".github/", "SPEC.md", "scripts/verify_local.sh", "tests/immunity/"],
+            ["diff", "--name-only", base_commit, "--", ".github/", "SPEC.md", "scripts/verify_local.sh", "tests/immunity/", "teams.json"],
             check=False,
             cwd=run_dir,
         )

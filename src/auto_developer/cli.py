@@ -9,11 +9,18 @@ from pathlib import Path
 from typing import Any, cast
 
 from auto_developer.audit import detect_model_family, verify_model_independence
+from auto_developer.boundary import BoundaryGuard
 from auto_developer.bundler import EvidenceBundler
 from auto_developer.dispatcher import TaskDispatcher
 from auto_developer.evidence import EvidenceStore
 from auto_developer.guard import GitGuard
-from auto_developer.manifest import ManifestValidationError, TeamManifest, load_teams_manifest
+from auto_developer.manifest import (
+    ManifestValidationError,
+    TeamContext,
+    TeamManifest,
+    load_teams_manifest,
+    resolve_team_context,
+)
 from auto_developer.metrics import MetricsLog
 from auto_developer.models import JobState
 from auto_developer.orchestrator import NightlyOrchestrator
@@ -30,7 +37,7 @@ echo "=== [1/2] Checking protected file invariants (tracked & untracked) ==="
 CHECKPOINT="${1:-HEAD}"
 
 if git rev-parse --verify "$CHECKPOINT" >/dev/null 2>&1; then
-  PROTECTED_DIFF=$(git diff --name-only "$CHECKPOINT" -- .github/ SPEC.md scripts/verify_local.sh tests/immunity/ 2>/dev/null || true)
+  PROTECTED_DIFF=$(git diff --name-only "$CHECKPOINT" -- .github/ SPEC.md scripts/verify_local.sh tests/immunity/ teams.json 2>/dev/null || true)
   if [ -n "$PROTECTED_DIFF" ]; then
     echo "ERROR: Protected files were modified without authorization (git diff):"
     echo "$PROTECTED_DIFF"
@@ -38,7 +45,7 @@ if git rev-parse --verify "$CHECKPOINT" >/dev/null 2>&1; then
   fi
 fi
 
-DIRTY_PROTECTED=$(git status --porcelain | awk '{print $2}' | grep -E '^(\\.github/|SPEC\\.md|scripts/verify_local\\.sh|tests/immunity/)' || true)
+DIRTY_PROTECTED=$(git status --porcelain | awk '{print $2}' | grep -E '^(\\.github/|SPEC\\.md|scripts/verify_local\\.sh|tests/immunity/|teams\\.json$)' || true)
 if [ -n "$DIRTY_PROTECTED" ]; then
   echo "ERROR: Protected files were created or modified (git status):"
   echo "$DIRTY_PROTECTED"
@@ -196,6 +203,42 @@ def load_teams_manifest_or_error(
         print(f"TEAMS_CONFIG_ERROR: {err}", file=sys.stderr)
         return None, 2
     return manifest, 0
+
+
+def _parse_owns_arg(raw_owns: list[str] | None) -> list[str] | None:
+    if raw_owns is None:
+        return None
+    patterns: list[str] = []
+    for item in raw_owns:
+        for part in item.split(","):
+            cleaned = part.strip()
+            if cleaned:
+                patterns.append(cleaned)
+    return patterns
+
+
+def _resolve_cli_team_context(
+    work_dir: Path,
+    *,
+    ref: str = "HEAD",
+    explicit_team_id: str | None = None,
+    explicit_owns: list[str] | None = None,
+    explicit_plan: Path | None = None,
+    allow_explicit_without_manifest: bool = False,
+) -> tuple[TeamContext | None, int]:
+    try:
+        ctx = resolve_team_context(
+            work_dir,
+            ref=ref,
+            explicit_team_id=explicit_team_id,
+            explicit_owns=explicit_owns,
+            explicit_plan=explicit_plan,
+            allow_explicit_without_manifest=allow_explicit_without_manifest,
+        )
+    except ManifestValidationError as err:
+        print(f"TEAMS_CONFIG_ERROR: {err}", file=sys.stderr)
+        return None, 2
+    return ctx, 0
 
 
 def _build_team_plan_template(team_id: str) -> str:
@@ -365,6 +408,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # Subcommand: run
     run_parser = subparsers.add_parser("run", help="Run autonomous sequential execution loop")
+    run_parser.add_argument("--plan", type=Path, default=argparse.SUPPRESS, help="Path to PLAN.md")
+    run_parser.add_argument("--team-id", type=str, default=None, help="Explicit team ID for team execution")
+    run_parser.add_argument(
+        "--owns",
+        action="append",
+        default=None,
+        help="Explicit ownership glob pattern(s) for team execution (repeatable or comma-separated)",
+    )
     run_parser.add_argument("--dry-run", action="store_true", help="Simulate execution without modifying git or state")
     run_parser.add_argument("--timeout", type=int, default=None, help="Max verification timeout in seconds")
     run_parser.add_argument("--resume", action="store_true", help="Resume interrupted job from state file")
@@ -511,15 +562,23 @@ def main(argv: list[str] | None = None) -> int:
 
     # Subcommand: pre-flight
     if args.subcommand == "pre-flight":
+        team_ctx, ctx_err = _resolve_cli_team_context(
+            work_dir,
+            ref="HEAD",
+            explicit_plan=args.plan,
+        )
+        if ctx_err != 0:
+            return ctx_err
+        effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
         try:
             git_guard.assert_clean_working_tree()
-        except RuntimeError as e:
+            tasks = dispatcher.parse_plan(effective_plan_path)
+        except (RuntimeError, FileNotFoundError) as e:
             print(f"PRE-FLIGHT ERROR: {e}", file=sys.stderr)
             return 2
-        tasks = dispatcher.parse_plan(plan_path)
         next_task = dispatcher.get_next_pending_task(tasks)
         checkpoint = git_guard.get_current_checkpoint()
-        result = {
+        result: dict[str, Any] = {
             "clean": True,
             "checkpoint": checkpoint,
             "next_task": {
@@ -529,25 +588,37 @@ def main(argv: list[str] | None = None) -> int:
             if next_task
             else None,
         }
+        if team_ctx is not None:
+            result["team_id"] = team_ctx.team_id
+            result["plan"] = team_ctx.plan_rel_path
+            result["owns"] = team_ctx.owns_patterns
         print(json.dumps(result, ensure_ascii=False))
         return 0
 
     elif args.subcommand == "verify-step":
-        metrics = MetricsLog(repo_dir=work_dir, plan_path=plan_path)
+        team_ctx, ctx_err = _resolve_cli_team_context(
+            work_dir,
+            ref=args.checkpoint or "HEAD",
+            explicit_plan=args.plan,
+        )
+        if ctx_err != 0:
+            return ctx_err
+        effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
+        metrics = MetricsLog(repo_dir=work_dir, plan_path=effective_plan_path)
         start_time = time.time()
         phase = metrics.get_current_phase()
-        tasks = dispatcher.parse_plan(plan_path)
+        tasks = dispatcher.parse_plan(effective_plan_path)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
         if not target:
-            print(f"ERROR: Task {args.task_id} not found in {plan_path}", file=sys.stderr)
+            print(f"ERROR: Task {args.task_id} not found in {effective_plan_path}", file=sys.stderr)
             return 1
 
-        original_plan_content = plan_path.read_text(encoding="utf-8")
+        original_plan_content = effective_plan_path.read_text(encoding="utf-8")
         # 検証対象の最終ツリーに PLAN.md の完了反映を含める
-        dispatcher.mark_task_status(plan_path, target, status="completed")
+        dispatcher.mark_task_status(effective_plan_path, target, status="completed")
 
         if not git_guard.check_protected_files_untouched(args.checkpoint):
-            plan_path.write_text(original_plan_content, encoding="utf-8")
+            effective_plan_path.write_text(original_plan_content, encoding="utf-8")
             print(f"CIRCUIT BREAKER: Protected file modified since {args.checkpoint}", file=sys.stderr)
             attempt = metrics.count_verify_attempts(args.task_id, args.checkpoint, phase=phase) + 1
             metrics.record_event(
@@ -561,13 +632,40 @@ def main(argv: list[str] | None = None) -> int:
                 phase=phase,
             )
             return 10
+
+        if team_ctx is not None:
+            boundary_res = BoundaryGuard(
+                repo_dir=work_dir,
+                owns_patterns=team_ctx.owns_patterns,
+                base_checkpoint=args.checkpoint,
+            ).inspect_changes()
+            if not boundary_res.allowed:
+                effective_plan_path.write_text(original_plan_content, encoding="utf-8")
+                print(
+                    f"BOUNDARY VIOLATION: Unauthorized modifications outside team '{team_ctx.team_id}' owns: "
+                    f"{boundary_res.violations}",
+                    file=sys.stderr,
+                )
+                attempt = metrics.count_verify_attempts(args.task_id, args.checkpoint, phase=phase) + 1
+                metrics.record_event(
+                    "verify_step",
+                    task_id=args.task_id,
+                    checkpoint=args.checkpoint,
+                    result="BOUNDARY_VIOLATION",
+                    exit_code=11,
+                    duration_sec=round(time.time() - start_time, 2),
+                    attempt=attempt,
+                    phase=phase,
+                )
+                return 11
+
         code, out = verifier.run_verification(
             verify_script, timeout_sec=args.timeout, cwd=work_dir
         )
         duration_sec = round(time.time() - start_time, 2)
         attempt = metrics.count_verify_attempts(args.task_id, args.checkpoint, phase=phase) + 1
         if code != 0:
-            plan_path.write_text(original_plan_content, encoding="utf-8")
+            effective_plan_path.write_text(original_plan_content, encoding="utf-8")
             print(f"VERIFICATION FAILED (Exit {code}):\n{out}", file=sys.stderr)
             metrics.record_event(
                 "verify_step",
@@ -609,11 +707,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     elif args.subcommand == "commit-step":
-        metrics = MetricsLog(repo_dir=work_dir, plan_path=plan_path)
-        tasks = dispatcher.parse_plan(plan_path)
+        chk_ref = args.checkpoint or "HEAD"
+        team_ctx, ctx_err = _resolve_cli_team_context(
+            work_dir,
+            ref=chk_ref,
+            explicit_plan=args.plan,
+        )
+        if ctx_err != 0:
+            return ctx_err
+        effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
+        metrics = MetricsLog(repo_dir=work_dir, plan_path=effective_plan_path)
+        tasks = dispatcher.parse_plan(effective_plan_path)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
         if not target:
-            print(f"ERROR: Task {args.task_id} not found in {plan_path}", file=sys.stderr)
+            print(f"ERROR: Task {args.task_id} not found in {effective_plan_path}", file=sys.stderr)
             return 1
 
         # Checker Policy 検査 (機能XXX.1 / AGENTS.md Rule 6)
@@ -656,6 +763,31 @@ def main(argv: list[str] | None = None) -> int:
                 maker_family=maker_fam,
             )
             return 4
+
+        if team_ctx is not None:
+            boundary_res = BoundaryGuard(
+                repo_dir=work_dir,
+                owns_patterns=team_ctx.owns_patterns,
+                base_checkpoint=chk_ref,
+            ).inspect_changes()
+            if not boundary_res.allowed:
+                print(
+                    f"BOUNDARY ERROR: Unauthorized files detected at commit gate for team '{team_ctx.team_id}': "
+                    f"{boundary_res.violations}",
+                    file=sys.stderr,
+                )
+                metrics.record_event(
+                    "commit_step",
+                    task_id=args.task_id,
+                    result="BOUNDARY_VIOLATION",
+                    commit=None,
+                    checker_decision=decision,
+                    checker_model=args.checker_model,
+                    checker_family=checker_fam,
+                    maker_model=args.maker_model,
+                    maker_family=maker_fam,
+                )
+                return 3
 
         current_tree_sha = git_guard.get_working_tree_sha()
         current_spec_sha = git_guard.get_spec_sha(spec_path)
@@ -748,14 +880,26 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     elif args.subcommand == "rollback-step":
-        metrics = MetricsLog(repo_dir=work_dir, plan_path=plan_path)
-        tasks = dispatcher.parse_plan(plan_path)
+        team_ctx, ctx_err = _resolve_cli_team_context(
+            work_dir,
+            ref=args.checkpoint or "HEAD",
+            explicit_plan=args.plan,
+        )
+        if ctx_err != 0:
+            return ctx_err
+        effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
+        metrics = MetricsLog(repo_dir=work_dir, plan_path=effective_plan_path)
+        tasks = dispatcher.parse_plan(effective_plan_path)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
         task_id = target.task_id if target else args.task_id
         evidence_store.clear_evidence(task_id=task_id)
         if target:
-            dispatcher.mark_task_status(plan_path, target, status="failed")
-        quarantine_branch = git_guard.quarantine_and_restore(args.checkpoint, task_id=task_id)
+            dispatcher.mark_task_status(effective_plan_path, target, status="failed")
+        quarantine_branch = git_guard.quarantine_and_restore(
+            args.checkpoint,
+            task_id=task_id,
+            team_id=team_ctx.team_id if team_ctx else "",
+        )
         if target:
             log_path = work_dir / "logs" / "nightly" / f"task_{target.task_id}_failure.log"
             reporter.write_failure_log(
@@ -783,9 +927,17 @@ def main(argv: list[str] | None = None) -> int:
         if dec not in ("APPROVE", "REJECT"):
             print(f"ERROR: --decision must be APPROVE or REJECT (got '{args.decision}')", file=sys.stderr)
             return 2
+        team_ctx, ctx_err = _resolve_cli_team_context(
+            work_dir,
+            ref="HEAD",
+            explicit_plan=args.plan,
+        )
+        if ctx_err != 0:
+            return ctx_err
+        effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
         maker_fam = detect_model_family(args.maker_model)
         checker_fam = detect_model_family(args.checker_model)
-        metrics = MetricsLog(repo_dir=work_dir, plan_path=plan_path)
+        metrics = MetricsLog(repo_dir=work_dir, plan_path=effective_plan_path)
         metrics.record_event(
             "checker_review",
             task_id=args.task_id,
@@ -990,6 +1142,24 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     # Default Autonomous Loop ("run" or no subcommand):
+    explicit_team_id = getattr(args, "team_id", None)
+    explicit_owns = _parse_owns_arg(getattr(args, "owns", None))
+    explicit_plan = getattr(args, "plan", None)
+    team_ctx, ctx_err = _resolve_cli_team_context(
+        work_dir,
+        ref="HEAD",
+        explicit_team_id=explicit_team_id,
+        explicit_owns=explicit_owns,
+        explicit_plan=explicit_plan,
+        allow_explicit_without_manifest=True,
+    )
+    if ctx_err != 0:
+        return ctx_err
+
+    effective_run_plan_path = team_ctx.plan_path if team_ctx else plan_path
+    resolved_team_id = (team_ctx.team_id or None) if team_ctx else None
+    resolved_owns = (team_ctx.owns_patterns or None) if team_ctx else None
+
     is_mock = getattr(args, "mock", False)
     maker_cmd = getattr(args, "maker_cmd", "")
     checker_cmd = getattr(args, "checker_cmd", "")
@@ -1031,11 +1201,12 @@ def main(argv: list[str] | None = None) -> int:
             maker_cmd_template=maker_cmd,
             checker_cmd_template=checker_cmd,
             timeout_sec=timeout,
+            cwd=work_dir,
         )
 
     orchestrator = NightlyOrchestrator(
         repo_dir=work_dir,
-        plan_path=plan_path,
+        plan_path=effective_run_plan_path,
         spec_path=spec_path,
         verify_script=verify_script,
         report_path=report_path,
@@ -1044,6 +1215,8 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=dry_run,
         timeout_sec=timeout,
         resume=resume,
+        team_id=resolved_team_id,
+        owns_patterns=resolved_owns,
         maker_model=maker_model,
         checker_model=checker_model,
         enable_audit_stage=enable_audit,

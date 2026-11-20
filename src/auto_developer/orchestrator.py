@@ -12,6 +12,7 @@ from auto_developer.bundler import EvidenceBundler
 from auto_developer.dispatcher import TaskDispatcher
 from auto_developer.evidence import EvidenceStore
 from auto_developer.guard import GitGuard
+from auto_developer.manifest import ManifestValidationError, resolve_team_context
 from auto_developer.models import JobState, Task
 from auto_developer.reporter import MorningReporter
 from auto_developer.runner import MockRunnerAdapter, RunnerAdapter
@@ -57,6 +58,9 @@ class NightlyOrchestrator:
         self.resume = resume
         self.team_id = team_id
         self.owns_patterns = owns_patterns
+        self._explicit_plan_path = plan_path
+        self._explicit_team_id = team_id
+        self._explicit_owns_patterns = owns_patterns
         self.maker_model = maker_model
         self.checker_model = checker_model
         self.allow_same_model_override = allow_same_model_override
@@ -74,6 +78,23 @@ class NightlyOrchestrator:
         self.evidence_store = EvidenceStore(repo_dir=self.repo_dir)
 
     def run(self) -> int:
+        try:
+            team_ctx = resolve_team_context(
+                repo_dir=self.repo_dir,
+                ref="HEAD",
+                explicit_team_id=self._explicit_team_id,
+                explicit_owns=self._explicit_owns_patterns,
+                explicit_plan=self._explicit_plan_path,
+                allow_explicit_without_manifest=True,
+            )
+        except ManifestValidationError as err:
+            print(f"TEAMS_CONFIG_ERROR: {err}", file=sys.stderr)
+            return 2
+        if team_ctx is not None:
+            self.team_id = team_ctx.team_id or None
+            self.plan_path = team_ctx.plan_path
+            self.owns_patterns = team_ctx.owns_patterns or None
+
         if self.maker_model and self.checker_model:
             from auto_developer.audit import verify_model_independence
 

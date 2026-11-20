@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -453,3 +454,255 @@ def load_teams_manifest(
     """リポジトリ直下の teams.json を v0.9.0 規約（独立チーム）で読み込む。"""
     target = manifest_path or (repo_dir / "teams.json")
     return TeamManifest.load(target, allow_depends_on=False)
+
+
+@dataclass(frozen=True)
+class TeamContext:
+    """worktree ブランチおよびコミット済み teams.json から解決された実行時チーム文脈。"""
+
+    team_id: str
+    plan_rel_path: str
+    plan_path: Path
+    owns_patterns: list[str]
+
+
+def _normalize_rel_path(path_str: str) -> str:
+    norm = path_str.replace("\\", "/").strip().lstrip("/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    return norm
+
+
+def _resolve_plan_rel_in_repo(repo_dir: Path, plan_arg: Path) -> tuple[str, Path]:
+    resolved_repo = repo_dir.resolve()
+    candidate = plan_arg if plan_arg.is_absolute() else (resolved_repo / plan_arg)
+    resolved_plan = candidate.resolve()
+    try:
+        rel = resolved_plan.relative_to(resolved_repo).as_posix()
+    except ValueError as err:
+        raise ManifestValidationError(
+            f"--plan '{plan_arg}' must reside inside repository '{resolved_repo}'"
+        ) from err
+    return rel, resolved_plan
+
+
+def _get_current_branch_safe(repo_dir: Path) -> str:
+    proc = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return ""
+    branch = proc.stdout.strip()
+    return "" if branch == "HEAD" else branch
+
+
+def load_committed_teams_manifest(repo_dir: Path, *, ref: str = "HEAD") -> TeamManifest | None:
+    """コミット済み Git ツリー（ref:teams.json）から TeamManifest を読み込む。作業ツリーからは読まない。"""
+    rev_chk = subprocess.run(
+        ["git", "rev-parse", "--verify", f"{ref}^{{tree}}"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if rev_chk.returncode != 0:
+        return None
+
+    ls_proc = subprocess.run(
+        ["git", "ls-tree", ref, "--", "teams.json"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if ls_proc.returncode != 0:
+        return None
+    tree_entry = ls_proc.stdout.strip()
+    if not tree_entry:
+        return None
+    if tree_entry.startswith("120000"):
+        raise ManifestValidationError(
+            f"Committed teams.json at '{ref}' must be a regular file, not a symlink"
+        )
+
+    show_proc = subprocess.run(
+        ["git", "show", f"{ref}:teams.json"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if show_proc.returncode != 0:
+        raise ManifestValidationError(
+            f"Failed to read committed teams.json at '{ref}': {show_proc.stderr.strip()}"
+        )
+
+    try:
+        data = json.loads(show_proc.stdout)
+    except json.JSONDecodeError as err:
+        raise ManifestValidationError(
+            f"Invalid JSON in committed teams.json at '{ref}': {err}"
+        ) from err
+
+    return TeamManifest.from_dict(data, allow_depends_on=False)
+
+
+def _build_team_context(repo_dir: Path, team: TeamConfig) -> TeamContext:
+    plan_rel = _normalize_rel_path(team.plan)
+    effective_owns = list(team.owns)
+    if not any(match_path(plan_rel, pat) for pat in effective_owns):
+        effective_owns.append(plan_rel)
+    return TeamContext(
+        team_id=team.id,
+        plan_rel_path=plan_rel,
+        plan_path=(repo_dir.resolve() / plan_rel),
+        owns_patterns=effective_owns,
+    )
+
+
+def _validate_explicit_against_team(
+    repo_dir: Path,
+    team: TeamConfig,
+    *,
+    explicit_team_id: str | None,
+    explicit_owns: list[str] | None,
+    explicit_plan: Path | None,
+) -> None:
+    if explicit_team_id is not None and explicit_team_id != team.id:
+        raise ManifestValidationError(
+            f"--team-id '{explicit_team_id}' contradicts team '{team.id}'"
+        )
+    if explicit_plan is not None:
+        plan_rel, _ = _resolve_plan_rel_in_repo(repo_dir, explicit_plan)
+        if plan_rel != _normalize_rel_path(team.plan):
+            raise ManifestValidationError(
+                f"--plan '{plan_rel}' contradicts teams.json plan '{team.plan}' for team '{team.id}'"
+            )
+    if explicit_owns is not None:
+        if not explicit_owns:
+            raise ManifestValidationError("--owns must specify at least one non-empty pattern")
+        norm_explicit = {_normalize_rel_path(p) for p in explicit_owns if p.strip()}
+        norm_team = {_normalize_rel_path(p) for p in team.owns}
+        norm_effective = norm_team | {_normalize_rel_path(team.plan)}
+        if not norm_explicit or (norm_explicit != norm_team and norm_explicit != norm_effective):
+            raise ManifestValidationError(
+                f"--owns {explicit_owns!r} contradicts teams.json owns {team.owns!r} for team '{team.id}'"
+            )
+
+
+def resolve_team_context(
+    repo_dir: Path,
+    *,
+    ref: str = "HEAD",
+    explicit_team_id: str | None = None,
+    explicit_owns: list[str] | None = None,
+    explicit_plan: Path | None = None,
+    allow_explicit_without_manifest: bool = False,
+) -> TeamContext | None:
+    """現在のブランチ team/<id> とコミット済み teams.json からチーム文脈を解決する。"""
+    resolved_repo = repo_dir.resolve()
+    branch = _get_current_branch_safe(resolved_repo)
+    branch_team_id: str | None = None
+    if branch.startswith("team/"):
+        branch_team_id = branch[len("team/") :]
+        if not branch_team_id or not TEAM_ID_PATTERN.match(branch_team_id):
+            raise ManifestValidationError(f"Invalid team branch name: '{branch}'")
+
+    if (
+        branch_team_id is None
+        and explicit_team_id is None
+        and explicit_owns is None
+    ):
+        return None
+
+    manifest = load_committed_teams_manifest(resolved_repo, ref=ref)
+
+    if branch_team_id is not None:
+        if manifest is None:
+            if (resolved_repo / "teams.json").exists():
+                raise ManifestValidationError(
+                    f"Branch '{branch}' requires committed teams.json at '{ref}'; "
+                    "working-tree teams.json cannot be used"
+                )
+            if not allow_explicit_without_manifest or (
+                explicit_team_id is None and explicit_owns is None
+            ):
+                return None
+        else:
+            team = next((t for t in manifest.teams if t.id == branch_team_id), None)
+            if team is None:
+                raise ManifestValidationError(
+                    f"Team '{branch_team_id}' from branch '{branch}' not found in committed teams.json"
+                )
+            _validate_explicit_against_team(
+                resolved_repo,
+                team,
+                explicit_team_id=explicit_team_id,
+                explicit_owns=explicit_owns,
+                explicit_plan=explicit_plan,
+            )
+            return _build_team_context(resolved_repo, team)
+
+    if manifest is not None:
+        if explicit_team_id is not None:
+            team = next((t for t in manifest.teams if t.id == explicit_team_id), None)
+            if team is None:
+                raise ManifestValidationError(
+                    f"--team-id '{explicit_team_id}' not found in committed teams.json"
+                )
+            _validate_explicit_against_team(
+                resolved_repo,
+                team,
+                explicit_team_id=explicit_team_id,
+                explicit_owns=explicit_owns,
+                explicit_plan=explicit_plan,
+            )
+            return _build_team_context(resolved_repo, team)
+
+        # explicit_owns is set without explicit_team_id when committed teams.json exists
+        if explicit_plan is not None:
+            plan_rel, _ = _resolve_plan_rel_in_repo(resolved_repo, explicit_plan)
+            matching_team = next(
+                (t for t in manifest.teams if _normalize_rel_path(t.plan) == plan_rel),
+                None,
+            )
+            if matching_team is not None:
+                _validate_explicit_against_team(
+                    resolved_repo,
+                    matching_team,
+                    explicit_team_id=None,
+                    explicit_owns=explicit_owns,
+                    explicit_plan=explicit_plan,
+                )
+                return _build_team_context(resolved_repo, matching_team)
+
+        raise ManifestValidationError(
+            "--owns without matching --team-id contradicts committed teams.json"
+        )
+
+    if not allow_explicit_without_manifest:
+        return None
+
+    if explicit_team_id is not None and not TEAM_ID_PATTERN.match(explicit_team_id):
+        raise ManifestValidationError(
+            f"Invalid --team-id format: '{explicit_team_id}'"
+        )
+    if explicit_owns is not None and not explicit_owns:
+        raise ManifestValidationError("--owns must specify at least one non-empty pattern")
+
+    plan_rel, resolved_plan = _resolve_plan_rel_in_repo(
+        resolved_repo, explicit_plan or Path("PLAN.md")
+    )
+    owns_list = [_normalize_rel_path(p) for p in (explicit_owns or []) if p.strip()]
+    if owns_list and not any(match_path(plan_rel, pat) for pat in owns_list):
+        owns_list.append(plan_rel)
+    return TeamContext(
+        team_id=explicit_team_id or "",
+        plan_rel_path=plan_rel,
+        plan_path=resolved_plan,
+        owns_patterns=owns_list,
+    )

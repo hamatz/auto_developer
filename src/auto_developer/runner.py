@@ -54,10 +54,12 @@ class CommandRunnerAdapter(RunnerAdapter):
         maker_cmd_template: str = "",
         checker_cmd_template: str = "",
         timeout_sec: int = 600,
+        cwd: Path | None = None,
     ) -> None:
         self.maker_cmd_template = maker_cmd_template
         self.checker_cmd_template = checker_cmd_template
         self.timeout_sec = timeout_sec
+        self.cwd = cwd
 
     def run_maker(self, task: Task, context: dict[str, Any]) -> tuple[int, str]:
         if not self.maker_cmd_template:
@@ -105,6 +107,7 @@ class CommandRunnerAdapter(RunnerAdapter):
             try:
                 proc = subprocess.run(
                     ["bash", "-c", cmd_str],
+                    cwd=self.cwd,
                     input=lessons_text,
                     env=env,
                     capture_output=True,
@@ -129,6 +132,7 @@ class CommandRunnerAdapter(RunnerAdapter):
         try:
             proc = subprocess.run(
                 ["bash", "-c", cmd_str],
+                cwd=self.cwd,
                 input=f"--- DIFF ---\n{diff}\n--- SPEC ---\n{spec_content}",
                 capture_output=True,
                 text=True,
