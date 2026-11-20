@@ -26,10 +26,15 @@ from auto_developer.models import JobState
 from auto_developer.multi_team import (
     cleanup_teams_job,
     format_teams_integrate_text,
+    format_teams_recover_text,
+    format_teams_run_text,
     format_teams_status_text,
+    get_multi_team_report_summary,
     get_teams_status,
     integrate_teams_job,
     prepare_teams_job,
+    recover_teams_job,
+    run_teams_job,
 )
 from auto_developer.orchestrator import NightlyOrchestrator
 from auto_developer.reporter import MorningReporter
@@ -247,6 +252,38 @@ def _resolve_cli_team_context(
         print(f"TEAMS_CONFIG_ERROR: {err}", file=sys.stderr)
         return None, 2
     return ctx, 0
+
+
+def _refresh_team_report_best_effort(
+    reporter: MorningReporter,
+    report_path: Path,
+    work_dir: Path,
+    plan_path: Path,
+    *,
+    force_create: bool,
+) -> None:
+    """マルチチーム実行後の NIGHTLY_REPORT.md を更新する（非致命）。"""
+    import subprocess as _sp
+
+    should_refresh = force_create or report_path.exists()
+    if not should_refresh:
+        chk_ign = _sp.run(
+            ["git", "check-ignore", "-q", str(report_path)],
+            cwd=work_dir,
+            capture_output=True,
+            check=False,
+        )
+        should_refresh = chk_ign.returncode == 0
+    if not should_refresh:
+        return
+    try:
+        reporter.generate_standalone_report(
+            report_path=report_path,
+            repo_dir=work_dir,
+            plan_path=plan_path,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"REPORT_WARNING: Failed to refresh report: {e}", file=sys.stderr)
 
 
 def _build_team_plan_template(team_id: str) -> str:
@@ -570,6 +607,84 @@ def main(argv: list[str] | None = None) -> int:
     teams_integrate_parser.add_argument(
         "--json", action="store_true", help="Output integration result in JSON format"
     )
+    teams_run_parser = teams_subparsers.add_parser(
+        "run", help="Prepare worktrees, execute all team workers concurrently, and integrate"
+    )
+    teams_run_parser.add_argument(
+        "--job-id", type=str, default=None, help="Optional job ID"
+    )
+    teams_run_parser.add_argument(
+        "--worker-timeout",
+        type=float,
+        default=21600.0,
+        help="Per-worker execution timeout in seconds (default: 21600)",
+    )
+    teams_run_parser.add_argument(
+        "--mock",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Run workers with simulated mock agents (for testing only)",
+    )
+    teams_run_parser.add_argument(
+        "--maker-cmd",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="Command template to execute Maker in each team worker",
+    )
+    teams_run_parser.add_argument(
+        "--checker-cmd",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="Command template to execute Checker in each team worker",
+    )
+    teams_run_parser.add_argument(
+        "--maker-model",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="Model identifier for Maker",
+    )
+    teams_run_parser.add_argument(
+        "--checker-model",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="Model identifier for Checker",
+    )
+    teams_run_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="Max verification timeout in seconds for each worker and integration gate",
+    )
+    teams_run_parser.add_argument(
+        "--verify-script",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="Path to verification script",
+    )
+    teams_run_parser.add_argument(
+        "--spec",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="Path to SPEC.md",
+    )
+    teams_run_parser.add_argument(
+        "--json", action="store_true", help="Output run result in JSON format"
+    )
+    teams_recover_parser = teams_subparsers.add_parser(
+        "recover", help="Recover interrupted multi-team job (orphaned workers/bundles/integration)"
+    )
+    teams_recover_parser.add_argument(
+        "--job-id", type=str, default=None, help="Optional job ID (defaults to latest job)"
+    )
+    teams_recover_parser.add_argument(
+        "--verify-script",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="Path to verification script",
+    )
+    teams_recover_parser.add_argument(
+        "--json", action="store_true", help="Output recovery result in JSON format"
+    )
 
     args = parser.parse_args(argv)
 
@@ -660,13 +775,71 @@ def main(argv: list[str] | None = None) -> int:
                 timeout_sec=args.timeout,
             )
             if int_payload is None:
+                if int_code != 2:
+                    _refresh_team_report_best_effort(
+                        reporter, report_path, work_dir, plan_path, force_create=False
+                    )
                 print(int_err, file=sys.stderr)
                 return int_code
+            _refresh_team_report_best_effort(
+                reporter, report_path, work_dir, plan_path, force_create=True
+            )
             if args.json:
                 print(json.dumps(int_payload, ensure_ascii=False, indent=2))
             else:
                 print(format_teams_integrate_text(int_payload))
             return 0
+        if args.teams_subcommand == "run":
+            run_payload, run_code, run_err = run_teams_job(
+                work_dir,
+                job_id=args.job_id,
+                maker_cmd=args.maker_cmd,
+                checker_cmd=args.checker_cmd,
+                maker_model=args.maker_model,
+                checker_model=args.checker_model,
+                is_mock=args.mock,
+                worker_timeout=args.worker_timeout,
+                verify_timeout=args.timeout,
+                verify_script=args.verify_script,
+                spec_path=args.spec,
+            )
+            if run_code != 2:
+                _refresh_team_report_best_effort(
+                    reporter,
+                    report_path,
+                    work_dir,
+                    plan_path,
+                    force_create=run_payload is not None,
+                )
+            if run_payload is None:
+                print(run_err, file=sys.stderr)
+                return run_code
+            if args.json:
+                print(json.dumps(run_payload, ensure_ascii=False, indent=2))
+            else:
+                print(format_teams_run_text(run_payload))
+            return 0
+        if args.teams_subcommand == "recover":
+            rec_payload, rec_code, rec_err = recover_teams_job(
+                work_dir,
+                job_id=args.job_id,
+                verify_script=args.verify_script,
+            )
+            if rec_payload is not None:
+                _refresh_team_report_best_effort(
+                    reporter,
+                    report_path,
+                    work_dir,
+                    plan_path,
+                    force_create=rec_code == 0,
+                )
+                if args.json:
+                    print(json.dumps(rec_payload, ensure_ascii=False, indent=2))
+                else:
+                    print(format_teams_recover_text(rec_payload))
+                return rec_code
+            print(rec_err, file=sys.stderr)
+            return rec_code
         teams_parser.print_help()
         return 2
 
@@ -1108,7 +1281,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.subcommand in ("brief", "morning-brief"):
         if state_file.exists():
             state = JobState.load(state_file)
-            summary = {
+            summary: dict[str, Any] = {
                 "status": state.status,
                 "total_tasks": len(state.completed_tasks) + (1 if state.quarantined_task else 0),
                 "succeeded_count": len(state.completed_tasks),
@@ -1117,6 +1290,12 @@ def main(argv: list[str] | None = None) -> int:
                 "completed_tasks": state.completed_tasks,
                 "quarantined_task": state.quarantined_task,
             }
+            try:
+                mt_summary = get_multi_team_report_summary(work_dir)
+                if mt_summary is not None:
+                    summary["multi_team"] = mt_summary
+            except Exception as e:  # noqa: BLE001
+                print(f"REPORT_WARNING: Failed to summarize multi-team job: {e}", file=sys.stderr)
             try:
                 reporter.write_report(report_path, summary, repo_dir=work_dir)
             except Exception as e:  # noqa: BLE001

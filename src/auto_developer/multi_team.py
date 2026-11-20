@@ -9,6 +9,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -17,7 +18,7 @@ import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from auto_developer.bundler import EvidenceBundler
 from auto_developer.dispatcher import TaskDispatcher
@@ -172,12 +173,25 @@ class WorkerRegistration:
 class WorkerRegistry:
     """VV.1: ジョブごとのワーカープロセスの起動・ライフサイクル状態を原子的ファイル保存・復元する永続レジストリ。"""
 
+    _path_locks_guard: ClassVar[threading.Lock] = threading.Lock()
+    _path_locks: ClassVar[dict[Path, threading.RLock]] = {}
+
+    @classmethod
+    def _get_lock_for_path(cls, path: Path) -> threading.RLock:
+        resolved = path.resolve()
+        with cls._path_locks_guard:
+            lock = cls._path_locks.get(resolved)
+            if lock is None:
+                lock = threading.RLock()
+                cls._path_locks[resolved] = lock
+            return lock
+
     def __init__(self, repo_dir: Path, job_id: str) -> None:
         self.repo_dir = repo_dir
         self.job_id = job_id
         self.registry_dir = repo_dir / ".dev" / "integration_jobs" / job_id
         self.registry_file = self.registry_dir / "workers.json"
-        self._lock = threading.RLock()
+        self._lock = self._get_lock_for_path(self.registry_file)
 
     def load(self) -> dict[str, WorkerRegistration]:
         with self._lock:
@@ -484,6 +498,22 @@ class MultiTeamOrchestrator:
         result = MultiTeamRecoveryResult(job_id=job_id)
 
         if not workers:
+            if self.integration_gate is not None:
+                int_state = IntegrationJobState.load(self.integration_gate.jobs_dir, job_id)
+                if int_state is not None:
+                    rec_ok, rec_status, rec_details = self.integration_gate.recover_interrupted_job(job_id)
+                    result.success = rec_ok
+                    result.details.update(rec_details)
+                    result.details["recovery_status"] = rec_status
+                    result.pipeline_result = MultiTeamResult(
+                        job_id=job_id,
+                        success=rec_ok,
+                        status=rec_status,
+                        release_candidate_commit=rec_details.get("rc_commit") or int_state.rc_commit,
+                        release_candidate_tag=rec_details.get("rc_tag") or int_state.rc_tag,
+                        details=rec_details,
+                    )
+                    return result
             result.details["error"] = f"No worker registry found for job_id '{job_id}'"
             return result
 
@@ -945,12 +975,13 @@ class MultiTeamOrchestrator:
                         )
                     )
 
+                    timed_out = False
                     try:
                         stdout_str, stderr_str = proc.communicate(timeout=timeout_sec)
                         exit_code = proc.returncode
                     except subprocess.TimeoutExpired:
+                        timed_out = True
                         logger.error("Team '%s' timed out after %s seconds; terminating process group", team.team_id, timeout_sec)
-                        registry.update_status(team.team_id, "TIMEOUT", details={"error": f"Timed out after {timeout_sec}s"})
                         self.terminate_worker_process_group(team.team_id)
                         try:
                             rem_out, rem_err = proc.communicate(timeout=1.0)
@@ -972,8 +1003,16 @@ class MultiTeamOrchestrator:
                         self.terminate_worker_process_group(team.team_id)
                         raise
                     finally:
-                        final_status = "COMPLETED" if exit_code == 0 else "FAILED"
-                        registry.update_status(team.team_id, final_status, details={"exit_code": exit_code})
+                        if timed_out:
+                            final_status = "TIMEOUT"
+                            registry.update_status(
+                                team.team_id,
+                                final_status,
+                                details={"error": f"Timed out after {timeout_sec}s"},
+                            )
+                        else:
+                            final_status = "COMPLETED" if exit_code == 0 else "FAILED"
+                            registry.update_status(team.team_id, final_status, details={"exit_code": exit_code})
                         with self._workers_lock:
                             if not has_active_processes_in_group(handle.pgid):
                                 self._active_workers.pop(team.team_id, None)
@@ -2845,3 +2884,536 @@ def format_teams_integrate_text(payload: dict[str, Any]) -> str:
         lines.append(f"  {cmd}")
     lines.append(f"  auto-dev teams cleanup --job-id {payload['job_id']}")
     return "\n".join(lines)
+
+
+def _build_worker_pythonpath_env() -> dict[str, str]:
+    """ワーカーサブプロセスが auto_developer を確実に import できる PYTHONPATH 環境辞書を返す。"""
+    src_root = str(Path(__file__).resolve().parents[1])
+    existing_pp = os.environ.get("PYTHONPATH", "")
+    parts = [p for p in existing_pp.split(os.pathsep) if p]
+    if src_root not in parts:
+        new_pp = f"{src_root}{os.pathsep}{existing_pp}" if existing_pp else src_root
+    else:
+        new_pp = existing_pp
+    return {"PYTHONPATH": new_pp}
+
+
+def _format_worker_failure_message(
+    job_id: str,
+    manifest: TeamManifest,
+    team_results: dict[str, TeamExecutionResult],
+    failed_teams: list[str],
+    wt_paths: dict[str, Path],
+) -> str:
+    """TEAM-15: チームワーカー失敗時のエラー詳細と保持された worktree・次の手順を整形する。"""
+    lines = [
+        f"TEAMS_RUN_ERROR: Worker execution failed for job '{job_id}'. Integration skipped.",
+        f"Failed team(s): {', '.join(failed_teams)}",
+    ]
+    for tid in failed_teams:
+        res = team_results.get(tid)
+        status = res.status if res else "NO_RESULT"
+        err_msg = ""
+        if res is not None:
+            err_msg = str(
+                res.details.get("error")
+                or res.details.get("stderr")
+                or res.details.get("stdout")
+                or ""
+            ).strip()
+        if err_msg:
+            err_line = err_msg.splitlines()[-1][:200]
+            lines.append(f"  - {tid} ({status}): {err_line}")
+        else:
+            lines.append(f"  - {tid} ({status})")
+
+    kept = ", ".join(f"{t.id}={wt_paths[t.id]}" for t in manifest.teams if t.id in wt_paths)
+    if kept:
+        lines.append(f"Worktrees preserved (not deleted): {kept}")
+    lines.append("Next steps:")
+    lines.append(f"  1. Inspect status: `auto-dev teams status --job-id {job_id}`")
+    lines.append(
+        "  2. Inspect or fix the failing team worktree(s), then run "
+        f"`auto-dev teams integrate --job-id {job_id}`."
+    )
+    lines.append(
+        f"  3. Or discard this job with `auto-dev teams cleanup --job-id {job_id} --force`."
+    )
+    return "\n".join(lines)
+
+
+def run_teams_job(
+    repo_dir: Path,
+    job_id: str | None = None,
+    *,
+    maker_cmd: str = "",
+    checker_cmd: str = "",
+    maker_model: str = "gemini-3.8-flash",
+    checker_model: str = "claude-opus-5.5",
+    is_mock: bool = False,
+    worker_timeout: float = 21600.0,
+    verify_timeout: int = 300,
+    verify_script: Path | None = None,
+    spec_path: Path | None = None,
+) -> tuple[dict[str, Any] | None, int, str]:
+    """TEAM-15: prepare → 全チーム並行実行 → integrate を一括実行する。"""
+    resolved_repo = repo_dir.resolve()
+    if worker_timeout <= 0:
+        return None, 2, "TEAMS_RUN_ERROR: --worker-timeout must be a positive number."
+
+    if not is_mock and (not maker_cmd or not checker_cmd):
+        return (
+            None,
+            2,
+            (
+                "CONFIG ERROR: In production mode, both Maker and Checker commands must be configured "
+                "(--maker-cmd and --checker-cmd).\n"
+                "Use --mock if you want to execute with simulated mock agents for testing."
+            ),
+        )
+
+    from auto_developer.audit import verify_model_independence
+
+    ok_models, model_reason = verify_model_independence(maker_model, checker_model)
+    if not ok_models:
+        return None, 2, f"PRE-FLIGHT MODEL POLICY ERROR: {model_reason}"
+
+    prep_payload, prep_code, prep_err = prepare_teams_job(resolved_repo, job_id=job_id)
+    if prep_payload is None:
+        return None, prep_code, prep_err
+
+    effective_job_id = str(prep_payload["job_id"])
+    manifest = load_teams_manifest(resolved_repo)
+    wt_paths: dict[str, Path] = {
+        str(t["team_id"]): Path(str(t["worktree_path"]))
+        for t in prep_payload["teams"]
+    }
+
+    job_rec = _load_team_job_record(resolved_repo, effective_job_id)
+    if job_rec is not None:
+        job_rec["status"] = "RUNNING"
+        job_rec["maker_model"] = maker_model
+        job_rec["checker_model"] = checker_model
+        job_rec["worker_timeout"] = worker_timeout
+        job_rec["is_mock"] = is_mock
+        job_rec["updated_at"] = time.time()
+        _save_team_job_record(resolved_repo, job_rec)
+
+    worker_env = _build_worker_pythonpath_env()
+    config = MultiTeamConfig(
+        job_id=effective_job_id,
+        teams=[
+            TeamWorkerSpec(
+                team_id=team.id,
+                base_branch=manifest.base_ref,
+                env=dict(worker_env),
+            )
+            for team in manifest.teams
+        ],
+        base_branch=manifest.base_ref,
+        integration_verify_script=verify_script,
+    )
+
+    def build_worker_cmd(_team_id: str, wt_path: Path) -> list[str]:
+        cmd = [sys.executable, "-m", "auto_developer.cli", "--work-dir", str(wt_path)]
+        if spec_path is not None:
+            cmd.extend(["--spec", str(spec_path.resolve())])
+        if verify_script is not None:
+            cmd.extend(["--verify-script", str(verify_script.resolve())])
+        cmd.append("run")
+        if is_mock:
+            cmd.append("--mock")
+        if maker_cmd:
+            cmd.extend(["--maker-cmd", maker_cmd])
+        if checker_cmd:
+            cmd.extend(["--checker-cmd", checker_cmd])
+        if maker_model:
+            cmd.extend(["--maker-model", maker_model])
+        if checker_model:
+            cmd.extend(["--checker-model", checker_model])
+        if verify_timeout > 0:
+            cmd.extend(["--timeout", str(verify_timeout)])
+        return cmd
+
+    orchestrator = MultiTeamOrchestrator(repo_dir=resolved_repo)
+    try:
+        team_results = orchestrator.run_workers(
+            config,
+            worker_cmd_factory=build_worker_cmd,
+            timeout_sec=worker_timeout,
+        )
+    except BaseException:
+        orchestrator.terminate_all_workers()
+        raise
+
+    failed_teams = [
+        team.id
+        for team in manifest.teams
+        if team.id not in team_results or not team_results[team.id].success
+    ]
+
+    worker_summary = {
+        team.id: {
+            "success": bool(team_results[team.id].success) if team.id in team_results else False,
+            "status": team_results[team.id].status if team.id in team_results else "NO_RESULT",
+            "branch": team_results[team.id].branch if team.id in team_results else f"team/{team.id}",
+            "head_commit": team_results[team.id].head_commit if team.id in team_results else None,
+            "error": (
+                str(team_results[team.id].details.get("error"))
+                if team.id in team_results and team_results[team.id].details.get("error")
+                else None
+            ),
+        }
+        for team in manifest.teams
+    }
+
+    job_rec = _load_team_job_record(resolved_repo, effective_job_id)
+    if job_rec is not None:
+        job_rec["worker_results"] = worker_summary
+        job_rec["updated_at"] = time.time()
+        if failed_teams:
+            job_rec["status"] = "WORKER_FAILED"
+            job_rec["failed_teams"] = failed_teams
+        _save_team_job_record(resolved_repo, job_rec)
+
+    if failed_teams:
+        return (
+            None,
+            1,
+            _format_worker_failure_message(
+                effective_job_id,
+                manifest,
+                team_results,
+                failed_teams,
+                wt_paths,
+            ),
+        )
+
+    int_payload, int_code, int_err = integrate_teams_job(
+        resolved_repo,
+        job_id=effective_job_id,
+        verify_script=verify_script,
+        timeout_sec=verify_timeout,
+    )
+    if int_payload is None:
+        return None, int_code, int_err
+
+    run_payload = dict(int_payload)
+    run_payload["worker_results"] = worker_summary
+    return run_payload, 0, ""
+
+
+def format_teams_run_text(payload: dict[str, Any]) -> str:
+    """teams run 成功時の人間向け出力を整形する。"""
+    lines = [
+        "=== AUTO DEVELOPER / TEAMS RUN COMPLETED ===",
+        f" Job ID:    {payload['job_id']}",
+    ]
+    worker_results = payload.get("worker_results") or {}
+    if worker_results:
+        lines.append(" Workers:")
+        for tid, winfo in worker_results.items():
+            lines.append(f"   - {tid}: {winfo.get('status', 'UNKNOWN')}")
+    lines.append(format_teams_integrate_text(payload))
+    return "\n".join(lines)
+
+
+def recover_teams_job(
+    repo_dir: Path,
+    job_id: str | None = None,
+    verify_script: Path | None = None,
+) -> tuple[dict[str, Any] | None, int, str]:
+    """TEAM-16: recover_multi_team_job を呼び、中断したマルチチームジョブの復旧・状態出力を行う。"""
+    resolved_repo = repo_dir.resolve()
+    jobs_dir = resolved_repo / ".dev" / "integration_jobs"
+
+    if job_id is not None:
+        if not VALID_JOB_ID_PATTERN.match(job_id):
+            return None, 2, f"TEAMS_RECOVER_ERROR: Invalid job_id '{job_id}'."
+        has_job = (
+            _team_job_record_path(resolved_repo, job_id).is_file()
+            or (jobs_dir / f"{job_id}.json").is_file()
+            or (jobs_dir / job_id / "workers.json").is_file()
+        )
+        if not has_job:
+            return None, 1, f"TEAMS_RECOVER_ERROR: Job '{job_id}' not found."
+        resolved_job_id = job_id
+    else:
+        found = _find_latest_team_job_id(resolved_repo)
+        if found is None:
+            return None, 1, "TEAMS_RECOVER_ERROR: No multi-team job found to recover."
+        resolved_job_id = found
+
+    effective_verify: Path | None = verify_script
+    if effective_verify is None:
+        default_vs = resolved_repo / "scripts" / "verify_local.sh"
+        if default_vs.is_file():
+            effective_verify = default_vs
+
+    orchestrator = MultiTeamOrchestrator(repo_dir=resolved_repo)
+    rec_res = orchestrator.recover_multi_team_job(
+        job_id=resolved_job_id,
+        verify_script=effective_verify,
+        cleanup=False,
+    )
+
+    workers = WorkerRegistry(resolved_repo, resolved_job_id).load()
+    int_state = IntegrationJobState.load(jobs_dir, resolved_job_id)
+    job_rec = _load_team_job_record(resolved_repo, resolved_job_id)
+
+    pipeline_res = rec_res.pipeline_result
+    rc_tag = pipeline_res.release_candidate_tag if pipeline_res else None
+    rc_commit = pipeline_res.release_candidate_commit if pipeline_res else None
+    if rc_tag and not rc_tag.startswith("rc/"):
+        rc_tag = rc_tag.removeprefix("refs/tags/")
+    if rc_tag is None and int_state is not None and int_state.rc_tag:
+        rc_tag = int_state.rc_tag
+    if rc_commit is None and int_state is not None and int_state.rc_commit:
+        rc_commit = int_state.rc_commit
+
+    if not workers and int_state is None and job_rec is not None:
+        status_label = str(job_rec.get("status") or "PREPARED")
+        payload: dict[str, Any] = {
+            "job_id": resolved_job_id,
+            "success": True,
+            "status": status_label,
+            "reclaimed_orphans": [],
+            "unverified_processes": [],
+            "unverified_worktrees": [],
+            "rescued_bundles": [],
+            "reused_bundles": [],
+            "rc_tag": job_rec.get("rc_tag"),
+            "rc_commit": job_rec.get("rc_commit"),
+            "team_results": {},
+            "details": {"message": f"Job '{resolved_job_id}' is in '{status_label}' state; nothing to recover."},
+        }
+        return payload, 0, ""
+
+    status_label = (
+        pipeline_res.status
+        if pipeline_res is not None
+        else ("RECOVERED" if rec_res.success else "RECOVERY_FAILED")
+    )
+
+    if job_rec is not None:
+        if rec_res.success and rc_tag:
+            job_rec["status"] = "INTEGRATED"
+            job_rec["rc_tag"] = rc_tag
+            if rc_commit:
+                job_rec["rc_commit"] = rc_commit
+        elif rec_res.success:
+            job_rec["status"] = status_label
+        else:
+            job_rec["status"] = status_label
+        job_rec["updated_at"] = time.time()
+        _save_team_job_record(resolved_repo, job_rec)
+
+    payload = {
+        "job_id": resolved_job_id,
+        "success": rec_res.success,
+        "status": status_label,
+        "reclaimed_orphans": rec_res.reclaimed_orphans,
+        "unverified_processes": rec_res.unverified_processes,
+        "unverified_worktrees": rec_res.unverified_worktrees,
+        "rescued_bundles": rec_res.rescued_bundles,
+        "reused_bundles": rec_res.reused_bundles,
+        "rc_tag": rc_tag,
+        "rc_commit": rc_commit,
+        "team_results": rec_res.details.get("team_results", {}),
+        "details": rec_res.details,
+    }
+    return payload, (0 if rec_res.success else 1), ""
+
+
+def format_teams_recover_text(payload: dict[str, Any]) -> str:
+    """teams recover の人間向け出力を整形する。"""
+    lines = [
+        "=== AUTO DEVELOPER / TEAMS RECOVERY ===",
+        f" Job ID:               {payload['job_id']}",
+        f" Success:              {payload['success']}",
+        f" Status:               {payload['status']}",
+        f" Reclaimed Orphans:    {', '.join(payload.get('reclaimed_orphans') or []) or 'none'}",
+        f" Unverified Processes: {', '.join(payload.get('unverified_processes') or []) or 'none'}",
+        f" Rescued Bundles:      {', '.join(payload.get('rescued_bundles') or []) or 'none'}",
+        f" Reused Bundles:       {', '.join(payload.get('reused_bundles') or []) or 'none'}",
+    ]
+    if payload.get("rc_tag"):
+        lines.append(f" RC Tag:               {payload['rc_tag']}")
+    if payload.get("rc_commit"):
+        lines.append(f" RC Commit:            {payload['rc_commit']}")
+    team_results = payload.get("team_results") or {}
+    if team_results:
+        lines.append(" Team Results:")
+        for tid, tres in team_results.items():
+            lines.append(
+                f"   - {tid}: status={tres.get('status')} (evidence_preserved={tres.get('evidence_preserved')})"
+            )
+    err = (payload.get("details") or {}).get("error")
+    if err:
+        lines.append(f" Details:              {err}")
+    if payload.get("success"):
+        if payload.get("rc_tag"):
+            lines.append(f"Next: inspect `git show {payload['rc_tag']}` or run `auto-dev teams cleanup --job-id {payload['job_id']}`.")
+        else:
+            lines.append(f"Next: run `auto-dev teams integrate --job-id {payload['job_id']}`.")
+    else:
+        lines.append(f"Next: inspect `auto-dev teams status --job-id {payload['job_id']}` before retrying or cleaning up with `--force`.")
+    return "\n".join(lines)
+
+
+def get_multi_team_report_summary(
+    repo_dir: Path,
+    job_id: str | None = None,
+) -> dict[str, Any] | None:
+    """TEAM-17: NIGHTLY_REPORT.md / brief 表示向けに最新のマルチチームジョブ結果を集約する。"""
+    resolved_repo = repo_dir.resolve()
+    resolved_job_id = job_id or _find_latest_team_job_id(resolved_repo)
+    if resolved_job_id is None:
+        return None
+
+    status_data, code, _ = get_teams_status(resolved_repo, job_id=resolved_job_id)
+    if code != 0 or status_data is None:
+        return None
+
+    jobs_dir = resolved_repo / ".dev" / "integration_jobs"
+    job_rec = _load_team_job_record(resolved_repo, resolved_job_id)
+    int_state = IntegrationJobState.load(jobs_dir, resolved_job_id)
+    workers = WorkerRegistry(resolved_repo, resolved_job_id).load()
+
+    base_ref = "main"
+    if job_rec and job_rec.get("base_ref"):
+        base_ref = str(job_rec["base_ref"])
+    else:
+        try:
+            manifest = load_teams_manifest(resolved_repo)
+            base_ref = manifest.base_ref
+        except (FileNotFoundError, ManifestValidationError, OSError):
+            pass
+
+    rc_tag = (
+        (int_state.rc_tag if int_state and int_state.rc_tag else None)
+        or (str(job_rec["rc_tag"]) if job_rec and job_rec.get("rc_tag") else None)
+    )
+    rc_commit = (
+        (int_state.rc_commit if int_state and int_state.rc_commit else None)
+        or (str(job_rec["rc_commit"]) if job_rec and job_rec.get("rc_commit") else None)
+    )
+
+    overall_state = str(status_data.get("job_state") or "UNKNOWN")
+    if job_rec and job_rec.get("status") == "WORKER_FAILED" and int_state is None:
+        overall_state = "WORKER_FAILED"
+
+    merged_teams = set(int_state.merged_teams) if int_state else set()
+    recorded_workers = (job_rec.get("worker_results") or {}) if job_rec else {}
+
+    teams_out: list[dict[str, Any]] = []
+    pending_decisions: list[str] = []
+    any_worktree_or_branch = False
+
+    for t in status_data.get("teams") or []:
+        tid = str(t["team_id"])
+        w_status = str(t["worker_status"])
+        rec_w = recorded_workers.get(tid, {}) if isinstance(recorded_workers, dict) else {}
+        if rec_w and rec_w.get("status") == "TIMEOUT" and w_status == "UNKNOWN":
+            w_status = "TIMEOUT"
+        elif rec_w and not rec_w.get("success", True) and w_status in ("PREPARED", "UNKNOWN"):
+            w_status = str(rec_w.get("status") or "FAILED")
+
+        w_reg = workers.get(tid)
+        err_detail: str | None = None
+        if w_reg and w_reg.details.get("error"):
+            err_detail = str(w_reg.details["error"])
+        elif isinstance(rec_w, dict) and rec_w.get("error"):
+            err_detail = str(rec_w["error"])
+
+        qbs = list(t.get("quarantine_branches") or [])
+        wt_exists = bool(t.get("worktree_exists"))
+        br_exists = bool(t.get("branch_exists"))
+        if wt_exists or br_exists:
+            any_worktree_or_branch = True
+
+        teams_out.append(
+            {
+                "team_id": tid,
+                "status": w_status,
+                "completed_tasks": int(t.get("completed_tasks", 0)),
+                "total_tasks": int(t.get("total_tasks", 0)),
+                "failed_tasks": int(t.get("failed_tasks", 0)),
+                "branch": str(t.get("branch") or f"team/{tid}"),
+                "branch_exists": br_exists,
+                "worktree_path": str(t.get("worktree_path") or ""),
+                "worktree_exists": wt_exists,
+                "quarantine_branches": qbs,
+                "merged": tid in merged_teams,
+                "error": err_detail,
+            }
+        )
+
+    integration_errors: list[str] = []
+    if int_state and isinstance(int_state.details, dict):
+        raw_errs = int_state.details.get("errors")
+        if isinstance(raw_errs, list):
+            integration_errors.extend(str(e) for e in raw_errs if e)
+        elif int_state.details.get("error"):
+            integration_errors.append(str(int_state.details["error"]))
+
+    is_integrated_ok = bool(rc_tag) and overall_state in ("COMPLETED", "INTEGRATED", "CLEANED_UP")
+    if is_integrated_ok and rc_tag:
+        pending_decisions.append(
+            f"RC タグ `{rc_tag}` の内容を確認し、`{base_ref}` へ取り込むか判断してください: "
+            f"`git diff {base_ref}..{rc_tag}` / `git merge --no-ff {rc_tag}`"
+        )
+        if any_worktree_or_branch:
+            pending_decisions.append(
+                f"作業領域（worktree・チームブランチ）を片付ける場合: `auto-dev teams cleanup --job-id {resolved_job_id}`"
+            )
+    else:
+        for t_info in teams_out:
+            tid = str(t_info["team_id"])
+            qbs = list(t_info["quarantine_branches"])
+            t_status = str(t_info["status"])
+            if qbs:
+                pending_decisions.append(
+                    f"チーム `{tid}` の隔離ブランチ（{', '.join(qbs)}）を確認し、修正・引き継ぎ・破棄を判断してください"
+                )
+            elif t_status in ("FAILED", "TIMEOUT", "CRASHED", "STALE", "UNVERIFIED_PROCESS") or t_info["failed_tasks"] > 0:
+                pending_decisions.append(
+                    f"チーム `{tid}` が `{t_status}` で停止したため統合されていません。状態を確認してください: "
+                    f"`auto-dev teams status --job-id {resolved_job_id}`"
+                )
+
+        if overall_state in ("MERGING", "VERIFYING", "PREPARING", "RECOVERY_REQUIRED", "RUNNING") or any(
+            t["status"] in ("STALE", "UNVERIFIED_PROCESS") for t in teams_out
+        ):
+            pending_decisions.append(
+                f"中断または未確認プロセスの復旧を実行してください: `auto-dev teams recover --job-id {resolved_job_id}`"
+            )
+        elif overall_state == "CONFLICT":
+            pending_decisions.append(
+                f"統合コンフリクトを該当 worktree で解消してコミットし、`auto-dev teams integrate --job-id {resolved_job_id}` を再実行してください"
+            )
+        elif overall_state in ("VERIFICATION_FAILED", "FAILED"):
+            pending_decisions.append(
+                f"統合ゲート失敗の原因を修正し、`auto-dev teams integrate --job-id {resolved_job_id}` を再実行してください"
+            )
+        elif overall_state == "PREPARED":
+            pending_decisions.append(
+                f"各チームのタスク完了後、`auto-dev teams integrate --job-id {resolved_job_id}` で統合を実行してください"
+            )
+
+        if any_worktree_or_branch:
+            pending_decisions.append(
+                f"ジョブを破棄してやり直す場合: `auto-dev teams cleanup --job-id {resolved_job_id} --force`"
+            )
+
+    return {
+        "job_id": resolved_job_id,
+        "job_state": overall_state,
+        "base_ref": base_ref,
+        "rc_tag": rc_tag,
+        "rc_commit": rc_commit,
+        "is_integrated": is_integrated_ok,
+        "teams": teams_out,
+        "integration_errors": integration_errors,
+        "pending_decisions": pending_decisions,
+    }

@@ -308,6 +308,58 @@ class MorningReporter:
             elif status_str in ("AUDIT_FAILED", "AUDIT_PENDING"):
                 lines.append(f"- **保留/エラー理由**: {audit_stage.get('error', 'Unknown')}")
 
+        multi_team_data = summary_data.get("multi_team")
+        if isinstance(multi_team_data, dict):
+            rc_tag = multi_team_data.get("rc_tag") or "未発行 (Not Created)"
+            rc_commit = multi_team_data.get("rc_commit")
+            base_ref = multi_team_data.get("base_ref") or "main"
+            lines.extend(
+                [
+                    "",
+                    "## マルチチーム実行結果 (Multi-Team Execution)",
+                    f"- **ジョブID**: `{multi_team_data.get('job_id', 'N/A')}`",
+                    f"- **ジョブ状態**: `{multi_team_data.get('job_state', 'UNKNOWN')}`",
+                    f"- **RC タグ**: `{rc_tag}`",
+                ]
+            )
+            if rc_commit:
+                lines.append(f"- **RC コミット**: `{rc_commit}`")
+            lines.append(f"- **基点ブランチ**: `{base_ref}`")
+
+            mt_teams = multi_team_data.get("teams") or []
+            if mt_teams:
+                lines.extend(
+                    [
+                        "",
+                        "### チームごとの結果 (Per-Team Results)",
+                        "| Team | Status | Tasks | Branch | Quarantine |",
+                        "| :--- | :--- | :--- | :--- | :--- |",
+                    ]
+                )
+                for t in mt_teams:
+                    tid = t.get("team_id", "")
+                    t_status = t.get("status", "UNKNOWN")
+                    comp_n = int(t.get("completed_tasks", 0))
+                    tot_n = int(t.get("total_tasks", 0))
+                    fail_n = int(t.get("failed_tasks", 0))
+                    task_str = f"{comp_n} / {tot_n}" + (f" (failed: {fail_n})" if fail_n else "")
+                    branch = t.get("branch", "")
+                    qbs = t.get("quarantine_branches") or []
+                    q_str = ", ".join(f"`{q}`" for q in qbs) if qbs else "none"
+                    lines.append(f"| `{tid}` | {t_status} | {task_str} | `{branch}` | {q_str} |")
+
+            int_errors = multi_team_data.get("integration_errors") or []
+            if int_errors:
+                lines.extend(["", "### 統合エラー詳細 (Integration Errors)"])
+                for err in int_errors:
+                    lines.append(f"- {err}")
+
+            mt_decisions = multi_team_data.get("pending_decisions") or []
+            if mt_decisions:
+                lines.extend(["", "### 判断待ちの事項 (Pending Decisions)"])
+                for dec in mt_decisions:
+                    lines.append(f"- {dec}")
+
         lines.extend(["", "## 要確認・隔離事項 (Quarantined Work)"])
         quarantined = summary_data.get("quarantined_task")
         if quarantined:
@@ -347,6 +399,20 @@ class MorningReporter:
                     "   ```",
                 ]
             )
+        elif isinstance(multi_team_data, dict):
+            lines.extend(
+                [
+                    "単一チーム実行の隔離タスクはありません（チームごとの隔離・状態は「マルチチーム実行結果」を参照してください）。",
+                    "",
+                    "## あなたに判断してほしいこと (Next Actions for Developer)",
+                ]
+            )
+            mt_decisions = multi_team_data.get("pending_decisions") or []
+            if mt_decisions:
+                for dec in mt_decisions:
+                    lines.append(f"- {dec}")
+            else:
+                lines.append(f"- `auto-dev teams status --job-id {multi_team_data.get('job_id', '')}` で状態を確認してください。")
         else:
             lines.extend(
                 [
@@ -493,6 +559,31 @@ class MorningReporter:
                     " All tasks completed smoothly. Ready for review or push!",
                 ]
             )
+
+        multi_team_data = summary_data.get("multi_team")
+        if isinstance(multi_team_data, dict):
+            rc_tag = multi_team_data.get("rc_tag") or "未発行 (Not Created)"
+            lines.extend(
+                [
+                    "------------------------------------------------------------",
+                    " [Multi-Team Execution]",
+                    f"  Job ID: {multi_team_data.get('job_id', 'N/A')} (state={multi_team_data.get('job_state', 'UNKNOWN')})",
+                    f"  RC Tag: {rc_tag}",
+                ]
+            )
+            for t in multi_team_data.get("teams") or []:
+                qbs = ", ".join(t.get("quarantine_branches") or []) or "none"
+                lines.append(
+                    f"  - {t.get('team_id')}: status={t.get('status')} | "
+                    f"tasks={t.get('completed_tasks', 0)}/{t.get('total_tasks', 0)} | "
+                    f"branch={t.get('branch')} | quarantine={qbs}"
+                )
+            mt_decisions = multi_team_data.get("pending_decisions") or []
+            if mt_decisions:
+                lines.append(" [Pending Decisions]")
+                for dec in mt_decisions:
+                    lines.append(f"  * {dec}")
+
         lines.append("============================================================")
         return "\n".join(lines)
 
@@ -761,7 +852,37 @@ class MorningReporter:
         except OSError:
             pass
 
+        # 7. マルチチームジョブ結果の集約 (TEAM-17)
+        multi_team_data: dict[str, Any] | None = None
+        try:
+            from auto_developer.multi_team import get_multi_team_report_summary
+
+            multi_team_data = get_multi_team_report_summary(effective_repo)
+        except Exception:  # noqa: BLE001
+            multi_team_data = None
+
         status = "COMPLETED" if (total_tasks > 0 and succeeded_count == total_tasks) else "IN_PROGRESS"
+        if multi_team_data is not None:
+            mt_teams = multi_team_data.get("teams") or []
+            mt_total = sum(int(t.get("total_tasks", 0)) for t in mt_teams)
+            mt_done = sum(int(t.get("completed_tasks", 0)) for t in mt_teams)
+            mt_failed = sum(int(t.get("failed_tasks", 0)) for t in mt_teams)
+            if mt_total > 0 and succeeded_count == 0:
+                total_tasks = mt_total
+                succeeded_count = mt_done
+            mt_state = str(multi_team_data.get("job_state") or "")
+            if multi_team_data.get("is_integrated"):
+                status = "COMPLETED"
+            elif mt_failed > 0 or quarantined_count > 0 or mt_state in (
+                "WORKER_FAILED",
+                "FAILED",
+                "CONFLICT",
+                "VERIFICATION_FAILED",
+                "RECOVERY_REQUIRED",
+            ):
+                status = "FAILED"
+            elif mt_state:
+                status = mt_state
 
         summary_data: dict[str, Any] = {
             "status": status,
@@ -775,6 +896,8 @@ class MorningReporter:
         }
         if audit_stage_data:
             summary_data["audit_stage"] = audit_stage_data
+        if multi_team_data is not None:
+            summary_data["multi_team"] = multi_team_data
 
         self.write_report(effective_report_path, summary_data, repo_dir=effective_repo)
         return effective_report_path

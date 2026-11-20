@@ -48,7 +48,7 @@
 - [x] 2. チーム文脈の決定: worktree 内の `run` / `pre-flight` / `verify-step` / `commit-step` / `rollback-step` が、ブランチ `team/<id>` とコミット済みの `teams.json` から `owns`・計画ファイルを決め、担当範囲外の変更を検知する。`teams.json` を保護ファイルに追加し、`run` に `--team-id` / `--owns` / `--plan` を追加する（Red-First）（TEAM-11）
 - [x] 3. `auto-dev teams prepare` / `teams status` / `teams cleanup`（前回のジョブが残っているときの拒否と案内を含む）（Red-First）（TEAM-13, TEAM-16）
 - [x] 4. `auto-dev teams integrate`（完了確認、Bundle の生成・保全、統合ゲート、RC タグと取り込みコマンドの表示、失敗時に worktree を残す）（Red-First）（TEAM-14）
-- [ ] 5. `auto-dev teams run`（`--worker-timeout`、Maker / Checker / モデル名 / `--mock` の受け渡し）と `teams recover`、チームのジョブの結果を NIGHTLY_REPORT.md と `brief` に表示（Red-First）（TEAM-15, TEAM-16, TEAM-17）
+- [x] 5. `auto-dev teams run`（`--worker-timeout`、Maker / Checker / モデル名 / `--mock` の受け渡し）と `teams recover`、チームのジョブの結果を NIGHTLY_REPORT.md と `brief` に表示（Red-First）（TEAM-15, TEAM-16, TEAM-17）
 - [ ] 6. Bundle の `format_version` / `tool_version` と、旧形式の Bundle を拒否する処理（Red-First）（REL-1）
 - [ ] 7. 2チーム構成の E2E 受入テスト（一括実行経路・低レベルサブコマンド経路・担当範囲外の変更の隔離・設定エラー）（TEAM-19）
 - [ ] 8. スキルの改修: `/nightly-setup` のチーム初期化、`/nightly-run` のチーム経路（prepare → 各 worktree での直列ループ → integrate）（TEAM-18）
