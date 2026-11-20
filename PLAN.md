@@ -51,7 +51,7 @@
 - [x] 5. `auto-dev teams run`（`--worker-timeout`、Maker / Checker / モデル名 / `--mock` の受け渡し）と `teams recover`、チームのジョブの結果を NIGHTLY_REPORT.md と `brief` に表示（Red-First）（TEAM-15, TEAM-16, TEAM-17）
 - [x] 6. Bundle の `format_version` / `tool_version` と、旧形式の Bundle を拒否する処理（Red-First）（REL-1）
 - [x] 7. 2チーム構成の E2E 受入テスト（一括実行経路・低レベルサブコマンド経路・担当範囲外の変更の隔離・設定エラー）（TEAM-19）
-- [ ] 8. スキルの改修: `/nightly-setup` のチーム初期化、`/nightly-run` のチーム経路（prepare → 各 worktree での直列ループ → integrate）（TEAM-18）
+- [x] 8. スキルの改修: `/nightly-setup` のチーム初期化、`/nightly-run` のチーム経路（prepare → 各 worktree での直列ループ → integrate）（TEAM-18）
 
 ## 止まっていること・判断待ち
 - なし。
