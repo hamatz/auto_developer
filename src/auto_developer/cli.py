@@ -136,6 +136,40 @@ class AcceptanceImmunityTest(unittest.TestCase):
         self.assertTrue(True)
 """
 
+DEFAULT_GITIGNORE_ENTRIES: tuple[str, ...] = (
+    ".dev/",
+    "logs/",
+    "NIGHTLY_REPORT.md",
+    "__pycache__/",
+    "*.py[cod]",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+)
+
+
+def _ensure_gitignore_entries(target_dir: Path) -> None:
+    """`.gitignore` に Auto Developer と Python の生成物を重複なく追記する。"""
+    gitignore = target_dir / ".gitignore"
+    if gitignore.exists():
+        content = gitignore.read_text(encoding="utf-8")
+        existing_lines = {line.strip() for line in content.splitlines()}
+        to_add = [entry for entry in DEFAULT_GITIGNORE_ENTRIES if entry not in existing_lines]
+        if to_add:
+            prefix = ""
+            if content:
+                prefix = content if content.endswith("\n") else content + "\n"
+                if not prefix.endswith("\n\n"):
+                    prefix += "\n"
+            updated = prefix + "# Auto Developer artifacts\n" + "\n".join(to_add) + "\n"
+            gitignore.write_text(updated, encoding="utf-8")
+            print(f"  ✓ Added {to_add} to .gitignore")
+        else:
+            print("  - .gitignore already contains Auto Developer artifacts, skipping")
+    else:
+        gitignore.write_text("\n".join(DEFAULT_GITIGNORE_ENTRIES) + "\n", encoding="utf-8")
+        print("  ✓ Created .gitignore with Auto Developer artifacts")
+
 
 def init_project(target_dir: Path) -> int:
     """指定ディレクトリに Auto Developer 規律ファイル群を生成する。"""
@@ -168,20 +202,7 @@ def init_project(target_dir: Path) -> int:
         print("  - SPEC.md already exists, skipping")
 
     # 4. .gitignore
-    gitignore = target_dir / ".gitignore"
-    needed_ignores = [".dev/", "logs/", "NIGHTLY_REPORT.md"]
-    if gitignore.exists():
-        content = gitignore.read_text(encoding="utf-8")
-        to_add = [ig for ig in needed_ignores if ig not in content]
-        if to_add:
-            content += "\n# Auto Developer artifacts\n" + "\n".join(to_add) + "\n"
-            gitignore.write_text(content, encoding="utf-8")
-            print(f"  ✓ Added {to_add} to .gitignore")
-        else:
-            print("  - .gitignore already contains Auto Developer artifacts, skipping")
-    else:
-        gitignore.write_text("\n".join(needed_ignores) + "\n", encoding="utf-8")
-        print("  ✓ Created .gitignore with Auto Developer artifacts")
+    _ensure_gitignore_entries(target_dir)
 
     # 5. tests/test_smoke.py (初期検証用テスト)
     smoke_test = target_dir / "tests" / "test_smoke.py"
@@ -376,6 +397,7 @@ def init_teams_project(target_dir: Path, team_ids: list[str] | None = None) -> i
         else:
             print(f"  - {plan_rel} already exists, skipping")
 
+    _ensure_gitignore_entries(target_dir)
     return 0
 
 
