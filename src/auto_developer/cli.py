@@ -1331,16 +1331,32 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     elif args.subcommand == "report":
+        team_ctx, ctx_err = _resolve_cli_team_context(
+            work_dir,
+            ref="HEAD",
+            explicit_plan=args.plan,
+        )
+        if ctx_err != 0:
+            return ctx_err
+        effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
         out_p = args.out or report_path
         gen_p = reporter.generate_standalone_report(
             report_path=out_p,
             repo_dir=work_dir,
-            plan_path=plan_path,
+            plan_path=effective_plan_path,
         )
         print(f"REPORT GENERATED: {gen_p}")
         return 0
 
     elif args.subcommand in ("brief", "morning-brief"):
+        team_ctx, ctx_err = _resolve_cli_team_context(
+            work_dir,
+            ref="HEAD",
+            explicit_plan=args.plan,
+        )
+        if ctx_err != 0:
+            return ctx_err
+        effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
         if state_file.exists():
             state = JobState.load(state_file)
             summary: dict[str, Any] = {
@@ -1359,7 +1375,12 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as e:  # noqa: BLE001
                 print(f"REPORT_WARNING: Failed to summarize multi-team job: {e}", file=sys.stderr)
             try:
-                reporter.write_report(report_path, summary, repo_dir=work_dir)
+                reporter.write_report(
+                    report_path,
+                    summary,
+                    repo_dir=work_dir,
+                    plan_path=effective_plan_path,
+                )
             except Exception as e:  # noqa: BLE001
                 print(f"REPORT_WARNING: Failed to write report from job_state: {e}", file=sys.stderr)
             print(reporter.format_console_brief(summary))
@@ -1369,7 +1390,7 @@ def main(argv: list[str] | None = None) -> int:
                 gen_p = reporter.generate_standalone_report(
                     report_path=report_path,
                     repo_dir=work_dir,
-                    plan_path=plan_path,
+                    plan_path=effective_plan_path,
                 )
                 if gen_p.exists():
                     print(gen_p.read_text(encoding="utf-8"))
@@ -1445,16 +1466,24 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if rec_result.success else 1
 
     elif args.subcommand == "bundle":
+        team_ctx, ctx_err = _resolve_cli_team_context(
+            work_dir,
+            ref="HEAD",
+            explicit_plan=args.plan,
+        )
+        if ctx_err != 0:
+            return ctx_err
+        effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
         try:
             reporter.generate_standalone_report(
                 report_path=report_path,
                 repo_dir=work_dir,
-                plan_path=plan_path,
+                plan_path=effective_plan_path,
             )
         except Exception as e:  # noqa: BLE001
             print(f"REPORT_WARNING: Failed to refresh report before bundle: {e}", file=sys.stderr)
 
-        bundler = EvidenceBundler(repo_dir=work_dir)
+        bundler = EvidenceBundler(repo_dir=work_dir, plan_path=effective_plan_path)
         out_path = bundler.create_bundle(dest_path=args.out, job_id=args.job_id)
         print(f"BUNDLE CREATED: {out_path}")
         return 0

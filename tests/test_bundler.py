@@ -989,6 +989,289 @@ class TestEvidenceBundler(unittest.TestCase):
         self._rewrite_manifest(no_ev_zip, no_ev_legacy_zip, lambda m: m.pop("format_version", None))
         self.assertEqual(main(["--work-dir", str(self.repo), "verify-bundle", str(no_ev_legacy_zip)]), 1)
 
+    def test_bdl_3_bundle_selects_only_completed_plan_tasks_and_records_excluded(self):
+        """BDL-3: 対象 PLAN.md（CORE-10 範囲）の - [x] タスクの記録のみを Bundle に入れ、対象外を excluded_records に記録すること。"""
+        import hashlib
+
+        (self.repo / "PLAN.md").write_text(
+            "# PLAN.md\n\n"
+            "<!--\n"
+            "## ステップ\n"
+            "- [x] 90. Commented task\n"
+            "-->\n\n"
+            "## ステップ\n"
+            "- [x] 1. Completed task\n"
+            "- [ ] 2. Pending task\n"
+            "- [ ] 3. Failed task **[FAILED]**\n\n"
+            "## 別の節\n"
+            "- [x] 91. Out-of-scope section task\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "PLAN.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: update plan [refs: 1]"], cwd=self.repo, check=True)
+
+        head_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        head_tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        spec_hash = hashlib.sha256((self.repo / "SPEC.md").read_bytes()).hexdigest()
+
+        records_dir = self.repo / ".git" / "nightly_evidence" / "records"
+        records_dir.mkdir(parents=True, exist_ok=True)
+        # 1: 現在の完了タスク（正しい SPEC hash & tree）
+        (records_dir / "task_1.json").write_text(
+            json.dumps({
+                "task_id": "1",
+                "checkpoint": "chk1",
+                "commit": {"sha": head_commit, "tree_sha": head_tree},
+                "tree_sha": head_tree,
+                "spec_sha": spec_hash,
+                "checker": {"decision": "APPROVE", "reason": "ok"},
+                "status": "COMPLETED",
+            }),
+            encoding="utf-8",
+        )
+        # 2, 3, 8 (前フェーズ残骸), 90 (コメント内), 91 (別節): 古い SPEC hash を持つ対象外レコード
+        stale_spec_hash = "0" * 64
+        for stale_id in ["2", "3", "8", "90", "91"]:
+            (records_dir / f"task_{stale_id}.json").write_text(
+                json.dumps({
+                    "task_id": stale_id,
+                    "checkpoint": "old_chk",
+                    "commit": {"sha": head_commit, "tree_sha": head_tree},
+                    "tree_sha": head_tree,
+                    "spec_sha": stale_spec_hash,
+                    "checker": {"decision": "APPROVE", "reason": "stale"},
+                    "status": "COMPLETED",
+                }),
+                encoding="utf-8",
+            )
+
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        out_zip = bundler.create_bundle(dest_path=self.repo / "bdl3_bundle.zip")
+
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            namelist = zf.namelist()
+            self.assertIn("evidence/task_1.json", namelist)
+            for stale_id in ["2", "3", "8", "90", "91"]:
+                self.assertNotIn(f"evidence/task_{stale_id}.json", namelist)
+
+            manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+            self.assertEqual([t["task_id"] for t in manifest["tasks"]], ["1"])
+            self.assertIn("excluded_records", manifest)
+            excluded_by_id = {e["task_id"]: e for e in manifest["excluded_records"]}
+            self.assertEqual(set(excluded_by_id.keys()), {"2", "3", "8", "90", "91"})
+            for tid, entry in excluded_by_id.items():
+                self.assertTrue(entry.get("reason"), f"Missing reason for excluded task {tid}")
+
+        # 対象外レコードが除外された結果、verify_bundle は VERIFIED になること
+        v_res = bundler.verify_bundle(out_zip)
+        self.assertTrue(v_res.is_valid, f"Expected VERIFIED, errors={v_res.errors}")
+        self.assertEqual(v_res.status, "VERIFIED")
+
+        # BDL-2 検査は弱めない: 古い SPEC hash のレコードを ZIP と manifest に再混入したら INVALID になること
+        tampered_zip = self.repo / "bdl3_reinjected.zip"
+        stale_rec_bytes = (records_dir / "task_8.json").read_bytes()
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            extracted = {name: zf.read(name) for name in zf.namelist()}
+        extracted["evidence/task_8.json"] = stale_rec_bytes
+        m_obj = json.loads(extracted["bundle_manifest.json"].decode("utf-8"))
+        m_obj["tasks"].append({
+            "task_id": "8",
+            "commit": head_commit,
+            "tree_sha": head_tree,
+            "spec_sha": stale_spec_hash,
+            "checker": {"decision": "APPROVE", "reason": "stale"},
+            "checker_decision": "APPROVE",
+            "status": "COMPLETED",
+        })
+        m_obj["file_hashes"] = {
+            name: hashlib.sha256(data).hexdigest()
+            for name, data in extracted.items()
+            if name != "bundle_manifest.json"
+        }
+        extracted["bundle_manifest.json"] = json.dumps(m_obj, ensure_ascii=False, indent=2).encode("utf-8")
+        with zipfile.ZipFile(tampered_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for name, data in extracted.items():
+                zf.writestr(name, data)
+
+        reinjected_res = bundler.verify_bundle(tampered_zip)
+        self.assertFalse(reinjected_res.is_valid)
+        self.assertEqual(reinjected_res.status, "INVALID")
+
+    def test_bdl_3_bundle_fallback_when_no_readable_tasks_or_missing_plan(self):
+        """BDL-3: 計画ファイルにタスクとして読める行がない場合や計画ファイルがない場合は、従来どおり全記録を対象にすること。"""
+        records_dir = self.repo / ".git" / "nightly_evidence" / "records"
+        (records_dir / "task_2.json").write_text(
+            json.dumps({
+                "task_id": "2",
+                "checkpoint": "chk2",
+                "tree_sha": "tree2",
+                "spec_sha": "spec2",
+                "checker": {"decision": "APPROVE"},
+                "status": "COMPLETED",
+            }),
+            encoding="utf-8",
+        )
+
+        # Case 1: 番号なしの行のみ（parse_plan が空）
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        zip_unparsed = bundler.create_bundle(dest_path=self.repo / "fallback_unparsed.zip")
+        with zipfile.ZipFile(zip_unparsed, "r") as zf:
+            self.assertIn("evidence/task_1.json", zf.namelist())
+            self.assertIn("evidence/task_2.json", zf.namelist())
+            manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+            self.assertEqual(manifest.get("excluded_records"), [])
+
+        # Case 2: 計画ファイル自体が存在しない
+        (self.repo / "PLAN.md").unlink()
+        zip_missing = bundler.create_bundle(dest_path=self.repo / "fallback_missing.zip")
+        with zipfile.ZipFile(zip_missing, "r") as zf:
+            self.assertIn("evidence/task_1.json", zf.namelist())
+            self.assertIn("evidence/task_2.json", zf.namelist())
+            manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+            self.assertEqual(manifest.get("excluded_records"), [])
+
+    def test_bdl_3_team_worktree_uses_team_plan_and_excludes_other_records(self):
+        """BDL-3: チーム worktree ではそのチームの計画ファイルを参照し、対象外・親リポジトリ由来の記録を除外すること。"""
+        import hashlib
+
+        from auto_developer.cli import main
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("# SPEC\n- BDL-3\n", encoding="utf-8")
+            # ルート PLAN.md には task 9 が完了、task 1 は未完了とする
+            (repo / "PLAN.md").write_text(
+                "# Root PLAN\n\n## ステップ\n- [ ] 1. Root pending\n- [x] 9. Root done\n",
+                encoding="utf-8",
+            )
+            (repo / "plans").mkdir(parents=True, exist_ok=True)
+            (repo / "plans" / "core.md").write_text(
+                "# PLAN (core)\n\n## ステップ\n- [ ] 1. Core task 1\n- [ ] 2. Core task 2\n",
+                encoding="utf-8",
+            )
+            (repo / "plans" / "ui.md").write_text(
+                "# PLAN (ui)\n\n## ステップ\n- [ ] 1. UI task 1\n",
+                encoding="utf-8",
+            )
+            (repo / "src" / "core").mkdir(parents=True, exist_ok=True)
+            (repo / "src" / "ui").mkdir(parents=True, exist_ok=True)
+            (repo / "src" / "core" / "app.py").write_text("X = 1\n", encoding="utf-8")
+            (repo / "src" / "ui" / "view.py").write_text("Y = 1\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            verify_sh = repo / "scripts" / "verify_local.sh"
+            verify_sh.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            verify_sh.chmod(0o755)
+            (repo / "teams.json").write_text(
+                json.dumps({
+                    "version": 1,
+                    "project": "demo",
+                    "base": {"ref": "main", "require_clean": True},
+                    "teams": [
+                        {"id": "core", "plan": "plans/core.md", "owns": ["src/core/**"], "depends_on": []},
+                        {"id": "ui", "plan": "plans/ui.md", "owns": ["src/ui/**"], "depends_on": []},
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            # 親リポジトリに別フェーズの残骸 task_8.json と task_9.json を配置
+            main_records = repo / ".git" / "nightly_evidence" / "records"
+            main_records.mkdir(parents=True, exist_ok=True)
+            for rid in ["8", "9"]:
+                (main_records / f"task_{rid}.json").write_text(
+                    json.dumps({
+                        "task_id": rid,
+                        "commit": {"sha": "a" * 40, "tree_sha": "b" * 40},
+                        "tree_sha": "b" * 40,
+                        "spec_sha": "c" * 64,
+                        "checker": {"decision": "APPROVE"},
+                        "status": "COMPLETED",
+                    }),
+                    encoding="utf-8",
+                )
+
+            self.assertEqual(main(["--work-dir", str(repo), "teams", "prepare", "--job-id", "job-bdl3"]), 0)
+            core_wt = repo / ".dev" / "worktrees" / "core"
+
+            # core worktree で task 1 のみ完了コミットし、.dev/evidence に task_1 と未完了 task_2 を配置
+            (core_wt / "plans" / "core.md").write_text(
+                "# PLAN (core)\n\n## ステップ\n- [x] 1. Core task 1\n- [ ] 2. Core task 2\n",
+                encoding="utf-8",
+            )
+            (core_wt / "src" / "core" / "app.py").write_text("X = 2\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=core_wt, check=True)
+            subprocess.run(["git", "commit", "-m", "core task 1 [refs: 1]"], cwd=core_wt, check=True)
+
+            wt_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=core_wt, capture_output=True, text=True, check=True
+            ).stdout.strip()
+            wt_tree = subprocess.run(
+                ["git", "rev-parse", "HEAD^{tree}"], cwd=core_wt, capture_output=True, text=True, check=True
+            ).stdout.strip()
+            wt_spec = hashlib.sha256((core_wt / "SPEC.md").read_bytes()).hexdigest()
+
+            wt_ev = core_wt / ".dev" / "evidence"
+            wt_ev.mkdir(parents=True, exist_ok=True)
+            (wt_ev / "task_1.json").write_text(
+                json.dumps({
+                    "task_id": "1",
+                    "commit": {"sha": wt_head, "tree_sha": wt_tree},
+                    "tree_sha": wt_tree,
+                    "spec_sha": wt_spec,
+                    "checker": {"decision": "APPROVE", "reason": "ok"},
+                    "status": "COMPLETED",
+                }),
+                encoding="utf-8",
+            )
+            (wt_ev / "task_2.json").write_text(
+                json.dumps({
+                    "task_id": "2",
+                    "commit": {"sha": wt_head, "tree_sha": wt_tree},
+                    "tree_sha": wt_tree,
+                    "spec_sha": "d" * 64,
+                    "checker": {"decision": "APPROVE", "reason": "stale"},
+                    "status": "COMPLETED",
+                }),
+                encoding="utf-8",
+            )
+
+            out_zip = core_wt / "core_bundle.zip"
+            self.assertEqual(main(["--work-dir", str(core_wt), "bundle", "--out", str(out_zip)]), 0)
+
+            with zipfile.ZipFile(out_zip, "r") as zf:
+                names = zf.namelist()
+                self.assertIn("evidence/task_1.json", names)
+                self.assertNotIn("evidence/task_2.json", names)
+                self.assertNotIn("evidence/task_8.json", names)
+                self.assertNotIn("evidence/task_9.json", names)
+                manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+                self.assertEqual([t["task_id"] for t in manifest["tasks"]], ["1"])
+                excluded_ids = {e["task_id"] for e in manifest.get("excluded_records", [])}
+                self.assertEqual(excluded_ids, {"2", "8", "9"})
+
+                # 同梱された NIGHTLY_REPORT.md も core の計画に基づくこと
+                report_text = zf.read("NIGHTLY_REPORT.md").decode("utf-8")
+                self.assertIn("`task-1`", report_text)
+                self.assertNotIn("`task-2`", report_text)
+                self.assertNotIn("`task-8`", report_text)
+                self.assertNotIn("`task-9`", report_text)
+
+            v_res = EvidenceBundler(repo_dir=core_wt).verify_bundle(out_zip)
+            self.assertTrue(v_res.is_valid, f"Expected VERIFIED, errors={v_res.errors}")
+            self.assertEqual(v_res.status, "VERIFIED")
+
+
 
 
 

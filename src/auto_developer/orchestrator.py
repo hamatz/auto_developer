@@ -679,7 +679,7 @@ class NightlyOrchestrator:
 
             bundle_rel_path = None
             try:
-                bundler = EvidenceBundler(repo_dir=self.repo_dir)
+                bundler = EvidenceBundler(repo_dir=self.repo_dir, plan_path=self.plan_path)
                 b_path = bundler.create_bundle(job_id=job_state.job_id)
                 bundle_rel_path = str(b_path.resolve().relative_to(self.repo_dir.resolve()))
             except (OSError, subprocess.SubprocessError) as e:
@@ -703,6 +703,7 @@ class NightlyOrchestrator:
                     "bundle_path": bundle_rel_path,
                     "audit_stage": audit_stage_result,
                 },
+                plan_path=self.plan_path,
             )
             print(f"\nExecution complete! Report written to {self.report_path}")
         else:
@@ -974,7 +975,7 @@ class NightlyOrchestrator:
 
         bundle_rel_path = None
         try:
-            bundler = EvidenceBundler(repo_dir=self.repo_dir)
+            bundler = EvidenceBundler(repo_dir=self.repo_dir, plan_path=self.plan_path)
             b_path = bundler.create_bundle(job_id=job_state.job_id)
             bundle_rel_path = str(b_path.resolve().relative_to(self.repo_dir.resolve()))
         except (OSError, subprocess.SubprocessError) as e:
@@ -993,5 +994,6 @@ class NightlyOrchestrator:
                 "quarantined_task": quarantined_info,
                 "bundle_path": bundle_rel_path,
             },
+            plan_path=self.plan_path,
         )
         return 1

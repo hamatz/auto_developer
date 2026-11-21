@@ -123,6 +123,51 @@ class TaskDispatcher:
         plan_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def resolve_target_plan_path(
+    repo_dir: Path,
+    explicit_plan_path: Path | None = None,
+) -> Path:
+    """単一チームでは PLAN.md、チーム worktree ではそのチームの計画ファイルを返す。"""
+    resolved_repo = repo_dir.resolve()
+    if explicit_plan_path is not None:
+        return (
+            explicit_plan_path
+            if explicit_plan_path.is_absolute()
+            else (resolved_repo / explicit_plan_path)
+        )
+    try:
+        from auto_developer.manifest import ManifestValidationError, resolve_team_context
+
+        team_ctx = resolve_team_context(resolved_repo)
+        if team_ctx is not None:
+            return team_ctx.plan_path
+    except (ManifestValidationError, OSError):
+        pass
+    return resolved_repo / "PLAN.md"
+
+
+def get_plan_task_states(
+    plan_path: Path,
+) -> tuple[bool, set[str], set[str], set[str]]:
+    """計画ファイルの有効範囲（CORE-10）から (has_tasks, completed_ids, pending_ids, failed_ids) を返す。"""
+    if not plan_path.is_file():
+        return False, set(), set(), set()
+    try:
+        tasks = TaskDispatcher().parse_plan(plan_path)
+    except OSError:
+        return False, set(), set(), set()
+    if not tasks:
+        return False, set(), set(), set()
+    completed_ids = {t.task_id for t in tasks if t.is_completed}
+    failed_ids = {t.task_id for t in tasks if not t.is_completed and t.is_failed} - completed_ids
+    pending_ids = (
+        {t.task_id for t in tasks if not t.is_completed and not t.is_failed}
+        - completed_ids
+        - failed_ids
+    )
+    return True, completed_ids, pending_ids, failed_ids
+
+
 class AuditDispatcher:
     """監査指摘 (AuditFinding) を RedTestVerifier で検証し、真正な Red を PLAN.md に自動登録する。"""
 

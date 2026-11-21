@@ -65,7 +65,7 @@
 - [x] 1. OS に依存しない期待値: Linux で失敗する既存の3件を、守るべき性質で書き直す。`AUTO_DEV_REQUIRE_SANDBOX=1` のときに、サンドボックスのテストのスキップやモックへの切り替えを失敗にする共通の仕組みを用意する（SBX-4）
 - [x] 2. サンドボックスの実働確認: 最小のコマンドで実際に起動できるかを判定してキャッシュし、起動できなければ OS ごとの対処を含む `SANDBOX_UNAVAILABLE` を返す（Red-First）（SBX-3）
 - [x] 3. Linux の bwrap の中で実際に実行し、ホストの機密ファイル・許可していないパス・ホームディレクトリ・元のリポジトリが読めないことを確かめるテストを追加する（macOS では、理由を示してスキップしてよい）（SBX-5）
-- [ ] 4. Bundle とレポートに入れる記録を、対象の計画で完了したタスクのものに限り、対象外の記録を manifest の `excluded_records` に残す（Red-First）（BDL-3）
+- [x] 4. Bundle とレポートに入れる記録を、対象の計画で完了したタスクのものに限り、対象外の記録を manifest の `excluded_records` に残す（Red-First）（BDL-3）
 - [ ] 5. `teams init` が `base.ref` に現在のブランチ名を書く（コミットのないリポジトリ・detached HEAD を含む）（Red-First）（TEAM-25）
 - [ ] 6. 統合に成功したジョブの `teams cleanup` で `integration/<job_id>` を削除する（RC タグは残し、失敗・未完了のジョブでは削除しない）（Red-First）（TEAM-26）
 - [ ] 7. チームのジョブの「判断待ちの事項」に、そのジョブで判断すべきことだけを表示する（Red-First）（RPT-5）

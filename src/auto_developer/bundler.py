@@ -93,8 +93,9 @@ class EvidenceBundler:
         re.compile(r"(^|/)Thumbs\.db$", re.IGNORECASE),
     )
 
-    def __init__(self, repo_dir: Path | None = None) -> None:
+    def __init__(self, repo_dir: Path | None = None, plan_path: Path | None = None) -> None:
         self.repo_dir = (repo_dir or Path.cwd()).resolve()
+        self.plan_path = plan_path
 
     def is_sanitized_out(self, rel_path: str) -> bool:
         """指定パスが機密ファイルまたはノイズファイルとして除外対象かを判定する。"""
@@ -123,6 +124,7 @@ class EvidenceBundler:
         self,
         dest_path: Path | None = None,
         job_id: str | None = None,
+        plan_path: Path | None = None,
     ) -> Path:
         """現在の作業リポジトリから機密を除外し、完全な監査証跡を含む ZIP バンドルを生成する。"""
         # 1. Git 情報の取得
@@ -226,9 +228,20 @@ class EvidenceBundler:
             except OSError:
                 pass
 
+            from auto_developer.dispatcher import get_plan_task_states, resolve_target_plan_path
+
+            target_plan_path = resolve_target_plan_path(
+                self.repo_dir,
+                plan_path if plan_path is not None else self.plan_path,
+            )
+            has_plan_tasks, completed_task_ids, pending_task_ids, failed_task_ids = (
+                get_plan_task_states(target_plan_path)
+            )
+
             tasks_manifest: list[dict[str, Any]] = []
+            excluded_records: list[dict[str, str]] = []
             audit_stage_manifest: dict[str, Any] | None = None
-            collected_rec_names: set[str] = set()
+            seen_rec_names: set[str] = set()
 
             for rec_dir in candidate_dirs:
                 if not rec_dir.exists() or not rec_dir.is_dir():
@@ -236,13 +249,31 @@ class EvidenceBundler:
                 # task_*.json および audit_*.json を収集 (SSS.4, TTT.2)
                 for pat in ["task_*.json", "audit_*.json"]:
                     for rec_file in sorted(rec_dir.glob(pat)):
-                        if rec_file.name in collected_rec_names:
+                        if rec_file.name in seen_rec_names:
                             continue
                         if self.is_sanitized_out(rec_file.name):
                             continue
                         try:
                             data = json.loads(rec_file.read_text(encoding="utf-8"))
+                            seen_rec_names.add(rec_file.name)
                             if rec_file.name.startswith("task_"):
+                                rec_task_id = (
+                                    str(data.get("task_id", "")).strip()
+                                    or rec_file.stem.removeprefix("task_")
+                                )
+                                if has_plan_tasks and rec_task_id not in completed_task_ids:
+                                    if rec_task_id in failed_task_ids:
+                                        excl_reason = "task is not completed in target plan (failed)"
+                                    elif rec_task_id in pending_task_ids:
+                                        excl_reason = "task is not completed in target plan (pending)"
+                                    else:
+                                        excl_reason = "task is not in target plan"
+                                    excluded_records.append({
+                                        "task_id": rec_task_id,
+                                        "reason": excl_reason,
+                                    })
+                                    continue
+
                                 commit_val = data.get("commit", "")
                                 if isinstance(commit_val, dict):
                                     commit_str = str(
@@ -269,7 +300,6 @@ class EvidenceBundler:
                                 audit_stage_manifest = data
 
                             items_to_zip.append((rec_file, f"evidence/{rec_file.name}"))
-                            collected_rec_names.add(rec_file.name)
                         except (json.JSONDecodeError, OSError):
                             pass
 
@@ -333,6 +363,7 @@ class EvidenceBundler:
                 "head_commit": head_commit,
                 "head_tree_sha": head_tree,
                 "tasks": tasks_manifest,
+                "excluded_records": excluded_records,
                 "file_hashes": file_hashes,
                 "backlog_count": backlog_count,
             }
