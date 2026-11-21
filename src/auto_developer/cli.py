@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -325,6 +326,24 @@ def _build_team_plan_template(team_id: str) -> str:
     )
 
 
+def _detect_current_git_branch(target_dir: Path) -> str | None:
+    """現在の Git ブランチ名を返す（コミット前の unborn HEAD を含む）。取得できない場合は None。"""
+    try:
+        proc = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    branch = proc.stdout.strip()
+    return branch or None
+
+
 def init_teams_project(target_dir: Path, team_ids: list[str] | None = None) -> int:
     """teams.json の雛形と各チームの plans/<team_id>.md を作成する（既存ファイルは上書きしない）。"""
     print(f"Initializing multi-team configuration in: {target_dir}")
@@ -352,12 +371,14 @@ def init_teams_project(target_dir: Path, team_ids: list[str] | None = None) -> i
         else:
             team_plans = [(team.id, team.plan) for team in manifest.teams]
     else:
+        detected_branch = _detect_current_git_branch(target_dir)
+        base_ref = detected_branch if detected_branch is not None else "main"
         ids_to_use = list(team_ids) if team_ids is not None else ["core", "ui"]
         manifest_payload = {
             "version": 1,
             "project": target_dir.name or "auto-developer-project",
             "base": {
-                "ref": "main",
+                "ref": base_ref,
                 "require_clean": True,
             },
             "teams": [
@@ -381,6 +402,13 @@ def init_teams_project(target_dir: Path, team_ids: list[str] | None = None) -> i
         except ManifestValidationError as err:
             print(f"TEAMS_CONFIG_ERROR: {err}", file=sys.stderr)
             return 2
+
+        if detected_branch is None:
+            print(
+                "  ! Warning: Could not determine current git branch "
+                "(detached HEAD or non-git directory); defaulting base.ref to 'main'.",
+                file=sys.stderr,
+            )
 
         teams_json_path.write_text(
             json.dumps(manifest_payload, indent=2, ensure_ascii=False) + "\n",
