@@ -28,9 +28,17 @@ v0.9.0 で、v0.8.0 までの 40 件超の教訓を、今も効いている原�
 
 ## 恒久教訓インデックス
 
+### [2026-11-22] 自己申告の査読は、見逃しを後から検出できない (Self-Reported Review Cannot Be Audited)
+- Context: ad-team-trial のシナリオ2（CLI-3、`src/cli/main.py`）、`record-review` / `commit-step`、`skills/nightly-run/SKILL.md`。
+- Trap: Maker が `OPERATORS` に組み込みの `pow` を足しただけの実装をし、Checker（claude-sonnet-5-5）が APPROVE した。この実装では、`10 ** 400` や `0 ** -1` で例外が外に出て、SPEC の CLI-2「例外を外に出さない」に反する。テストは通っていた。シナリオ1を含む全5件の査読の理由は同じ型の文で、Checker に渡した入力と、Checker の出力のファイルは残っていなかった。そのため、Checker が差分を読んで判断したのか、まとめ役のエージェントが記録だけを書いたのかを、後から区別できない。追加した要件（CLI-3）が1行だけで、異常系の扱いを書いていなかったことも見逃しを招いた。
+- Rule: Checker に渡した入力（SPEC の該当節、差分）と Checker の出力はファイルに保存し、記録からたどれるようにする。最終的には、`record-review` でそれらのハッシュを記録し、Bundle に入れる。Checker には、異常系・境界値の扱いを、差分とテストの両方で確かめるよう明示的に求める。要件を足すときは、既存の一般的な規則（例外を外に出さない など）が新しい機能にどう当てはまるかを書く。
+- Rung: 道具（PLAN.md の作業手順で、Checker の入出力を保存し、異常系の確認を求める）。将来は作り（BACKLOG IDEA-007: 入出力のハッシュを記録・Bundle に収録）
+- Immunity Test: なし（手順。IDEA-007 を実装した時点でテストを追加する）
+- Proof: 2026-11-22 に、ad-team-trial の `team/cli` で `10 ** 400` / `0 ** -1` を実行し、例外が外に出ることを確認した。
+
 ### [2026-11-21] テストの期待値に OS 固有の挙動を書くと、他の OS では製品の欠陥と区別できなくなる (Assert Properties, Not OS Mechanisms)
 - Context: `tests/test_red_verifier.py`、`tests/test_independent_audit_runner.py`、`tests/test_live_claude_audit.py`、`src/auto_developer/verifier.py`（`_get_sandbox_backend`）。
-- Trap: Linux で失敗し続けた3件は、製品の欠陥ではなく、テストが macOS の手段を前提にしていたことが原因だった。改ざんを仕込む部分で `chflags` を無条件に呼んでいた。機密の読み取りの拒否を `PermissionError` で確かめていたが、bwrap はパスそのものを見せないので `FileNotFoundError` になる。原因がわかるまでの3フェーズの間、「環境依存」として放置されていた。さらに、サンドボックスがないと気づかれないままモックに切り替わるテストがあった。また、サンドボックスが使えるかを実行ファイルの有無だけで判定していたため、AppArmor の制限で bwrap が起動できない Ubuntu では、対処のわからないエラーになった。
+- Trap: Linux で失敗し続けた3件は、製品の欠陥ではなく、テストが macOS の手段を前提にしていたことが原因だった。改ざんを仕込む部分で `chflags` を無条件に呼んでいた。機密の読み取りの拒否を `PermissionError` で確かめていたが、bwrap はパスそのものを見せないので `FileNotFoundError` になる。原因がわかるまでの3フェーズの間、「環境依存」として放置されていた。さらに、サンドボックスがないと気づかれないままモックに切り替わるテストがあった。また、サンドボックスが使えるかを実行ファイルの有無だけで判定していたため、AppArmor の制限で bwrap が起動できない Ubuntu では、対処のわからないエラーになった。 同じ原則の3例目として、Phase 68 では mypy が `sys.platform` の分岐を実行中の OS の側しか解析しないため、Mac では通る型エラーが Linux の CI で初めて見つかった（`verifier.py:1560`）。対策として、検証スクリプトで `mypy --platform linux` と `--platform darwin` の両方を実行する。
 - Rule: テストの期待値は、守るべき性質（機密の値が出力に現れない、Red として受理されない）で書き、OS 固有の手段（例外の種類、専用のコマンド）で書かない。OS 固有の手段を使うときは、存在を確かめてから使う。ある OS で実際に実行して確かめている性質は、他の対応 OS でも実際に実行して確かめる。サンドボックスのような前提条件は、存在ではなく実際に動くかで判定する。CI ではスキップやモックへの切り替えを許さない。「環境依存」の失敗を放置しない。原因を調べて、テストの欠陥か製品の欠陥かを確定する。
 - Rung: 検査（OS に依存しない期待値 SBX-4、対称な実行テスト SBX-5）、作り（実働の判定 SBX-3）、関門（CI のマトリクスと `AUTO_DEV_REQUIRE_SANDBOX=1`、REL-3）
 - Immunity Test: Phase 68 で追加（SBX-4, SBX-5）
@@ -54,7 +62,7 @@ v0.9.0 で、v0.8.0 までの 40 件超の教訓を、今も効いている原�
 
 ### [2026-11-20] 「実装済み」と書いた機能が利用者の経路から使えず、README の手順も実際の挙動とずれていた (Documented ≠ Reachable)
 - Context: v0.9.0 準備。README.md、`src/auto_developer/multi_team.py` / `manifest.py`、`cli.py`。
-- Trap: マルチチーム実行はライブラリとして実装・テスト済みだった。しかし `TeamManifest` と `MultiTeamOrchestrator` がつながっておらず、CLI からもスキルからも呼べなかった。全チームが同じ PLAN.md を更新するので、つないだとしても統合時に必ずコンフリクトする構造だった。README にも、実際の挙動と違う記述が残っていた。「`--maker-cmd` 未指定時は MockRunner で動作」と書いてあったが、実際は終了コード 2 になる。Checker を指定しない隔離体験の手順も、そのままでは起動できなかった。
+- Trap: マルチチーム実行はライブラリとして実装・テスト済みだった。しかし `TeamManifest` と `MultiTeamOrchestrator` がつながっておらず、CLI からもスキルからも呼べなかった。全チームが同じ PLAN.md を更新するので、つないだとしても統合時に必ずコンフリクトする構造だった。README にも、実際の挙動と違う記述が残っていた。「`--maker-cmd` 未指定時は MockRunner で動作」と書いてあったが、実際は終了コード 2 になる。Checker を指定しない隔離体験の手順も、そのままでは起動できなかった。 再発（2026-11-22）: README のクイックスタートを試すと、`auto-dev init` の直後の `run --mock` は必ず失敗した（mock の Maker は何も変更しない）。シェルの1行コマンドで試すには、実際には使っていないモデル名を書く必要があった。さらに、対応しているモデルの系統が3社だけで、それ以外のモデルでは `run` も `commit-step` も通らなかった。
 - Rule: 「実装済み」は、利用者が使う経路（CLI・スキル）から E2E テストで動かせたときにだけ名乗る。README に書く手順は、テストでそのまま実行する。単体テストが通っていることは、利用者が使える根拠にならない。
 - Rung: 検査（README クイックスタートの実行テスト DX-1、2 チーム E2E テスト TEAM-19）
 - Immunity Test: v0.9.0 で追加（`tests/test_quickstart.py`, `tests/test_teams_cli_e2e.py` を予定）

@@ -31,7 +31,8 @@ fi
 
 echo "=== [3/4] Running Mypy type checker (if available) ==="
 if command -v mypy >/dev/null 2>&1; then
-  mypy src scripts
+  mypy --platform linux src scripts
+  mypy --platform darwin src scripts
 else
   echo "mypy not installed, skipping local type check"
 fi

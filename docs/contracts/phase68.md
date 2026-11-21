@@ -195,3 +195,16 @@ Phase 69 に回すもの: DX-1（README の手順の実行テスト）、DX-3（
 - 1 の指紋を SPEC の要件に「旧挙動」として書かせれば、2 と 4 は決定論的に実行できる。
 - 3 の分類と、5 の実験の設計には、LLM と人間の判断が要る。
 - この契約書の 3 章の形（指紋 / 影響する既存テスト / 影響するドキュメント）を、PLAN.md の「既存テスト変更の理由」に直接流し込めるようにすると、今回のような停止を準備の段階で防げる。
+
+### 実施後の振り返り（2026-11-22 追記）
+
+- 結果: 8 ステップで、既存テストの変更による停止は1回だった（Phase 67 は3回）。
+- 見落とし: DX-2 の影響を、`_run_cli(...)` と `main([...])` の形の呼び出しに限って探していた。互換ラッパー `scripts/nightly_orchestrator.py` を `subprocess` で呼ぶ `test_nightly_orchestrator.py` の `test_external_project_workflow` を見落とした。
+- 改善: 指紋を探す前に、CLI の入口をすべて列挙する。この repo では次の6つ。
+  1. `auto-dev`
+  2. `python -m auto_developer.cli`
+  3. `scripts/nightly_orchestrator.py`
+  4. `main()` の直接呼び出し
+  5. スキルに書かれたコマンド
+  6. README に書かれたコマンド
+- Phase 69 の契約書（docs/contracts/phase69.md の 3.0）から、この手順を適用している。

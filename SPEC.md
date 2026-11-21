@@ -10,7 +10,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - [x] は実装済みでテストがあるもの、[ ] は未実装（現在のフェーズの対象）を表す。
 - 新しいフェーズの要件は「## 5. 次のリリースで追加する要件」に書き、リリース後に 4 章の該当領域へ移す。
   開発の経緯（なぜそうしたか）はここに書かず、LESSONS.md・CHANGELOG.md・git 履歴に残す。
-- Checker への入力は、現在のフェーズの節を機械的に切り出した原文とする（要約しない）。例（Phase 68）:
+- Checker への入力は、現在のフェーズの節を機械的に切り出した原文とする（要約しない）。例（Phase 69）:
     awk '/^### 5\.1/,/^### 5\.2/' SPEC.md > .dev/checker/spec_current.md
 - この SPEC は Elephant（人間と設計セッション）が書き、人間が承認する。Maker は変更できない（保護ファイル）。
 -->
@@ -91,11 +91,17 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - [x] **RPT-2 単独でのレポート生成**: `auto-dev report` は、ジョブ状態ファイルがなくても、Git・PLAN.md・監査レコード・監査結果からレポートを生成する。`brief` と `bundle` の実行時にもレポートを最新化する。
 - [x] **RPT-3 イベントログ**: `verify_step`, `commit_step`, `rollback_step`, `checker_review`, `audit_stage` のイベントを `events.jsonl` に追記だけで記録する。書き込みに失敗しても `METRICS_WARNING:` を出すのみとする（INV-8）。
 - [x] **RPT-4 フェーズ集計**: `auto-dev metrics [--phase N] [--json] [--append-to PATH]` は、フェーズごとの指標と直前のフェーズとの差を出力する。指標ごとに、イベントログ由来か Git 由来かを示す。算出できない指標は推定値で埋めずに null とする。指標の定義は METRICS.md に書く。
+- [x] **RPT-5 判断待ちの表示**: チームのジョブがあるときの `brief` と `NIGHTLY_REPORT.md` で、「判断待ちの事項」節には、そのジョブで人間が判断すべきことだけを表示する。判断すべきことがなければ「なし」とし、単一チーム用の文言を出さない。
 
 ### 4.5 BDL — 提出パッケージ（Evidence Bundle）
 
 - [x] **BDL-1 生成**: `auto-dev bundle` は、Git 履歴、ソースのスナップショット、監査レコード、ジョブ状態、ログ、`NIGHTLY_REPORT.md`, `PLAN.md`, `SPEC.md`, `BACKLOG.md`、監査結果を1つの ZIP にまとめる。機密と OS の不要ファイルは除外し、`bundle_manifest.json` に全ファイルの SHA-256 を記録する。ジョブが完了したときにも自動で生成する。
 - [x] **BDL-2 検証**: `auto-dev verify-bundle <zip> [--json]` は、ファイルのハッシュ、Evidence とコミットの Tree SHA の一致、SPEC の不変性、Checker の承認を検証して、終了コード 0 / 1 で判定する。監査後に実装が変わっていれば `AUDIT_OUTDATED`、未解決の P0/P1 またはエスカレーションがあれば `RELEASE_BLOCKED` とする。
+- [x] **BDL-3 Bundle とレポートに入れる記録の選択**: `auto-dev bundle` と `NIGHTLY_REPORT.md` の生成で、次の規則に従って記録を選ぶ。
+  - 対象の計画ファイル（単一チームでは `PLAN.md`、チームの worktree ではそのチームの計画ファイル）で完了（`- [x]`）しているタスクの Evidence の記録だけを対象にする（CORE-10 の読み取り範囲に従う）。
+  - 対象外とした記録は Bundle に入れず、manifest の `excluded_records` にタスク ID と理由を記録する。
+  - 計画ファイルにタスクとして読める行が1つもない場合は、従来どおりすべての記録を対象にする。
+  - `verify-bundle` の検査（BDL-2）は弱めない。
 
 ### 4.6 AUDIT — 独立監査と自己改善ループ
 
@@ -119,6 +125,24 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - サンドボックスが使えない環境、または root で実行している場合は、実行を拒否する。
   - 実行の前後で元のリポジトリ（未追跡・無視ファイルを含む）のスナップショットを比較し、改ざんがあれば結果に関わらず拒否する。
 - [x] **SBX-2 本物の Red の判定**: 判定は構造化されたテスト結果に基づく。実行件数が1件以上で、アサーション失敗が1件以上あり、それ以外のエラーが0件のときだけ Red とする。製品コードと因果関係のない失敗（固定値どうしの比較、無条件の `fail` など）は、AST 解析と実行の追跡で TRIVIAL_RED として退ける。静的に確信できない場合は TRIVIAL_RED と断定しない。
+- [x] **SBX-3 サンドボックスの実働確認**: サンドボックスを使えるかどうかは、実行ファイルがあるかではなく、実際に起動できるかで判定する。
+  - 判定は、最小のコマンドをサンドボックスの中で1回実行して行い、結果はプロセスの中でキャッシュする。
+  - 起動できなければ `SANDBOX_UNAVAILABLE` とする（SBX-1 の Fail-Closed は変えない）。その出力には、OS ごとの対処を含める。
+    - Linux で bwrap がない: bubblewrap のインストール。
+    - Linux で bwrap が起動できない: Ubuntu 23.10 以降の AppArmor による非特権ユーザー名前空間の制限。`bwrap-userns-restrict` プロファイルの読み込み。
+    - macOS で `sandbox-exec` が使えない: その旨。
+  - 判定の結果を返す関数 `_get_sandbox_backend` の名前と戻り値（`"sandbox-exec"` / `"bwrap"` / `None`）は変えない。
+- [x] **SBX-4 OS に依存しない期待値**: テストの期待値は、OS 固有の手段ではなく、守るべき性質で書く。
+  - 改ざんを仕込むテストは、macOS 専用のコマンド（`chflags`）を、それが存在する場合にだけ呼ぶ。
+  - 機密の読み取りを試すテストは、次の2つを確かめる。どの例外（`PermissionError` / `FileNotFoundError`）で拒否されたかは問わない。
+    - 機密の値が出力に現れない。
+    - Red として受理されない。
+  - サンドボックスが使えないときにスキップする、またはモックに切り替えるテストは、環境変数 `AUTO_DEV_REQUIRE_SANDBOX=1` のときは、スキップや切り替えをせずに失敗にする。
+- [x] **SBX-5 実行による確認の対称性**: macOS で実際にサンドボックスの中で実行して確かめている性質は、Linux でも bwrap の中で実際に実行して確かめる。少なくとも、次の4つが読めないことを、Linux の実行テストで確かめる。macOS 専用のテスト（`test_sandbox_blocks_reading_*`）は残す。
+  - ホストの機密ファイル（`/etc/shadow` など）
+  - 許可していないホストのパス（`/opt` など）
+  - ホームディレクトリ（`~/.ssh` を含む）
+  - 元のリポジトリ
 
 ### 4.8 TEAM — マルチチーム実行
 
@@ -191,62 +215,76 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - (a) `teams run` が成功し、RC タグができる。計画ファイルの進捗が、コメント内の記法例を数えずに正しく表示される。
   - (b) 続けて `teams cleanup --job-id <id>`（`--force` なし）が成功し、隔離ブランチを作らない。そのあと、新しいジョブ ID の `teams prepare` が成功する。
   - (c) 一方のチームの Maker が担当範囲外に書いた場合、そのチームの作業が、そのジョブの隔離ブランチ（TEAM-23）に退避される。worktree はクリーンに戻り、統合は行われない。
+- [x] **TEAM-25 `teams init` の基点ブランチ**: `teams init` は `teams.json` の `base.ref` に、現在のブランチ名を書く。コミットがまだないリポジトリでも、`HEAD` が指すブランチ名を使う。ブランチ名が取れない場合（detached HEAD など）は `main` を書き、その旨を表示する。
+- [x] **TEAM-26 統合ブランチの片付け**: 統合に成功したジョブの `teams cleanup` は、統合ブランチ `integration/<job_id>` も削除する。RC タグ `rc/<job_id>` は残す。統合に失敗したジョブ・未完了のジョブの統合ブランチは削除しない。
 
 ### 4.9 REL — リリースと互換性
 
 - [x] **REL-1 Bundle の形式バージョン**: `bundle_manifest.json` に `format_version`（v0.9.0 は 2）と `tool_version` を記録する。`verify-bundle` は、`format_version` がないか 2 未満の Bundle について、「v0.8 以前の形式です。v0.8.0 の auto-dev で検証してください」という趣旨を示して終了コード 1 を返す（v0.8 以前の Bundle との互換は持たない）。
+- [x] **REL-3 CI**: CI は macOS と Linux（Ubuntu 24.04）、Python 3.10 と 3.12 の組み合わせで検証スクリプトを実行する。
+  - Linux では bubblewrap と、その AppArmor プロファイルを準備する。
+  - `AUTO_DEV_REQUIRE_SANDBOX=1` を設定し、サンドボックスのテストをスキップさせない。
+
+### 4.10 DX — 利用者の体験
+
+- [x] **DX-2 モデル名の既定値**: CLI の `run` と `teams run` で、`--maker-cmd` / `--checker-cmd`（`--enable-audit` を付けたときは `--auditor-cmd`）を指定して、対応する `--maker-model` / `--checker-model` / `--auditor-model` を省略した場合は、指定を求めるメッセージを出して終了コード 2 とする。
+  - 特定ベンダーのモデル名を、暗黙に記録しない。
+  - `--mock` のときは、従来どおり既定値を使う。
+  - ライブラリ（`NightlyOrchestrator` などのクラス）の既定値は変えない。
 
 ## 5. 次のリリース（v0.9.0）で追加する要件
 
 <!-- v0.9.0 の目的: 4.8 TEAM を CLI とスキルから使えるようにし、初めての利用者がつまずかずに試せる状態にする。
-     Phase 66・67 で実装した部分は 4 章に移した。以下は残りの要件。
-     要件ごとの影響分析（既存のテスト・ドキュメントへの影響）は docs/contracts/phase68.md を参照。 -->
+     Phase 66〜68 で実装した部分は 4 章に移した。以下は残りの要件。
+     要件ごとの影響分析は docs/contracts/phase69.md を参照。 -->
 
-### 5.1 Phase 68 — Linux を macOS と同格に扱う・Phase 67 確認で見つかった欠陥の修正
+### 5.1 Phase 69 — 初めての利用者が自分の環境とモデルで試せるようにする
 
-<!-- 方針: 開発は Mac で行うが、対応 OS を Mac に絞らない。Linux でも全テストが通り（サンドボックスのテストをスキップで済ませない）、
-     利用者がつまずいたときに対処がわかる状態にする。 -->
+<!-- 起点: README のクイックスタートの確認（run --mock は必ず失敗し、シェルの1行コマンドで試すには偽のモデル名が要る。対応する系統が3社だけ）。
+     Phase 68 の CI（Ubuntu）と ad-team-trial での試行で見つかった欠陥の修正も含む。 -->
 
-- [ ] **SBX-3 サンドボックスの実働確認**: サンドボックスを使えるかどうかは、実行ファイルがあるかではなく、実際に起動できるかで判定する。
-  - 判定は、最小のコマンドをサンドボックスの中で1回実行して行い、結果はプロセスの中でキャッシュする。
-  - 起動できなければ `SANDBOX_UNAVAILABLE` とする（SBX-1 の Fail-Closed は変えない）。その出力には、OS ごとの対処を含める。
-    - Linux で bwrap がない: bubblewrap のインストール。
-    - Linux で bwrap が起動できない: Ubuntu 23.10 以降の AppArmor による非特権ユーザー名前空間の制限。`bwrap-userns-restrict` プロファイルの読み込み。
-    - macOS で `sandbox-exec` が使えない: その旨。
-  - 判定の結果を返す関数 `_get_sandbox_backend` の名前と戻り値（`"sandbox-exec"` / `"bwrap"` / `None`）は変えない。
-- [ ] **SBX-4 OS に依存しない期待値**: テストの期待値は、OS 固有の手段ではなく、守るべき性質で書く。
-  - 改ざんを仕込むテストは、macOS 専用のコマンド（`chflags`）を、それが存在する場合にだけ呼ぶ。
-  - 機密の読み取りを試すテストは、次の2つを確かめる。どの例外（`PermissionError` / `FileNotFoundError`）で拒否されたかは問わない。
-    - 機密の値が出力に現れない。
-    - Red として受理されない。
-  - サンドボックスが使えないときにスキップする、またはモックに切り替えるテストは、環境変数 `AUTO_DEV_REQUIRE_SANDBOX=1` のときは、スキップや切り替えをせずに失敗にする。
-- [ ] **SBX-5 実行による確認の対称性**: macOS で実際にサンドボックスの中で実行して確かめている性質は、Linux でも bwrap の中で実際に実行して確かめる。少なくとも、次の4つが読めないことを、Linux の実行テストで確かめる。macOS 専用のテスト（`test_sandbox_blocks_reading_*`）は残す。
-  - ホストの機密ファイル（`/etc/shadow` など）
-  - 許可していないホストのパス（`/opt` など）
-  - ホームディレクトリ（`~/.ssh` を含む）
-  - 元のリポジトリ
-- [ ] **BDL-3 Bundle とレポートに入れる記録の選択**: `auto-dev bundle` と `NIGHTLY_REPORT.md` の生成で、次の規則に従って記録を選ぶ。
-  - 対象の計画ファイル（単一チームでは `PLAN.md`、チームの worktree ではそのチームの計画ファイル）で完了（`- [x]`）しているタスクの Evidence の記録だけを対象にする（CORE-10 の読み取り範囲に従う）。
-  - 対象外とした記録は Bundle に入れず、manifest の `excluded_records` にタスク ID と理由を記録する。
-  - 計画ファイルにタスクとして読める行が1つもない場合は、従来どおりすべての記録を対象にする。
-  - `verify-bundle` の検査（BDL-2）は弱めない。
-- [ ] **TEAM-25 `teams init` の基点ブランチ**: `teams init` は `teams.json` の `base.ref` に、現在のブランチ名を書く。コミットがまだないリポジトリでも、`HEAD` が指すブランチ名を使う。ブランチ名が取れない場合（detached HEAD など）は `main` を書き、その旨を表示する。
-- [ ] **TEAM-26 統合ブランチの片付け**: 統合に成功したジョブの `teams cleanup` は、統合ブランチ `integration/<job_id>` も削除する。RC タグ `rc/<job_id>` は残す。統合に失敗したジョブ・未完了のジョブの統合ブランチは削除しない。
-- [ ] **RPT-5 判断待ちの表示**: チームのジョブがあるときの `brief` と `NIGHTLY_REPORT.md` で、「判断待ちの事項」節には、そのジョブで人間が判断すべきことだけを表示する。判断すべきことがなければ「なし」とし、単一チーム用の文言を出さない。
-- [ ] **DX-2 モデル名の既定値**: CLI の `run` と `teams run` で、`--maker-cmd` / `--checker-cmd`（`--enable-audit` を付けたときは `--auditor-cmd`）を指定して、対応する `--maker-model` / `--checker-model` / `--auditor-model` を省略した場合は、指定を求めるメッセージを出して終了コード 2 とする。
-  - 特定ベンダーのモデル名を、暗黙に記録しない。
-  - `--mock` のときは、従来どおり既定値を使う。
-  - ライブラリ（`NightlyOrchestrator` などのクラス）の既定値は変えない。
-- [ ] **REL-3 CI（人間が実施）**: CI は macOS と Linux（Ubuntu 24.04）、Python 3.10 と 3.12 の組み合わせで検証スクリプトを実行する。
-  - Linux では bubblewrap と、その AppArmor プロファイルを準備する。
-  - `AUTO_DEV_REQUIRE_SANDBOX=1` を設定し、サンドボックスのテストをスキップさせない。
+- [ ] **REL-4 型検査の両 platform 対応**: `mypy --platform linux src scripts` と `mypy --platform darwin src scripts` の両方が通る。`sys.platform` で分岐する処理では、分岐の前で変数の型を宣言する。
+- [ ] **TEAM-27 変更のないチーム**: 統合の時点で、基点から自分のブランチへのコミットが0件のチームを「変更なし（`NO_CHANGES`）」として扱う。
+  - そのチームについては Bundle の検証とマージを省き、統合の結果とレポートに `NO_CHANGES` と表示する。
+  - すべてのチームが `NO_CHANGES` なら、RC タグを作らずにその旨を表示し、終了コード 0 とする。
+  - コミットが1件以上あるのに Evidence の記録がないチームは、従来どおり拒否する（TEAM-6）。
+  - 計画に未完了のタスクがあるチームは、従来どおり統合を拒否する（TEAM-14）。
+  - `teams run` も同じ規則に従う。
+- [ ] **RPT-6 レポートと Bundle の順序**: `auto-dev run` は、成功時・失敗時とも、Bundle の出力先を先に決め、そのパスを含むレポートを書いてから Bundle を作る。Bundle に入る `NIGHTLY_REPORT.md` は、その実行の結果を表す。
+- [ ] **RPT-7 チームのジョブのレポート**: チームのジョブを実行した後の `NIGHTLY_REPORT.md` と `brief` に、チームごとに次を表示する。
+  - 完了したタスク
+  - 各タスクの Checker の判定とモデル名（保全済みの Bundle、または worktree の Evidence の記録から読む）
+  - `NO_CHANGES` のチームはその旨
+  - 「最新コミット (HEAD)」の代わりに RC コミットを示し、main（基点）が変更されていないことがわかる表示にする。単一チームのレポートは変えない。
+- [ ] **DX-5 Python の選択と src/ の構成**: 次の3点を変える。
+  - `auto-dev init` が作る検証スクリプトは、テストの実行に、環境変数 `PYTHON` があればそれを、なければ PATH の `python3` を使う（`/usr/bin/python3` を優先しない）。
+  - `src/` ディレクトリがあれば、`PYTHONPATH` に加えてテストを実行する。
+  - 雛形の区切りの文字列「Running Project Tests」、テストの節に `|| true` を含まないこと、`teams.json` の保護は保つ。
+  - ワーカーの既定の起動コマンドは、`"python3"` ではなく `sys.executable` を使う。
+- [ ] **DX-6 `auto-dev demo`**: 外部のエージェントやモデルを使わずに、次の流れを1コマンドで見せる。
+  - 新しい一時ディレクトリに Git リポジトリを作り、`init` の雛形と2タスクの計画を置く。
+  - 組み込みのスクリプトの Maker / Checker で2タスクを完了させる。
+  - 次に、保護ファイル（`SPEC.md`）を書き換える Maker のタスクを1つ実行し、隔離されることを見せる。
+  - `brief` の要約を表示し、Bundle を作って `verify-bundle` で検証する。
+  - 各段階で何が起きたかを、短い説明とともに表示する。
+  - 期待どおりに進めば終了コード 0、そうでなければ 1 とする。
+  - 既定では終了時に一時ディレクトリを削除する。`--keep` を付けると残し、場所を表示する。利用者のカレントディレクトリは変更しない。
+  - Maker / Checker のモデル名と系統には、デモであることがわかる値（例: モデル名 `auto-dev-demo-maker`、系統 `demo-maker`）を DX-7 の明示で使い、実在のモデル名は記録しない。
+- [ ] **DX-7 モデルの系統**: 次の5点を変える。
+  - `run`, `teams run`, `commit-step`, `record-review` と独立監査の設定に、`--maker-family` / `--checker-family` / `--auditor-family` を追加し、系統を明示できるようにする。
+  - 明示した系統は空でなく、`unknown` でないこと。
+  - 指定した系統と、組み込みの判定で分かる系統が食い違う場合は拒否する（系統の偽装を防ぐ）。
+  - 系統の独立性の検査（INV-6）は、明示した系統にも同じように適用する。
+  - 組み込みの判定に `mistral` / `llama` / `qwen` / `deepseek` を加える。明示がない場合の既存の挙動（不明な系統の拒否、`"pro"` で終了コード 4 など）は変えない。
+  - Evidence の記録と `checker_review` / `commit_step` のイベントに、系統が明示か推定か（`family_source`）を記録する。
 
-### 5.2 Phase 69 — README・利用者の体験・リリース
+### 5.2 Phase 70 — README・サンプル・リリース
 
-<!-- README は「人間が書くもの」として、Phase 69 の準備コミットで先に書く（契約の一部）。DX-1 はその README に対して Red から始める。 -->
+<!-- README は「人間が書くもの」として、Phase 70 の準備コミットで先に書く（契約の一部）。DX-1 はその README に対して Red から始める。
+     クイックスタートの中心は `pip install` → `auto-dev demo`。 -->
 
-- [ ] **DX-1 README のクイックスタートをテストする**: README に書いたクイックスタートの手順（新しい空のリポジトリでの `init` → `run --mock` → `brief`、および失敗から隔離までの例）を、そのまま一時リポジトリで実行するテストを用意する。README と実際の挙動のずれを検査で検出する。
-- [ ] **DX-3 サンプル**: `examples/two-teams/` に、2チーム構成の最小プロジェクト（`teams.json`, `plans/`, 検証スクリプト）を置く。DX-1 と TEAM-19 のテストから参照する。
+- [ ] **DX-1 README のクイックスタートをテストする**: README（日本語・英語）に書いたクイックスタートのコマンドを、一時ディレクトリでそのまま実行するテストを用意し、README と実際の挙動のずれを検査で検出する。対象は `auto-dev demo`、新しいリポジトリでの `init`、および `teams init` から `teams prepare` まで。外部のエージェントやモデルを要する手順は対象外とし、README の中でそれとわかるように書く。
+- [ ] **DX-3 サンプル**: `examples/two-teams/` に、2チーム構成の最小プロジェクトを置く（ad-team-trial を原型とする電卓。`teams.json`, `plans/`, SPEC, 検証スクリプト）。DX-1 のテストから、`teams init` の代わりにこのサンプルを使う経路も確かめる。
 - [ ] **DX-4 CLI リファレンスの生成**: `docs/cli.md` を、CLI の引数定義（argparse）から生成するスクリプトを置く。生成結果と `docs/cli.md` が一致しない場合に失敗するテストを用意し、CLI の変更でリファレンスが古くならないようにする。
 - [ ] **REL-2 バージョン表記**: `pyproject.toml`, `plugin.json`, `auto_developer.__version__`, CLI の表示を 0.9.0 に揃える。タグは `v0.9.0` の形式とする（v0.8.0 までの `v.0.x.0` 形式は使わない）。 `CHANGELOG.md` に `## [0.9.0]` 節を、`docs/releases/v0.9.0.md` にリリースノートを置く。
 
