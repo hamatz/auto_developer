@@ -552,6 +552,7 @@ print(json.dumps(data))
 
         clean_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", task_id)
         clean_team = re.sub(r"[^a-zA-Z0-9_\-]", "_", team_id) if team_id else ""
+        clean_job = re.sub(r"[^a-zA-Z0-9_\-]", "_", job_id) if job_id else ""
         team_prefix = f"{clean_team}-" if clean_team else ""
         timestamp = int(time.time())
 
@@ -566,7 +567,19 @@ print(json.dumps(data))
             self.create_quarantine_snapshot(task_id=f"{team_prefix}{task_id}", checkpoint=checkpoint, job_id=job_id)
 
             # 2. 隔離ブランチへの安全なステージとコミット (追跡済みファイルのみ add -u でステージし、シークレット検査を実施)
-            quarantine_branch = f"quarantine/{team_prefix}{clean_id}-{timestamp}"
+            if clean_team and clean_job:
+                base_q_branch = f"quarantine/{clean_job}/{clean_team}/{clean_id}-{timestamp}"
+            elif clean_team:
+                base_q_branch = f"quarantine/{clean_team}-{clean_id}-{timestamp}"
+            else:
+                base_q_branch = f"quarantine/{clean_id}-{timestamp}"
+
+            quarantine_branch = base_q_branch
+            counter = 1
+            while self._run_git(["branch", "--list", quarantine_branch]).stdout.strip():
+                quarantine_branch = f"{base_q_branch}-{counter}"
+                counter += 1
+
             self._run_git(["checkout", "-b", quarantine_branch])
             self._run_git(["add", "-u"])
             self.sanitize_staged_changes()

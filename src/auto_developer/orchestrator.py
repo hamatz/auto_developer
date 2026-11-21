@@ -208,12 +208,20 @@ class NightlyOrchestrator:
             if job_state.checkpoint_hash and not self.dry_run:
                 print(f"Resetting uncommitted work back to checkpoint {job_state.checkpoint_hash} for safe resume...")
                 self.git_guard.quarantine_and_restore(
-                    job_state.checkpoint_hash, task_id=job_state.current_task_id or "interrupted"
+                    job_state.checkpoint_hash,
+                    task_id=job_state.current_task_id or "interrupted",
+                    job_id=job_state.job_id,
+                    team_id=self.team_id or "",
                 )
                 if not job_state.base_branch:
                     job_state.base_branch = self.git_guard.get_current_branch()
         else:
-            job_id = f"job-{int(time.time())}"
+            resolved_team_job_id: str | None = None
+            if self.team_id:
+                from auto_developer.multi_team import resolve_active_team_job_id
+
+                resolved_team_job_id = resolve_active_team_job_id(self.repo_dir, team_id=self.team_id)
+            job_id = resolved_team_job_id or f"job-{int(time.time())}"
             current_branch = self.git_guard.get_current_branch()
             job_state = JobState(job_id=job_id, status="RUNNING", base_branch=current_branch)
             if not self.dry_run:

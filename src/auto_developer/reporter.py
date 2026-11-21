@@ -830,8 +830,18 @@ class MorningReporter:
                 except (json.JSONDecodeError, OSError):
                     pass
 
-        # 6. 隔離ブランチの検出
+        # 6. マルチチームジョブ結果の集約 (TEAM-17)
+        multi_team_data: dict[str, Any] | None = None
+        try:
+            from auto_developer.multi_team import get_multi_team_report_summary
+
+            multi_team_data = get_multi_team_report_summary(effective_repo)
+        except Exception:  # noqa: BLE001
+            multi_team_data = None
+
+        # 7. 隔離ブランチの検出 (TEAM-23: マルチチーム時は対象ジョブの隔離ブランチだけを集計)
         quarantined_count = 0
+        all_quarantine_branches: list[str] = []
         try:
             br_res = subprocess.run(
                 ["git", "branch", "--list", "quarantine/*"],
@@ -841,20 +851,32 @@ class MorningReporter:
                 check=False,
             )
             if br_res.returncode == 0 and br_res.stdout.strip():
-                quarantined_count = len([
-                    b for b in br_res.stdout.strip().splitlines() if b.strip()
-                ])
+                all_quarantine_branches = [
+                    b.lstrip("* ").strip()
+                    for b in br_res.stdout.strip().splitlines()
+                    if b.strip()
+                ]
         except OSError:
             pass
 
-        # 7. マルチチームジョブ結果の集約 (TEAM-17)
-        multi_team_data: dict[str, Any] | None = None
-        try:
-            from auto_developer.multi_team import get_multi_team_report_summary
-
-            multi_team_data = get_multi_team_report_summary(effective_repo)
-        except Exception:  # noqa: BLE001
-            multi_team_data = None
+        if multi_team_data is not None:
+            target_job_id = str(multi_team_data.get("job_id") or "").strip()
+            target_q_set: set[str] = set()
+            for t in multi_team_data.get("teams") or []:
+                for qb in t.get("quarantine_branches") or []:
+                    if isinstance(qb, str) and qb:
+                        target_q_set.add(qb)
+            if target_job_id:
+                clean_job = re.sub(r"[^a-zA-Z0-9_\-]", "_", target_job_id)
+                team_prefix = f"quarantine/{clean_job}/"
+                int_prefix_raw = f"quarantine/integration-{target_job_id}-"
+                int_prefix_clean = f"quarantine/integration-{clean_job}-"
+                for qb in all_quarantine_branches:
+                    if qb.startswith((team_prefix, int_prefix_raw, int_prefix_clean)):
+                        target_q_set.add(qb)
+            quarantined_count = len(target_q_set)
+        else:
+            quarantined_count = len(all_quarantine_branches)
 
         status = "COMPLETED" if (total_tasks > 0 and succeeded_count == total_tasks) else "IN_PROGRESS"
         if multi_team_data is not None:

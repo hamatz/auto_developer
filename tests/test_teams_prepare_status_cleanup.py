@@ -229,14 +229,14 @@ class TestTeamsStatusAndCleanupCli(unittest.TestCase):
         _git(core_wt, "commit", "-m", "feat: core task 1")
 
         # Create a quarantine branch for core and a failed JobState in ui worktree
-        _git(core_wt, "branch", "quarantine/core-2-1700000001")
+        _git(core_wt, "branch", "quarantine/job-stat-1/core/2-1700000001")
         JobState(
             job_id="ui-run-1",
             status="FAILED",
             checkpoint_hash=self.base_commit,
-            quarantined_task={"task_id": "1", "quarantined_branch": "quarantine/ui-1-1700000002"},
+            quarantined_task={"task_id": "1", "quarantined_branch": "quarantine/job-stat-1/ui/1-1700000002"},
         ).save(ui_wt / ".dev" / "job_state.json")
-        _git(ui_wt, "branch", "quarantine/ui-1-1700000002")
+        _git(ui_wt, "branch", "quarantine/job-stat-1/ui/1-1700000002")
 
         # Check JSON status (without --job-id, picks latest job)
         st_json = _run_cli(self.repo_dir, "teams", "status", "--json")
@@ -249,14 +249,14 @@ class TestTeamsStatusAndCleanupCli(unittest.TestCase):
         self.assertTrue(by_team["core"]["worktree_exists"])
         self.assertEqual(by_team["core"]["completed_tasks"], 1)
         self.assertEqual(by_team["core"]["total_tasks"], 2)
-        self.assertIn("quarantine/core-2-1700000001", by_team["core"]["quarantine_branches"])
-        self.assertNotIn("quarantine/ui-1-1700000002", by_team["core"]["quarantine_branches"])
+        self.assertIn("quarantine/job-stat-1/core/2-1700000001", by_team["core"]["quarantine_branches"])
+        self.assertNotIn("quarantine/job-stat-1/ui/1-1700000002", by_team["core"]["quarantine_branches"])
 
         self.assertEqual(by_team["ui"]["branch"], "team/ui")
         self.assertEqual(by_team["ui"]["completed_tasks"], 0)
         self.assertEqual(by_team["ui"]["total_tasks"], 1)
         self.assertEqual(by_team["ui"]["worker_status"], "FAILED")
-        self.assertIn("quarantine/ui-1-1700000002", by_team["ui"]["quarantine_branches"])
+        self.assertIn("quarantine/job-stat-1/ui/1-1700000002", by_team["ui"]["quarantine_branches"])
 
         # Check human-readable text output
         st_txt = _run_cli(self.repo_dir, "teams", "status", "--job-id", "job-stat-1")
@@ -264,7 +264,7 @@ class TestTeamsStatusAndCleanupCli(unittest.TestCase):
         self.assertIn("core", st_txt.stdout)
         self.assertIn("team/core", st_txt.stdout)
         self.assertIn("1/2", st_txt.stdout)
-        self.assertIn("quarantine/core-2-1700000001", st_txt.stdout)
+        self.assertIn("quarantine/job-stat-1/core/2-1700000001", st_txt.stdout)
         self.assertIn("FAILED", st_txt.stdout)
 
     def test_status_unknown_job_id_returns_error(self) -> None:
@@ -480,7 +480,7 @@ class TestTeamsStatusAndCleanupCli(unittest.TestCase):
         forced = _run_cli(self.repo_dir, "teams", "cleanup", "--job-id", job_id, "--force")
         self.assertEqual(forced.returncode, 0, forced.stderr)
         self.assertFalse(core_wt.exists())
-        q_branches = _git(self.repo_dir, "branch", "--list", "quarantine/core-*").stdout.splitlines()
+        q_branches = _git(self.repo_dir, "branch", "--list", f"quarantine/{job_id}/core/*").stdout.splitlines()
         self.assertTrue(len(q_branches) > 0)
         q_name = q_branches[-1].strip().lstrip("* ").strip()
         self.assertEqual(_git(self.repo_dir, "show", f"{q_name}:src/core/app.py").stdout, "VALUE = 50\n")
@@ -517,7 +517,7 @@ class TestTeamsStatusAndCleanupCli(unittest.TestCase):
 
         q_branches = [
             b.strip().lstrip("* ").strip()
-            for b in _git(self.repo_dir, "branch", "--list", "quarantine/core-*").stdout.splitlines()
+            for b in _git(self.repo_dir, "branch", "--list", f"quarantine/{job_id}/core/*").stdout.splitlines()
             if b.strip()
         ]
         self.assertTrue(len(q_branches) > 0, "Expected quarantine branch for core")

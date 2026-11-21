@@ -157,7 +157,7 @@ class TestCommitGateBoundaryOrchestrator(unittest.TestCase):
         # Quarantine branch created with **[FAILED]** recorded
         q_branches = [
             b.lstrip("* ").strip()
-            for b in _git(wt_dir, "branch", "--list", "quarantine/core-1-*").stdout.splitlines()
+            for b in _git(wt_dir, "branch", "--list", "quarantine/*/core/1-*").stdout.splitlines()
             if b.strip()
         ]
         self.assertTrue(q_branches, "Expected quarantine branch for core task 1")
@@ -205,7 +205,7 @@ class TestCommitGateBoundaryOrchestrator(unittest.TestCase):
 
         q_branches = [
             b.lstrip("* ").strip()
-            for b in _git(wt_dir, "branch", "--list", "quarantine/core-1-*").stdout.splitlines()
+            for b in _git(wt_dir, "branch", "--list", "quarantine/*/core/1-*").stdout.splitlines()
             if b.strip()
         ]
         self.assertTrue(q_branches)

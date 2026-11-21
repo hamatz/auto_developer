@@ -34,6 +34,7 @@ from auto_developer.multi_team import (
     integrate_teams_job,
     prepare_teams_job,
     recover_teams_job,
+    resolve_active_team_job_id,
     run_teams_job,
 )
 from auto_developer.orchestrator import NightlyOrchestrator
@@ -1230,9 +1231,18 @@ def main(argv: list[str] | None = None) -> int:
         evidence_store.clear_evidence(task_id=task_id)
         if target:
             dispatcher.mark_task_status(effective_plan_path, target, status="failed")
+        rollback_job_id = ""
+        if team_ctx:
+            rollback_job_id = resolve_active_team_job_id(work_dir, team_id=team_ctx.team_id) or ""
+        if not rollback_job_id and state_file.is_file():
+            try:
+                rollback_job_id = JobState.load(state_file).job_id
+            except (OSError, json.JSONDecodeError, ValueError):
+                rollback_job_id = ""
         quarantine_branch = git_guard.quarantine_and_restore(
             args.checkpoint,
             task_id=task_id,
+            job_id=rollback_job_id,
             team_id=team_ctx.team_id if team_ctx else "",
         )
         if target:

@@ -186,12 +186,12 @@ class TestTeamsReportAndBrief(unittest.TestCase):
         )
         _git(ui_wt, "add", "plans/ui.md")
         _git(ui_wt, "commit", "-m", "mark ui failed")
-        _git(ui_wt, "branch", "quarantine/ui-1-1700000009")
+        _git(ui_wt, "branch", f"quarantine/{job_id}/ui/1-1700000009")
         JobState(
             job_id=f"{job_id}-ui",
             status="FAILED",
             checkpoint_hash=self.base_commit,
-            quarantined_task={"task_id": "1", "quarantined_branch": "quarantine/ui-1-1700000009"},
+            quarantined_task={"task_id": "1", "quarantined_branch": f"quarantine/{job_id}/ui/1-1700000009"},
         ).save(ui_wt / ".dev" / "job_state.json")
 
         rpt = _run_cli(self.repo_dir, "report")
@@ -200,7 +200,7 @@ class TestTeamsReportAndBrief(unittest.TestCase):
 
         self.assertIn("core", report_text)
         self.assertIn("ui", report_text)
-        self.assertIn("quarantine/ui-1-1700000009", report_text)
+        self.assertIn(f"quarantine/{job_id}/ui/1-1700000009", report_text)
         self.assertIn("FAILED", report_text)
         self.assertIn(f"teams cleanup --job-id {job_id} --force", report_text)
 
@@ -208,7 +208,7 @@ class TestTeamsReportAndBrief(unittest.TestCase):
         self.assertEqual(brief.returncode, 0, brief.stderr)
         self.assertIn("core", brief.stdout)
         self.assertIn("ui", brief.stdout)
-        self.assertIn("quarantine/ui-1-1700000009", brief.stdout)
+        self.assertIn(f"quarantine/{job_id}/ui/1-1700000009", brief.stdout)
         self.assertIn(f"teams cleanup --job-id {job_id} --force", brief.stdout)
 
     def test_brief_still_shows_multi_team_summary_when_root_job_state_exists(self) -> None:

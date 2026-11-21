@@ -913,6 +913,8 @@ class MultiTeamOrchestrator:
 
             try:
                 merged_env = os.environ.copy()
+                if config.job_id:
+                    merged_env["AUTO_DEV_JOB_ID"] = config.job_id
                 if team.env:
                     merged_env.update(team.env)
 
@@ -1378,6 +1380,55 @@ def _find_latest_team_job_id(repo_dir: Path) -> str | None:
     return max(latest_by_id, key=lambda k: latest_by_id[k])
 
 
+def resolve_active_team_job_id(repo_dir: Path, team_id: str | None = None) -> str | None:
+    """worktree またはメインリポジトリから現在有効なマルチチームジョブ ID を解決する。"""
+    env_job_id = os.environ.get("AUTO_DEV_JOB_ID", "").strip()
+    if env_job_id and VALID_JOB_ID_PATTERN.match(env_job_id):
+        return env_job_id
+
+    resolved = repo_dir.resolve()
+    main_repo = resolved
+    proc = _run_git_cmd(resolved, ["rev-parse", "--git-common-dir"])
+    if proc.returncode == 0 and proc.stdout.strip():
+        common_dir = Path(proc.stdout.strip())
+        if not common_dir.is_absolute():
+            common_dir = (resolved / common_dir).resolve()
+        else:
+            common_dir = common_dir.resolve()
+        if common_dir.name == ".git":
+            main_repo = common_dir.parent
+
+    jobs_dir = main_repo / ".dev" / "integration_jobs"
+    if not jobs_dir.is_dir():
+        return None
+
+    candidates: dict[str, float] = {}
+    for entry in jobs_dir.iterdir():
+        if not entry.is_dir() or not VALID_JOB_ID_PATTERN.match(entry.name):
+            continue
+        jid = entry.name
+        job_rec = _load_team_job_record(main_repo, jid)
+        if job_rec is None or job_rec.get("status") == "CLEANED_UP":
+            continue
+        if team_id:
+            rec_teams = {
+                str(t.get("team_id"))
+                for t in (job_rec.get("teams") or [])
+                if isinstance(t, dict) and t.get("team_id")
+            }
+            wt_map = job_rec.get("worktrees")
+            if isinstance(wt_map, dict):
+                rec_teams.update(str(k) for k in wt_map)
+            if rec_teams and team_id not in rec_teams:
+                continue
+        ts = float(job_rec.get("updated_at") or job_rec.get("created_at") or (entry / "job.json").stat().st_mtime)
+        candidates[jid] = ts
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda k: candidates[k])
+
+
 def _is_registered_worker_alive(reg: WorkerRegistration) -> bool:
     """登録済みワーカープロセスが同一性・PGID を保って生存しているか確認する。"""
     if reg.pgid <= 0 or not has_active_processes_in_group(reg.pgid):
@@ -1568,25 +1619,26 @@ def _collect_team_quarantine_branches(
     all_quarantines: list[str],
     all_team_ids: list[str],
     wt_job_state: JobState | None,
+    *,
+    job_id: str | None = None,
+    job_rec: dict[str, Any] | None = None,
 ) -> list[str]:
-    """指定チームに属する隔離ブランチ一覧を抽出する。"""
+    """指定ジョブ・チームに属する隔離ブランチ一覧を抽出する。"""
+    del all_team_ids  # チーム間に job_id/team_id/ スラッシュ境界があるため他チームとの前方一致衝突は起きない
+    if not job_id:
+        return []
+    clean_job = _sanitize_team_token(job_id)
     clean_team = _sanitize_team_token(team_id)
-    prefix = f"quarantine/{clean_team}-"
-    longer_prefixes: list[str] = []
-    for other in all_team_ids:
-        if other == team_id:
-            continue
-        other_clean = _sanitize_team_token(other)
-        if other_clean.startswith(f"{clean_team}-"):
-            longer_prefixes.append(f"quarantine/{other_clean}-")
-    matched: set[str] = set()
-    for qb in all_quarantines:
-        if qb.startswith(prefix) and not any(qb.startswith(lp) for lp in longer_prefixes):
-            matched.add(qb)
+    prefix = f"quarantine/{clean_job}/{clean_team}/"
+    matched: set[str] = {qb for qb in all_quarantines if qb.startswith(prefix)}
     if wt_job_state and isinstance(wt_job_state.quarantined_task, dict):
         q_branch = wt_job_state.quarantined_task.get("quarantined_branch")
-        if isinstance(q_branch, str) and q_branch:
+        if isinstance(q_branch, str) and q_branch.startswith(prefix):
             matched.add(q_branch)
+    if job_rec and isinstance(job_rec.get("quarantine_branches"), dict):
+        rec_q = job_rec["quarantine_branches"].get(team_id)
+        if isinstance(rec_q, str) and rec_q.startswith(prefix) and rec_q in all_quarantines:
+            matched.add(rec_q)
     return sorted(matched)
 
 
@@ -1709,6 +1761,8 @@ def get_teams_status(
             all_quarantines=all_quarantines,
             all_team_ids=ordered_team_ids,
             wt_job_state=wt_job_state,
+            job_id=resolved_job_id,
+            job_rec=job_rec,
         )
 
         if reg is not None:
@@ -1952,6 +2006,7 @@ def _quarantine_team_before_cleanup(
     wt_dir: Path | None,
     rc_ref: str | None,
     base_commit: str | None,
+    job_id: str = "",
 ) -> str | None:
     """INV-3 / INV-5: 削除前に未コミット変更と RC 未取り込みコミットを quarantine/* ブランチへ退避・検証する。"""
     wt_exists = wt_dir is not None and wt_dir.is_dir()
@@ -1989,11 +2044,17 @@ def _quarantine_team_before_cleanup(
         return None
 
     clean_team = _sanitize_team_token(team_id)
+    clean_job = _sanitize_team_token(job_id) if job_id else ""
     ts = int(time.time())
-    q_branch = f"quarantine/{clean_team}-cleanup-{ts}"
+    base_q = (
+        f"quarantine/{clean_job}/{clean_team}/cleanup-{ts}"
+        if clean_job
+        else f"quarantine/{clean_team}-cleanup-{ts}"
+    )
+    q_branch = base_q
     counter = 1
     while _branch_exists(resolved_repo, q_branch):
-        q_branch = f"quarantine/{clean_team}-cleanup-{ts}-{counter}"
+        q_branch = f"{base_q}-{counter}"
         counter += 1
 
     excluded_secrets: list[str] = []
@@ -2183,6 +2244,7 @@ def cleanup_teams_job(
                     wt_dir=wt_dir if wt_dir.is_dir() else None,
                     rc_ref=rc_ref,
                     base_commit=base_commit,
+                    job_id=job_id,
                 )
             except (RuntimeError, OSError, subprocess.SubprocessError) as err:
                 return (

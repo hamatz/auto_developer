@@ -220,10 +220,10 @@ class TestTeamsCliE2E(unittest.TestCase):
 
         q_branches = [
             line.lstrip("* ").strip()
-            for line in _git(self.repo_dir, "branch", "--list", "quarantine/ui-*").stdout.splitlines()
+            for line in _git(self.repo_dir, "branch", "--list", "quarantine/e2e-quarantine-01/ui/*").stdout.splitlines()
             if line.strip()
         ]
-        self.assertTrue(q_branches, "Expected a quarantine/ui-* branch to be created")
+        self.assertTrue(q_branches, "Expected a quarantine/e2e-quarantine-01/ui/* branch to be created")
         q_core_init = _git(self.repo_dir, "show", f"{q_branches[0]}:src/core/__init__.py").stdout
         self.assertEqual(q_core_init, "CORE_VERSION = 999\n")
         q_plan = _git(self.repo_dir, "show", f"{q_branches[0]}:plans/ui.md").stdout

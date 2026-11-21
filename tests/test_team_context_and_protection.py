@@ -370,7 +370,7 @@ class TestTeamWorktreeCliSubcommands(unittest.TestCase):
         self.assertEqual(proc_rogue.returncode, 1, proc_rogue.stderr)
         self.assertEqual(_git(self.wt_dir, "status", "--porcelain").stdout.strip(), "")
         self.assertEqual((self.wt_dir / "src" / "ui" / "view.py").read_text(encoding="utf-8"), "VIEW = 1\n")
-        q_branches = _git(self.wt_dir, "branch", "--list", "quarantine/core-1-*").stdout.strip()
+        q_branches = _git(self.wt_dir, "branch", "--list", "quarantine/*/core/1-*").stdout.strip()
         self.assertTrue(len(q_branches) > 0)
 
         # Reset plans/core.md if needed (it was restored to checkpoint) and run valid maker

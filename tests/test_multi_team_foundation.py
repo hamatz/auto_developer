@@ -165,9 +165,9 @@ class TestMultiTeamFoundation(unittest.TestCase):
         self.assertEqual(restored_core, "# Core Base\n")
         self.assertFalse((ui_wt / "rogue.sh").exists())
 
-        # 4. チーム専用の隔離ブランチ（quarantine/team-ui-1-...）が作成されていること
+        # 4. チーム専用の隔離ブランチ（quarantine/<job_id>/team-ui/1-...）が作成されていること
         branch_res = subprocess.run(
-            ["git", "branch", "--list", "quarantine/team-ui-1-*"],
+            ["git", "branch", "--list", "quarantine/*/team-ui/1-*"],
             cwd=ui_wt,
             check=True,
             capture_output=True,
