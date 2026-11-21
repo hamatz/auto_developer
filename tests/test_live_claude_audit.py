@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+tests_dir = str(Path(__file__).resolve().parent)
+if tests_dir not in sys.path:
+    sys.path.insert(0, tests_dir)
+
+from sandbox_test_helpers import should_mock_when_sandbox_unavailable
 
 from auto_developer.audit import AuditConfig, AuditFinding, IndependentAuditRunner
 from auto_developer.dispatcher import AuditDispatcher
@@ -97,7 +104,11 @@ class TestLiveClaudeAudit(unittest.TestCase):
         dispatcher = AuditDispatcher(repo_dir=self.repo_dir)
         # VVV.2 / Sol Phase 61 P1: OSサンドボックスが未導入・利用不能な環境（Linux非特権コンテナ等）でも、
         # 構造化指摘の取り込みとPLAN.mdへの自律登録パイプラインを確実に検証できるよう適応的フォールバック
-        if dispatcher.verifier._get_sandbox_backend() is None:
+        if should_mock_when_sandbox_unavailable(
+            self,
+            dispatcher.verifier,
+            reason="OS sandbox backend is unavailable in test_structured_claude_finding_ingestion_and_dispatch",
+        ):
             from unittest.mock import patch
 
             mock_res = RedVerificationResult(

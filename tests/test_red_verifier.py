@@ -14,6 +14,11 @@ from typing import Any
 src_dir = str(Path(__file__).resolve().parent.parent / "src")
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
+tests_dir = str(Path(__file__).resolve().parent)
+if tests_dir not in sys.path:
+    sys.path.insert(0, tests_dir)
+
+from sandbox_test_helpers import require_platform_sandbox
 
 from auto_developer.verifier import RedTestVerifier
 
@@ -491,7 +496,8 @@ class SimpleTest(unittest.TestCase):
 
         def hostile_communicate(timeout: int | None = None) -> tuple[str, str]:
             # テスト実行中にフラグ・パーミッションを強制復元して元リポジトリへファイルを不正作成 (改ざん注入)
-            subprocess.run(["chflags", "nouchg", str(self.repo_dir)], check=False)
+            if shutil.which("chflags"):
+                subprocess.run(["chflags", "nouchg", str(self.repo_dir)], check=False)
             os.chmod(self.repo_dir, 0o755)
             tamper_file = self.repo_dir / "injected_tamper.txt"
             tamper_file.write_text("TAMPERED_IN_FLIGHT", encoding="utf-8")
@@ -547,7 +553,8 @@ class TamperingTest(unittest.TestCase):
 
         def hostile_communicate(timeout: int | None = None) -> tuple[str, str]:
             # テスト実行中にフラグを戻して未追跡ファイルの内容のみを書き換える
-            subprocess.run(["chflags", "-R", "nouchg", str(self.repo_dir)], check=False)
+            if shutil.which("chflags"):
+                subprocess.run(["chflags", "-R", "nouchg", str(self.repo_dir)], check=False)
             os.chmod(self.repo_dir, 0o755)
             os.chmod(probe_untracked, 0o644)
             probe_untracked.write_text("TAMPERED_UNTRACKED_IN_FLIGHT", encoding="utf-8")
@@ -872,8 +879,13 @@ class PassTest(unittest.TestCase):
         """機能LLL.2: macOS sandbox-exec においてホーム外の機密パス（/Library/Keychains 等）が
         明示的 deny され、候補テストから読み取れないこと（Sol氏 Phase 51 P1指摘）。
         """
-        if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
-            self.skipTest("macOS sandbox-exec is only available on macOS")
+        require_platform_sandbox(
+            self,
+            expected_platform="darwin",
+            backend_available=bool(shutil.which("sandbox-exec")),
+            platform_skip_reason="macOS sandbox-exec is only available on macOS",
+            unavailable_reason="macOS sandbox-exec is unavailable on macOS",
+        )
 
         keychain_path = Path("/Library/Keychains/System.keychain")
         if not keychain_path.exists():
@@ -995,8 +1007,13 @@ class PassTest(unittest.TestCase):
         """機能MMM.2: macOS sandbox-exec においてデフォルト拒否（deny file-read*）と明示的許可リストにより、
         ホワイトリスト外のホストパス（/opt 等）への読み取りが PermissionError で拒絶されること（Sol氏 Phase 52 P1指摘）。
         """
-        if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
-            self.skipTest("macOS sandbox-exec is only available on macOS")
+        require_platform_sandbox(
+            self,
+            expected_platform="darwin",
+            backend_available=bool(shutil.which("sandbox-exec")),
+            platform_skip_reason="macOS sandbox-exec is only available on macOS",
+            unavailable_reason="macOS sandbox-exec is unavailable on macOS",
+        )
 
         opt_path = Path("/opt")
         if not opt_path.exists():
@@ -1020,8 +1037,13 @@ class ReadUnallowedPathTest(unittest.TestCase):
         """機能NNN.1: macOS sandbox-exec において広範な /Library, /private/var, /etc 全体 allow を廃止し、
         システム設定・キャッシュへのアクセスが PermissionError で遮断されること（Sol氏 Phase 53 P1指摘）。
         """
-        if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
-            self.skipTest("macOS sandbox-exec is only available on macOS")
+        require_platform_sandbox(
+            self,
+            expected_platform="darwin",
+            backend_available=bool(shutil.which("sandbox-exec")),
+            platform_skip_reason="macOS sandbox-exec is only available on macOS",
+            unavailable_reason="macOS sandbox-exec is unavailable on macOS",
+        )
 
         code = """import os, unittest
 

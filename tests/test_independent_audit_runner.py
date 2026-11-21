@@ -155,10 +155,15 @@ class LeakSecretTest(unittest.TestCase):
         self.assertIn("CONFIDENTIAL", text)
 """
         result = verifier.verify_candidate_test(leaking_code)
-        # サンドボックスにより PermissionError が発生し、UNHANDLED_EXCEPTION になること
+        # サンドボックスにより読み取りが遮断され（PermissionError / FileNotFoundError）、
+        # 機密値が漏洩せず UNHANDLED_EXCEPTION になること
         self.assertFalse(result.is_reproduced)
         self.assertEqual(result.reason, "UNHANDLED_EXCEPTION")
-        self.assertIn("PermissionError", result.output)
+        self.assertNotIn("secret_12345", result.output)
+        self.assertTrue(
+            "PermissionError" in result.output or "FileNotFoundError" in result.output,
+            f"Expected PermissionError or FileNotFoundError in output: {result.output}",
+        )
 
     def test_criterion_2_false_positive_resistance(self) -> None:
         """受入条件2 [偽陽性耐性]: 固定値比較・無条件fail・形骸的呼出を伴う偽RedがTRIVIAL_REDとして排除され、真正なRedのみ受理されること。"""
