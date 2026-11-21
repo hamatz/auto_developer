@@ -28,6 +28,22 @@ v0.9.0 で、v0.8.0 までの 40 件超の教訓を、今も効いている原�
 
 ## 恒久教訓インデックス
 
+### [2026-11-21] テストの期待値に OS 固有の挙動を書くと、他の OS では製品の欠陥と区別できなくなる (Assert Properties, Not OS Mechanisms)
+- Context: `tests/test_red_verifier.py`、`tests/test_independent_audit_runner.py`、`tests/test_live_claude_audit.py`、`src/auto_developer/verifier.py`（`_get_sandbox_backend`）。
+- Trap: Linux で失敗し続けた3件は、製品の欠陥ではなく、テストが macOS の手段を前提にしていたことが原因だった。改ざんを仕込む部分で `chflags` を無条件に呼んでいた。機密の読み取りの拒否を `PermissionError` で確かめていたが、bwrap はパスそのものを見せないので `FileNotFoundError` になる。原因がわかるまでの3フェーズの間、「環境依存」として放置されていた。さらに、サンドボックスがないと気づかれないままモックに切り替わるテストがあった。また、サンドボックスが使えるかを実行ファイルの有無だけで判定していたため、AppArmor の制限で bwrap が起動できない Ubuntu では、対処のわからないエラーになった。
+- Rule: テストの期待値は、守るべき性質（機密の値が出力に現れない、Red として受理されない）で書き、OS 固有の手段（例外の種類、専用のコマンド）で書かない。OS 固有の手段を使うときは、存在を確かめてから使う。ある OS で実際に実行して確かめている性質は、他の対応 OS でも実際に実行して確かめる。サンドボックスのような前提条件は、存在ではなく実際に動くかで判定する。CI ではスキップやモックへの切り替えを許さない。「環境依存」の失敗を放置しない。原因を調べて、テストの欠陥か製品の欠陥かを確定する。
+- Rung: 検査（OS に依存しない期待値 SBX-4、対称な実行テスト SBX-5）、作り（実働の判定 SBX-3）、関門（CI のマトリクスと `AUTO_DEV_REQUIRE_SANDBOX=1`、REL-3）
+- Immunity Test: Phase 68 で追加（SBX-4, SBX-5）
+- Proof: 2026-11-21 に、何もしない `chflags` を PATH に置くと Linux でも2件が通ることを確認した。また、bwrap の中で親リポジトリの `.env` を読むと `FileNotFoundError` になることも確認した。
+
+### [2026-11-21] タスク番号だけで管理した記録が、次のフェーズに漏れて Bundle を壊した (Phase-Scoped State)
+- Context: `.git/nightly_evidence/records/task_<id>.json`、`src/auto_developer/bundler.py`（記録の収集）。
+- Trap: Evidence の記録はタスク番号だけをキーにしていた。Phase 66（8タスク）の次の Phase 67（7タスク）で、1〜7は上書きされたが、Phase 66 の task 8 が残った。古い SPEC のハッシュを持つその記録が Bundle に入り、`verify-bundle` が INVALID になった。以前は、フェーズの準備で人間が記録を手で退避していた（`archive/phase64/`）。しかし手順として書かれておらず、今回の準備から抜けた。
+- Rule: 複数のフェーズや計画にまたがって残る状態は、「どの計画のものか」で絞り込む。人間の暗黙の手順に頼らない。Bundle やレポートに入れる記録は、対象の計画で完了したタスクのものに限る。暫定の手順は、仕組みにするまで PLAN.md の「人間が行うこと」に明記する。
+- Rung: 作り（記録の選択 BDL-3）
+- Immunity Test: Phase 68 で追加（BDL-3）
+- Proof: 2026-11-21 に task 8 の記録を `archive/phase66/` へ移して Bundle を作り直し、VERIFIED になることを確認した。
+
 ### [2026-11-21] E2E テストが雛形を使わず、特定の環境でしか実行されていなかったため、利用者の経路の欠陥を見逃した (E2E Must Use Shipped Templates, Real Environments)
 - Context: Phase 66（TEAM-10〜19）。`tests/test_teams_cli_e2e.py`、`cli.py` の `init` / `teams init` の雛形、`orchestrator.py` のコミット直前の担当範囲検査、`worktree.py` の削除時の保全判定。
 - Trap: Phase 66 の受入テストは全件 Green だったが、雛形をそのまま使って Linux で `teams run` を実行すると、両チームが失敗した。原因は4つあった。(1) テストの副産物 `__pycache__` が担当範囲の違反と判定された（雛形の `.gitignore` に含まれていなかった）。(2) コミット直前に違反を見つけても隔離せず、ステージ済みの変更と Evidence を残したまま終了していた。(3) 成功したジョブの `teams cleanup` が、ワーカーの生成物を保全対象とみなして必ず失敗した。(4) 雛形のコメント内の記法例がタスクとして読まれた。いずれも、テストがコメントを削った計画ファイルを使い、バイトコードを書かない環境で動き、実際に実行した後の `cleanup` を通していなかったため検出されなかった。E2E のコードには、(4) を回避するための注記まで書かれていた。
