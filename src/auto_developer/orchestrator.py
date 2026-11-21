@@ -558,8 +558,26 @@ class NightlyOrchestrator:
             # 3. 証跡の検証と消費（ツリー整合性照合）
             final_violations = self._check_boundary(checkpoint)
             if final_violations:
-                print(f"  BOUNDARY ERROR: Unauthorized files detected at commit gate: {final_violations}", file=sys.stderr)
-                return 3
+                err_msg = f"BOUNDARY ERROR: Unauthorized files detected at commit gate: {final_violations}"
+                print(f"  {err_msg}", file=sys.stderr)
+                if attempt_2_log:
+                    first_log = attempt_1_log
+                    second_log = f"{attempt_2_log}\n\n[Phase E: Commit Gate]\n{err_msg}"
+                else:
+                    first_log = f"{attempt_1_log}\n\n[Phase E: Commit Gate]\n{err_msg}".strip()
+                    second_log = ""
+                return self._handle_failure(
+                    task,
+                    checkpoint,
+                    total_tasks,
+                    succeeded_tasks,
+                    job_state,
+                    "BOUNDARY_VIOLATION",
+                    err_msg,
+                    attempt_1_log=first_log,
+                    attempt_2_log=second_log,
+                    attempts=task_attempts,
+                )
 
             current_tree = self.git_guard.get_working_tree_sha()
             current_spec = self.git_guard.get_spec_sha(self.spec_path)

@@ -274,8 +274,25 @@ class TestTeamWorktreeCliSubcommands(unittest.TestCase):
         self.assertIn("BOUNDARY", c_bad.stderr.upper())
         self.assertEqual(_git(self.wt_dir, "rev-parse", "HEAD").stdout.strip(), self.wt_checkpoint)
 
-        # Remove rogue file and commit cleanly
+        # Remove rogue file: commit-step without re-verifying must fail with exit 3 (TEAM-21)
         (self.wt_dir / "src" / "ui" / "rogue.py").unlink()
+        c_invalid = self._run_cli(
+            "commit-step",
+            "--task-id", "1",
+            "--checkpoint", self.wt_checkpoint,
+            "--maker-model", "gemini-3.8-flash",
+            "--checker-model", "claude-opus-5-5-medium",
+            "--checker-decision", "APPROVE",
+            "--checker-reason", "looks good",
+        )
+        self.assertEqual(c_invalid.returncode, 3, c_invalid.stderr)
+        self.assertEqual(_git(self.wt_dir, "rev-parse", "HEAD").stdout.strip(), self.wt_checkpoint)
+
+        # Re-run verify-step, then commit-step cleanly
+        v_reverify = self._run_cli("verify-step", "--checkpoint", self.wt_checkpoint, "--task-id", "1")
+        self.assertEqual(v_reverify.returncode, 0, v_reverify.stderr)
+        self.assertIn("VERIFICATION PASSED", v_reverify.stdout)
+
         c_ok = self._run_cli(
             "commit-step",
             "--task-id", "1",

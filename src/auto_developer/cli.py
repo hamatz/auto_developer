@@ -1103,9 +1103,12 @@ def main(argv: list[str] | None = None) -> int:
                 base_checkpoint=chk_ref,
             ).inspect_changes()
             if not boundary_res.allowed:
+                evidence_store.clear_evidence(task_id=args.task_id)
                 print(
                     f"BOUNDARY ERROR: Unauthorized files detected at commit gate for team '{team_ctx.team_id}': "
-                    f"{boundary_res.violations}",
+                    f"{boundary_res.violations}\n"
+                    f"Evidence has been invalidated. Run `auto-dev rollback-step --checkpoint {chk_ref} "
+                    f"--task-id {args.task_id}` to quarantine the changes and restore the worktree.",
                     file=sys.stderr,
                 )
                 metrics.record_event(
