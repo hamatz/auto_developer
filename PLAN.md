@@ -54,7 +54,7 @@
 - どのステップでも、変更したテスト名をコミットメッセージに列挙する。
 
 ## ステップ
-- [ ] 1. 型検査の両 platform 対応: `verifier.py` の `sys.platform` の分岐の前で型を宣言し、`mypy --platform linux` / `--platform darwin` の両方を通す（Red: 検証スクリプトの Linux 側の mypy が失敗している）（REL-4）
+- [x] 1. 型検査の両 platform 対応: `verifier.py` の `sys.platform` の分岐の前で型を宣言し、`mypy --platform linux` / `--platform darwin` の両方を通す（Red: 検証スクリプトの Linux 側の mypy が失敗している）（REL-4）
 - [ ] 2. 雛形の検証スクリプトの Python の選択（環境変数 `PYTHON` → PATH の `python3`）と、`src/` があれば `PYTHONPATH` に加える処理。ワーカーの既定の起動を `sys.executable` にする（Red-First）（DX-5）
 - [ ] 3. `auto-dev run` で、成功時・失敗時とも、レポートを書いてから Bundle を作る（Red-First）（RPT-6）
 - [ ] 4. 基点からのコミットが0件のチームを `NO_CHANGES` として統合の対象から外す。全チームが `NO_CHANGES` なら RC タグを作らずに終了コード 0。`teams run` も同じ規則に従う（Red-First）（TEAM-27）

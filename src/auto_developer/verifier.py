@@ -1531,9 +1531,10 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         if cached is not None:
             return cached
 
+        res: tuple[str | None, str]
         if sys.platform == "darwin":
             if not shutil.which("sandbox-exec"):
-                res: tuple[str | None, str] = (
+                res = (
                     None,
                     _format_sandbox_unavailable_message(sys.platform, binary_missing=True),
                 )
