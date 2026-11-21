@@ -430,6 +430,58 @@ def init_teams_project(target_dir: Path, team_ids: list[str] | None = None) -> i
     return 0
 
 
+_DEFAULT_MOCK_MAKER_MODEL = "gemini-3.8-flash"
+_DEFAULT_MOCK_CHECKER_MODEL = "claude-opus-5.5"
+_DEFAULT_MOCK_AUDITOR_MODEL = "claude-opus-5.5"
+
+
+def _normalize_optional_model(value: object) -> str | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped if stripped else None
+    return None
+
+
+def _resolve_cli_run_models(
+    *,
+    is_mock: bool,
+    maker_cmd: str,
+    checker_cmd: str,
+    raw_maker_model: object,
+    raw_checker_model: object,
+    enable_audit: bool = False,
+    auditor_cmd: str = "",
+    raw_auditor_model: object = None,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Resolve CLI model identifiers and reject omitted models when external commands are given (DX-2)."""
+    maker_model = _normalize_optional_model(raw_maker_model)
+    checker_model = _normalize_optional_model(raw_checker_model)
+    auditor_model = _normalize_optional_model(raw_auditor_model)
+    if is_mock:
+        return (
+            maker_model or _DEFAULT_MOCK_MAKER_MODEL,
+            checker_model or _DEFAULT_MOCK_CHECKER_MODEL,
+            auditor_model or _DEFAULT_MOCK_AUDITOR_MODEL,
+            None,
+        )
+
+    missing_models: list[str] = []
+    if maker_cmd and not maker_model:
+        missing_models.append("--maker-model")
+    if checker_cmd and not checker_model:
+        missing_models.append("--checker-model")
+    if enable_audit and auditor_cmd and not auditor_model:
+        missing_models.append("--auditor-model")
+    if missing_models:
+        flags = ", ".join(missing_models)
+        err = (
+            f"CONFIG ERROR: In production mode, model identifiers must be specified when external commands are configured ({flags}).\n"
+            f"Please specify {flags}, or use --mock to run with simulated mock agents."
+        )
+        return None, None, None, err
+    return maker_model, checker_model, auditor_model, None
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI エントリーポイント。"""
     parser = argparse.ArgumentParser(
@@ -476,10 +528,10 @@ def main(argv: list[str] | None = None) -> int:
         "--checker-cmd", type=str, default="", help="Command template to execute Checker"
     )
     parser.add_argument(
-        "--maker-model", type=str, default="gemini-3.8-flash", help="Model identifier for Maker"
+        "--maker-model", type=str, default=None, help="Model identifier for Maker"
     )
     parser.add_argument(
-        "--checker-model", type=str, default="claude-opus-5.5", help="Model identifier for Checker"
+        "--checker-model", type=str, default=None, help="Model identifier for Checker"
     )
     parser.add_argument(
         "--enable-audit", action="store_true", help="Enable independent repository audit stage on completion"
@@ -488,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
         "--auditor-cmd", type=str, default="", help="Command template to execute independent auditor"
     )
     parser.add_argument(
-        "--auditor-model", type=str, default="claude-opus-5.5", help="Model identifier for Independent Auditor"
+        "--auditor-model", type=str, default=None, help="Model identifier for Independent Auditor"
     )
     parser.add_argument(
         "--auditor-fallback-models", type=str, default="", help="Comma-separated fallback models for independent auditor"
@@ -512,19 +564,19 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Explicit ownership glob pattern(s) for team execution (repeatable or comma-separated)",
     )
-    run_parser.add_argument("--dry-run", action="store_true", help="Simulate execution without modifying git or state")
+    run_parser.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS, help="Simulate execution without modifying git or state")
     run_parser.add_argument("--timeout", type=int, default=None, help="Max verification timeout in seconds")
-    run_parser.add_argument("--resume", action="store_true", help="Resume interrupted job from state file")
-    run_parser.add_argument("--mock", action="store_true", help="Run with simulated mock agents (for testing only)")
-    run_parser.add_argument("--maker-cmd", type=str, default="", help="Command template to execute Maker")
-    run_parser.add_argument("--checker-cmd", type=str, default="", help="Command template to execute Checker")
-    run_parser.add_argument("--maker-model", type=str, default="gemini-3.8-flash", help="Model identifier for Maker")
-    run_parser.add_argument("--checker-model", type=str, default="claude-opus-5.5", help="Model identifier for Checker")
-    run_parser.add_argument("--enable-audit", action="store_true", help="Enable independent repository audit stage on completion")
-    run_parser.add_argument("--auditor-cmd", type=str, default="", help="Command template to execute independent auditor")
-    run_parser.add_argument("--auditor-model", type=str, default="claude-opus-5.5", help="Model identifier for Independent Auditor")
-    run_parser.add_argument("--auditor-fallback-models", type=str, default="", help="Comma-separated fallback models for independent auditor")
-    run_parser.add_argument("--audit-baseline", type=str, default=None, help="Baseline commit hash for independent audit comparison")
+    run_parser.add_argument("--resume", action="store_true", default=argparse.SUPPRESS, help="Resume interrupted job from state file")
+    run_parser.add_argument("--mock", action="store_true", default=argparse.SUPPRESS, help="Run with simulated mock agents (for testing only)")
+    run_parser.add_argument("--maker-cmd", type=str, default=argparse.SUPPRESS, help="Command template to execute Maker")
+    run_parser.add_argument("--checker-cmd", type=str, default=argparse.SUPPRESS, help="Command template to execute Checker")
+    run_parser.add_argument("--maker-model", type=str, default=argparse.SUPPRESS, help="Model identifier for Maker")
+    run_parser.add_argument("--checker-model", type=str, default=argparse.SUPPRESS, help="Model identifier for Checker")
+    run_parser.add_argument("--enable-audit", action="store_true", default=argparse.SUPPRESS, help="Enable independent repository audit stage on completion")
+    run_parser.add_argument("--auditor-cmd", type=str, default=argparse.SUPPRESS, help="Command template to execute independent auditor")
+    run_parser.add_argument("--auditor-model", type=str, default=argparse.SUPPRESS, help="Model identifier for Independent Auditor")
+    run_parser.add_argument("--auditor-fallback-models", type=str, default=argparse.SUPPRESS, help="Comma-separated fallback models for independent auditor")
+    run_parser.add_argument("--audit-baseline", type=str, default=argparse.SUPPRESS, help="Baseline commit hash for independent audit comparison")
 
     # Subcommand: brief
     subparsers.add_parser("brief", help="Display morning brief of recent execution")
@@ -841,19 +893,47 @@ def main(argv: list[str] | None = None) -> int:
                 print(format_teams_integrate_text(int_payload))
             return 0
         if args.teams_subcommand == "run":
-            run_payload, run_code, run_err = run_teams_job(
-                work_dir,
-                job_id=args.job_id,
-                maker_cmd=args.maker_cmd,
-                checker_cmd=args.checker_cmd,
-                maker_model=args.maker_model,
-                checker_model=args.checker_model,
-                is_mock=args.mock,
-                worker_timeout=args.worker_timeout,
-                verify_timeout=args.timeout,
-                verify_script=args.verify_script,
-                spec_path=args.spec,
-            )
+            teams_is_mock = bool(getattr(args, "mock", False))
+            teams_maker_cmd = getattr(args, "maker_cmd", "")
+            teams_checker_cmd = getattr(args, "checker_cmd", "")
+            if not teams_is_mock and (not teams_maker_cmd or not teams_checker_cmd):
+                run_payload, run_code, run_err = run_teams_job(
+                    work_dir,
+                    job_id=args.job_id,
+                    maker_cmd=teams_maker_cmd,
+                    checker_cmd=teams_checker_cmd,
+                    maker_model=None,
+                    checker_model=None,
+                    is_mock=False,
+                    worker_timeout=args.worker_timeout,
+                    verify_timeout=args.timeout,
+                    verify_script=args.verify_script,
+                    spec_path=args.spec,
+                )
+            else:
+                teams_maker_model, teams_checker_model, _, teams_model_err = _resolve_cli_run_models(
+                    is_mock=teams_is_mock,
+                    maker_cmd=teams_maker_cmd,
+                    checker_cmd=teams_checker_cmd,
+                    raw_maker_model=getattr(args, "maker_model", None),
+                    raw_checker_model=getattr(args, "checker_model", None),
+                )
+                if teams_model_err is not None:
+                    print(teams_model_err, file=sys.stderr)
+                    return 2
+                run_payload, run_code, run_err = run_teams_job(
+                    work_dir,
+                    job_id=args.job_id,
+                    maker_cmd=teams_maker_cmd,
+                    checker_cmd=teams_checker_cmd,
+                    maker_model=teams_maker_model,
+                    checker_model=teams_checker_model,
+                    is_mock=teams_is_mock,
+                    worker_timeout=args.worker_timeout,
+                    verify_timeout=args.timeout,
+                    verify_script=args.verify_script,
+                    spec_path=args.spec,
+                )
             if run_code != 2:
                 _refresh_team_report_best_effort(
                     reporter,
@@ -1583,14 +1663,11 @@ def main(argv: list[str] | None = None) -> int:
     resolved_team_id = (team_ctx.team_id or None) if team_ctx else None
     resolved_owns = (team_ctx.owns_patterns or None) if team_ctx else None
 
-    is_mock = getattr(args, "mock", False)
+    is_mock = bool(getattr(args, "mock", False))
     maker_cmd = getattr(args, "maker_cmd", "")
     checker_cmd = getattr(args, "checker_cmd", "")
-    maker_model = getattr(args, "maker_model", "gemini-3.8-flash")
-    checker_model = getattr(args, "checker_model", "claude-opus-5.5")
-    enable_audit = getattr(args, "enable_audit", False)
+    enable_audit = bool(getattr(args, "enable_audit", False))
     auditor_cmd = getattr(args, "auditor_cmd", "")
-    auditor_model = getattr(args, "auditor_model", "claude-opus-5.5")
     auditor_fallback_str = getattr(args, "auditor_fallback_models", "")
     fallback_models = (
         [m.strip() for m in auditor_fallback_str.split(",") if m.strip()]
@@ -1598,8 +1675,8 @@ def main(argv: list[str] | None = None) -> int:
         else []
     )
     audit_baseline = getattr(args, "audit_baseline", None)
-    dry_run = getattr(args, "dry_run", False)
-    resume = getattr(args, "resume", False)
+    dry_run = bool(getattr(args, "dry_run", False))
+    resume = bool(getattr(args, "resume", False))
     timeout = getattr(args, "timeout", None) or 300
 
     if enable_audit and not is_mock and not auditor_cmd:
@@ -1626,6 +1703,20 @@ def main(argv: list[str] | None = None) -> int:
             timeout_sec=timeout,
             cwd=work_dir,
         )
+
+    maker_model, checker_model, auditor_model, model_err = _resolve_cli_run_models(
+        is_mock=is_mock,
+        maker_cmd=maker_cmd,
+        checker_cmd=checker_cmd,
+        raw_maker_model=getattr(args, "maker_model", None),
+        raw_checker_model=getattr(args, "checker_model", None),
+        enable_audit=enable_audit,
+        auditor_cmd=auditor_cmd,
+        raw_auditor_model=getattr(args, "auditor_model", None),
+    )
+    if model_err is not None:
+        print(model_err, file=sys.stderr)
+        return 2
 
     orchestrator = NightlyOrchestrator(
         repo_dir=work_dir,

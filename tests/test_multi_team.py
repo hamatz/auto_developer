@@ -687,12 +687,30 @@ class TestMultiTeamOrchestration(unittest.TestCase):
                 teams=[
                     TeamWorkerSpec(
                         team_id="team-core",
-                        extra_args=["--maker-cmd", core_maker_cmd, "--checker-cmd", core_checker_cmd],
+                        extra_args=[
+                            "--maker-cmd",
+                            core_maker_cmd,
+                            "--checker-cmd",
+                            core_checker_cmd,
+                            "--maker-model",
+                            "gemini-3.8-flash",
+                            "--checker-model",
+                            "claude-opus-5-5-medium",
+                        ],
                         env=worker_env,
                     ),
                     TeamWorkerSpec(
                         team_id="team-ui",
-                        extra_args=["--maker-cmd", ui_maker_cmd, "--checker-cmd", ui_checker_cmd],
+                        extra_args=[
+                            "--maker-cmd",
+                            ui_maker_cmd,
+                            "--checker-cmd",
+                            ui_checker_cmd,
+                            "--maker-model",
+                            "gemini-3.8-flash",
+                            "--checker-model",
+                            "claude-opus-5-5-medium",
+                        ],
                         env=worker_env,
                     ),
                 ],

@@ -3137,8 +3137,8 @@ def run_teams_job(
     *,
     maker_cmd: str = "",
     checker_cmd: str = "",
-    maker_model: str = "gemini-3.8-flash",
-    checker_model: str = "claude-opus-5.5",
+    maker_model: str | None = "gemini-3.8-flash",
+    checker_model: str | None = "claude-opus-5.5",
     is_mock: bool = False,
     worker_timeout: float = 21600.0,
     verify_timeout: int = 300,
@@ -3161,9 +3161,33 @@ def run_teams_job(
             ),
         )
 
+    norm_maker_model = maker_model.strip() if isinstance(maker_model, str) else ""
+    norm_checker_model = checker_model.strip() if isinstance(checker_model, str) else ""
+    if is_mock:
+        resolved_maker_model = norm_maker_model or "gemini-3.8-flash"
+        resolved_checker_model = norm_checker_model or "claude-opus-5.5"
+    else:
+        missing_models: list[str] = []
+        if maker_cmd and not norm_maker_model:
+            missing_models.append("--maker-model")
+        if checker_cmd and not norm_checker_model:
+            missing_models.append("--checker-model")
+        if missing_models:
+            flags = ", ".join(missing_models)
+            return (
+                None,
+                2,
+                (
+                    f"CONFIG ERROR: In production mode, model identifiers must be specified when external commands are configured ({flags}).\n"
+                    f"Please specify {flags}, or use --mock to run with simulated mock agents."
+                ),
+            )
+        resolved_maker_model = norm_maker_model
+        resolved_checker_model = norm_checker_model
+
     from auto_developer.audit import verify_model_independence
 
-    ok_models, model_reason = verify_model_independence(maker_model, checker_model)
+    ok_models, model_reason = verify_model_independence(resolved_maker_model, resolved_checker_model)
     if not ok_models:
         return None, 2, f"PRE-FLIGHT MODEL POLICY ERROR: {model_reason}"
 
@@ -3181,8 +3205,8 @@ def run_teams_job(
     job_rec = _load_team_job_record(resolved_repo, effective_job_id)
     if job_rec is not None:
         job_rec["status"] = "RUNNING"
-        job_rec["maker_model"] = maker_model
-        job_rec["checker_model"] = checker_model
+        job_rec["maker_model"] = resolved_maker_model
+        job_rec["checker_model"] = resolved_checker_model
         job_rec["worker_timeout"] = worker_timeout
         job_rec["is_mock"] = is_mock
         job_rec["updated_at"] = time.time()
@@ -3216,10 +3240,10 @@ def run_teams_job(
             cmd.extend(["--maker-cmd", maker_cmd])
         if checker_cmd:
             cmd.extend(["--checker-cmd", checker_cmd])
-        if maker_model:
-            cmd.extend(["--maker-model", maker_model])
-        if checker_model:
-            cmd.extend(["--checker-model", checker_model])
+        if resolved_maker_model:
+            cmd.extend(["--maker-model", resolved_maker_model])
+        if resolved_checker_model:
+            cmd.extend(["--checker-model", resolved_checker_model])
         if verify_timeout > 0:
             cmd.extend(["--timeout", str(verify_timeout)])
         return cmd

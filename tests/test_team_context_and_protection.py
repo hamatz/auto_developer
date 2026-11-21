@@ -356,6 +356,8 @@ class TestTeamWorktreeCliSubcommands(unittest.TestCase):
                 *bad_args,
                 "--maker-cmd", maker_ok,
                 "--checker-cmd", checker_ok,
+                "--maker-model", "gemini-3.8-flash",
+                "--checker-model", "claude-opus-5-5-medium",
             )
             self.assertEqual(proc.returncode, 2, f"Expected exit 2 for {bad_args}, got {proc.returncode}: {proc.stderr}")
             self.assertIn("TEAMS_CONFIG_ERROR:", proc.stderr)
@@ -366,6 +368,8 @@ class TestTeamWorktreeCliSubcommands(unittest.TestCase):
             "run",
             "--maker-cmd", maker_rogue,
             "--checker-cmd", checker_ok,
+            "--maker-model", "gemini-3.8-flash",
+            "--checker-model", "claude-opus-5-5-medium",
         )
         self.assertEqual(proc_rogue.returncode, 1, proc_rogue.stderr)
         self.assertEqual(_git(self.wt_dir, "status", "--porcelain").stdout.strip(), "")
@@ -381,6 +385,8 @@ class TestTeamWorktreeCliSubcommands(unittest.TestCase):
             "--plan", "plans/core.md",
             "--maker-cmd", maker_ok,
             "--checker-cmd", checker_ok,
+            "--maker-model", "gemini-3.8-flash",
+            "--checker-model", "claude-opus-5-5-medium",
         )
         self.assertEqual(proc_ok.returncode, 0, f"stderr: {proc_ok.stderr}\nstdout: {proc_ok.stdout}")
         self.assertIn("- [x] 1. Update core module", (self.wt_dir / "plans" / "core.md").read_text(encoding="utf-8"))
@@ -398,6 +404,8 @@ class TestTeamWorktreeCliSubcommands(unittest.TestCase):
             "--owns", "src/ui/**",
             "--maker-cmd", maker_ok,
             "--checker-cmd", checker_ok,
+            "--maker-model", "gemini-3.8-flash",
+            "--checker-model", "claude-opus-5-5-medium",
         ])
         self.assertEqual(bad, 2)
 
@@ -408,6 +416,8 @@ class TestTeamWorktreeCliSubcommands(unittest.TestCase):
             "--team-id", "nonexistent",
             "--maker-cmd", maker_ok,
             "--checker-cmd", checker_ok,
+            "--maker-model", "gemini-3.8-flash",
+            "--checker-model", "claude-opus-5-5-medium",
         ])
         self.assertEqual(unknown, 2)
 
@@ -418,6 +428,8 @@ class TestTeamWorktreeCliSubcommands(unittest.TestCase):
             "--team-id", "core",
             "--maker-cmd", maker_ok,
             "--checker-cmd", checker_ok,
+            "--maker-model", "gemini-3.8-flash",
+            "--checker-model", "claude-opus-5-5-medium",
         ])
         self.assertEqual(ok, 0)
         self.assertIn("- [x] 1. Update core module", (self.repo_dir / "plans" / "core.md").read_text(encoding="utf-8"))
@@ -439,6 +451,8 @@ class TestTeamWorktreeCliSubcommands(unittest.TestCase):
                 "--plan", "plans/core.md",
                 "--maker-cmd", maker_rogue,
                 "--checker-cmd", checker_ok,
+                "--maker-model", "gemini-3.8-flash",
+                "--checker-model", "claude-opus-5-5-medium",
             ])
             self.assertEqual(rogue, 1)
             self.assertEqual(_git(repo2, "status", "--porcelain").stdout.strip(), "")
@@ -451,6 +465,8 @@ class TestTeamWorktreeCliSubcommands(unittest.TestCase):
                 "--plan", "plans/core.md",
                 "--maker-cmd", maker_ok,
                 "--checker-cmd", checker_ok,
+                "--maker-model", "gemini-3.8-flash",
+                "--checker-model", "claude-opus-5-5-medium",
             ])
             self.assertEqual(ok, 0)
             self.assertIn("- [x] 1. Update core module", (repo2 / "plans" / "core.md").read_text(encoding="utf-8"))

@@ -293,6 +293,10 @@ class TestTeamsRunCli(unittest.TestCase):
             f"{sys.executable} {maker_script}",
             "--checker-cmd",
             "printf 'DECISION: APPROVE\\n'",
+            "--maker-model",
+            "gemini-3.8-flash",
+            "--checker-model",
+            "claude-opus-5-5-medium",
         )
         self.assertEqual(proc.returncode, 1)
         combined = proc.stdout + "\n" + proc.stderr
@@ -326,6 +330,10 @@ class TestTeamsRunCli(unittest.TestCase):
             f"{sys.executable} {maker_script}",
             "--checker-cmd",
             "printf 'DECISION: APPROVE\\n'",
+            "--maker-model",
+            "gemini-3.8-flash",
+            "--checker-model",
+            "claude-opus-5-5-medium",
         )
         elapsed = time.monotonic() - t0
         self.assertEqual(proc.returncode, 1)

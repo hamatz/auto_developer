@@ -314,6 +314,10 @@ class TestTeamsCliE2E(unittest.TestCase):
                     "true",
                     "--checker-cmd",
                     "printf 'DECISION: APPROVE\\n'",
+                    "--maker-model",
+                    "gemini-3.8-flash",
+                    "--checker-model",
+                    "claude-opus-5-5-medium",
                 )
                 self.assertEqual(run.returncode, 2, f"run stdout={run.stdout}\nstderr={run.stderr}")
                 self.assertIn("TEAMS_CONFIG_ERROR:", run.stderr)

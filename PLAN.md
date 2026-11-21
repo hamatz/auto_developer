@@ -70,7 +70,7 @@
 - [x] 5. `teams init` が `base.ref` に現在のブランチ名を書く（コミットのないリポジトリ・detached HEAD を含む）（Red-First）（TEAM-25）
 - [x] 6. 統合に成功したジョブの `teams cleanup` で `integration/<job_id>` を削除する（RC タグは残し、失敗・未完了のジョブでは削除しない）（Red-First）（TEAM-26）
 - [x] 7. チームのジョブの「判断待ちの事項」に、そのジョブで判断すべきことだけを表示する（Red-First）（RPT-5）
-- [ ] 8. 外部コマンドを指定してモデル名を省略した `run` / `teams run` を終了コード 2 で拒否する（`--mock` は従来どおり）（Red-First）（DX-2）
+- [x] 8. 外部コマンドを指定してモデル名を省略した `run` / `teams run` を終了コード 2 で拒否する（`--mock` は従来どおり）（Red-First）（DX-2）
 
 ## 止まっていること・判断待ち
 - なし。
