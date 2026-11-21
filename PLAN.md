@@ -41,8 +41,8 @@
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - ステップ 1（CORE-10）: HTML コメント内の記法例をタスクとして数えることを前提にした既存テストがあれば、新しい規則に合わせて更新してよい。この場合、変更したテスト名をコミットメッセージに列挙する。
 - ステップ 4（TEAM-21）: `tests/test_team_context_and_protection.py` の `test_verify_step_and_commit_step_with_auto_included_plan_and_boundary_guard` に限り、違反時の `commit-step` が Evidence を無効化するため、違反ファイル削除後に再検証なしの `commit-step` が終了コード 3 で拒否され、`verify-step` 再実行後の `commit-step` が成功するように更新してよい。変更したテスト名をコミットメッセージに列挙する。
-- ステップ 5（TEAM-23）: 隔離ブランチ名 `quarantine/<team_id>-...` を前提にした既存テストは、`quarantine/<job_id>/<team_id>/...` に更新してよい。変更したテスト名をコミットメッセージに列挙する。
-- 上記以外の既存テストは変更しない。`tests/test_teams_cli_e2e.py`（TEAM-19）は変更しない。免疫テスト（`tests/immunity/**`）は変更しない。
+- ステップ 5（TEAM-23）: 隔離ブランチ名 `quarantine/<team_id>-...` を前提にした既存テストは、`quarantine/<job_id>/<team_id>/...` に更新してよい。また、`tests/test_teams_cli_e2e.py` の `test_e2e_out_of_owns_team_is_quarantined_and_not_integrated` に限り、隔離ブランチ検索パターン `"quarantine/ui-*"` を `"quarantine/e2e-quarantine-01/ui/*"` に、そのアサーションのメッセージ文字列を新しいパターンに合わせて更新してよい（同テストの他のアサーションは変更しない）。変更したテスト名をコミットメッセージに列挙する。
+- 上記以外の既存テストは変更しない。上記以外の `tests/test_teams_cli_e2e.py`（TEAM-19）は変更しない。免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
 - [x] 1. 計画ファイルの読み取り範囲: HTML コメント内の行を無視し、「## ステップ」見出しがあればその節だけを読む。進捗表示と状態の書き込みも同じ規則で行う（Red-First）（CORE-10）
