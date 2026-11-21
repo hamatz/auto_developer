@@ -40,6 +40,7 @@
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 - ステップ 1（CORE-10）: HTML コメント内の記法例をタスクとして数えることを前提にした既存テストがあれば、新しい規則に合わせて更新してよい。この場合、変更したテスト名をコミットメッセージに列挙する。
+- ステップ 4（TEAM-21）: `tests/test_team_context_and_protection.py` の `test_verify_step_and_commit_step_with_auto_included_plan_and_boundary_guard` に限り、違反時の `commit-step` が Evidence を無効化するため、違反ファイル削除後に再検証なしの `commit-step` が終了コード 3 で拒否され、`verify-step` 再実行後の `commit-step` が成功するように更新してよい。変更したテスト名をコミットメッセージに列挙する。
 - ステップ 5（TEAM-23）: 隔離ブランチ名 `quarantine/<team_id>-...` を前提にした既存テストは、`quarantine/<job_id>/<team_id>/...` に更新してよい。変更したテスト名をコミットメッセージに列挙する。
 - 上記以外の既存テストは変更しない。`tests/test_teams_cli_e2e.py`（TEAM-19）は変更しない。免疫テスト（`tests/immunity/**`）は変更しない。
 
