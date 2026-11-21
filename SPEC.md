@@ -10,8 +10,8 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - [x] は実装済みでテストがあるもの、[ ] は未実装（現在のフェーズの対象）を表す。
 - 新しいフェーズの要件は「## 5. 次のリリースで追加する要件」に書き、リリース後に 4 章の該当領域へ移す。
   開発の経緯（なぜそうしたか）はここに書かず、LESSONS.md・CHANGELOG.md・git 履歴に残す。
-- Checker への入力は、該当節を機械的に切り出した原文とする（要約しない）:
-    awk '/^## 5\./,/^## 6\./' SPEC.md > .dev/checker/spec_current.md
+- Checker への入力は、現在のフェーズの節を機械的に切り出した原文とする（要約しない）。例（Phase 67）:
+    awk '/^### 5\.1/,/^### 5\.2/' SPEC.md > .dev/checker/spec_current.md
 - この SPEC は Elephant（人間と設計セッション）が書き、人間が承認する。Maker は変更できない（保護ファイル）。
 -->
 
@@ -32,7 +32,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - **検証スクリプト**: `scripts/verify_local.sh`。リンター・型検査・テストを実行し、終了コード 0 のときだけ合格とする。
 - **Evidence（証跡）**: 検証合格時に発行され、作業ツリーの Git Tree SHA と SPEC.md のハッシュに拘束された一回限りの記録。コミット時に照合・消費され、監査レコードとして残る。
 - **Quarantine（隔離）**: 失敗した作業を捨てずに `quarantine/*` ブランチへ退避し、本線を直前の正常状態に戻すこと。
-- **保護ファイル**: Maker が作成・変更・削除してはならないファイル。`.github/**`, `SPEC.md`, `scripts/verify_local.sh`, `tests/immunity/**`（v0.9.0 から `teams.json` を追加。TEAM-11）。
+- **保護ファイル**: Maker が作成・変更・削除してはならないファイル。`.github/**`, `SPEC.md`, `scripts/verify_local.sh`, `tests/immunity/**`, `teams.json`。
 - **免疫テスト**: 過去の重大な失敗の再発を防ぐテスト（`tests/immunity/`）。人間だけが追加・変更する。
 - **チーム**: 担当範囲（`owns`）と計画ファイルを持つ作業単位。チームごとに専用の Git worktree とブランチで作業する。
 
@@ -113,7 +113,9 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - 実行の前後で元のリポジトリ（未追跡・無視ファイルを含む）のスナップショットを比較し、改ざんがあれば結果に関わらず拒否する。
 - [x] **SBX-2 本物の Red の判定**: 判定は構造化されたテスト結果に基づく。実行件数が1件以上で、アサーション失敗が1件以上あり、それ以外のエラーが0件のときだけ Red とする。製品コードと因果関係のない失敗（固定値どうしの比較、無条件の `fail` など）は、AST 解析と実行の追跡で TRIVIAL_RED として退ける。静的に確信できない場合は TRIVIAL_RED と断定しない。
 
-### 4.8 TEAM — マルチチーム実行（ライブラリ層）
+### 4.8 TEAM — マルチチーム実行
+
+#### ライブラリ層
 
 - [x] **TEAM-1 チーム定義**: `TeamManifest`（`manifest.py`）は、プロジェクト・基点ブランチ・チーム（`id`, `owns`, `depends_on`）・統合の設定を JSON から読み込み、検証する。
 - [x] **TEAM-2 worktree の分離**: `WorktreeManager` は、チームごとに `.dev/worktrees/<team_id>/` とブランチ `team/<team_id>` を作る。ID の検証とパスの逸脱の拒否を行い、準備が途中で失敗したら作成済みの worktree を巻き戻す。
@@ -127,56 +129,89 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - 合格したら `refs/tags/rc/<job_id>` を原子的に作成する。基点ブランチ（main）は更新しない。
   - 中断したジョブは `recover_interrupted_job` で復旧する。
 
-## 5. 次のリリース（v0.9.0）で追加する要件
+#### CLI とスキル（v0.9.0 Phase 66 で接続）
 
-<!-- v0.9.0 の目的: 4.8 TEAM を CLI とスキルから使えるようにし、初めての利用者がつまずかずに試せる状態にする。 -->
-
-### 5.1 TEAM — マルチチーム実行の CLI 接続
-
-- [ ] **TEAM-10 チーム定義ファイル**: リポジトリ直下の `teams.json` を `TeamManifest` で読み込む。各チームに `plan`（既定 `plans/<team_id>.md`）を追加する。次の場合は、理由を示す `TEAMS_CONFIG_ERROR:` を出して終了コード 2 で拒否する。
+- [x] **TEAM-10 チーム定義ファイル**: リポジトリ直下の `teams.json` を `TeamManifest` で読み込む。各チームに `plan`（既定 `plans/<team_id>.md`）を追加する。次の場合は、理由を示す `TEAMS_CONFIG_ERROR:` を出して終了コード 2 で拒否する。
   - `depends_on` が空でない（v0.9.0 は独立したチームのみ対応）。
   - 2つのチームの `owns` が同じパスに一致しうる（同一のパターン、または一方が他方を含む）。
   - チームの `plan` が他のチームの `owns` に含まれる。
-- [ ] **TEAM-11 チーム文脈の決定**: worktree の中で実行する `run`, `pre-flight`, `verify-step`, `commit-step`, `rollback-step` は、現在のブランチ `team/<team_id>` と、コミット済みの `teams.json` から、チーム ID・`owns`・計画ファイルを自動で決める。
+- [x] **TEAM-11 チーム文脈の決定**: worktree の中で実行する `run`, `pre-flight`, `verify-step`, `commit-step`, `rollback-step` は、現在のブランチ `team/<team_id>` と、コミット済みの `teams.json` から、チーム ID・`owns`・計画ファイルを自動で決める。
   - 作業ツリー内の書き換え可能なファイルからは決めない。
   - チームの計画ファイルは、そのチームの `owns` に自動で含める。
   - `teams.json` を保護ファイルに加える。
   - `run` には明示的な指定 `--team-id` / `--owns` / `--plan` も設ける。ただし `teams.json` と矛盾する指定は拒否する。
-- [ ] **TEAM-12 `auto-dev teams init`**: `teams.json` の雛形と、各チームの `plans/<team_id>.md` を作る（`--teams core,ui` で ID を指定）。既存のファイルは上書きしない。
-- [ ] **TEAM-13 `auto-dev teams prepare [--job-id ID] [--json]`**: クリーンツリーと `teams.json` を検査し、全チームの worktree を作る。
+- [x] **TEAM-12 `auto-dev teams init`**: `teams.json` の雛形と、各チームの `plans/<team_id>.md` を作る（`--teams core,ui` で ID を指定）。既存のファイルは上書きしない。
+- [x] **TEAM-13 `auto-dev teams prepare [--job-id ID] [--json]`**: クリーンツリーと `teams.json` を検査し、全チームの worktree を作る。
   - ジョブ ID と各 worktree のパスを出力する（`--json` では機械可読の形で）。
   - 前回のジョブの worktree やブランチが残っていれば、作り直さずに拒否し、`teams status` / `teams cleanup` / `teams recover` を案内する。
-- [ ] **TEAM-14 `auto-dev teams integrate --job-id ID`**: 全チームの計画ファイルのタスクが `- [x]` で、作業ツリーがクリーンなことを確かめる。そのうえで各チームの Bundle を（なければ生成して）保全し、統合ゲート（TEAM-6）を実行する。
+- [x] **TEAM-14 `auto-dev teams integrate --job-id ID`**: 全チームの計画ファイルのタスクが `- [x]` で、作業ツリーがクリーンなことを確かめる。そのうえで各チームの Bundle を（なければ生成して）保全し、統合ゲート（TEAM-6）を実行する。
   - 成功したら RC タグと、main へ取り込むためのコマンドを表示する。
   - 未完了・失敗・コンフリクト・統合後の検証失敗のいずれかなら、終了コード 1 で止め、原因のチームと次の手順を表示する。
   - 失敗した場合は worktree を残す。
-- [ ] **TEAM-15 `auto-dev teams run`**: `prepare` → 全チームの並行実行 → `integrate` を一括で行う。
+- [x] **TEAM-15 `auto-dev teams run`**: `prepare` → 全チームの並行実行 → `integrate` を一括で行う。
   - 各ワーカーは worktree の中で `auto-dev run` を実行する。`--maker-cmd`, `--checker-cmd`, モデル名、`--mock` をそのまま渡す。
   - ワーカーのタイムアウトは `--worker-timeout`（既定 21600 秒）とする。
   - 1チームでも失敗したら統合しない。
-- [ ] **TEAM-16 `auto-dev teams status [--job-id ID] [--json]` / `teams cleanup --job-id ID` / `teams recover [--job-id ID]`**:
+- [x] **TEAM-16 `auto-dev teams status [--job-id ID] [--json]` / `teams cleanup --job-id ID` / `teams recover [--job-id ID]`**:
   - `status` は、チームごとに worktree・ブランチ・完了数/全タスク数・ワーカーの状態・隔離ブランチを表示する。
   - `cleanup` は、統合に成功したジョブの worktree とチームブランチだけを削除する。統合に失敗したジョブの削除は `--force` を付けたときだけ行う。
   - `recover` は `recover_multi_team_job` を呼ぶ。
-- [ ] **TEAM-17 レポート**: チームのジョブを実行した後の `NIGHTLY_REPORT.md` と `auto-dev brief` に、チームごとの結果・RC タグ・判断待ちの事項を表示する。
-- [ ] **TEAM-18 スキル**:
+- [x] **TEAM-17 レポート**: チームのジョブを実行した後の `NIGHTLY_REPORT.md` と `auto-dev brief` に、チームごとの結果・RC タグ・判断待ちの事項を表示する。
+- [x] **TEAM-18 スキル**:
   - `/nightly-setup` はチームを使うかを尋ね、使うなら `teams init` を実行する。
   - `/nightly-run` は、`teams.json` があれば `teams prepare` を実行し、各 worktree で従来の直列ループ（CORE-7 の低レベルサブコマンド）を回してから `teams integrate` を実行する。
   - 外部 CLI で Maker / Checker を起動する場合は `teams run` を使ってよいと案内する。
-- [ ] **TEAM-19 受入テスト**: 一時リポジトリに2チームを作り、mock の Maker で次を確かめる E2E テストを用意する。
+- [x] **TEAM-19 受入テスト**: 一時リポジトリに2チームを作り、mock の Maker で次を確かめる E2E テストを用意する。
   - (a) `teams run` で両チームの変更が統合され、RC タグができる。
   - (b) 担当範囲外を変更したチームは隔離され、統合されない。
   - (c) `depends_on` や重なった `owns` を指定すると終了コード 2 になる。
   - (d) `prepare` → worktree 内での低レベルサブコマンド → `integrate` の経路でも (a) と同じ結果になる。
 
-### 5.2 REL — リリースと互換性
+### 4.9 REL — リリースと互換性
 
-- [ ] **REL-1 Bundle の形式バージョン**: `bundle_manifest.json` に `format_version`（v0.9.0 は 2）と `tool_version` を記録する。`verify-bundle` は、`format_version` がないか 2 未満の Bundle について、「v0.8 以前の形式です。v0.8.0 の auto-dev で検証してください」という趣旨を示して終了コード 1 を返す（v0.8 以前の Bundle との互換は持たない）。
+- [x] **REL-1 Bundle の形式バージョン**: `bundle_manifest.json` に `format_version`（v0.9.0 は 2）と `tool_version` を記録する。`verify-bundle` は、`format_version` がないか 2 未満の Bundle について、「v0.8 以前の形式です。v0.8.0 の auto-dev で検証してください」という趣旨を示して終了コード 1 を返す（v0.8 以前の Bundle との互換は持たない）。
+
+## 5. 次のリリース（v0.9.0）で追加する要件
+
+<!-- v0.9.0 の目的: 4.8 TEAM を CLI とスキルから使えるようにし、初めての利用者がつまずかずに試せる状態にする。
+     Phase 66 で接続した部分は 4.8 / 4.9 に移した。以下は残りの要件。 -->
+
+### 5.1 Phase 67 — 利用者の経路での不具合修正
+
+<!-- 起点: Phase 66 完了後の確認（2026-11-21）。init / teams init の雛形をそのまま使い、Linux で teams run を実行すると、
+     両チームが担当範囲違反で失敗した。成功したジョブの teams cleanup も --force なしでは通らなかった。
+     いずれも既存テストが雛形を使わず、実際に実行した後の状態を通していなかったため検出されなかった（LESSONS.md 2026-11-21）。 -->
+
+- [ ] **CORE-10 計画ファイルの読み取り範囲**: タスクの取得（CORE-1）は次の規則に従う。`teams status` などの進捗表示や、完了・失敗の書き込みも同じ規則で対象行を決める。
+  - HTML コメント（`<!--` から `-->` まで。複数行にまたがるものを含む）の中の行は、タスクとして扱わない。
+  - 「## ステップ」見出しがある場合は、その見出しから次の `## ` 見出しまでの中のタスクだけを読む。見出しがない場合は、従来どおりファイル全体から読む。
+  - 状態を書き込むときは対象のタスク行だけを書き換え、コメントや他の節は変更しない。
+- [ ] **CORE-11 生成物の無視**: `auto-dev init` と `auto-dev teams init` は、`.gitignore` に次を追記する。既にある行は重複させない。
+  - Auto Developer の生成物: `.dev/`, `logs/`, `NIGHTLY_REPORT.md`
+  - Python の一般的な生成物: `__pycache__/`, `*.py[cod]`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`
+- [ ] **TEAM-20 検証後の担当範囲検査**: チームとして作業するとき、担当範囲の検査（TEAM-3）を、Maker の実行後に加えて、検証スクリプトの実行後・Evidence の発行前にも行う。違反があれば Evidence を発行しない。
+  - `verify-step` は終了コード 1 で失敗する。違反したファイルの一覧と、「検証で生成されたファイルなら `.gitignore` に追加する」という案内を表示する。
+  - `run` では検証の失敗として扱い、再試行（CORE-4）と隔離（RCV-1）の規則に従う。
+- [ ] **TEAM-21 コミット直前の違反の扱い**: コミット直前の担当範囲検査で違反を見つけた場合は、次のように扱う。
+  - `run`: Evidence を破棄し、RCV-1 と同じく隔離・本線の完全な復元・失敗ログの保存・`**[FAILED]**` の記録を行って、終了コード 1 で停止する。ステージ済みの変更を作業ツリーに残さない。
+  - `commit-step`: Evidence を無効にして終了コード 3 で拒否し、`rollback-step` の実行を案内する。HEAD と計画ファイルは変更しない。
+- [ ] **TEAM-22 成功したジョブの片付け**: 統合に成功したジョブの `teams cleanup`（`--force` なし）は、worktree 内の無視ファイルのうち、次のものを保全の対象とせずに削除する。
+  - Auto Developer の生成物（`NIGHTLY_REPORT.md`, `.dev/`, `logs/`）
+  - CORE-11 のキャッシュ類
+  - 削除の前に、そのチームの Bundle が統合ジョブの保存先（TEAM-5）にあることを確かめる。なければ削除しない。
+  - それ以外の未コミットのファイルや無視ファイルがある場合は、従来どおり拒否する（`--force` なら隔離してから削除する）。
+- [ ] **TEAM-23 隔離ブランチとジョブの対応**: チームのジョブで作る隔離ブランチの名前には、ジョブ ID を含める（`quarantine/<job_id>/<team_id>/...`）。`teams status`、`brief`、`NIGHTLY_REPORT.md` は、対象ジョブの隔離ブランチだけを表示・集計する。
+- [ ] **TEAM-24 雛形をそのまま使う受入テスト**: 新しい受入テストで、一時リポジトリに対して次を確かめる。TEAM-19 の既存テストは変更しない。
+  - 準備: `auto-dev init` と `auto-dev teams init --teams core,ui` の雛形を、そのまま使う（計画ファイルのコメントを削らない）。追記するのは、タスク行と、Python のテスト1件だけとする。
+  - 実行環境: テストのサブプロセスでは、`PYTHONDONTWRITEBYTECODE` と `PYTHONPYCACHEPREFIX` を外す（バイトコードが worktree の中に生成される状態で実行し、環境によって結果が変わらないようにする）。
+  - (a) `teams run` が成功し、RC タグができる。計画ファイルの進捗が、コメント内の記法例を数えずに正しく表示される。
+  - (b) 続けて `teams cleanup --job-id <id>`（`--force` なし）が成功し、隔離ブランチを作らない。そのあと、新しいジョブ ID の `teams prepare` が成功する。
+  - (c) 一方のチームの Maker が担当範囲外に書いた場合、そのチームの作業が、そのジョブの隔離ブランチ（TEAM-23）に退避される。worktree はクリーンに戻り、統合は行われない。
+
+### 5.2 Phase 68 — README・利用者の体験・リリース
+
 - [ ] **REL-2 バージョン表記**: `pyproject.toml`, `plugin.json`, `auto_developer.__version__`, CLI の表示を 0.9.0 に揃える。タグは `v0.9.0` の形式とする（v0.8.0 までの `v.0.x.0` 形式は使わない）。
 - [ ] **REL-3 CI**: CI は macOS と Linux（Ubuntu）、Python 3.10 と 3.12 の組み合わせで検証スクリプトを実行する。Linux で `bwrap` を必要とするテストは、`bwrap` がなければ理由を示してスキップしてよい（判定を合格にすり替えない）。
-
-### 5.3 DX — 初めての利用者の体験
-
 - [ ] **DX-1 README のクイックスタートをテストする**: README に書いたクイックスタートの手順（新しい空のリポジトリでの `init` → `run --mock` → `brief`、および失敗から隔離までの例）を、そのまま一時リポジトリで実行するテストを用意する。README と実際の挙動のずれを検査で検出する。
 - [ ] **DX-2 モデル名の既定値**: `run` の `--maker-model` / `--checker-model` / `--auditor-model` の既定値は、外部コマンドを指定したときには適用しない。外部コマンドを指定してモデル名を省略した場合は、指定を求めて終了コード 2 とする（特定ベンダーのモデル名を暗黙に記録しない）。
 - [ ] **DX-3 サンプル**: `examples/two-teams/` に、2チーム構成の最小プロジェクト（`teams.json`, `plans/`, 検証スクリプト）を置く。DX-1 と TEAM-19 のテストから参照する。
