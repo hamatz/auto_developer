@@ -52,7 +52,7 @@
 - [x] 4. コミット直前の担当範囲違反: `run` は Evidence を破棄して隔離・復元・失敗ログ・FAILED 記録を行い、終了コード 1 で停止する。`commit-step` は Evidence を無効にして終了コード 3 で拒否し、`rollback-step` を案内する（Red-First）（TEAM-21）
 - [x] 5. 隔離ブランチ名へのジョブ ID の付与（`quarantine/<job_id>/<team_id>/...`）と、`teams status` / `brief` / `NIGHTLY_REPORT.md` での対象ジョブだけの表示・集計（Red-First）（TEAM-23）
 - [x] 6. 成功したジョブの `teams cleanup`（`--force` なし）で、Auto Developer の生成物とキャッシュ類を保全の対象外にする。削除前に、統合ジョブの保存先に Bundle があることを確認する（Red-First）（TEAM-22）
-- [ ] 7. 雛形をそのまま使う受入テスト: `teams run` → `teams cleanup` → 次のジョブの `teams prepare`、および担当範囲外の変更の隔離（TEAM-24）
+- [x] 7. 雛形をそのまま使う受入テスト: `teams run` → `teams cleanup` → 次のジョブの `teams prepare`、および担当範囲外の変更の隔離（TEAM-24）
 
 ## 止まっていること・判断待ち
 - なし。
