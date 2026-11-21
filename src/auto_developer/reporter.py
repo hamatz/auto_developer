@@ -281,7 +281,8 @@ class MorningReporter:
             for lim in known_limitations:
                 lines.append(f"- {lim}")
 
-        audit_stage = summary_data.get("audit_stage")
+        multi_team_data = summary_data.get("multi_team")
+        audit_stage = summary_data.get("audit_stage") if not isinstance(multi_team_data, dict) else None
         if audit_stage:
             lines.extend(
                 [
@@ -344,7 +345,6 @@ class MorningReporter:
             elif status_str in ("AUDIT_FAILED", "AUDIT_PENDING"):
                 lines.append(f"- **保留/エラー理由**: {audit_stage.get('error', 'Unknown')}")
 
-        multi_team_data = summary_data.get("multi_team")
         if isinstance(multi_team_data, dict):
             rc_tag = multi_team_data.get("rc_tag") or "未発行 (Not Created)"
             rc_commit = multi_team_data.get("rc_commit")
@@ -391,128 +391,117 @@ class MorningReporter:
                     lines.append(f"- {err}")
 
             mt_decisions = multi_team_data.get("pending_decisions") or []
-            if mt_decisions:
-                lines.extend(["", "### 判断待ちの事項 (Pending Decisions)"])
-                for dec in mt_decisions:
-                    lines.append(f"- {dec}")
-
-        lines.extend(["", "## 要確認・隔離事項 (Quarantined Work)"])
-        quarantined = summary_data.get("quarantined_task")
-        if quarantined:
-            branch = quarantined.get("quarantined_branch", "N/A")
-            log_p = quarantined.get("log_path", "N/A")
-            lines.extend(
-                [
-                    f"* **対象タスク**: task-{quarantined['task_id']} ({quarantined.get('title', 'N/A')})",
-                    f"* **停止フェーズ**: `{quarantined.get('phase', 'UNKNOWN')}`",
-                    f"* **隔離ブランチ**: `{branch}`",
-                    f"* **詳細エラーログ**: `{log_p}`",
-                    "* **失敗原因の要約**:",
-                    "  ```text",
-                    f"  {quarantined.get('root_cause_summary', 'No details')}",
-                    "  ```",
-                    "",
-                    "## あなたに判断してほしいこと (Next Actions for Developer)",
-                    f"タスク {quarantined['task_id']} で受入検証が停止しました。作業成果は破棄されず `{branch}` に安全に隔離されています。直前の正常状態 `{checkpoint}` は保持されています。",
-                    "",
-                    "以下の選択肢から次のアクションを決定してください：",
-                    "",
-                    "1. **隔離ブランチの作業差分を確認する**:",
-                    "   ```bash",
-                    f"   git diff {checkpoint}..{branch}",
-                    "   ```",
-                    "2. **失敗ログを詳細に調査する**:",
-                    "   ```bash",
-                    f"   cat {log_p}",
-                    "   ```",
-                    "3. **隔離ブランチの作業成果を引き継ぐ / 手動修正する**:",
-                    "   ```bash",
-                    f"   git checkout {branch}",
-                    "   ```",
-                    "4. **今回は保留し、隔離ブランチを破棄する**:",
-                    "   ```bash",
-                    f"   git branch -D {branch}",
-                    "   ```",
-                ]
-            )
-        elif isinstance(multi_team_data, dict):
-            lines.extend(
-                [
-                    "単一チーム実行の隔離タスクはありません（チームごとの隔離・状態は「マルチチーム実行結果」を参照してください）。",
-                    "",
-                    "## あなたに判断してほしいこと (Next Actions for Developer)",
-                ]
-            )
-            mt_decisions = multi_team_data.get("pending_decisions") or []
+            lines.extend(["", "### 判断待ちの事項 (Pending Decisions)"])
             if mt_decisions:
                 for dec in mt_decisions:
                     lines.append(f"- {dec}")
             else:
-                lines.append(f"- `auto-dev teams status --job-id {multi_team_data.get('job_id', '')}` で状態を確認してください。")
-        else:
-            lines.extend(
-                [
-                    "隔離されたタスクはありません（すべてのタスクが正常完了または未着手です）。",
-                    "",
-                    "## あなたに判断してほしいこと (Next Actions for Developer)",
-                    "- [x] すべての予定タスクが正常に検証され、本線にコミットされました。",
-                ]
-            )
-            has_origin = False
-            try:
-                res = subprocess.run(
-                    ["git", "remote", "get-url", "origin"],
-                    check=False,
-                    cwd=effective_repo,
-                    capture_output=True,
-                    text=True,
+                lines.append("- なし")
+
+        if not isinstance(multi_team_data, dict):
+            lines.extend(["", "## 要確認・隔離事項 (Quarantined Work)"])
+            quarantined = summary_data.get("quarantined_task")
+            if quarantined:
+                branch = quarantined.get("quarantined_branch", "N/A")
+                log_p = quarantined.get("log_path", "N/A")
+                lines.extend(
+                    [
+                        f"* **対象タスク**: task-{quarantined['task_id']} ({quarantined.get('title', 'N/A')})",
+                        f"* **停止フェーズ**: `{quarantined.get('phase', 'UNKNOWN')}`",
+                        f"* **隔離ブランチ**: `{branch}`",
+                        f"* **詳細エラーログ**: `{log_p}`",
+                        "* **失敗原因の要約**:",
+                        "  ```text",
+                        f"  {quarantined.get('root_cause_summary', 'No details')}",
+                        "  ```",
+                        "",
+                        "## あなたに判断してほしいこと (Next Actions for Developer)",
+                        f"タスク {quarantined['task_id']} で受入検証が停止しました。作業成果は破棄されず `{branch}` に安全に隔離されています。直前の正常状態 `{checkpoint}` は保持されています。",
+                        "",
+                        "以下の選択肢から次のアクションを決定してください：",
+                        "",
+                        "1. **隔離ブランチの作業差分を確認する**:",
+                        "   ```bash",
+                        f"   git diff {checkpoint}..{branch}",
+                        "   ```",
+                        "2. **失敗ログを詳細に調査する**:",
+                        "   ```bash",
+                        f"   cat {log_p}",
+                        "   ```",
+                        "3. **隔離ブランチの作業成果を引き継ぐ / 手動修正する**:",
+                        "   ```bash",
+                        f"   git checkout {branch}",
+                        "   ```",
+                        "4. **今回は保留し、隔離ブランチを破棄する**:",
+                        "   ```bash",
+                        f"   git branch -D {branch}",
+                        "   ```",
+                    ]
                 )
-                if res.returncode == 0 and res.stdout.strip():
-                    has_origin = True
-            except (subprocess.SubprocessError, OSError):
+            else:
+                lines.extend(
+                    [
+                        "隔離されたタスクはありません（すべてのタスクが正常完了または未着手です）。",
+                        "",
+                        "## あなたに判断してほしいこと (Next Actions for Developer)",
+                        "- [x] すべての予定タスクが正常に検証され、本線にコミットされました。",
+                    ]
+                )
                 has_origin = False
+                try:
+                    res = subprocess.run(
+                        ["git", "remote", "get-url", "origin"],
+                        check=False,
+                        cwd=effective_repo,
+                        capture_output=True,
+                        text=True,
+                    )
+                    if res.returncode == 0 and res.stdout.strip():
+                        has_origin = True
+                except (subprocess.SubprocessError, OSError):
+                    has_origin = False
 
-            if has_origin:
-                lines.append(
-                    f"- `git log --oneline -n {succeeded}` でコミット内容を確認後、`git push origin` でリモートへ反映してください。"
+                if has_origin:
+                    lines.append(
+                        f"- `git log --oneline -n {succeeded}` でコミット内容を確認後、`git push origin` でリモートへ反映してください。"
+                    )
+                else:
+                    lines.append(
+                        f"- リモートリポジトリ (origin) は未設定です。`git log -p -n {succeeded}` でコミット差分を確認してください。"
+                    )
+
+            # 5. エスカレーションされた指摘の列挙 (WWW.5)
+            escalated_findings: list[Any] = []
+            if audit_stage:
+                escalated_findings = audit_stage.get("escalated", []) or []
+
+            if escalated_findings:
+                lines.extend(
+                    [
+                        "",
+                        "### 監査エスカレーション（修正予算上限超過・人手による判断が必要です）",
+                        "修正予算（連続サイクル上限）に達した指摘があります。モジュールごとの再設計または修正方針を判断してください：",
+                    ]
                 )
-            else:
-                lines.append(
-                    f"- リモートリポジトリ (origin) は未設定です。`git log -p -n {succeeded}` でコミット差分を確認してください。"
-                )
-
-        # 5. エスカレーションされた指摘の列挙 (WWW.5)
-        escalated_findings: list[Any] = []
-        if audit_stage:
-            escalated_findings = audit_stage.get("escalated", []) or []
-
-        if escalated_findings:
-            lines.extend(
-                [
-                    "",
-                    "### 監査エスカレーション（修正予算上限超過・人手による判断が必要です）",
-                    "修正予算（連続サイクル上限）に達した指摘があります。モジュールごとの再設計または修正方針を判断してください：",
-                ]
-            )
-            for f in escalated_findings:
-                fid = getattr(f, "finding_id", f.get("finding_id", str(f)) if isinstance(f, dict) else str(f))
-                sev = getattr(f, "severity", f.get("severity", "P1") if isinstance(f, dict) else "P1")
-                desc = getattr(f, "description", f.get("description", "") if isinstance(f, dict) else "")
-                loc = getattr(f, "location", f.get("location", "") if isinstance(f, dict) else "")
-                mod = getattr(f, "module", None) or (f.get("module") if isinstance(f, dict) else None) or self._extract_module_key(loc)
-                streak = getattr(f, "streak", None) or (f.get("streak") if isinstance(f, dict) else None)
-                if streak is None:
-                    try:
-                        budget_path = effective_repo / ".dev" / "audit" / "budget.json"
-                        if budget_path.is_file():
-                            b_data = json.loads(budget_path.read_text(encoding="utf-8"))
-                            if mod in b_data:
-                                streak = b_data[mod].get("streak")
-                    except OSError:
-                        pass
-                streak_str = str(streak) if streak is not None else "N/A"
-                lines.append(f"- モジュール: `{mod}` (Streak: {streak_str})")
-                lines.append(f"  - `[{sev}] {fid}`: {desc} ({loc})")
+                for f in escalated_findings:
+                    fid = getattr(f, "finding_id", f.get("finding_id", str(f)) if isinstance(f, dict) else str(f))
+                    sev = getattr(f, "severity", f.get("severity", "P1") if isinstance(f, dict) else "P1")
+                    desc = getattr(f, "description", f.get("description", "") if isinstance(f, dict) else "")
+                    loc = getattr(f, "location", f.get("location", "") if isinstance(f, dict) else "")
+                    mod = getattr(f, "module", None) or (f.get("module") if isinstance(f, dict) else None) or self._extract_module_key(loc)
+                    streak = getattr(f, "streak", None) or (f.get("streak") if isinstance(f, dict) else None)
+                    if streak is None:
+                        try:
+                            budget_path = effective_repo / ".dev" / "audit" / "budget.json"
+                            if budget_path.is_file():
+                                b_data = json.loads(budget_path.read_text(encoding="utf-8"))
+                                if mod in b_data:
+                                    streak = b_data[mod].get("streak")
+                        except OSError:
+                            pass
+                    streak_str = str(streak) if streak is not None else "N/A"
+                    lines.append(f"- モジュール: `{mod}` (Streak: {streak_str})")
+                    lines.append(f"  - `[{sev}] {fid}`: {desc} ({loc})")
 
         bundle_path_str = summary_data.get("bundle_path")
         if bundle_path_str:
@@ -540,6 +529,7 @@ class MorningReporter:
         checkpoint = summary_data.get("checkpoint", "N/A")
         executive_summary = summary_data.get("executive_summary")
         quick_try = summary_data.get("quick_try_command")
+        multi_team_data = summary_data.get("multi_team")
 
         lines = [
             "============================================================",
@@ -553,50 +543,50 @@ class MorningReporter:
             lines.append(f" Summary: {executive_summary}")
         if quick_try:
             lines.append(f" Quick Try: {quick_try}")
-        lines.extend(
-            [
-                "------------------------------------------------------------",
-                " [Completed Milestones & Audit]",
-            ]
-        )
-        completed = summary_data.get("completed_tasks", [])
-        if completed:
-            for c in completed:
-                lines.append(f"  ✓ task-{c['task_id']}: {c['title']} ({c['commit'][:7]})")
-        else:
-            lines.append("  (none)")
-
-        quarantined = summary_data.get("quarantined_task")
-        if quarantined:
-            branch = quarantined.get("quarantined_branch", "N/A")
-            log_p = quarantined.get("log_path", "N/A")
+        if not isinstance(multi_team_data, dict):
             lines.extend(
                 [
                     "------------------------------------------------------------",
-                    " [Action Required / Quarantined Task]",
-                    f"  ✗ Task {quarantined['task_id']}: {quarantined.get('title', 'N/A')}",
-                    f"    Phase: {quarantined.get('phase', 'UNKNOWN')}",
-                    f"    Quarantined Branch: {branch}",
-                    f"    Log: {log_p}",
-                    "  Root Cause Summary:",
-                    f"    {quarantined.get('root_cause_summary', 'N/A')[:120]}...",
-                    "------------------------------------------------------------",
-                    " [Next Choices for Developer]",
-                    f"  1. Diff:     git diff {checkpoint}..{branch}",
-                    f"  2. Log:      cat {log_p}",
-                    f"  3. Checkout: git checkout {branch}",
-                    f"  4. Drop:     git branch -D {branch}",
+                    " [Completed Milestones & Audit]",
                 ]
             )
-        else:
-            lines.extend(
-                [
-                    "------------------------------------------------------------",
-                    " All tasks completed smoothly. Ready for review or push!",
-                ]
-            )
+            completed = summary_data.get("completed_tasks", [])
+            if completed:
+                for c in completed:
+                    lines.append(f"  ✓ task-{c['task_id']}: {c['title']} ({c['commit'][:7]})")
+            else:
+                lines.append("  (none)")
 
-        multi_team_data = summary_data.get("multi_team")
+            quarantined = summary_data.get("quarantined_task")
+            if quarantined:
+                branch = quarantined.get("quarantined_branch", "N/A")
+                log_p = quarantined.get("log_path", "N/A")
+                lines.extend(
+                    [
+                        "------------------------------------------------------------",
+                        " [Action Required / Quarantined Task]",
+                        f"  ✗ Task {quarantined['task_id']}: {quarantined.get('title', 'N/A')}",
+                        f"    Phase: {quarantined.get('phase', 'UNKNOWN')}",
+                        f"    Quarantined Branch: {branch}",
+                        f"    Log: {log_p}",
+                        "  Root Cause Summary:",
+                        f"    {quarantined.get('root_cause_summary', 'N/A')[:120]}...",
+                        "------------------------------------------------------------",
+                        " [Next Choices for Developer]",
+                        f"  1. Diff:     git diff {checkpoint}..{branch}",
+                        f"  2. Log:      cat {log_p}",
+                        f"  3. Checkout: git checkout {branch}",
+                        f"  4. Drop:     git branch -D {branch}",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        "------------------------------------------------------------",
+                        " All tasks completed smoothly. Ready for review or push!",
+                    ]
+                )
+
         if isinstance(multi_team_data, dict):
             rc_tag = multi_team_data.get("rc_tag") or "未発行 (Not Created)"
             lines.extend(
@@ -615,10 +605,12 @@ class MorningReporter:
                     f"branch={t.get('branch')} | quarantine={qbs}"
                 )
             mt_decisions = multi_team_data.get("pending_decisions") or []
+            lines.append(" [判断待ちの事項 (Pending Decisions)]")
             if mt_decisions:
-                lines.append(" [Pending Decisions]")
                 for dec in mt_decisions:
                     lines.append(f"  * {dec}")
+            else:
+                lines.append("  * なし")
 
         lines.append("============================================================")
         return "\n".join(lines)
@@ -900,20 +892,7 @@ class MorningReporter:
                 )
             )
 
-        # 5. 独立監査結果 (audit_stage) の読み込み
-        audit_stage_data: dict[str, Any] | None = None
-        for cand_audit in [
-            effective_repo / ".git" / "nightly_evidence" / "audit_stage.json",
-            effective_repo / ".dev" / "audit_stage.json",
-        ]:
-            if cand_audit.is_file():
-                try:
-                    audit_stage_data = json.loads(cand_audit.read_text(encoding="utf-8"))
-                    break
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-        # 6. マルチチームジョブ結果の集約 (TEAM-17)
+        # 5. マルチチームジョブ結果の集約 (TEAM-17)
         multi_team_data: dict[str, Any] | None = None
         try:
             from auto_developer.multi_team import get_multi_team_report_summary
@@ -921,6 +900,20 @@ class MorningReporter:
             multi_team_data = get_multi_team_report_summary(effective_repo)
         except Exception:  # noqa: BLE001
             multi_team_data = None
+
+        # 6. 独立監査結果 (audit_stage) の読み込み（単一チーム実行時のみ）
+        audit_stage_data: dict[str, Any] | None = None
+        if multi_team_data is None:
+            for cand_audit in [
+                effective_repo / ".git" / "nightly_evidence" / "audit_stage.json",
+                effective_repo / ".dev" / "audit_stage.json",
+            ]:
+                if cand_audit.is_file():
+                    try:
+                        audit_stage_data = json.loads(cand_audit.read_text(encoding="utf-8"))
+                        break
+                    except (json.JSONDecodeError, OSError):
+                        pass
 
         # 7. 隔離ブランチの検出 (TEAM-23: マルチチーム時は対象ジョブの隔離ブランチだけを集計)
         quarantined_count = 0

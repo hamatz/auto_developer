@@ -1385,6 +1385,25 @@ def main(argv: list[str] | None = None) -> int:
         if ctx_err != 0:
             return ctx_err
         effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
+        mt_summary: dict[str, Any] | None = None
+        try:
+            mt_summary = get_multi_team_report_summary(work_dir)
+        except Exception as e:  # noqa: BLE001
+            print(f"REPORT_WARNING: Failed to summarize multi-team job: {e}", file=sys.stderr)
+
+        if mt_summary is not None:
+            try:
+                gen_p = reporter.generate_standalone_report(
+                    report_path=report_path,
+                    repo_dir=work_dir,
+                    plan_path=effective_plan_path,
+                )
+                if gen_p.exists():
+                    print(gen_p.read_text(encoding="utf-8"))
+                    return 0
+            except Exception as e:  # noqa: BLE001
+                print(f"REPORT_WARNING: Failed to generate standalone report: {e}", file=sys.stderr)
+
         if state_file.exists():
             state = JobState.load(state_file)
             summary: dict[str, Any] = {
@@ -1396,12 +1415,8 @@ def main(argv: list[str] | None = None) -> int:
                 "completed_tasks": state.completed_tasks,
                 "quarantined_task": state.quarantined_task,
             }
-            try:
-                mt_summary = get_multi_team_report_summary(work_dir)
-                if mt_summary is not None:
-                    summary["multi_team"] = mt_summary
-            except Exception as e:  # noqa: BLE001
-                print(f"REPORT_WARNING: Failed to summarize multi-team job: {e}", file=sys.stderr)
+            if mt_summary is not None:
+                summary["multi_team"] = mt_summary
             try:
                 reporter.write_report(
                     report_path,

@@ -3548,10 +3548,18 @@ def get_multi_team_report_summary(
 
     is_integrated_ok = bool(rc_tag) and overall_state in ("COMPLETED", "INTEGRATED", "CLEANED_UP")
     if is_integrated_ok and rc_tag:
-        pending_decisions.append(
-            f"RC タグ `{rc_tag}` の内容を確認し、`{base_ref}` へ取り込むか判断してください: "
-            f"`git diff {base_ref}..{rc_tag}` / `git merge --no-ff {rc_tag}`"
+        rc_merged = False
+        chk_merged = _run_git_cmd(
+            resolved_repo,
+            ["merge-base", "--is-ancestor", f"refs/tags/{rc_tag}", base_ref],
         )
+        if chk_merged.returncode == 0:
+            rc_merged = True
+        if not rc_merged:
+            pending_decisions.append(
+                f"RC タグ `{rc_tag}` の内容を確認し、`{base_ref}` へ取り込むか判断してください: "
+                f"`git diff {base_ref}..{rc_tag}` / `git merge --no-ff {rc_tag}`"
+            )
         if any_worktree_or_branch:
             pending_decisions.append(
                 f"作業領域（worktree・チームブランチ）を片付ける場合: `auto-dev teams cleanup --job-id {resolved_job_id}`"
@@ -3565,7 +3573,10 @@ def get_multi_team_report_summary(
                 pending_decisions.append(
                     f"チーム `{tid}` の隔離ブランチ（{', '.join(qbs)}）を確認し、修正・引き継ぎ・破棄を判断してください"
                 )
-            elif t_status in ("FAILED", "TIMEOUT", "CRASHED", "STALE", "UNVERIFIED_PROCESS") or t_info["failed_tasks"] > 0:
+            elif overall_state != "CLEANED_UP" and (
+                t_status in ("FAILED", "TIMEOUT", "CRASHED", "STALE", "UNVERIFIED_PROCESS")
+                or t_info["failed_tasks"] > 0
+            ):
                 pending_decisions.append(
                     f"チーム `{tid}` が `{t_status}` で停止したため統合されていません。状態を確認してください: "
                     f"`auto-dev teams status --job-id {resolved_job_id}`"
