@@ -58,6 +58,7 @@
   - `tests/test_teams_run_and_recover.py`: 286, 317 行目付近の呼び出し
   - `tests/test_teams_cli_e2e.py`: 307 行目付近の `teams run` の呼び出し（設定エラーの検査。終了コード 2 の理由がモデル名の省略に変わらないようにするため）
   - `tests/test_multi_team.py`: 690, 695 行目付近の `extra_args`
+  - `tests/test_nightly_orchestrator.py`: `test_external_project_workflow`（758 行目付近の `run` 呼び出し）
 - 上記以外の既存テストは変更しない。免疫テスト（`tests/immunity/**`）は変更しない。
 - どのステップでも、変更したテスト名をコミットメッセージに列挙する。
 
