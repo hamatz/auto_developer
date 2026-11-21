@@ -42,6 +42,7 @@
 - ステップ 1（CORE-10）: HTML コメント内の記法例をタスクとして数えることを前提にした既存テストがあれば、新しい規則に合わせて更新してよい。この場合、変更したテスト名をコミットメッセージに列挙する。
 - ステップ 4（TEAM-21）: `tests/test_team_context_and_protection.py` の `test_verify_step_and_commit_step_with_auto_included_plan_and_boundary_guard` に限り、違反時の `commit-step` が Evidence を無効化するため、違反ファイル削除後に再検証なしの `commit-step` が終了コード 3 で拒否され、`verify-step` 再実行後の `commit-step` が成功するように更新してよい。変更したテスト名をコミットメッセージに列挙する。
 - ステップ 5（TEAM-23）: 隔離ブランチ名 `quarantine/<team_id>-...` を前提にした既存テストは、`quarantine/<job_id>/<team_id>/...` に更新してよい。また、`tests/test_teams_cli_e2e.py` の `test_e2e_out_of_owns_team_is_quarantined_and_not_integrated` に限り、隔離ブランチ検索パターン `"quarantine/ui-*"` を `"quarantine/e2e-quarantine-01/ui/*"` に、そのアサーションのメッセージ文字列を新しいパターンに合わせて更新してよい（同テストの他のアサーションは変更しない）。変更したテスト名をコミットメッセージに列挙する。
+- ステップ 6（TEAM-22）: `tests/test_teams_prepare_status_cleanup.py` の `test_cleanup_succeeds_for_completed_integration_and_allows_next_prepare` に限り、テスト準備で `core.zip` と `ui.zip` の両方に有効な ZIP Bundle を配置し、cleanup 前後で両ファイルが残存かつ SHA-256 が不変であることを確認するように更新してよい。変更したテスト名をコミットメッセージに列挙する。
 - 上記以外の既存テストは変更しない。上記以外の `tests/test_teams_cli_e2e.py`（TEAM-19）は変更しない。免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
