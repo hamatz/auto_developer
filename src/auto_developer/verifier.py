@@ -1012,6 +1012,70 @@ class CommitCheckoutError(RuntimeError):
     """指定されたコミットのチェックアウトに失敗した際のエラー (Fail-Closed) (III.1)。"""
 
 
+_SANDBOX_PROBE_CACHE: dict[str, tuple[str | None, str]] = {}
+
+
+def _reset_sandbox_backend_cache() -> None:
+    """プロセス内のサンドボックス実働確認キャッシュを初期化する。"""
+    _SANDBOX_PROBE_CACHE.clear()
+
+
+def _run_sandbox_probe(cmd: list[str]) -> tuple[bool, str]:
+    """最小コマンドをサンドボックス内で 1 回実行し、(起動成功, 失敗詳細) を返す。"""
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    if proc.returncode == 0:
+        return True, ""
+    detail = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()
+    return False, detail
+
+
+def _format_sandbox_unavailable_message(
+    platform: str,
+    *,
+    binary_missing: bool = False,
+    probe_error: str = "",
+) -> str:
+    """OS ごとの対処を含む SANDBOX_UNAVAILABLE メッセージを生成する。"""
+    if platform == "darwin":
+        if binary_missing:
+            return (
+                "SANDBOX_UNAVAILABLE: macOS 'sandbox-exec' was not found on PATH; "
+                "cannot initialize OS sandbox isolation (Fail-Closed)."
+            )
+        reason_part = f" ({probe_error})" if probe_error else ""
+        return (
+            f"SANDBOX_UNAVAILABLE: macOS 'sandbox-exec' cannot be used or failed to launch{reason_part}; "
+            "cannot run candidate tests without OS sandbox isolation (Fail-Closed)."
+        )
+    if platform.startswith("linux"):
+        if binary_missing:
+            return (
+                "SANDBOX_UNAVAILABLE: 'bwrap' (bubblewrap) was not found on Linux. "
+                "Install bubblewrap (e.g. 'sudo apt-get install -y bubblewrap') and retry."
+            )
+        reason_part = f" ({probe_error})" if probe_error else ""
+        return (
+            f"SANDBOX_UNAVAILABLE: 'bwrap' is installed on Linux but failed to launch a sandbox{reason_part}. "
+            "On Ubuntu 23.10+, AppArmor restricts unprivileged user namespaces; "
+            "install 'apparmor-profiles' and load the 'bwrap-userns-restrict' profile "
+            "(e.g. 'sudo install -m 0644 /usr/share/apparmor/extra-profiles/bwrap-userns-restrict "
+            "/etc/apparmor.d/bwrap-userns-restrict && sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict')."
+        )
+    return (
+        f"SANDBOX_UNAVAILABLE: OS sandbox is not supported on platform '{platform}' "
+        "(requires sandbox-exec on macOS or bwrap on Linux)."
+    )
+
+
 class RedTestVerifier:
     """監査役や外部から提示されたテスト候補が、現在のコードベースで確実に Red になるかを判定するハーネス。"""
 
@@ -1461,13 +1525,59 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 with contextlib.suppress(ValueError, OSError):
                     resource.setrlimit(resource.RLIMIT_NPROC, nproc_limits)
 
+    def _probe_sandbox_backend(self) -> tuple[str | None, str]:
+        """利用可能な OS サンドボックス機構を最小コマンドの実働で確認し、結果をプロセス内でキャッシュする (SBX-3)。"""
+        cached = _SANDBOX_PROBE_CACHE.get("result")
+        if cached is not None:
+            return cached
+
+        if sys.platform == "darwin":
+            if not shutil.which("sandbox-exec"):
+                res: tuple[str | None, str] = (
+                    None,
+                    _format_sandbox_unavailable_message(sys.platform, binary_missing=True),
+                )
+            else:
+                ok, err = _run_sandbox_probe(
+                    ["sandbox-exec", "-p", "(version 1)(allow default)(deny network*)", "true"]
+                )
+                res = (
+                    ("sandbox-exec", "")
+                    if ok
+                    else (None, _format_sandbox_unavailable_message(sys.platform, probe_error=err))
+                )
+        elif sys.platform.startswith("linux"):
+            if not shutil.which("bwrap"):
+                res = (
+                    None,
+                    _format_sandbox_unavailable_message(sys.platform, binary_missing=True),
+                )
+            else:
+                ok, err = _run_sandbox_probe(
+                    ["bwrap", "--unshare-net", "--ro-bind", "/", "/", "true"]
+                )
+                res = (
+                    ("bwrap", "")
+                    if ok
+                    else (None, _format_sandbox_unavailable_message(sys.platform, probe_error=err))
+                )
+        else:
+            res = (None, _format_sandbox_unavailable_message(sys.platform))
+
+        _SANDBOX_PROBE_CACHE["result"] = res
+        return res
+
     def _get_sandbox_backend(self) -> str | None:
         """利用可能な OS サンドボックス機構を検出する (macOS: sandbox-exec, Linux: bwrap)。"""
-        if sys.platform == "darwin" and shutil.which("sandbox-exec"):
-            return "sandbox-exec"
-        if shutil.which("bwrap"):
-            return "bwrap"
-        return None
+        backend, _ = self._probe_sandbox_backend()
+        return backend
+
+    def _get_sandbox_unavailable_detail(self) -> str:
+        """SANDBOX_UNAVAILABLE 時の OS ごとの対処メッセージを返す。"""
+        cached = _SANDBOX_PROBE_CACHE.get("result")
+        if cached is not None and cached[0] is None and cached[1]:
+            return cached[1]
+        return _format_sandbox_unavailable_message(sys.platform)
 
     def _capture_repo_snapshot(self) -> dict[str, Any]:
         """元リポジトリの改ざん検知用スナップショットを取得する (JJJ.2)。"""
@@ -1624,12 +1734,13 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         # 0.1 OS サンドボックス基盤の確認 (Fail-Closed: サンドボックス不可時は即座に拒絶)
         backend = self._get_sandbox_backend()
         if not backend:
+            unavailable_msg = self._get_sandbox_unavailable_detail()
             return _res(
                 is_reproduced=False,
                 exit_code=1,
                 reason="SANDBOX_UNAVAILABLE",
-                output="OS sandbox mechanism (sandbox-exec on macOS or bwrap on Linux) is not available or failed to initialize.",
-                reason_detail="OS sandbox execution environment is unavailable (Fail-Closed).",
+                output=unavailable_msg,
+                reason_detail=unavailable_msg,
             )
 
         # 1. 環境変数のサニタイズ（シークレット・APIキー・危険動的変数の除外）
