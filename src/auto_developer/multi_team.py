@@ -2090,12 +2090,55 @@ def _quarantine_team_before_cleanup(
     return q_branch
 
 
+def _integration_worktree_team_id(job_id: str) -> str:
+    cleaned_id = re.sub(r"[^a-z0-9_-]", "-", job_id.lower()).strip("-")
+    return f"int-{cleaned_id}"[:64]
+
+
+def _remove_worktree_for_cleanup(
+    resolved_repo: Path,
+    wt_manager: WorktreeManager,
+    wt_team_id: str,
+    wt_dir: Path,
+    *,
+    force: bool,
+    delete_branch: bool,
+) -> tuple[bool, str | None]:
+    """cleanup 用の worktree 削除を実行し、(branch_deleted, error_message) を返す。"""
+    try:
+        deleted = wt_manager.remove_worktree(
+            wt_team_id,
+            force=force,
+            delete_branch=delete_branch,
+            purge_unmerged=True,
+            ignore_cleanup_artifacts=not force,
+        )
+        return deleted, None
+    except WorktreeError as err:
+        # すでに quarantine/* へ非機密作業を退避検証済みで、INV-5 機密除外による拒否のみの場合は --force で強制削除する
+        err_msg = str(err)
+        is_secret_exclusion = (
+            "excluded from quarantine" in err_msg or "Secret content detected" in err_msg
+        )
+        if force and is_secret_exclusion:
+            rm_proc = _run_git_cmd(resolved_repo, ["worktree", "remove", "--force", str(wt_dir)])
+            if rm_proc.returncode != 0:
+                return (
+                    False,
+                    f"TEAM_CLEANUP_ERROR: Failed to force-remove worktree '{wt_team_id}': {rm_proc.stderr.strip()}",
+                )
+            return False, None
+        return False, f"TEAM_CLEANUP_ERROR: Failed to remove worktree '{wt_team_id}': {err}"
+
+
 def _check_cleanup_preconditions(
     resolved_repo: Path,
     job_id: str,
     team_targets: list[tuple[str, str]],
     rc_ref: str | None,
     wt_manager: WorktreeManager,
+    integration_branch: str | None = None,
+    int_wt_id: str | None = None,
 ) -> str | None:
     """force なしでの cleanup 前に、RC 解決・Bundle 保全・未コミット変更・RC 取り込み済みを厳格検証する。"""
     if rc_ref is None:
@@ -2128,6 +2171,32 @@ def _check_cleanup_preconditions(
                 f"TEAM_CLEANUP_ERROR: Preserved evidence bundle for team '{tid}' is missing or invalid "
                 f"at '{bundle_path}'. Refusing to delete without --force."
             )
+
+    if int_wt_id is not None:
+        int_wt_info = live_wts.get(int_wt_id)
+        if int_wt_info is not None and int_wt_info.path.exists():
+            try:
+                wt_manager.check_clean_for_removal(int_wt_id, ignore_cleanup_artifacts=True)
+            except WorktreeError as err:
+                return (
+                    f"TEAM_CLEANUP_ERROR: Worktree '{int_wt_id}' ({int_wt_info.path}) has uncommitted changes "
+                    f"({err}). Pass --force to quarantine and remove."
+                )
+
+    if integration_branch and _branch_exists(resolved_repo, integration_branch):
+        curr_br = _run_git_cmd(resolved_repo, ["branch", "--show-current"])
+        if curr_br.returncode == 0 and curr_br.stdout.strip() == integration_branch:
+            return (
+                f"TEAM_CLEANUP_ERROR: Integration branch '{integration_branch}' is currently "
+                f"checked out in '{resolved_repo}'. Switch branches before cleanup."
+            )
+        anc = _run_git_cmd(resolved_repo, ["merge-base", "--is-ancestor", integration_branch, rc_ref])
+        if anc.returncode != 0:
+            return (
+                f"TEAM_CLEANUP_ERROR: Branch '{integration_branch}' has commits not merged into '{rc_ref}'. "
+                "Refusing to delete without --force."
+            )
+
     return None
 
 
@@ -2174,7 +2243,7 @@ def cleanup_teams_job(
     job_id: str,
     force: bool = False,
 ) -> tuple[dict[str, Any] | None, int, str]:
-    """TEAM-16: 統合成功ジョブの worktree とチームブランチを削除する（失敗ジョブは --force 時のみ隔離後に削除）。"""
+    """TEAM-16 / TEAM-26: 統合成功ジョブの worktree・チームブランチ・統合ブランチを削除する（失敗・未完了ジョブの統合ブランチは削除しない）。"""
     resolved_repo = repo_dir.resolve()
     if not VALID_JOB_ID_PATTERN.match(job_id):
         return None, 2, f"TEAM_CLEANUP_ERROR: Invalid job_id '{job_id}'."
@@ -2221,14 +2290,44 @@ def cleanup_teams_job(
     wt_manager = WorktreeManager(repo_dir=resolved_repo)
     job_targets = _collect_job_team_targets(resolved_repo, int_state, job_rec, workers)
     rc_ref = _resolve_rc_ref(resolved_repo, job_id, int_state)
+    integration_branch = f"integration/{job_id}"
+
+    live_wts = {wt.team_id: wt for wt in wt_manager.list_worktrees()}
+    default_int_wt_id = _integration_worktree_team_id(job_id)
+    int_wt_info = live_wts.get(default_int_wt_id)
+    if int_wt_info is None:
+        for wt in live_wts.values():
+            if wt.team_id.startswith("int-") and wt.branch == integration_branch:
+                int_wt_info = wt
+                break
+    int_wt_id = int_wt_info.team_id if int_wt_info is not None else default_int_wt_id
+    int_wt_dir = int_wt_info.path if int_wt_info is not None else (wt_manager.worktree_base / int_wt_id)
 
     team_targets = [(tid, branch) for tid, (branch, _) in job_targets.items()]
     if not force:
-        pre_err = _check_cleanup_preconditions(resolved_repo, job_id, team_targets, rc_ref, wt_manager)
+        pre_err = _check_cleanup_preconditions(
+            resolved_repo,
+            job_id,
+            team_targets,
+            rc_ref,
+            wt_manager,
+            integration_branch=integration_branch if integration_succeeded else None,
+            int_wt_id=int_wt_id if integration_succeeded else None,
+        )
         if pre_err is not None:
             return None, 1, pre_err
+    elif integration_succeeded and _branch_exists(resolved_repo, integration_branch):
+        curr_br = _run_git_cmd(resolved_repo, ["branch", "--show-current"])
+        if curr_br.returncode == 0 and curr_br.stdout.strip() == integration_branch:
+            return (
+                None,
+                1,
+                (
+                    f"TEAM_CLEANUP_ERROR: Integration branch '{integration_branch}' is currently "
+                    f"checked out in '{resolved_repo}'. Switch branches before cleanup."
+                ),
+            )
 
-    live_wts = {wt.team_id: wt for wt in wt_manager.list_worktrees()}
     base_commit: str | None = None
     if job_rec and job_rec.get("base_commit"):
         base_commit = str(job_rec["base_commit"])
@@ -2262,6 +2361,26 @@ def cleanup_teams_job(
             if q_branch is not None:
                 quarantined_branches[tid] = q_branch
 
+        if integration_succeeded and _branch_exists(resolved_repo, integration_branch):
+            try:
+                q_int_branch = _quarantine_team_before_cleanup(
+                    resolved_repo=resolved_repo,
+                    team_id="integration",
+                    branch=integration_branch,
+                    wt_dir=int_wt_dir if int_wt_dir.is_dir() else None,
+                    rc_ref=rc_ref,
+                    base_commit=base_commit,
+                    job_id=job_id,
+                )
+            except (RuntimeError, OSError, subprocess.SubprocessError) as err:
+                return (
+                    None,
+                    1,
+                    f"TEAM_CLEANUP_ERROR: Quarantine failed for integration branch '{integration_branch}'; aborting cleanup: {err}",
+                )
+            if q_int_branch is not None:
+                quarantined_branches["integration"] = q_int_branch
+
     removed_worktrees: list[str] = []
     removed_branches: list[str] = []
 
@@ -2272,31 +2391,16 @@ def cleanup_teams_job(
 
         wt_dir = wt_info.path if wt_info is not None else (recorded_wt or (wt_manager.worktree_base / tid))
         if tid in live_wts or wt_dir.exists():
-            try:
-                deleted = wt_manager.remove_worktree(
-                    tid,
-                    force=force,
-                    delete_branch=True,
-                    purge_unmerged=True,
-                    ignore_cleanup_artifacts=not force,
-                )
-            except WorktreeError as err:
-                # すでに quarantine/* へ非機密作業を退避検証済みで、INV-5 機密除外による拒否のみの場合は --force で強制削除する
-                err_msg = str(err)
-                is_secret_exclusion = (
-                    "excluded from quarantine" in err_msg or "Secret content detected" in err_msg
-                )
-                if force and is_secret_exclusion:
-                    rm_proc = _run_git_cmd(resolved_repo, ["worktree", "remove", "--force", str(wt_dir)])
-                    if rm_proc.returncode != 0:
-                        return (
-                            None,
-                            1,
-                            f"TEAM_CLEANUP_ERROR: Failed to force-remove worktree '{tid}': {rm_proc.stderr.strip()}",
-                        )
-                    deleted = False
-                else:
-                    return None, 1, f"TEAM_CLEANUP_ERROR: Failed to remove worktree '{tid}': {err}"
+            deleted, rm_err = _remove_worktree_for_cleanup(
+                resolved_repo,
+                wt_manager,
+                tid,
+                wt_dir,
+                force=force,
+                delete_branch=True,
+            )
+            if rm_err is not None:
+                return None, 1, rm_err
             removed_worktrees.append(tid)
             if deleted:
                 removed_branches.append(branch)
@@ -2311,6 +2415,32 @@ def cleanup_teams_job(
                 )
             if branch not in removed_branches:
                 removed_branches.append(branch)
+
+    # TEAM-26: 統合に成功したジョブに限り残存統合 worktree と統合ブランチ integration/<job_id> を削除し、RC タグは残す
+    if integration_succeeded:
+        if int_wt_id not in job_targets and (int_wt_id in live_wts or int_wt_dir.exists()):
+            _, int_rm_err = _remove_worktree_for_cleanup(
+                resolved_repo,
+                wt_manager,
+                int_wt_id,
+                int_wt_dir,
+                force=force,
+                delete_branch=False,
+            )
+            if int_rm_err is not None:
+                return None, 1, int_rm_err
+            removed_worktrees.append(int_wt_id)
+
+        if _branch_exists(resolved_repo, integration_branch):
+            del_int_proc = _run_git_cmd(resolved_repo, ["branch", "-D", integration_branch])
+            if del_int_proc.returncode != 0:
+                return (
+                    None,
+                    1,
+                    f"TEAM_CLEANUP_ERROR: Failed to delete integration branch '{integration_branch}': {del_int_proc.stderr.strip()}",
+                )
+            if integration_branch not in removed_branches:
+                removed_branches.append(integration_branch)
 
     _run_git_cmd(resolved_repo, ["worktree", "prune"])
     if wt_manager.worktree_base.is_dir():
