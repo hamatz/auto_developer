@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from auto_developer.bundler import EvidenceBundler
-from auto_developer.dispatcher import TaskDispatcher
+from auto_developer.dispatcher import TaskDispatcher, extract_plan_scope_lines
 from auto_developer.guard import GitGuard
 from auto_developer.integration_gate import (
     VALID_JOB_ID_PATTERN,
@@ -1541,29 +1541,21 @@ def _parse_plan_counts(
     branch_exists: bool,
 ) -> tuple[int, int, int]:
     """チーム計画ファイルの完了数・全タスク数・失敗数を返す。"""
-    lines: list[str] = []
+    content = ""
     wt_plan = wt_path / plan_rel
     if wt_exists and wt_plan.is_file():
-        lines = wt_plan.read_text(encoding="utf-8").splitlines()
+        content = wt_plan.read_text(encoding="utf-8")
     elif branch_exists:
         proc = _run_git_cmd(repo_dir, ["show", f"{branch}:{plan_rel}"])
         if proc.returncode == 0:
-            lines = proc.stdout.splitlines()
-    if not lines and (repo_dir / plan_rel).is_file():
-        lines = (repo_dir / plan_rel).read_text(encoding="utf-8").splitlines()
+            content = proc.stdout
+    if not content and (repo_dir / plan_rel).is_file():
+        content = (repo_dir / plan_rel).read_text(encoding="utf-8")
 
-    total = 0
-    completed = 0
-    failed = 0
-    for line in lines:
-        match = TaskDispatcher.TASK_PATTERN.match(line)
-        if match:
-            total += 1
-            check_box, _, _ = match.groups()
-            if check_box.lower() == "x":
-                completed += 1
-            elif "**[FAILED]**" in line:
-                failed += 1
+    tasks = TaskDispatcher().parse_plan_text(content) if content else []
+    total = len(tasks)
+    completed = sum(1 for t in tasks if t.is_completed)
+    failed = sum(1 for t in tasks if not t.is_completed and t.is_failed)
     return completed, total, failed
 
 
@@ -2278,18 +2270,15 @@ def cleanup_teams_job(
     )
 
 
-_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-
-
 def _check_team_plan_completed(plan_path: Path) -> tuple[bool, list[str]]:
     """チーム計画ファイルの全タスクが完了済み (- [x] かつ未失敗) であるか検証する。"""
     if not plan_path.is_file():
         return False, [f"plan file not found: {plan_path.name}"]
 
-    stripped_doc = _HTML_COMMENT_RE.sub("", plan_path.read_text(encoding="utf-8"))
+    content = plan_path.read_text(encoding="utf-8")
     total = 0
     issues: list[str] = []
-    for line in stripped_doc.splitlines():
+    for _, line in extract_plan_scope_lines(content):
         match = TaskDispatcher.TASK_PATTERN.match(line)
         if match:
             total += 1

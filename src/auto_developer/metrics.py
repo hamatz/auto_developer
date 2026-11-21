@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from auto_developer.dispatcher import extract_plan_scope_lines, strip_html_comments_preserving_lines
+
 
 class MetricsLog:
     """決定論的パイプラインの各段階におけるイベントログを記録する (機能XXX.3)。"""
@@ -51,7 +53,9 @@ class MetricsLog:
         try:
             if not self.plan_path.exists():
                 return "unknown"
-            content = self.plan_path.read_text(encoding="utf-8", errors="replace")
+            content = strip_html_comments_preserving_lines(
+                self.plan_path.read_text(encoding="utf-8", errors="replace")
+            )
 
             in_goal_section = False
             for line in content.splitlines():
@@ -311,7 +315,7 @@ class MetricsLog:
     def _extract_phase_num_from_text(self, text: str) -> int | None:
         """PLAN.md テキストの「## 現在の目標」節から Phase 番号を抽出する。"""
         in_goal = False
-        for line in text.splitlines():
+        for line in strip_html_comments_preserving_lines(text).splitlines():
             line_s = line.strip()
             if line_s.startswith("## 現在の目標"):
                 in_goal = True
@@ -325,25 +329,18 @@ class MetricsLog:
         return None
 
     def _extract_steps_from_plan(self, content: str) -> tuple[set[str], set[str]]:
-        """PLAN.md テキストの「## ステップ」節から数値ステップ ID と AUD- ステップ ID を抽出する。"""
-        in_steps = False
+        """PLAN.md テキストの読み取り範囲から数値ステップ ID と AUD- ステップ ID を抽出する。"""
         num_steps: set[str] = set()
         aud_steps: set[str] = set()
-        for line in content.splitlines():
+        for _, line in extract_plan_scope_lines(content):
             line_s = line.strip()
-            if line_s.startswith("## ステップ"):
-                in_steps = True
+            m_num = re.search(r"^-\s*\[[ xX]\]\s*(\d+)\.", line_s)
+            if m_num:
+                num_steps.add(m_num.group(1))
                 continue
-            elif in_steps and line_s.startswith("## "):
-                break
-            if in_steps:
-                m_num = re.search(r"^-\s*\[[ xX]\]\s*(\d+)\.", line_s)
-                if m_num:
-                    num_steps.add(m_num.group(1))
-                    continue
-                m_aud = re.search(r"^-\s*\[[ xX]\]\s*(AUD-[A-Za-z0-9_\-]+)", line_s)
-                if m_aud:
-                    aud_steps.add(m_aud.group(1))
+            m_aud = re.search(r"^-\s*\[[ xX]\]\s*(AUD-[A-Za-z0-9_\-]+)", line_s)
+            if m_aud:
+                aud_steps.add(m_aud.group(1))
         return num_steps, aud_steps
 
     def _compute_git_metrics_for_phase(

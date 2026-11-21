@@ -14,6 +14,34 @@ if TYPE_CHECKING:
 
 from auto_developer.models import Task
 
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def strip_html_comments_preserving_lines(content: str) -> str:
+    """HTML コメント (<!-- ... -->) を改行数を保ったまま除去する."""
+    return _HTML_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), content)
+
+
+def extract_plan_scope_lines(content: str) -> list[tuple[int, str]]:
+    """HTML コメントを除外し、「## ステップ」節があればその範囲だけの (0-based行番号, 行テキスト) を返す."""
+    cleaned = strip_html_comments_preserving_lines(content)
+    lines = cleaned.splitlines()
+
+    step_start_idx: int | None = None
+    step_end_idx = len(lines)
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if step_start_idx is None:
+            if stripped.startswith("## ステップ"):
+                step_start_idx = idx
+        elif stripped.startswith("## "):
+            step_end_idx = idx
+            break
+
+    if step_start_idx is None:
+        return list(enumerate(lines))
+    return [(idx, lines[idx]) for idx in range(step_start_idx + 1, step_end_idx)]
+
 
 class TaskDispatcher:
     """PLAN.md のタスクパースと状態管理を担当するモジュール。"""
@@ -23,15 +51,10 @@ class TaskDispatcher:
         r"^\s*-\s*\[([ xX])\]\s*(\d+|[a-zA-Z0-9_\-]+)\.\s*(.+?)(?:\s*\*\*\[FAILED\]\*\*)?\s*$"
     )
 
-    def parse_plan(self, plan_path: Path) -> list[Task]:
-        """PLAN.md を行単位で読み込み、Taskオブジェクトのリストを生成する。"""
-        if not plan_path.exists():
-            raise FileNotFoundError(f"PLAN file not found: {plan_path}")
-
+    def parse_plan_text(self, content: str) -> list[Task]:
+        """計画テキストから読み取り範囲規則に従って Task オブジェクトのリストを生成する。"""
         tasks: list[Task] = []
-        lines = plan_path.read_text(encoding="utf-8").splitlines()
-
-        for idx, line in enumerate(lines):
+        for idx, line in extract_plan_scope_lines(content):
             match = self.TASK_PATTERN.match(line)
             if match:
                 check_box, task_id, title = match.groups()
@@ -50,6 +73,13 @@ class TaskDispatcher:
 
         return tasks
 
+    def parse_plan(self, plan_path: Path) -> list[Task]:
+        """PLAN.md を行単位で読み込み、Taskオブジェクトのリストを生成する。"""
+        if not plan_path.exists():
+            raise FileNotFoundError(f"PLAN file not found: {plan_path}")
+
+        return self.parse_plan_text(plan_path.read_text(encoding="utf-8"))
+
     def get_next_pending_task(self, tasks: list[Task]) -> Task | None:
         """未完了かつ未失敗の最初のタスクを取得する。"""
         for task in tasks:
@@ -59,28 +89,37 @@ class TaskDispatcher:
 
     def mark_task_status(self, plan_path: Path, task: Task, status: str) -> None:
         """PLAN.md 内の指定タスクのステータス記法を更新する。"""
-        lines = plan_path.read_text(encoding="utf-8").splitlines()
-        if task.line_number >= len(lines):
+        content = plan_path.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        if task.line_number < 0 or task.line_number >= len(lines):
             raise IndexError(f"Task line number {task.line_number} exceeds plan length.")
 
-        target_line = lines[task.line_number]
-        match = self.TASK_PATTERN.match(target_line)
-        if not match:
-            # Fallback: search by task_id and title
-            for idx, line in enumerate(lines):
-                if f"{task.task_id}." in line and task.title in line:
-                    task = Task(task.task_id, task.title, idx, task.is_completed, task.is_failed)
-                    target_line = line
-                    break
+        scoped_tasks = self.parse_plan_text(content)
+        scoped_by_line = {t.line_number: t for t in scoped_tasks}
+
+        target_task = scoped_by_line.get(task.line_number)
+        if target_task is None or target_task.task_id != task.task_id or (
+            task.title and target_task.title != task.title
+        ):
+            target_task = next(
+                (
+                    t
+                    for t in scoped_tasks
+                    if t.task_id == task.task_id and (not task.title or t.title == task.title)
+                ),
+                None,
+            )
+        if target_task is None:
+            raise ValueError(f"Task {task.task_id} not found in active plan scope.")
 
         if status == "completed":
-            new_line = f"- [x] {task.task_id}. {task.title}"
+            new_line = f"- [x] {target_task.task_id}. {target_task.title}"
         elif status == "failed":
-            new_line = f"- [ ] {task.task_id}. {task.title} **[FAILED]**"
+            new_line = f"- [ ] {target_task.task_id}. {target_task.title} **[FAILED]**"
         else:
             raise ValueError(f"Unsupported status: {status}")
 
-        lines[task.line_number] = new_line
+        lines[target_task.line_number] = new_line
         plan_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -184,7 +223,7 @@ class AuditDispatcher:
 
         # 全既存番号の収集
         existing_nums: set[int] = set()
-        for n in re.findall(r"AUD-(?:AUD-)?(\d+)", plan_content):
+        for n in re.findall(r"AUD-(?:AUD-)?(\d+)", strip_html_comments_preserving_lines(plan_content)):
             existing_nums.add(int(n))
         for n in re.findall(r"AUD-(?:AUD-)?(\d+)", backlog_content):
             existing_nums.add(int(n))
@@ -214,7 +253,7 @@ class AuditDispatcher:
         open_plan_ids: set[str] = set()
         open_plan_cycles: dict[str, str] = {}
         completed_plan_ids: set[str] = set()
-        for line in plan_content.splitlines():
+        for _, line in extract_plan_scope_lines(plan_content):
             line_str = line.strip()
             cycle_match = re.search(r"Cycle:\s*([A-Za-z0-9_-]+)", line_str)
             cycle_val = cycle_match.group(1) if cycle_match else ""
@@ -394,7 +433,7 @@ class AuditDispatcher:
         fid = finding.finding_id if finding.finding_id.startswith("AUD-") else f"AUD-{finding.finding_id}"
         is_already_open = any(
             line.strip().startswith("- [ ]") and (f"[{finding.finding_id}]" in line or f"[{fid}]" in line)
-            for line in lines
+            for _, line in extract_plan_scope_lines(content)
         )
         if is_already_open:
             finding.status = "DISPATCHED"
@@ -410,10 +449,11 @@ class AuditDispatcher:
         )
         step_idx = -1
         stop_idx = -1
-        for idx, line in enumerate(lines):
-            if line.startswith("## ステップ"):
+        for idx, line in enumerate(strip_html_comments_preserving_lines(content).splitlines()):
+            line_s = line.strip()
+            if line_s.startswith("## ステップ"):
                 step_idx = idx
-            elif line.startswith("## ") and step_idx != -1 and idx > step_idx:
+            elif line_s.startswith("## ") and step_idx != -1 and idx > step_idx:
                 stop_idx = idx
                 break
 

@@ -28,13 +28,19 @@ def _get_tool_version() -> str:
 
 def find_release_blockers(plan_text: str) -> list[str]:
     """未完了の - [ ] 行のうち (Severity: P0 または (Severity: P1 を含む行、および - ESCALATED 行を返す (WWW.3)。"""
+    from auto_developer.dispatcher import (
+        extract_plan_scope_lines,
+        strip_html_comments_preserving_lines,
+    )
+
     blockers: list[str] = []
-    for line in plan_text.splitlines():
+    for _, line in extract_plan_scope_lines(plan_text):
         stripped = line.strip()
-        if stripped.startswith("- [ ]"):
-            if "(Severity: P0" in line or "(Severity: P1" in line:
-                blockers.append(stripped)
-        elif stripped.startswith("- ESCALATED"):
+        if stripped.startswith("- [ ]") and ("(Severity: P0" in line or "(Severity: P1" in line):
+            blockers.append(stripped)
+    for line in strip_html_comments_preserving_lines(plan_text).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- ESCALATED"):
             blockers.append(stripped)
     return blockers
 
