@@ -8,9 +8,27 @@ import sys
 import tarfile
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 TEAM_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+
+_CLEANUP_CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+_CLEANUP_CACHE_SUFFIXES = (".pyc", ".pyo", ".pyd")
+_CLEANUP_AUTODEV_ROOT_DIRS = frozenset({".dev", "logs"})
+
+
+def _is_cleanup_ignorable_artifact(rel_posix: str) -> bool:
+    """TEAM-22: worktree 内の無視ファイルのうち保全対象外としてよい生成物・キャッシュ類かを判定する。"""
+    parts = PurePosixPath(rel_posix).parts
+    if not parts:
+        return False
+    if rel_posix == "NIGHTLY_REPORT.md":
+        return True
+    if parts[0] in _CLEANUP_AUTODEV_ROOT_DIRS and len(parts) >= 2:
+        return True
+    if parts[-1].endswith(_CLEANUP_CACHE_SUFFIXES):
+        return True
+    return any(part in _CLEANUP_CACHE_DIRS for part in parts[:-1])
 
 SECRET_PATTERNS = (
     re.compile(r"^\.env(\..+)?$", re.IGNORECASE),
@@ -165,12 +183,159 @@ class WorktreeManager:
 
         return worktrees
 
+    def _scan_worktree_for_removal(
+        self,
+        team_id: str,
+        target_dir: Path,
+        ignore_cleanup_artifacts: bool = False,
+    ) -> tuple[bool, list[tuple[Path, str, str]]]:
+        """worktree 内の未コミット変更・無視ファイル・機密ファイルを検査し、(has_uncommitted, candidate_work_files) を返す。"""
+        # 1. Git状態の取得 (管理済み未変更ファイルの特定および status 検査)
+        ls_res = subprocess.run(
+            ["git", "ls-files"],
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        tracked_files = set(ls_res.stdout.splitlines()) if ls_res.returncode == 0 else set()
+
+        status_res = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=target_dir,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if status_res.returncode != 0:
+            raise WorktreeError(
+                f"git status failed in worktree '{team_id}': {status_res.stderr.strip()}. "
+                "Aborting removal to prevent unverified data loss."
+            )
+
+        ignored_untracked_files: set[str] = set()
+        if ignore_cleanup_artifacts:
+            ign_res = subprocess.run(
+                ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+                cwd=target_dir,
+                capture_output=True,
+                check=False,
+            )
+            if ign_res.returncode != 0:
+                err_msg = ign_res.stderr.decode("utf-8", errors="replace").strip()
+                raise WorktreeError(
+                    f"git ls-files --ignored failed in worktree '{team_id}': {err_msg}. "
+                    "Aborting removal to prevent unverified data loss."
+                )
+            ignored_untracked_files = {
+                entry.decode("utf-8", errors="surrogateescape")
+                for entry in ign_res.stdout.split(b"\x00")
+                if entry
+            }
+
+        # git status で変更・未追跡が報告されているファイル集合
+        modified_or_untracked: set[str] = set()
+        for line in status_res.stdout.splitlines():
+            parts = line.strip().split(maxsplit=1)
+            if len(parts) == 2:
+                fpath = parts[1].split(" -> ")[-1].strip()
+                modified_or_untracked.add(fpath)
+
+        # 2. 実ファイルの事前スキャン（管理済み未変更ファイルを除外し、未保存成果・機密を検査・把握）
+        from auto_developer.guard import GitGuard
+
+        sensitive_files_found: list[str] = []
+        candidate_work_files: list[tuple[Path, str, str]] = []  # (item, rel_posix, sha256)
+
+        for item in sorted(target_dir.rglob("*")):
+            if not item.is_file():
+                continue
+            rel_to_wt = item.relative_to(target_dir)
+            rel_posix = rel_to_wt.as_posix()
+
+            # Git管理ディレクトリやノイズファイルは除外 (再生成可能なため削除を阻害しない)
+            if rel_posix.startswith(".git") or "/.git" in rel_posix:
+                continue
+            if any(pat.search(rel_posix) for pat in NOISE_PATTERNS):
+                continue
+
+            # Git管理済み かつ 未変更（クリーン）のファイルはリポジトリに安全に存在するため検査・保全不要
+            if rel_posix in tracked_files and rel_posix not in modified_or_untracked:
+                continue
+
+            # TEAM-22: 統合成功後の cleanup では、無視ファイルのうち Auto Developer 生成物とキャッシュ類のみ保全対象外とする
+            if (
+                ignore_cleanup_artifacts
+                and rel_posix in ignored_untracked_files
+                and rel_posix not in tracked_files
+                and rel_posix not in modified_or_untracked
+                and _is_cleanup_ignorable_artifact(rel_posix)
+            ):
+                continue
+
+            # 既知のシークレットファイル名パターン
+            if GitGuard.is_secret_file(item.name) or any(
+                pat.search(item.name) for pat in SECRET_PATTERNS
+            ):
+                sensitive_files_found.append(rel_posix)
+                continue
+
+            # ファイル内容のディープスキャン
+            try:
+                content = item.read_bytes()
+            except OSError as err:
+                raise WorktreeError(f"Failed to read file '{rel_posix}' for secret scanning: {err}") from err
+
+            if GitGuard.has_secret_content(content):
+                raise WorktreeError(
+                    f"Secret content detected in worktree file '{rel_posix}'. "
+                    "Aborting removal to prevent secret leakage or unverified data loss."
+                )
+
+            file_sha = hashlib.sha256(content).hexdigest()
+            candidate_work_files.append((item, rel_posix, file_sha))
+
+        if sensitive_files_found:
+            sample_files = ", ".join(sorted(sensitive_files_found)[:3])
+            raise WorktreeError(
+                f"Worktree '{team_id}' contains sensitive files excluded from quarantine ({sample_files}); "
+                "removal refused to prevent data loss. Please commit, move, or clean up sensitive files before removal."
+            )
+
+        # Git status に未コミット変更があるか、または Git追跡外（.gitignoreされた非機密通常ファイル等）が存在するか
+        has_untracked_or_ignored_work = any(
+            rel_posix not in tracked_files for _, rel_posix, _ in candidate_work_files
+        )
+        has_uncommitted = bool(status_res.stdout.strip()) or has_untracked_or_ignored_work
+        return has_uncommitted, candidate_work_files
+
+    def check_clean_for_removal(
+        self,
+        team_id: str,
+        ignore_cleanup_artifacts: bool = False,
+    ) -> None:
+        """TEAM-22: 削除前に worktree に保全対象の未コミット変更・無視ファイルがないか検証する。"""
+        target_dir = self._validate_team_id(team_id)
+        if not target_dir.exists():
+            return
+        has_uncommitted, _ = self._scan_worktree_for_removal(
+            team_id=team_id,
+            target_dir=target_dir,
+            ignore_cleanup_artifacts=ignore_cleanup_artifacts,
+        )
+        if has_uncommitted:
+            raise WorktreeError(
+                f"Cannot remove worktree '{team_id}' with uncommitted changes without force. "
+                "Preserving uncommitted work."
+            )
+
     def remove_worktree(
         self,
         team_id: str,
         force: bool = False,
         delete_branch: bool = False,
         purge_unmerged: bool = False,
+        ignore_cleanup_artifacts: bool = False,
     ) -> bool:
         """チーム専用の Git Worktree を安全に削除する。
         未コミット成果がある場合は自動 Quarantine 保存を行い、未マージブランチは purge_unmerged=True が
@@ -181,93 +346,11 @@ class WorktreeManager:
 
         # 未コミット変更の残存検査と成果保全
         if target_dir.exists():
-            # 1. Git状態の取得 (管理済み未変更ファイルの特定および status 検査)
-            ls_res = subprocess.run(
-                ["git", "ls-files"],
-                cwd=target_dir,
-                capture_output=True,
-                text=True,
-                check=False,
+            has_uncommitted, candidate_work_files = self._scan_worktree_for_removal(
+                team_id=team_id,
+                target_dir=target_dir,
+                ignore_cleanup_artifacts=ignore_cleanup_artifacts,
             )
-            tracked_files = set(ls_res.stdout.splitlines()) if ls_res.returncode == 0 else set()
-
-            status_res = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=target_dir,
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if status_res.returncode != 0:
-                raise WorktreeError(
-                    f"git status failed in worktree '{team_id}': {status_res.stderr.strip()}. "
-                    "Aborting removal to prevent unverified data loss."
-                )
-
-            # git status で変更・未追跡が報告されているファイル集合
-            modified_or_untracked: set[str] = set()
-            for line in status_res.stdout.splitlines():
-                parts = line.strip().split(maxsplit=1)
-                if len(parts) == 2:
-                    fpath = parts[1].split(" -> ")[-1].strip()
-                    modified_or_untracked.add(fpath)
-
-            # 2. 実ファイルの事前スキャン（管理済み未変更ファイルを除外し、未保存成果・機密を検査・把握）
-            from auto_developer.guard import GitGuard
-
-            sensitive_files_found: list[str] = []
-            candidate_work_files: list[tuple[Path, str, str]] = []  # (item, rel_posix, sha256)
-
-            for item in sorted(target_dir.rglob("*")):
-                if not item.is_file():
-                    continue
-                rel_to_wt = item.relative_to(target_dir)
-                rel_posix = rel_to_wt.as_posix()
-
-                # Git管理ディレクトリやノイズファイルは除外 (再生成可能なため削除を阻害しない)
-                if rel_posix.startswith(".git") or "/.git" in rel_posix:
-                    continue
-                if any(pat.search(rel_posix) for pat in NOISE_PATTERNS):
-                    continue
-
-                # Git管理済み かつ 未変更（クリーン）のファイルはリポジトリに安全に存在するため検査・保全不要
-                if rel_posix in tracked_files and rel_posix not in modified_or_untracked:
-                    continue
-
-                # 既知のシークレットファイル名パターン
-                if GitGuard.is_secret_file(item.name) or any(
-                    pat.search(item.name) for pat in SECRET_PATTERNS
-                ):
-                    sensitive_files_found.append(rel_posix)
-                    continue
-
-                # ファイル内容のディープスキャン
-                try:
-                    content = item.read_bytes()
-                except OSError as err:
-                    raise WorktreeError(f"Failed to read file '{rel_posix}' for secret scanning: {err}") from err
-
-                if GitGuard.has_secret_content(content):
-                    raise WorktreeError(
-                        f"Secret content detected in worktree file '{rel_posix}'. "
-                        "Aborting removal to prevent secret leakage or unverified data loss."
-                    )
-
-                file_sha = hashlib.sha256(content).hexdigest()
-                candidate_work_files.append((item, rel_posix, file_sha))
-
-            if sensitive_files_found:
-                sample_files = ", ".join(sorted(sensitive_files_found)[:3])
-                raise WorktreeError(
-                    f"Worktree '{team_id}' contains sensitive files excluded from quarantine ({sample_files}); "
-                    "removal refused to prevent data loss. Please commit, move, or clean up sensitive files before removal."
-                )
-
-            # Git status に未コミット変更があるか、または Git追跡外（.gitignoreされた非機密通常ファイル等）が存在するか
-            has_untracked_or_ignored_work = any(
-                rel_posix not in tracked_files for _, rel_posix, _ in candidate_work_files
-            )
-            has_uncommitted = bool(status_res.stdout.strip()) or has_untracked_or_ignored_work
 
             if has_uncommitted:
                 if not force:

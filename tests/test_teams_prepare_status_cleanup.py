@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -297,11 +299,17 @@ class TestTeamsStatusAndCleanupCli(unittest.TestCase):
         _git(self.repo_dir, "tag", f"rc/{job_id}", rc_sha)
         _git(self.repo_dir, "checkout", "main")
 
-        # Keep a quarantine branch & evidence file to verify cleanup does NOT delete them
+        # Keep a quarantine branch & evidence files to verify cleanup does NOT delete or alter them
         _git(self.repo_dir, "branch", "quarantine/core-old-1", self.base_commit)
-        ev_file = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence" / "core.zip"
-        ev_file.parent.mkdir(parents=True, exist_ok=True)
-        ev_file.write_bytes(b"zip-stub")
+        ev_dir = self.repo_dir / ".dev" / "integration_jobs" / job_id / "evidence"
+        ev_dir.mkdir(parents=True, exist_ok=True)
+        ev_file = ev_dir / "core.zip"
+        ui_ev_file = ev_dir / "ui.zip"
+        for tid, path in (("core", ev_file), ("ui", ui_ev_file)):
+            with zipfile.ZipFile(path, "w") as zf:
+                zf.writestr("bundle_manifest.json", json.dumps({"team_id": tid}))
+        core_ev_sha_before = hashlib.sha256(ev_file.read_bytes()).hexdigest()
+        ui_ev_sha_before = hashlib.sha256(ui_ev_file.read_bytes()).hexdigest()
 
         IntegrationJobState(
             job_id=job_id,
@@ -325,6 +333,9 @@ class TestTeamsStatusAndCleanupCli(unittest.TestCase):
         # RC tag, evidence, and quarantine branches remain
         self.assertEqual(_git(self.repo_dir, "tag", "--list", f"rc/{job_id}").stdout.strip(), f"rc/{job_id}")
         self.assertTrue(ev_file.exists())
+        self.assertTrue(ui_ev_file.exists())
+        self.assertEqual(hashlib.sha256(ev_file.read_bytes()).hexdigest(), core_ev_sha_before)
+        self.assertEqual(hashlib.sha256(ui_ev_file.read_bytes()).hexdigest(), ui_ev_sha_before)
         self.assertIn("quarantine/core-old-1", _git(self.repo_dir, "branch", "--list", "quarantine/*").stdout)
 
         # Next prepare for a new job should now succeed cleanly

@@ -2097,7 +2097,7 @@ def _check_cleanup_preconditions(
     rc_ref: str | None,
     wt_manager: WorktreeManager,
 ) -> str | None:
-    """force なしでの cleanup 前に、RC 解決・未コミット変更・RC 取り込み済みを厳格検証する。"""
+    """force なしでの cleanup 前に、RC 解決・Bundle 保全・未コミット変更・RC 取り込み済みを厳格検証する。"""
     if rc_ref is None:
         return (
             f"TEAM_CLEANUP_ERROR: Cannot resolve RC commit or tag for job '{job_id}'. "
@@ -2108,11 +2108,12 @@ def _check_cleanup_preconditions(
     for tid, branch in team_targets:
         wt_info = live_wts.get(tid)
         if wt_info is not None and wt_info.path.exists():
-            st_proc = _run_git_cmd(wt_info.path, ["status", "--porcelain"])
-            if st_proc.returncode != 0 or st_proc.stdout.strip():
+            try:
+                wt_manager.check_clean_for_removal(tid, ignore_cleanup_artifacts=True)
+            except WorktreeError as err:
                 return (
-                    f"TEAM_CLEANUP_ERROR: Worktree '{tid}' ({wt_info.path}) has uncommitted changes. "
-                    "Pass --force to quarantine and remove."
+                    f"TEAM_CLEANUP_ERROR: Worktree '{tid}' ({wt_info.path}) has uncommitted changes "
+                    f"({err}). Pass --force to quarantine and remove."
                 )
         if _branch_exists(resolved_repo, branch):
             anc = _run_git_cmd(resolved_repo, ["merge-base", "--is-ancestor", branch, rc_ref])
@@ -2121,6 +2122,12 @@ def _check_cleanup_preconditions(
                     f"TEAM_CLEANUP_ERROR: Branch '{branch}' has commits not merged into '{rc_ref}'. "
                     "Refusing to delete without --force."
                 )
+        bundle_path = resolved_repo / ".dev" / "integration_jobs" / job_id / "evidence" / f"{tid}.zip"
+        if not _is_valid_bundle_archive(bundle_path):
+            return (
+                f"TEAM_CLEANUP_ERROR: Preserved evidence bundle for team '{tid}' is missing or invalid "
+                f"at '{bundle_path}'. Refusing to delete without --force."
+            )
     return None
 
 
@@ -2271,6 +2278,7 @@ def cleanup_teams_job(
                     force=force,
                     delete_branch=True,
                     purge_unmerged=True,
+                    ignore_cleanup_artifacts=not force,
                 )
             except WorktreeError as err:
                 # すでに quarantine/* へ非機密作業を退避検証済みで、INV-5 機密除外による拒否のみの場合は --force で強制削除する
