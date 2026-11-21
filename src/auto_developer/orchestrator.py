@@ -371,9 +371,7 @@ class NightlyOrchestrator:
 
             # Phase C: 決定論的検証 & 再試行 (Verification Gate)
             print(f"  [Phase C: Verifier] Running {self.verify_script}...")
-            code, out = self.verifier.run_verification(
-                self.verify_script, timeout_sec=self.timeout_sec, cwd=self.repo_dir
-            )
+            code, out = self._run_verification_with_boundary(checkpoint)
             last_out_lines = [l.strip() for l in out.strip().splitlines() if l.strip()]
             task_attempts.append({
                 "attempt": 1,
@@ -463,9 +461,7 @@ class NightlyOrchestrator:
                     )
 
                 self.dispatcher.mark_task_status(self.plan_path, task, status="completed")
-                code, out = self.verifier.run_verification(
-                    self.verify_script, timeout_sec=self.timeout_sec, cwd=self.repo_dir
-                )
+                code, out = self._run_verification_with_boundary(checkpoint)
                 last_out_lines2 = [l.strip() for l in out.strip().splitlines() if l.strip()]
                 task_attempts.append({
                     "attempt": 2,
@@ -870,6 +866,25 @@ class NightlyOrchestrator:
             )
         except Exception as ex:  # noqa: BLE001
             print(f"METRICS_WARNING: Failed to record audit_stage event: {ex}", file=sys.stderr)
+
+    def _run_verification_with_boundary(self, checkpoint: str) -> tuple[int, str]:
+        """検証スクリプトを実行し、成功時は Evidence 発行前に担当範囲を再検査する。"""
+        code, out = self.verifier.run_verification(
+            self.verify_script, timeout_sec=self.timeout_sec, cwd=self.repo_dir
+        )
+        if code != 0:
+            return code, out
+        post_violations = self._check_boundary(checkpoint)
+        if post_violations:
+            msg = (
+                "BOUNDARY VIOLATION after verification: Unauthorized modifications outside team owns: "
+                f"{post_violations}\n"
+                "検証で生成されたファイルなら .gitignore に追加してください。"
+            )
+            print(f"  {msg}", file=sys.stderr)
+            combined = f"{out}\n{msg}".strip() if out.strip() else msg
+            return 1, combined
+        return 0, out
 
     def _check_boundary(self, checkpoint: str) -> list[str]:
         """チーム所有スコープ（owns）が指定されている場合、領空侵犯を検査し違反ファイルリストを返す。"""

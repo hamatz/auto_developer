@@ -983,6 +983,33 @@ def main(argv: list[str] | None = None) -> int:
                 phase=phase,
             )
             return code
+        if team_ctx is not None:
+            post_boundary_res = BoundaryGuard(
+                repo_dir=work_dir,
+                owns_patterns=team_ctx.owns_patterns,
+                base_checkpoint=args.checkpoint,
+            ).inspect_changes()
+            if not post_boundary_res.allowed:
+                effective_plan_path.write_text(original_plan_content, encoding="utf-8")
+                evidence_store.clear_evidence(task_id=args.task_id)
+                violated_list = "\n".join(f"  - {f}" for f in post_boundary_res.violations)
+                print(
+                    f"BOUNDARY VIOLATION: Unauthorized modifications outside team '{team_ctx.team_id}' owns "
+                    f"detected after verification:\n{violated_list}\n"
+                    "検証で生成されたファイルなら .gitignore に追加してください。",
+                    file=sys.stderr,
+                )
+                metrics.record_event(
+                    "verify_step",
+                    task_id=args.task_id,
+                    checkpoint=args.checkpoint,
+                    result="BOUNDARY_VIOLATION",
+                    exit_code=1,
+                    duration_sec=duration_sec,
+                    attempt=attempt,
+                    phase=phase,
+                )
+                return 1
         tree_sha = git_guard.get_working_tree_sha()
         spec_sha = git_guard.get_spec_sha(spec_path)
         out_lines = [line.strip() for line in out.strip().splitlines() if line.strip()]
