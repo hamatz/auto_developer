@@ -1126,7 +1126,7 @@ class MultiTeamOrchestrator:
 
         for team in config.teams:
             res = team_results.get(team.team_id)
-            if res is None or res.bundle_path is None or not res.bundle_path.exists():
+            if res is None or res.status == "NO_CHANGES" or res.bundle_path is None or not res.bundle_path.exists():
                 continue
 
             dest_path = dest_base / f"{res.team_id}.zip"
@@ -1242,11 +1242,14 @@ class MultiTeamOrchestrator:
         self.preserve_team_bundles(config, team_results)
 
         failed_teams: list[str] = []
+        no_changes_teams: list[str] = []
         inputs: list[TeamIntegrationInput] = []
 
         for team in config.teams:
             res = team_results.get(team.team_id)
-            if res is None or not res.success or res.bundle_path is None:
+            if res is not None and res.success and res.status == "NO_CHANGES":
+                no_changes_teams.append(team.team_id)
+            elif res is None or not res.success or res.bundle_path is None:
                 failed_teams.append(team.team_id)
             else:
                 inputs.append(
@@ -1270,6 +1273,17 @@ class MultiTeamOrchestrator:
                 },
             )
 
+        if not inputs and no_changes_teams:
+            return MultiTeamResult(
+                job_id=config.job_id,
+                success=True,
+                status="NO_CHANGES",
+                team_results=team_results,
+                release_candidate_commit=None,
+                release_candidate_tag=None,
+                details={"no_changes_teams": no_changes_teams},
+            )
+
         # IntegrationGate による統合実行
         int_result = self.integration_gate.execute_integration(
             job_id=config.job_id,
@@ -1281,6 +1295,9 @@ class MultiTeamOrchestrator:
         )
 
         rc_tag = str(int_result.details.get("rc_tag")) if int_result.details.get("rc_tag") else None
+        result_details = dict(int_result.details)
+        if no_changes_teams:
+            result_details["no_changes_teams"] = no_changes_teams
         return MultiTeamResult(
             job_id=config.job_id,
             success=int_result.success,
@@ -1289,7 +1306,7 @@ class MultiTeamOrchestrator:
             integration_result=int_result,
             release_candidate_commit=int_result.release_candidate_commit,
             release_candidate_tag=rc_tag,
-            details=int_result.details,
+            details=result_details,
         )
 
 
@@ -1427,6 +1444,26 @@ def resolve_active_team_job_id(repo_dir: Path, team_id: str | None = None) -> st
     if not candidates:
         return None
     return max(candidates, key=lambda k: candidates[k])
+
+
+def _extract_no_changes_teams(
+    int_state: IntegrationJobState | None,
+    job_rec: dict[str, Any] | None,
+) -> list[str]:
+    """IntegrationJobState / job.json から NO_CHANGES チーム ID 一覧を重複なく抽出する。"""
+    seen: list[str] = []
+    sources: list[Any] = []
+    if int_state is not None and isinstance(int_state.details, dict):
+        sources.append(int_state.details.get("no_changes_teams"))
+    if job_rec is not None:
+        sources.append(job_rec.get("no_changes_teams"))
+    for src in sources:
+        if isinstance(src, list):
+            for tid in src:
+                s_tid = str(tid).strip()
+                if s_tid and s_tid not in seen:
+                    seen.append(s_tid)
+    return seen
 
 
 def _is_registered_worker_alive(reg: WorkerRegistration) -> bool:
@@ -1706,6 +1743,7 @@ def get_teams_status(
             ordered_team_ids.append(tid)
 
     manifest_by_id = {t.id: t for t in manifest.teams} if manifest is not None else {}
+    no_changes_teams = set(_extract_no_changes_teams(int_state, job_rec))
     all_quarantines = _list_branches_with_prefix(resolved_repo, "quarantine/")
     existing_branches = set(_list_branches_with_prefix(resolved_repo, ""))
 
@@ -1782,6 +1820,14 @@ def get_teams_status(
             worker_status = "CLEANED_UP"
         else:
             worker_status = "UNKNOWN"
+
+        if (
+            tid in no_changes_teams
+            and not quarantines
+            and failed_tasks == 0
+            and worker_status not in ("RUNNING", "STALE", "FAILED", "TIMEOUT", "CRASHED")
+        ):
+            worker_status = "NO_CHANGES"
 
         team_statuses.append(
             {
@@ -2139,14 +2185,20 @@ def _check_cleanup_preconditions(
     wt_manager: WorktreeManager,
     integration_branch: str | None = None,
     int_wt_id: str | None = None,
+    *,
+    no_changes_teams: set[str] | None = None,
+    base_ref: str | None = None,
+    allow_no_rc: bool = False,
 ) -> str | None:
     """force なしでの cleanup 前に、RC 解決・Bundle 保全・未コミット変更・RC 取り込み済みを厳格検証する。"""
-    if rc_ref is None:
+    target_ref = rc_ref or (base_ref if allow_no_rc else None)
+    if target_ref is None:
         return (
             f"TEAM_CLEANUP_ERROR: Cannot resolve RC commit or tag for job '{job_id}'. "
             "Refusing to remove worktrees and team branches without --force."
         )
 
+    nc_teams = no_changes_teams or set()
     live_wts = {wt.team_id: wt for wt in wt_manager.list_worktrees()}
     for tid, branch in team_targets:
         wt_info = live_wts.get(tid)
@@ -2159,18 +2211,19 @@ def _check_cleanup_preconditions(
                     f"({err}). Pass --force to quarantine and remove."
                 )
         if _branch_exists(resolved_repo, branch):
-            anc = _run_git_cmd(resolved_repo, ["merge-base", "--is-ancestor", branch, rc_ref])
+            anc = _run_git_cmd(resolved_repo, ["merge-base", "--is-ancestor", branch, target_ref])
             if anc.returncode != 0:
                 return (
-                    f"TEAM_CLEANUP_ERROR: Branch '{branch}' has commits not merged into '{rc_ref}'. "
+                    f"TEAM_CLEANUP_ERROR: Branch '{branch}' has commits not merged into '{target_ref}'. "
                     "Refusing to delete without --force."
                 )
-        bundle_path = resolved_repo / ".dev" / "integration_jobs" / job_id / "evidence" / f"{tid}.zip"
-        if not _is_valid_bundle_archive(bundle_path):
-            return (
-                f"TEAM_CLEANUP_ERROR: Preserved evidence bundle for team '{tid}' is missing or invalid "
-                f"at '{bundle_path}'. Refusing to delete without --force."
-            )
+        if tid not in nc_teams:
+            bundle_path = resolved_repo / ".dev" / "integration_jobs" / job_id / "evidence" / f"{tid}.zip"
+            if not _is_valid_bundle_archive(bundle_path):
+                return (
+                    f"TEAM_CLEANUP_ERROR: Preserved evidence bundle for team '{tid}' is missing or invalid "
+                    f"at '{bundle_path}'. Refusing to delete without --force."
+                )
 
     if int_wt_id is not None:
         int_wt_info = live_wts.get(int_wt_id)
@@ -2189,6 +2242,11 @@ def _check_cleanup_preconditions(
             return (
                 f"TEAM_CLEANUP_ERROR: Integration branch '{integration_branch}' is currently "
                 f"checked out in '{resolved_repo}'. Switch branches before cleanup."
+            )
+        if rc_ref is None:
+            return (
+                f"TEAM_CLEANUP_ERROR: Cannot resolve RC commit or tag for job '{job_id}'. "
+                "Refusing to delete without --force."
             )
         anc = _run_git_cmd(resolved_repo, ["merge-base", "--is-ancestor", integration_branch, rc_ref])
         if anc.returncode != 0:
@@ -2256,7 +2314,15 @@ def cleanup_teams_job(
     if int_state is None and job_rec is None and not workers:
         return None, 1, f"TEAM_CLEANUP_ERROR: Job '{job_id}' not found."
 
-    integration_succeeded = int_state is not None and int_state.state == "COMPLETED"
+    no_changes_list = _extract_no_changes_teams(int_state, job_rec)
+    no_changes_set = set(no_changes_list)
+    all_no_changes = bool(
+        int_state is None
+        and job_rec is not None
+        and job_rec.get("status") == "NO_CHANGES"
+        and no_changes_set
+    )
+    integration_succeeded = (int_state is not None and int_state.state == "COMPLETED") or all_no_changes
     if not integration_succeeded and not force:
         state_label = (
             int_state.state
@@ -2303,6 +2369,14 @@ def cleanup_teams_job(
     int_wt_id = int_wt_info.team_id if int_wt_info is not None else default_int_wt_id
     int_wt_dir = int_wt_info.path if int_wt_info is not None else (wt_manager.worktree_base / int_wt_id)
 
+    cleanup_base_ref: str | None = None
+    if all_no_changes and job_rec is not None:
+        raw_base = job_rec.get("base_commit") or job_rec.get("base_ref")
+        if raw_base:
+            chk_base = _run_git_cmd(resolved_repo, ["rev-parse", "--verify", f"{raw_base}^{{commit}}"])
+            if chk_base.returncode == 0 and chk_base.stdout.strip():
+                cleanup_base_ref = chk_base.stdout.strip()
+
     team_targets = [(tid, branch) for tid, (branch, _) in job_targets.items()]
     if not force:
         pre_err = _check_cleanup_preconditions(
@@ -2311,8 +2385,11 @@ def cleanup_teams_job(
             team_targets,
             rc_ref,
             wt_manager,
-            integration_branch=integration_branch if integration_succeeded else None,
-            int_wt_id=int_wt_id if integration_succeeded else None,
+            integration_branch=integration_branch if (int_state is not None and int_state.state == "COMPLETED") else None,
+            int_wt_id=int_wt_id if (int_state is not None and int_state.state == "COMPLETED") else None,
+            no_changes_teams=no_changes_set,
+            base_ref=cleanup_base_ref,
+            allow_no_rc=all_no_changes,
         )
         if pre_err is not None:
             return None, 1, pre_err
@@ -2470,7 +2547,11 @@ def cleanup_teams_job(
     )
 
 
-def _check_team_plan_completed(plan_path: Path) -> tuple[bool, list[str]]:
+def _check_team_plan_completed(
+    plan_path: Path,
+    *,
+    allow_empty: bool = False,
+) -> tuple[bool, list[str]]:
     """チーム計画ファイルの全タスクが完了済み (- [x] かつ未失敗) であるか検証する。"""
     if not plan_path.is_file():
         return False, [f"plan file not found: {plan_path.name}"]
@@ -2491,7 +2572,7 @@ def _check_team_plan_completed(plan_path: Path) -> tuple[bool, list[str]]:
             total += 1
             issues.append(f"incomplete task: {line.strip()}")
 
-    if total == 0:
+    if total == 0 and not allow_empty:
         issues.append(f"no tasks found in {plan_path.name}")
     return len(issues) == 0, issues
 
@@ -2500,11 +2581,12 @@ def _collect_team_integrate_blockers(
     resolved_repo: Path,
     manifest: TeamManifest,
     live_wts: dict[str, WorktreeInfo],
-) -> tuple[list[str], dict[str, Path]]:
-    """各チームの worktree 存在・ブランチ・クリーン状態・計画完了を検証する。"""
+) -> tuple[list[str], dict[str, Path], dict[str, int]]:
+    """各チームの worktree 存在・ブランチ・クリーン状態・基点からのコミット数・計画完了を検証する。"""
     wt_manager = WorktreeManager(repo_dir=resolved_repo)
     blockers: list[str] = []
     team_wt_paths: dict[str, Path] = {}
+    team_commit_counts: dict[str, int] = {}
 
     for team in manifest.teams:
         wt_info = live_wts.get(team.id)
@@ -2537,7 +2619,25 @@ def _collect_team_integrate_blockers(
             )
             continue
 
-        plan_ok, plan_issues = _check_team_plan_completed(wt_path / team.plan)
+        cnt_proc = _run_git_cmd(wt_path, ["rev-list", "--count", f"{manifest.base_ref}..HEAD"])
+        if cnt_proc.returncode != 0:
+            blockers.append(
+                f"team '{team.id}': failed to count commits via git rev-list from '{manifest.base_ref}' in {wt_path}: "
+                f"{cnt_proc.stderr.strip()}"
+            )
+            continue
+        try:
+            commit_count = int(cnt_proc.stdout.strip())
+        except ValueError:
+            blockers.append(
+                f"team '{team.id}': invalid git rev-list --count output: {cnt_proc.stdout.strip()!r}"
+            )
+            continue
+
+        plan_ok, plan_issues = _check_team_plan_completed(
+            wt_path / team.plan,
+            allow_empty=(commit_count == 0),
+        )
         if not plan_ok:
             blockers.append(
                 f"team '{team.id}' ({team.plan}): {'; '.join(plan_issues)}"
@@ -2545,8 +2645,9 @@ def _collect_team_integrate_blockers(
             continue
 
         team_wt_paths[team.id] = wt_path
+        team_commit_counts[team.id] = commit_count
 
-    return blockers, team_wt_paths
+    return blockers, team_wt_paths, team_commit_counts
 
 
 def _read_bundle_manifest(bundle_path: Path) -> dict[str, Any] | None:
@@ -2700,25 +2801,41 @@ def _extract_offending_teams(
 def _build_integrate_success_payload(
     job_id: str,
     base_ref: str,
-    rc_tag: str,
-    rc_commit: str,
+    rc_tag: str | None,
+    rc_commit: str | None,
     preserved_bundles: dict[str, str],
     *,
     already_integrated: bool = False,
+    no_changes_teams: list[str] | None = None,
+    all_no_changes: bool = False,
 ) -> dict[str, Any]:
+    nc_list = list(no_changes_teams or [])
+    if all_no_changes:
+        status = "NO_CHANGES"
+        integration_branch: str | None = None
+        merge_commands: list[str] = []
+    else:
+        status = "ALREADY_INTEGRATED" if already_integrated else "SUCCESS"
+        integration_branch = f"integration/{job_id}"
+        merge_commands = (
+            [
+                f"git diff {base_ref}..{rc_tag}",
+                f"git checkout {base_ref} && git merge --no-ff {rc_tag}",
+            ]
+            if rc_tag
+            else []
+        )
     return {
         "job_id": job_id,
         "success": True,
-        "status": "ALREADY_INTEGRATED" if already_integrated else "SUCCESS",
+        "status": status,
         "base_ref": base_ref,
         "rc_tag": rc_tag,
         "rc_commit": rc_commit,
-        "integration_branch": f"integration/{job_id}",
+        "integration_branch": integration_branch,
         "preserved_bundles": preserved_bundles,
-        "merge_commands": [
-            f"git diff {base_ref}..{rc_tag}",
-            f"git checkout {base_ref} && git merge --no-ff {rc_tag}",
-        ],
+        "no_changes_teams": nc_list,
+        "merge_commands": merge_commands,
     }
 
 
@@ -2844,21 +2961,29 @@ def integrate_teams_job(
 
     if int_state is not None and int_state.state == "COMPLETED":
         rc_ref = _resolve_rc_ref(resolved_repo, job_id, int_state)
+        recorded_no_changes = _extract_no_changes_teams(int_state, job_rec)
+        recorded_nc_set = set(recorded_no_changes)
         heads_match = rc_ref is not None
         if heads_match:
             for team in manifest.teams:
                 expected_sha = int_state.verified_commits.get(team.id)
                 br_proc = _run_git_cmd(resolved_repo, ["rev-parse", "--verify", f"refs/heads/team/{team.id}"])
-                if expected_sha and (br_proc.returncode != 0 or br_proc.stdout.strip() != expected_sha):
-                    heads_match = False
-                    break
+                if expected_sha:
+                    if br_proc.returncode != 0 or br_proc.stdout.strip() != expected_sha:
+                        heads_match = False
+                        break
+                elif team.id in recorded_nc_set and br_proc.returncode == 0:
+                    nc_cnt = _run_git_cmd(resolved_repo, ["rev-list", "--count", f"{manifest.base_ref}..refs/heads/team/{team.id}"])
+                    if nc_cnt.returncode != 0 or nc_cnt.stdout.strip() != "0":
+                        heads_match = False
+                        break
         if heads_match:
             rc_tag = int_state.rc_tag or f"rc/{job_id}"
             rc_commit = int_state.rc_commit or _run_git_cmd(resolved_repo, ["rev-parse", f"refs/tags/{rc_tag}"]).stdout.strip()
             preserved = {
                 t.id: str(jobs_dir / job_id / "evidence" / f"{t.id}.zip")
                 for t in manifest.teams
-                if (jobs_dir / job_id / "evidence" / f"{t.id}.zip").is_file()
+                if t.id not in recorded_nc_set and (jobs_dir / job_id / "evidence" / f"{t.id}.zip").is_file()
             }
             return (
                 _build_integrate_success_payload(
@@ -2868,6 +2993,7 @@ def integrate_teams_job(
                     rc_commit,
                     preserved,
                     already_integrated=True,
+                    no_changes_teams=recorded_no_changes,
                 ),
                 0,
                 "",
@@ -2921,7 +3047,9 @@ def integrate_teams_job(
         for wt in wt_manager.list_worktrees()
         if not wt.team_id.startswith("int-")
     }
-    blockers, team_wt_paths = _collect_team_integrate_blockers(resolved_repo, manifest, live_wts)
+    blockers, team_wt_paths, team_commit_counts = _collect_team_integrate_blockers(
+        resolved_repo, manifest, live_wts
+    )
     if blockers:
         details_block = "\n".join(f"  - {b}" for b in blockers)
         return (
@@ -2939,6 +3067,7 @@ def integrate_teams_job(
         )
 
     team_results: dict[str, TeamExecutionResult] = {}
+    no_changes_teams: list[str] = []
     for team in manifest.teams:
         wt_path = team_wt_paths[team.id]
         head_proc = _run_git_cmd(wt_path, ["rev-parse", "HEAD"])
@@ -2960,6 +3089,18 @@ def integrate_teams_job(
             )
         head_commit = head_proc.stdout.strip()
         head_tree = tree_proc.stdout.strip()
+        if team_commit_counts.get(team.id, 0) == 0:
+            no_changes_teams.append(team.id)
+            team_results[team.id] = TeamExecutionResult(
+                team_id=team.id,
+                success=True,
+                status="NO_CHANGES",
+                branch=f"team/{team.id}",
+                head_commit=head_commit,
+                bundle_path=None,
+            )
+            continue
+
         preserved_path = jobs_dir / job_id / "evidence" / f"{team.id}.zip"
         _archive_superseded_team_bundle(
             preserved_path,
@@ -3024,6 +3165,29 @@ def integrate_teams_job(
             _format_integrate_failure_message(job_id, multi_res, manifest, team_wt_paths),
         )
 
+    if multi_res.status == "NO_CHANGES":
+        if job_rec is not None:
+            job_rec["status"] = "NO_CHANGES"
+            job_rec["no_changes_teams"] = list(no_changes_teams)
+            job_rec["rc_tag"] = None
+            job_rec["rc_commit"] = None
+            job_rec["integration_branch"] = None
+            job_rec["updated_at"] = time.time()
+            _save_team_job_record(resolved_repo, job_rec)
+        return (
+            _build_integrate_success_payload(
+                job_id,
+                manifest.base_ref,
+                None,
+                None,
+                {},
+                no_changes_teams=no_changes_teams,
+                all_no_changes=True,
+            ),
+            0,
+            "",
+        )
+
     rc_tag = multi_res.release_candidate_tag or f"rc/{job_id}"
     rc_commit = multi_res.release_candidate_commit or ""
     preserved_bundles = {
@@ -3031,11 +3195,17 @@ def integrate_teams_job(
         for tid, res in team_results.items()
         if res.bundle_path is not None
     }
+    if no_changes_teams:
+        saved_int_state = IntegrationJobState.load(jobs_dir, job_id)
+        if saved_int_state is not None:
+            saved_int_state.details["no_changes_teams"] = list(no_changes_teams)
+            saved_int_state.save(jobs_dir)
     if job_rec is not None:
         job_rec["status"] = "INTEGRATED"
         job_rec["rc_tag"] = rc_tag
         job_rec["rc_commit"] = rc_commit
         job_rec["integration_branch"] = f"integration/{job_id}"
+        job_rec["no_changes_teams"] = list(no_changes_teams)
         job_rec["updated_at"] = time.time()
         _save_team_job_record(resolved_repo, job_rec)
 
@@ -3046,6 +3216,7 @@ def integrate_teams_job(
             rc_tag,
             rc_commit,
             preserved_bundles,
+            no_changes_teams=no_changes_teams,
         ),
         0,
         "",
@@ -3054,6 +3225,21 @@ def integrate_teams_job(
 
 def format_teams_integrate_text(payload: dict[str, Any]) -> str:
     """teams integrate 成功時の人間向け出力を整形する。"""
+    no_changes = payload.get("no_changes_teams") or []
+    if payload.get("status") == "NO_CHANGES":
+        lines = [
+            "=== AUTO DEVELOPER / TEAMS INTEGRATION (NO_CHANGES) ===",
+            f" Job ID:    {payload['job_id']}",
+            f" Status:    {payload['status']}",
+            " RC Tag:    (not created; no team changes from base)",
+            f" Base Ref:  {payload['base_ref']} (not modified)",
+        ]
+        if no_changes:
+            lines.append(f" No Changes (NO_CHANGES): {', '.join(no_changes)}")
+        lines.append(f"Next steps (no changes to merge into '{payload['base_ref']}'):")
+        lines.append(f"  auto-dev teams cleanup --job-id {payload['job_id']}")
+        return "\n".join(lines)
+
     lines = [
         "=== AUTO DEVELOPER / TEAMS INTEGRATION PASSED ===",
         f" Job ID:    {payload['job_id']}",
@@ -3063,6 +3249,8 @@ def format_teams_integrate_text(payload: dict[str, Any]) -> str:
     if payload.get("rc_commit"):
         lines.append(f" RC Commit: {payload['rc_commit']}")
     lines.append(f" Base Ref:  {payload['base_ref']} (not modified)")
+    if no_changes:
+        lines.append(f" No Changes (NO_CHANGES): {', '.join(no_changes)}")
     bundles = payload.get("preserved_bundles") or {}
     if bundles:
         lines.append(" Preserved Bundles:")
@@ -3311,6 +3499,11 @@ def run_teams_job(
     if int_payload is None:
         return None, int_code, int_err
 
+    no_changes_set = set(int_payload.get("no_changes_teams") or [])
+    for tid in no_changes_set:
+        if tid in worker_summary and worker_summary[tid].get("success"):
+            worker_summary[tid]["status"] = "NO_CHANGES"
+
     run_payload = dict(int_payload)
     run_payload["worker_results"] = worker_summary
     return run_payload, 0, ""
@@ -3517,6 +3710,7 @@ def get_multi_team_report_summary(
         overall_state = "WORKER_FAILED"
 
     merged_teams = set(int_state.merged_teams) if int_state else set()
+    no_changes_teams = set(_extract_no_changes_teams(int_state, job_rec))
     recorded_workers = (job_rec.get("worker_results") or {}) if job_rec else {}
 
     teams_out: list[dict[str, Any]] = []
@@ -3531,6 +3725,14 @@ def get_multi_team_report_summary(
             w_status = "TIMEOUT"
         elif rec_w and not rec_w.get("success", True) and w_status in ("PREPARED", "UNKNOWN"):
             w_status = str(rec_w.get("status") or "FAILED")
+        elif tid in no_changes_teams and w_status not in (
+            "FAILED",
+            "TIMEOUT",
+            "CRASHED",
+            "STALE",
+            "UNVERIFIED_PROCESS",
+        ):
+            w_status = "NO_CHANGES"
 
         w_reg = workers.get(tid)
         err_detail: str | None = None
@@ -3571,6 +3773,13 @@ def get_multi_team_report_summary(
             integration_errors.append(str(int_state.details["error"]))
 
     is_integrated_ok = bool(rc_tag) and overall_state in ("COMPLETED", "INTEGRATED", "CLEANED_UP")
+    is_all_no_changes = not rc_tag and overall_state == "NO_CHANGES"
+    is_all_no_changes_cleaned = (
+        not rc_tag
+        and overall_state == "CLEANED_UP"
+        and bool(no_changes_teams)
+        and all(t["team_id"] in no_changes_teams for t in teams_out)
+    )
     if is_integrated_ok and rc_tag:
         rc_merged = False
         chk_merged = _run_git_cmd(
@@ -3588,6 +3797,16 @@ def get_multi_team_report_summary(
             pending_decisions.append(
                 f"作業領域（worktree・チームブランチ）を片付ける場合: `auto-dev teams cleanup --job-id {resolved_job_id}`"
             )
+    elif is_all_no_changes:
+        pending_decisions.append(
+            f"全チームに変更がなかったため（NO_CHANGES）、RC タグは作成されませんでした（`{base_ref}` は変更なし）。"
+        )
+        if any_worktree_or_branch:
+            pending_decisions.append(
+                f"作業領域（worktree・チームブランチ）を片付ける場合: `auto-dev teams cleanup --job-id {resolved_job_id}`"
+            )
+    elif is_all_no_changes_cleaned:
+        pass
     else:
         for t_info in teams_out:
             tid = str(t_info["team_id"])
