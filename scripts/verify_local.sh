@@ -38,11 +38,17 @@ else
 fi
 
 echo "=== [4/4] Running Python unit and acceptance tests ==="
-if [ -x "/usr/bin/python3" ]; then
-  PYTHON="/usr/bin/python3"
-else
-  PYTHON="python3"
+# テストを動かす Python: 環境変数 PYTHON → PATH の python3 の順に選ぶ（DX-5 の雛形と同じ規則）。
+# /usr/bin/python3 を優先しない（CI の Ubuntu ではマトリクスの Python ではなく OS の Python で走っていた）。
+if [ -z "${PYTHON:-}" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON="python3"
+  else
+    echo "ERROR: python3 not found to execute tests (set PYTHON to the interpreter to use)"
+    exit 1
+  fi
 fi
+echo "Using Python: $(command -v "$PYTHON") ($("$PYTHON" --version 2>&1))"
 "$PYTHON" -m unittest discover -s tests -p "test_*.py"
 
 echo "=== All verification checks passed! (Exit 0) ==="
