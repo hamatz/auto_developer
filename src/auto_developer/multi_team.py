@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
+import io
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -2413,12 +2415,21 @@ def cleanup_teams_job(
 
     # INV-3: --force 時は削除前に全チームの未コミット変更・未取り込みブランチを quarantine/* へ退避・検証する
     quarantined_branches: dict[str, str] = {}
+    quarantined_task_snapshots: dict[str, dict[str, Any]] = {}
     if force:
         for tid, (branch, recorded_wt) in job_targets.items():
             wt_info = live_wts.get(tid)
             wt_dir = wt_info.path if wt_info is not None else (recorded_wt or (wt_manager.worktree_base / tid))
             if wt_info is not None and wt_info.branch and wt_info.branch != branch:
                 continue
+            wt_state_file = wt_dir / ".dev" / "job_state.json"
+            if wt_dir.is_dir() and wt_state_file.is_file():
+                try:
+                    wt_js = JobState.load(wt_state_file)
+                    if isinstance(wt_js.quarantined_task, dict):
+                        quarantined_task_snapshots[tid] = dict(wt_js.quarantined_task)
+                except (OSError, json.JSONDecodeError, ValueError):
+                    pass
             try:
                 q_branch = _quarantine_team_before_cleanup(
                     resolved_repo=resolved_repo,
@@ -2532,6 +2543,8 @@ def cleanup_teams_job(
         job_rec["updated_at"] = time.time()
         if quarantined_branches:
             job_rec["quarantine_branches"] = quarantined_branches
+        if quarantined_task_snapshots:
+            job_rec["quarantined_tasks"] = quarantined_task_snapshots
         _save_team_job_record(resolved_repo, job_rec)
 
     return (
@@ -3667,11 +3680,316 @@ def format_teams_recover_text(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _is_unconsumed_evidence_token(data: dict[str, Any]) -> bool:
+    return (
+        "token" in data
+        and "status" not in data
+        and "checker" not in data
+        and "commit" not in data
+    )
+
+
+def _load_team_evidence_from_bundle(bundle_path: Path) -> dict[str, dict[str, Any]]:
+    """保全済みチーム Bundle ZIP から task_id ごとの Evidence 記録を読み込む。"""
+    if not bundle_path.is_file() or not zipfile.is_zipfile(bundle_path):
+        return {}
+    records: dict[str, dict[str, Any]] = {}
+    try:
+        with zipfile.ZipFile(bundle_path, "r") as zf:
+            names = zf.namelist()
+            for name in sorted(names):
+                if not name.startswith("evidence/task_") or not name.endswith(".json"):
+                    continue
+                try:
+                    raw = zf.read(name).decode("utf-8")
+                    data = json.loads(raw)
+                except (KeyError, UnicodeDecodeError, json.JSONDecodeError, OSError):
+                    continue
+                if not isinstance(data, dict) or _is_unconsumed_evidence_token(data):
+                    continue
+                tid = str(data.get("task_id") or "").strip() or Path(name).stem.removeprefix("task_")
+                if tid:
+                    records[tid] = data
+
+            if "bundle_manifest.json" in names:
+                try:
+                    manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+                except (KeyError, UnicodeDecodeError, json.JSONDecodeError, OSError):
+                    manifest = None
+                if isinstance(manifest, dict) and isinstance(manifest.get("tasks"), list):
+                    for entry in manifest["tasks"]:
+                        if not isinstance(entry, dict):
+                            continue
+                        tid = str(entry.get("task_id") or "").strip()
+                        if tid and tid not in records:
+                            records[tid] = dict(entry)
+    except (zipfile.BadZipFile, OSError):
+        return {}
+    return records
+
+
+def _load_team_evidence_from_worktree(wt_path: Path) -> dict[str, dict[str, Any]]:
+    """worktree 内の Evidence 記録から task_id ごとのレコードを読み込む。"""
+    records: dict[str, dict[str, Any]] = {}
+    candidate_dirs = [
+        wt_path / ".dev" / "evidence" / "records",
+        wt_path / ".dev" / "evidence",
+    ]
+    for cdir in candidate_dirs:
+        if not cdir.is_dir():
+            continue
+        for rec_file in sorted(cdir.glob("task_*.json")):
+            try:
+                data = json.loads(rec_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict) or _is_unconsumed_evidence_token(data):
+                continue
+            tid = str(data.get("task_id") or "").strip() or rec_file.stem.removeprefix("task_")
+            if tid and tid not in records:
+                records[tid] = data
+    return records
+
+
+def _load_team_review_events_from_worktree(wt_path: Path) -> dict[str, dict[str, Any]]:
+    """worktree 内の events.jsonl から task_id ごとの最新査読・コミットイベントを読み込む。"""
+    events_by_task: dict[str, dict[str, Any]] = {}
+    events_path = wt_path / ".dev" / "metrics" / "events.jsonl"
+    if not events_path.is_file():
+        return events_by_task
+    try:
+        for line in events_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            try:
+                rec = json.loads(s)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if rec.get("event") not in ("checker_review", "commit_step"):
+                continue
+            tid = str(rec.get("task_id") or "").strip()
+            if tid:
+                events_by_task[tid] = rec
+    except OSError:
+        pass
+    return events_by_task
+
+
+def _read_team_plan_from_bundle(bundle_path: Path, plan_rel: str) -> str:
+    """保全済み Bundle の source_snapshot.tar から計画ファイル内容を読み込む。"""
+    if not bundle_path.is_file() or not zipfile.is_zipfile(bundle_path):
+        return ""
+    norm_rel = plan_rel.replace("\\", "/").lstrip("./")
+    try:
+        with zipfile.ZipFile(bundle_path, "r") as zf:
+            if "source_snapshot.tar" not in zf.namelist():
+                return ""
+            tar_bytes = zf.read("source_snapshot.tar")
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:*") as tf:
+            for cand_name in (norm_rel, f"./{norm_rel}"):
+                try:
+                    member = tf.getmember(cand_name)
+                except KeyError:
+                    continue
+                extracted = tf.extractfile(member)
+                if extracted is not None:
+                    return extracted.read().decode("utf-8", errors="replace")
+    except (zipfile.BadZipFile, tarfile.TarError, OSError, UnicodeDecodeError):
+        return ""
+    return ""
+
+
+def _read_team_plan_text(
+    *,
+    resolved_repo: Path,
+    wt_path: Path,
+    plan_rel: str,
+    branch: str,
+    wt_exists: bool,
+    branch_exists: bool,
+    verified_commit: str | None,
+    rc_tag: str | None,
+    bundle_path: Path,
+    quarantine_branches: list[str],
+) -> str:
+    """worktree・チームブランチ・RC・保全 Bundle の順でチーム計画ファイルを取得する。"""
+    wt_plan = wt_path / plan_rel
+    if wt_exists and wt_plan.is_file():
+        try:
+            return wt_plan.read_text(encoding="utf-8")
+        except OSError:
+            pass
+
+    if branch_exists:
+        proc = _run_git_cmd(resolved_repo, ["show", f"{branch}:{plan_rel}"])
+        if proc.returncode == 0 and proc.stdout:
+            return proc.stdout
+
+    git_refs: list[str] = []
+    if verified_commit:
+        git_refs.append(verified_commit)
+    if rc_tag:
+        git_refs.append(f"refs/tags/{rc_tag}")
+    if not wt_exists and not branch_exists:
+        git_refs.extend(quarantine_branches)
+
+    for ref in git_refs:
+        proc = _run_git_cmd(resolved_repo, ["show", f"{ref}:{plan_rel}"])
+        if proc.returncode == 0 and proc.stdout:
+            return proc.stdout
+
+    bundle_plan = _read_team_plan_from_bundle(bundle_path, plan_rel)
+    if bundle_plan:
+        return bundle_plan
+
+    repo_plan = resolved_repo / plan_rel
+    if repo_plan.is_file():
+        try:
+            return repo_plan.read_text(encoding="utf-8")
+        except OSError:
+            pass
+    return ""
+
+
+def _extract_commit_sha(commit_val: Any) -> str:
+    if isinstance(commit_val, dict):
+        return str(
+            commit_val.get("sha")
+            or commit_val.get("hash")
+            or commit_val.get("commit_sha")
+            or ""
+        ).strip()
+    return str(commit_val or "").strip()
+
+
+def _collect_team_task_details(
+    *,
+    plan_text: str,
+    records_by_task: dict[str, dict[str, Any]],
+    events_by_task: dict[str, dict[str, Any]],
+    quarantined_task: dict[str, Any] | None,
+    job_rec: dict[str, Any] | None,
+    team_status: str,
+) -> list[dict[str, Any]]:
+    """チームのタスク一覧・状態・Checker 判定・使用モデルを統合する (RPT-7)。"""
+    parsed_tasks = TaskDispatcher().parse_plan_text(plan_text) if plan_text else []
+    q_task_id = (
+        str(quarantined_task.get("task_id") or "").strip()
+        if isinstance(quarantined_task, dict)
+        else ""
+    )
+    q_phase = (
+        str(quarantined_task.get("phase") or "").strip()
+        if isinstance(quarantined_task, dict)
+        else ""
+    )
+    q_checker_model = (
+        str(quarantined_task.get("checker_model") or "").strip()
+        if isinstance(quarantined_task, dict)
+        else ""
+    )
+    q_maker_model = (
+        str(quarantined_task.get("maker_model") or "").strip()
+        if isinstance(quarantined_task, dict)
+        else ""
+    )
+    job_checker_model = str((job_rec or {}).get("checker_model") or "").strip()
+    job_maker_model = str((job_rec or {}).get("maker_model") or "").strip()
+
+    def _build_entry(task_id: str, title: str, task_status: str) -> dict[str, Any]:
+        rec = records_by_task.get(task_id)
+        ev = events_by_task.get(task_id)
+        commit_sha = ""
+        checker_decision = ""
+        checker_model = ""
+        maker_model = ""
+
+        if isinstance(rec, dict):
+            commit_sha = _extract_commit_sha(rec.get("commit"))
+            rec_checker = rec.get("checker")
+            if isinstance(rec_checker, dict):
+                checker_decision = str(rec_checker.get("decision") or "").strip()
+                checker_model = str(
+                    rec_checker.get("model") or rec_checker.get("checker_model") or ""
+                ).strip()
+                maker_model = str(rec_checker.get("maker_model") or "").strip()
+            elif rec_checker:
+                checker_decision = str(rec_checker).strip()
+            if not checker_decision and rec.get("checker_decision"):
+                checker_decision = str(rec.get("checker_decision")).strip()
+
+        if isinstance(ev, dict):
+            if not checker_decision:
+                checker_decision = str(
+                    ev.get("decision") or ev.get("checker_decision") or ""
+                ).strip()
+            if not checker_model and ev.get("checker_model"):
+                checker_model = str(ev["checker_model"]).strip()
+            if not maker_model and ev.get("maker_model"):
+                maker_model = str(ev["maker_model"]).strip()
+            if not commit_sha and ev.get("commit") and str(ev.get("commit")) != "unknown":
+                commit_sha = str(ev["commit"]).strip()
+
+        if task_status == "FAILED" and q_task_id == task_id:
+            if not checker_decision and q_phase == "CHECKER_REJECT":
+                checker_decision = "REJECT"
+            if not checker_model and q_checker_model:
+                checker_model = q_checker_model
+            if not maker_model and q_maker_model:
+                maker_model = q_maker_model
+
+        if team_status != "NO_CHANGES" and (
+            task_status in ("COMPLETED", "FAILED")
+            or checker_decision in ("APPROVE", "REJECT")
+        ):
+            if not checker_model and job_checker_model:
+                checker_model = job_checker_model
+            if not maker_model and job_maker_model:
+                maker_model = job_maker_model
+
+        return {
+            "task_id": task_id,
+            "title": title,
+            "status": task_status,
+            "commit": commit_sha,
+            "checker_decision": checker_decision or "N/A",
+            "checker_model": checker_model or "N/A",
+            "maker_model": maker_model or "N/A",
+        }
+
+    out: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for task in parsed_tasks:
+        tid = str(task.task_id)
+        seen_ids.add(tid)
+        if task.is_completed:
+            t_status = "COMPLETED"
+        elif task.is_failed or (q_task_id and q_task_id == tid):
+            t_status = "FAILED"
+        else:
+            t_status = "PENDING"
+        out.append(_build_entry(tid, task.title, t_status))
+
+    for tid, rec in records_by_task.items():
+        if tid in seen_ids:
+            continue
+        seen_ids.add(tid)
+        rec_status = str(rec.get("status") or "").strip().upper()
+        t_status = "COMPLETED" if rec_status == "COMPLETED" else ("FAILED" if rec_status == "FAILED" else "COMPLETED")
+        title = str(rec.get("title") or f"Task {tid}")
+        out.append(_build_entry(tid, title, t_status))
+
+    return out
+
+
 def get_multi_team_report_summary(
     repo_dir: Path,
     job_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """TEAM-17: NIGHTLY_REPORT.md / brief 表示向けに最新のマルチチームジョブ結果を集約する。"""
+    """TEAM-17 / RPT-7: NIGHTLY_REPORT.md / brief 表示向けに最新のマルチチームジョブ結果を集約する。"""
     resolved_repo = repo_dir.resolve()
     resolved_job_id = job_id or _find_latest_team_job_id(resolved_repo)
     if resolved_job_id is None:
@@ -3696,6 +4014,22 @@ def get_multi_team_report_summary(
         except (FileNotFoundError, ManifestValidationError, OSError):
             pass
 
+    base_head = ""
+    base_head_proc = _run_git_cmd(resolved_repo, ["rev-parse", "--verify", f"{base_ref}^{{commit}}"])
+    if base_head_proc.returncode == 0 and base_head_proc.stdout.strip():
+        base_head = base_head_proc.stdout.strip()
+
+    raw_base_commit = (
+        (str(job_rec["base_commit"]) if job_rec and job_rec.get("base_commit") else "")
+        or (str(int_state.base_commit) if int_state and int_state.base_commit else "")
+        or base_head
+    )
+    base_commit = raw_base_commit
+    if raw_base_commit and not re.fullmatch(r"[0-9a-fA-F]{40}", raw_base_commit):
+        bc_proc = _run_git_cmd(resolved_repo, ["rev-parse", "--verify", f"{raw_base_commit}^{{commit}}"])
+        if bc_proc.returncode == 0 and bc_proc.stdout.strip():
+            base_commit = bc_proc.stdout.strip()
+
     rc_tag = (
         (int_state.rc_tag if int_state and int_state.rc_tag else None)
         or (str(job_rec["rc_tag"]) if job_rec and job_rec.get("rc_tag") else None)
@@ -3704,6 +4038,10 @@ def get_multi_team_report_summary(
         (int_state.rc_commit if int_state and int_state.rc_commit else None)
         or (str(job_rec["rc_commit"]) if job_rec and job_rec.get("rc_commit") else None)
     )
+    if rc_tag and not rc_commit:
+        rc_sha_proc = _run_git_cmd(resolved_repo, ["rev-parse", "--verify", f"refs/tags/{rc_tag}^{{commit}}"])
+        if rc_sha_proc.returncode == 0 and rc_sha_proc.stdout.strip():
+            rc_commit = rc_sha_proc.stdout.strip()
 
     overall_state = str(status_data.get("job_state") or "UNKNOWN")
     if job_rec and job_rec.get("status") == "WORKER_FAILED" and int_state is None:
@@ -3712,6 +4050,11 @@ def get_multi_team_report_summary(
     merged_teams = set(int_state.merged_teams) if int_state else set()
     no_changes_teams = set(_extract_no_changes_teams(int_state, job_rec))
     recorded_workers = (job_rec.get("worker_results") or {}) if job_rec else {}
+    recorded_q_tasks = (
+        job_rec.get("quarantined_tasks") or {}
+        if job_rec and isinstance(job_rec.get("quarantined_tasks"), dict)
+        else {}
+    )
 
     teams_out: list[dict[str, Any]] = []
     pending_decisions: list[str] = []
@@ -3747,20 +4090,88 @@ def get_multi_team_report_summary(
         if wt_exists or br_exists:
             any_worktree_or_branch = True
 
+        wt_path = Path(str(t.get("worktree_path") or "")) if t.get("worktree_path") else (resolved_repo / ".dev" / "worktrees" / tid)
+        plan_rel = str(t.get("plan") or f"plans/{tid}.md")
+        branch = str(t.get("branch") or f"team/{tid}")
+        bundle_path = jobs_dir / resolved_job_id / "evidence" / f"{tid}.zip"
+        verified_commit = int_state.verified_commits.get(tid) if int_state else None
+
+        wt_q_task: dict[str, Any] | None = None
+        wt_state_file = wt_path / ".dev" / "job_state.json"
+        if wt_exists and wt_state_file.is_file():
+            try:
+                wt_js = JobState.load(wt_state_file)
+                if isinstance(wt_js.quarantined_task, dict):
+                    wt_q_task = wt_js.quarantined_task
+            except (OSError, json.JSONDecodeError, ValueError):
+                wt_q_task = None
+        if wt_q_task is None and isinstance(recorded_q_tasks.get(tid), dict):
+            wt_q_task = recorded_q_tasks[tid]
+
+        records_by_task: dict[str, dict[str, Any]] = {}
+        if wt_exists:
+            records_by_task.update(_load_team_evidence_from_worktree(wt_path))
+        for k, v in _load_team_evidence_from_bundle(bundle_path).items():
+            records_by_task.setdefault(k, v)
+
+        events_by_task = _load_team_review_events_from_worktree(wt_path) if wt_exists else {}
+
+        plan_text = _read_team_plan_text(
+            resolved_repo=resolved_repo,
+            wt_path=wt_path,
+            plan_rel=plan_rel,
+            branch=branch,
+            wt_exists=wt_exists,
+            branch_exists=br_exists,
+            verified_commit=verified_commit,
+            rc_tag=rc_tag,
+            bundle_path=bundle_path,
+            quarantine_branches=qbs,
+        )
+
+        team_tasks = _collect_team_task_details(
+            plan_text=plan_text,
+            records_by_task=records_by_task,
+            events_by_task=events_by_task,
+            quarantined_task=wt_q_task,
+            job_rec=job_rec,
+            team_status=w_status,
+        )
+
+        comp_count = int(t.get("completed_tasks", 0))
+        tot_count = int(t.get("total_tasks", 0))
+        fail_count = int(t.get("failed_tasks", 0))
+        if team_tasks:
+            tot_count = len(team_tasks)
+            comp_count = sum(1 for item in team_tasks if item["status"] == "COMPLETED")
+            fail_count = sum(1 for item in team_tasks if item["status"] == "FAILED")
+
+        if (
+            w_status in ("CLEANED_UP", "UNKNOWN")
+            and tid not in no_changes_teams
+            and tot_count > 0
+            and comp_count == tot_count
+            and fail_count == 0
+        ):
+            w_status = "COMPLETED"
+
         teams_out.append(
             {
                 "team_id": tid,
                 "status": w_status,
-                "completed_tasks": int(t.get("completed_tasks", 0)),
-                "total_tasks": int(t.get("total_tasks", 0)),
-                "failed_tasks": int(t.get("failed_tasks", 0)),
-                "branch": str(t.get("branch") or f"team/{tid}"),
+                "plan": plan_rel,
+                "completed_tasks": comp_count,
+                "total_tasks": tot_count,
+                "failed_tasks": fail_count,
+                "branch": branch,
                 "branch_exists": br_exists,
                 "worktree_path": str(t.get("worktree_path") or ""),
                 "worktree_exists": wt_exists,
                 "quarantine_branches": qbs,
                 "merged": tid in merged_teams,
                 "error": err_detail,
+                "no_changes": w_status == "NO_CHANGES",
+                "tasks": team_tasks,
             }
         )
 
@@ -3780,8 +4191,9 @@ def get_multi_team_report_summary(
         and bool(no_changes_teams)
         and all(t["team_id"] in no_changes_teams for t in teams_out)
     )
+
+    rc_merged = False
     if is_integrated_ok and rc_tag:
-        rc_merged = False
         chk_merged = _run_git_cmd(
             resolved_repo,
             ["merge-base", "--is-ancestor", f"refs/tags/{rc_tag}", base_ref],
@@ -3849,13 +4261,22 @@ def get_multi_team_report_summary(
                 f"ジョブを破棄してやり直す場合: `auto-dev teams cleanup --job-id {resolved_job_id} --force`"
             )
 
+    if base_head and base_commit:
+        base_unchanged = (base_head == base_commit) and (not rc_merged or rc_commit == base_commit)
+    else:
+        base_unchanged = not rc_merged
+
     return {
         "job_id": resolved_job_id,
         "job_state": overall_state,
         "base_ref": base_ref,
+        "base_commit": base_commit,
+        "base_head": base_head,
+        "base_unchanged": base_unchanged,
         "rc_tag": rc_tag,
         "rc_commit": rc_commit,
         "is_integrated": is_integrated_ok,
+        "all_no_changes": is_all_no_changes or is_all_no_changes_cleaned,
         "teams": teams_out,
         "integration_errors": integration_errors,
         "pending_decisions": pending_decisions,

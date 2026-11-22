@@ -149,6 +149,9 @@ class MorningReporter:
                 ]
             )
 
+        multi_team_data = summary_data.get("multi_team")
+        is_multi_team = isinstance(multi_team_data, dict)
+
         # 3. 概要 (Status Overview) / 機能R
         status_lines = [
             "## 概要 (Status Overview)",
@@ -158,7 +161,34 @@ class MorningReporter:
             f"| **タスク進捗** | **{succeeded} / {total}** 完了 |",
             f"| **要確認・隔離** | **{quarantined_count}** 件 |",
         ]
-        if initial_checkpoint and final_commit:
+        if is_multi_team:
+            mt_dict = multi_team_data if isinstance(multi_team_data, dict) else {}
+            base_ref = str(mt_dict.get("base_ref") or "main")
+            base_commit = str(
+                mt_dict.get("base_commit") or initial_checkpoint or checkpoint or "N/A"
+            )
+            base_unchanged = bool(mt_dict.get("base_unchanged", True))
+            rc_tag = mt_dict.get("rc_tag")
+            rc_commit = mt_dict.get("rc_commit")
+            all_no_changes = bool(mt_dict.get("all_no_changes"))
+
+            status_lines.append(f"| **初期チェックポイント ({base_ref})** | `{base_commit}` |")
+            if rc_commit:
+                rc_label = f"RC コミット ({rc_tag})" if rc_tag else "RC コミット"
+                status_lines.append(f"| **{rc_label}** | `{rc_commit}` |")
+            elif all_no_changes:
+                status_lines.append("| **RC コミット** | なし (全チーム NO_CHANGES) |")
+            else:
+                status_lines.append("| **RC コミット** | 未発行 (Not Created) |")
+
+            if base_unchanged:
+                base_state_str = f"`{base_ref}` は未変更 (unchanged)"
+            else:
+                base_head = str(mt_dict.get("base_head") or "")
+                head_suffix = f" (HEAD: `{base_head}`)" if base_head else ""
+                base_state_str = f"`{base_ref}` に取り込み済み / 更新あり{head_suffix}"
+            status_lines.append(f"| **基点ブランチ ({base_ref}) の状態** | {base_state_str} |")
+        elif initial_checkpoint and final_commit:
             status_lines.extend(
                 [
                     f"| **初期チェックポイント** | `{initial_checkpoint}` |",
@@ -178,7 +208,39 @@ class MorningReporter:
                 for item in completed_tasks
                 if str(item.get("task_id", "")) in completed_task_ids
             ]
-        if completed_tasks:
+
+        mt_task_rows: list[tuple[str, dict[str, Any]]] = []
+        if isinstance(multi_team_data, dict):
+            for t in multi_team_data.get("teams") or []:
+                tid_str = str(t.get("team_id", ""))
+                for task_entry in t.get("tasks") or []:
+                    if isinstance(task_entry, dict):
+                        mt_task_rows.append((tid_str, task_entry))
+
+        if isinstance(multi_team_data, dict):
+            if mt_task_rows:
+                lines.extend(
+                    [
+                        "| Team | Task | Title | Status | Commit | Checker Decision | Checker Model | Maker Model |",
+                        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
+                    ]
+                )
+                for team_id, t_item in mt_task_rows:
+                    tid = str(t_item.get("task_id", ""))
+                    title = str(t_item.get("title", ""))
+                    t_status = str(t_item.get("status", "UNKNOWN"))
+                    c_sha = str(t_item.get("commit") or "")[:7] or "-"
+                    c_dec = str(t_item.get("checker_decision") or "N/A")
+                    c_mod = str(t_item.get("checker_model") or "N/A")
+                    m_mod = str(t_item.get("maker_model") or "N/A")
+                    lines.append(
+                        f"| `{team_id}` | `task-{tid}` | {title} | {t_status} | `{c_sha}` | {c_dec} | `{c_mod}` | `{m_mod}` |"
+                    )
+            elif multi_team_data.get("all_no_changes"):
+                lines.append("* (全チーム NO_CHANGES: 基点からの変更コミットはありません)")
+            else:
+                lines.append("* (マルチチームジョブのタスク記録はありません)")
+        elif completed_tasks:
             lines.extend(
                 [
                     "| Task | Title | Commit | Verified Tree | Checker Review |",
@@ -281,7 +343,6 @@ class MorningReporter:
             for lim in known_limitations:
                 lines.append(f"- {lim}")
 
-        multi_team_data = summary_data.get("multi_team")
         audit_stage = summary_data.get("audit_stage") if not isinstance(multi_team_data, dict) else None
         if audit_stage:
             lines.extend(
@@ -346,9 +407,17 @@ class MorningReporter:
                 lines.append(f"- **保留/エラー理由**: {audit_stage.get('error', 'Unknown')}")
 
         if isinstance(multi_team_data, dict):
-            rc_tag = multi_team_data.get("rc_tag") or "未発行 (Not Created)"
+            all_no_changes = bool(multi_team_data.get("all_no_changes"))
+            rc_tag = multi_team_data.get("rc_tag") or (
+                "なし (全チーム NO_CHANGES)" if all_no_changes else "未発行 (Not Created)"
+            )
             rc_commit = multi_team_data.get("rc_commit")
+            rc_commit_display = rc_commit or (
+                "なし (全チーム NO_CHANGES)" if all_no_changes else "未発行 (Not Created)"
+            )
             base_ref = multi_team_data.get("base_ref") or "main"
+            base_unchanged = bool(multi_team_data.get("base_unchanged", True))
+            base_note = "未変更 (unchanged)" if base_unchanged else "更新あり (modified)"
             lines.extend(
                 [
                     "",
@@ -356,11 +425,10 @@ class MorningReporter:
                     f"- **ジョブID**: `{multi_team_data.get('job_id', 'N/A')}`",
                     f"- **ジョブ状態**: `{multi_team_data.get('job_state', 'UNKNOWN')}`",
                     f"- **RC タグ**: `{rc_tag}`",
+                    f"- **RC コミット**: `{rc_commit_display}`",
+                    f"- **基点ブランチ**: `{base_ref}` ({base_note})",
                 ]
             )
-            if rc_commit:
-                lines.append(f"- **RC コミット**: `{rc_commit}`")
-            lines.append(f"- **基点ブランチ**: `{base_ref}`")
 
             mt_teams = multi_team_data.get("teams") or []
             if mt_teams:
@@ -368,21 +436,85 @@ class MorningReporter:
                     [
                         "",
                         "### チームごとの結果 (Per-Team Results)",
-                        "| Team | Status | Tasks | Branch | Quarantine |",
-                        "| :--- | :--- | :--- | :--- | :--- |",
+                        "| Team | Status | Tasks | Checker | Models | Branch | Quarantine |",
+                        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
                     ]
                 )
                 for t in mt_teams:
                     tid = t.get("team_id", "")
-                    t_status = t.get("status", "UNKNOWN")
+                    t_status = str(t.get("status", "UNKNOWN"))
                     comp_n = int(t.get("completed_tasks", 0))
                     tot_n = int(t.get("total_tasks", 0))
                     fail_n = int(t.get("failed_tasks", 0))
                     task_str = f"{comp_n} / {tot_n}" + (f" (failed: {fail_n})" if fail_n else "")
+                    t_tasks = t.get("tasks") or []
+                    if t_status == "NO_CHANGES":
+                        checker_col = "NO_CHANGES"
+                        models_col = "-"
+                    elif t_tasks:
+                        decs = list(
+                            dict.fromkeys(
+                                str(item.get("checker_decision") or "N/A")
+                                for item in t_tasks
+                                if isinstance(item, dict)
+                            )
+                        )
+                        checker_col = ", ".join(decs) if decs else "N/A"
+                        c_mods = list(
+                            dict.fromkeys(
+                                str(item.get("checker_model") or "N/A")
+                                for item in t_tasks
+                                if isinstance(item, dict)
+                            )
+                        )
+                        m_mods = list(
+                            dict.fromkeys(
+                                str(item.get("maker_model") or "N/A")
+                                for item in t_tasks
+                                if isinstance(item, dict)
+                            )
+                        )
+                        models_col = f"maker={', '.join(m_mods)} / checker={', '.join(c_mods)}"
+                    else:
+                        checker_col = "N/A"
+                        models_col = "N/A"
                     branch = t.get("branch", "")
                     qbs = t.get("quarantine_branches") or []
                     q_str = ", ".join(f"`{q}`" for q in qbs) if qbs else "none"
-                    lines.append(f"| `{tid}` | {t_status} | {task_str} | `{branch}` | {q_str} |")
+                    lines.append(
+                        f"| `{tid}` | {t_status} | {task_str} | {checker_col} | {models_col} | `{branch}` | {q_str} |"
+                    )
+
+                lines.extend(["", "### チームごとのタスクと査読詳細 (Per-Team Tasks & Checker Reviews)"])
+                for t in mt_teams:
+                    tid = str(t.get("team_id", ""))
+                    t_status = str(t.get("status", "UNKNOWN"))
+                    t_tasks = t.get("tasks") or []
+                    lines.append(f"- **`{tid}`** (`{t_status}`)")
+                    if t_status == "NO_CHANGES":
+                        lines.append("  - NO_CHANGES: 基点からの変更コミットはありません")
+                    if t_tasks:
+                        for item in t_tasks:
+                            if not isinstance(item, dict):
+                                continue
+                            it_id = str(item.get("task_id", ""))
+                            it_title = str(item.get("title", ""))
+                            it_stat = str(item.get("status", "UNKNOWN"))
+                            mark = (
+                                "[x]"
+                                if it_stat == "COMPLETED"
+                                else ("[FAILED]" if it_stat == "FAILED" else "[ ]")
+                            )
+                            c_dec = str(item.get("checker_decision") or "N/A")
+                            c_mod = str(item.get("checker_model") or "N/A")
+                            m_mod = str(item.get("maker_model") or "N/A")
+                            c_sha = str(item.get("commit") or "")[:7] or "-"
+                            lines.append(
+                                f"  - {mark} `task-{it_id}`: {it_title} | status=`{it_stat}` | "
+                                f"checker=`{c_dec}` (checker_model=`{c_mod}`, maker_model=`{m_mod}`) | commit=`{c_sha}`"
+                            )
+                    elif t_status != "NO_CHANGES":
+                        lines.append("  - (タスク記録なし)")
 
             int_errors = multi_team_data.get("integration_errors") or []
             if int_errors:
@@ -588,22 +720,48 @@ class MorningReporter:
                 )
 
         if isinstance(multi_team_data, dict):
-            rc_tag = multi_team_data.get("rc_tag") or "未発行 (Not Created)"
+            all_no_changes = bool(multi_team_data.get("all_no_changes"))
+            rc_tag = multi_team_data.get("rc_tag") or (
+                "なし (全チーム NO_CHANGES)" if all_no_changes else "未発行 (Not Created)"
+            )
+            rc_commit = multi_team_data.get("rc_commit") or (
+                "なし (全チーム NO_CHANGES)" if all_no_changes else "未発行 (Not Created)"
+            )
+            base_ref = multi_team_data.get("base_ref") or "main"
+            base_unchanged = bool(multi_team_data.get("base_unchanged", True))
+            base_state_str = "未変更 (unchanged)" if base_unchanged else "更新あり (modified)"
             lines.extend(
                 [
                     "------------------------------------------------------------",
                     " [Multi-Team Execution]",
                     f"  Job ID: {multi_team_data.get('job_id', 'N/A')} (state={multi_team_data.get('job_state', 'UNKNOWN')})",
                     f"  RC Tag: {rc_tag}",
+                    f"  RC Commit: {rc_commit}",
+                    f"  Base Branch ({base_ref}): {base_state_str}",
                 ]
             )
             for t in multi_team_data.get("teams") or []:
                 qbs = ", ".join(t.get("quarantine_branches") or []) or "none"
+                t_status = str(t.get("status", "UNKNOWN"))
                 lines.append(
-                    f"  - {t.get('team_id')}: status={t.get('status')} | "
+                    f"  - {t.get('team_id')}: status={t_status} | "
                     f"tasks={t.get('completed_tasks', 0)}/{t.get('total_tasks', 0)} | "
                     f"branch={t.get('branch')} | quarantine={qbs}"
                 )
+                if t_status == "NO_CHANGES":
+                    lines.append("      * NO_CHANGES (基点からの変更コミットなし)")
+                for task_item in t.get("tasks") or []:
+                    if not isinstance(task_item, dict):
+                        continue
+                    c_dec = str(task_item.get("checker_decision") or "N/A")
+                    c_mod = str(task_item.get("checker_model") or "N/A")
+                    m_mod = str(task_item.get("maker_model") or "N/A")
+                    it_stat = str(task_item.get("status") or "UNKNOWN")
+                    c_sha = str(task_item.get("commit") or "")[:7] or "-"
+                    lines.append(
+                        f"      * task-{task_item.get('task_id')}: {task_item.get('title', '')} "
+                        f"[{it_stat}] | checker={c_dec} (checker_model={c_mod}, maker_model={m_mod}) | commit={c_sha}"
+                    )
             mt_decisions = multi_team_data.get("pending_decisions") or []
             lines.append(" [判断待ちの事項 (Pending Decisions)]")
             if mt_decisions:
@@ -960,12 +1118,14 @@ class MorningReporter:
             mt_total = sum(int(t.get("total_tasks", 0)) for t in mt_teams)
             mt_done = sum(int(t.get("completed_tasks", 0)) for t in mt_teams)
             mt_failed = sum(int(t.get("failed_tasks", 0)) for t in mt_teams)
-            if mt_total > 0 and succeeded_count == 0:
+            if mt_teams:
                 total_tasks = mt_total
                 succeeded_count = mt_done
             mt_state = str(multi_team_data.get("job_state") or "")
             if multi_team_data.get("is_integrated"):
                 status = "COMPLETED"
+            elif multi_team_data.get("all_no_changes"):
+                status = "NO_CHANGES"
             elif mt_failed > 0 or quarantined_count > 0 or mt_state in (
                 "WORKER_FAILED",
                 "FAILED",
@@ -976,6 +1136,8 @@ class MorningReporter:
                 status = "FAILED"
             elif mt_state:
                 status = mt_state
+            if multi_team_data.get("base_commit"):
+                initial_checkpoint = str(multi_team_data["base_commit"])
 
         summary_data: dict[str, Any] = {
             "status": status,

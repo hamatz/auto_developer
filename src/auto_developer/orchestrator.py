@@ -684,6 +684,20 @@ class NightlyOrchestrator:
                 return 3
 
             # 6. 永続監査レコード（Evidence Record）の保存 (機能N / P1-1, 機能U)
+            checker_info: dict[str, Any] = {
+                "decision": "APPROVE",
+                "reason": checker_reason,
+            }
+            if self.checker_model or self.maker_model:
+                from auto_developer.audit import detect_model_family
+
+                if self.checker_model:
+                    checker_info["model"] = self.checker_model
+                    checker_info["family"] = detect_model_family(self.checker_model)
+                if self.maker_model:
+                    checker_info["maker_model"] = self.maker_model
+                    checker_info["maker_family"] = detect_model_family(self.maker_model)
+
             self.evidence_store.archive_record(
                 task_id=task.task_id,
                 status="COMPLETED",
@@ -694,10 +708,7 @@ class NightlyOrchestrator:
                     "tree_sha": committed_tree_sha,
                     "tree_verified": True,
                 },
-                checker_info={
-                    "decision": "APPROVE",
-                    "reason": checker_reason,
-                },
+                checker_info=checker_info,
                 verification_info=verification_meta,
                 attempts=task_attempts,
             )
@@ -1067,7 +1078,7 @@ class NightlyOrchestrator:
                 "attempts": attempts or [],
             },
         )
-        quarantined_info = {
+        quarantined_info: dict[str, Any] = {
             "task_id": task.task_id,
             "phase": phase,
             "quarantined_branch": quarantine_branch,
@@ -1075,6 +1086,10 @@ class NightlyOrchestrator:
             "root_cause_summary": reason[:300],
             "attempts": attempts or [],
         }
+        if self.checker_model:
+            quarantined_info["checker_model"] = self.checker_model
+        if self.maker_model:
+            quarantined_info["maker_model"] = self.maker_model
         job_state.quarantined_task = quarantined_info
         job_state.save(self.state_path)
 
