@@ -242,6 +242,47 @@ class NightlyOrchestrator:
 
         print(f"=== Starting Autonomous Orchestrator (Job: {job_state.job_id}, Total Tasks: {total_tasks}, Dry-Run: {self.dry_run}) ===")
 
+        try:
+            return self._execute_tasks_and_finalize(
+                job_state=job_state,
+                initial_checkpoint=initial_checkpoint,
+                tasks=tasks,
+                total_tasks=total_tasks,
+                succeeded_tasks=succeeded_tasks,
+            )
+        except Exception as exc:
+            if not self.dry_run:
+                try:
+                    current_head = self.git_guard.get_current_checkpoint()
+                except Exception:  # noqa: BLE001
+                    current_head = initial_checkpoint
+                self._write_report_then_create_bundle(
+                    job_id=job_state.job_id,
+                    summary_data={
+                        "status": "FAILED (EXCEPTION)",
+                        "total_tasks": total_tasks,
+                        "succeeded_count": len(succeeded_tasks),
+                        "quarantined_count": 1 if job_state.quarantined_task else 0,
+                        "remaining_count": max(0, total_tasks - len(succeeded_tasks)),
+                        "checkpoint": current_head,
+                        "initial_checkpoint": initial_checkpoint,
+                        "completed_tasks": succeeded_tasks,
+                        "quarantined_task": job_state.quarantined_task,
+                        "executive_summary": f"予期しない例外により実行が中断されました: {type(exc).__name__}: {exc}",
+                    },
+                    failure_context="after unexpected exception",
+                )
+            raise
+
+    def _execute_tasks_and_finalize(
+        self,
+        *,
+        job_state: JobState,
+        initial_checkpoint: str,
+        tasks: list[Task],
+        total_tasks: int,
+        succeeded_tasks: list[dict[str, Any]],
+    ) -> int:
         while True:
             task = self.dispatcher.get_next_pending_task(tasks)
             if not task:
@@ -595,7 +636,23 @@ class NightlyOrchestrator:
                 expected_tree_sha=current_tree,
                 expected_spec_sha=current_spec,
             ):
-                print(f"  EVIDENCE ERROR: Could not verify evidence for task {task.task_id}", file=sys.stderr)
+                err_msg = f"Could not verify evidence for task {task.task_id}"
+                print(f"  EVIDENCE ERROR: {err_msg}", file=sys.stderr)
+                self._write_report_then_create_bundle(
+                    job_id=job_state.job_id,
+                    summary_data={
+                        "status": "FAILED (EVIDENCE_ERROR)",
+                        "total_tasks": total_tasks,
+                        "succeeded_count": len(succeeded_tasks),
+                        "quarantined_count": 0,
+                        "remaining_count": max(0, total_tasks - len(succeeded_tasks)),
+                        "checkpoint": checkpoint,
+                        "initial_checkpoint": initial_checkpoint,
+                        "completed_tasks": succeeded_tasks,
+                        "executive_summary": f"Evidence 検証エラーにより停止しました: {err_msg}",
+                    },
+                    failure_context="after evidence verification error",
+                )
                 return 3
 
             # 4. コミット実行（固定されたインデックスから直接コミット）
@@ -604,9 +661,25 @@ class NightlyOrchestrator:
             # 5. コミットされた Git Commit の Tree SHA と Evidence Tree SHA の完全一致を検証
             committed_tree_sha = self.git_guard.get_commit_tree_sha(commit_hash)
             if committed_tree_sha != final_tree_sha:
+                err_msg = f"Committed tree {committed_tree_sha} does not match verified tree {final_tree_sha}"
                 print(
-                    f"  FATAL INVARIANT BREACH: Committed tree {committed_tree_sha} does not match verified tree {final_tree_sha}!",
+                    f"  FATAL INVARIANT BREACH: {err_msg}!",
                     file=sys.stderr,
+                )
+                self._write_report_then_create_bundle(
+                    job_id=job_state.job_id,
+                    summary_data={
+                        "status": "FAILED (INVARIANT_BREACH)",
+                        "total_tasks": total_tasks,
+                        "succeeded_count": len(succeeded_tasks),
+                        "quarantined_count": 0,
+                        "remaining_count": max(0, total_tasks - len(succeeded_tasks)),
+                        "checkpoint": checkpoint,
+                        "initial_checkpoint": initial_checkpoint,
+                        "completed_tasks": succeeded_tasks,
+                        "executive_summary": f"致命的不変条件違反により停止しました: {err_msg}",
+                    },
+                    failure_context="after commit tree mismatch",
                 )
                 return 3
 
@@ -677,17 +750,9 @@ class NightlyOrchestrator:
                 print(f"\n[Independent Audit Stage] Running repository audit against baseline {base_c[:7]}...")
                 audit_stage_result = self.run_audit_stage(baseline_commit=base_c, target_commit=current_head)
 
-            bundle_rel_path = None
-            try:
-                bundler = EvidenceBundler(repo_dir=self.repo_dir, plan_path=self.plan_path)
-                b_path = bundler.create_bundle(job_id=job_state.job_id)
-                bundle_rel_path = str(b_path.resolve().relative_to(self.repo_dir.resolve()))
-            except (OSError, subprocess.SubprocessError) as e:
-                print(f"Warning: Failed to create evidence bundle: {e}", file=sys.stderr)
-
-            self.reporter.write_report(
-                self.report_path,
-                {
+            self._write_report_then_create_bundle(
+                job_id=job_state.job_id,
+                summary_data={
                     "status": "COMPLETED",
                     "total_tasks": total_tasks,
                     "succeeded_count": len(succeeded_tasks),
@@ -700,10 +765,8 @@ class NightlyOrchestrator:
                     "executive_summary": exec_summary,
                     "run_command": run_cmd,
                     "verify_command": verify_cmd,
-                    "bundle_path": bundle_rel_path,
                     "audit_stage": audit_stage_result,
                 },
-                plan_path=self.plan_path,
             )
             print(f"\nExecution complete! Report written to {self.report_path}")
         else:
@@ -925,6 +988,48 @@ class NightlyOrchestrator:
         res = guard.inspect_changes()
         return res.violations
 
+    def _resolve_bundle_paths(self, job_id: str) -> tuple[Path, str]:
+        """Bundle の出力先絶対パスとリポジトリからの相対パスを決定する (RPT-6)。"""
+        bundle_dest_path = self.repo_dir / ".dev" / "bundles" / f"bundle_{job_id}.zip"
+        try:
+            bundle_rel_path = str(bundle_dest_path.resolve().relative_to(self.repo_dir.resolve()))
+        except ValueError:
+            bundle_rel_path = str(bundle_dest_path)
+        return bundle_dest_path, bundle_rel_path
+
+    def _write_report_then_create_bundle(
+        self,
+        *,
+        job_id: str,
+        summary_data: dict[str, Any],
+        failure_context: str = "",
+    ) -> None:
+        """Bundle 出力先を先に決め、そのパスを含むレポートを書いてから Bundle を作成する (RPT-6)。"""
+        bundle_dest_path, bundle_rel_path = self._resolve_bundle_paths(job_id)
+        report_payload = dict(summary_data)
+        report_payload["bundle_path"] = bundle_rel_path
+
+        try:
+            self.reporter.write_report(
+                self.report_path,
+                report_payload,
+                plan_path=self.plan_path,
+            )
+        except Exception as e:  # noqa: BLE001
+            ctx = f" {failure_context}" if failure_context else ""
+            print(
+                f"Warning: Failed to write report{ctx}: {e}; skipping evidence bundle creation",
+                file=sys.stderr,
+            )
+            return
+
+        try:
+            bundler = EvidenceBundler(repo_dir=self.repo_dir, plan_path=self.plan_path)
+            bundler.create_bundle(dest_path=bundle_dest_path, job_id=job_id)
+        except Exception as e:  # noqa: BLE001
+            ctx = f" {failure_context}" if failure_context else ""
+            print(f"Warning: Failed to create evidence bundle{ctx}: {e}", file=sys.stderr)
+
     def _handle_failure(
         self,
         task: Task,
@@ -973,17 +1078,9 @@ class NightlyOrchestrator:
         job_state.quarantined_task = quarantined_info
         job_state.save(self.state_path)
 
-        bundle_rel_path = None
-        try:
-            bundler = EvidenceBundler(repo_dir=self.repo_dir, plan_path=self.plan_path)
-            b_path = bundler.create_bundle(job_id=job_state.job_id)
-            bundle_rel_path = str(b_path.resolve().relative_to(self.repo_dir.resolve()))
-        except (OSError, subprocess.SubprocessError) as e:
-            print(f"Warning: Failed to create evidence bundle during failure quarantine: {e}", file=sys.stderr)
-
-        self.reporter.write_report(
-            self.report_path,
-            {
+        self._write_report_then_create_bundle(
+            job_id=job_state.job_id,
+            summary_data={
                 "status": "STOPPED (FAIL-FAST)",
                 "total_tasks": total_tasks,
                 "succeeded_count": len(succeeded_tasks),
@@ -992,8 +1089,7 @@ class NightlyOrchestrator:
                 "checkpoint": checkpoint,
                 "completed_tasks": succeeded_tasks,
                 "quarantined_task": quarantined_info,
-                "bundle_path": bundle_rel_path,
             },
-            plan_path=self.plan_path,
+            failure_context="during failure quarantine",
         )
         return 1
