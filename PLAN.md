@@ -60,6 +60,7 @@
   - `test_bwrap_command_includes_dir_before_bind_for_tmpfs_compatibility`
   - `test_bwrap_virtualenv_in_home_mounts_only_prefix_not_home`
   - `test_bwrap_virtualenv_in_home_subdirectory_mounts_only_bin_lib_not_entire_venv`
+  - また、`tests/test_sandbox_preflight.py` の `test_linux_bwrap_unlaunchable_returns_none_and_apparmor_guidance` と `test_macos_sandbox_exec_unlaunchable_returns_none_and_guidance` に限り、(1) `patch.object(self.verifier, "_compute_nproc_limit", return_value=((500, 500), "applied: limit=500 (test)"))` で上限を固定し、(2) 引数なしの `_get_sandbox_backend()` を `_get_sandbox_backend(timeout_sec=30, nproc_limits=(500, 500))` に変えて `verify_candidate_test` と同じ値の組にすることのみ許可する（`assertEqual(len(captured), 1)` を含めアサーションは変えない）。
   - 上記以外の既存テスト（特に `test_nproc_limit_computation_and_status_recording`、`test_rejects_class_without_test_methods_ran_zero`、`REPO_TAMPER_DETECTED` のテスト 506/562 行目付近）は変更せずそのまま通ること。
 - ステップ 2（GATE-5）: `record-review` を `--decision` だけで呼んでいる次の箇所を、新しい呼び方（`review-input` で作った差分、SPEC の切り出し、判定行を含む出力ファイルを渡す）に置き換えてよい。
   - `tests/test_metrics.py`（255, 272, 339 行目付近）。272 行目付近の不正な判定（`MAYBE`）の拒否は、判定行のない出力ファイルで終了コード 4 になることを確かめる形にしてよい。
@@ -77,7 +78,7 @@
 - どのステップでも、変更したテスト名をコミットメッセージに列挙する。
 
 ## ステップ
-- [ ] 1. サンドボックスの起動の上限と失敗の分類: `RLIMIT_NPROC` をスレッド単位で数えて決める。起動の確認を実際の実行と同じ資源の上限で行う。サンドボックスの機構の起動の失敗を `NO_TESTS_RAN` ではなく `SANDBOX_UNAVAILABLE`（機構のエラーと対処を表示）とする（Red: 同じユーザーのスレッドを数百本立てた状態で、`test_red_verifier.py` が CI と同じく失敗する）（SBX-6）
+- [x] 1. サンドボックスの起動の上限と失敗の分類: `RLIMIT_NPROC` をスレッド単位で数えて決める。起動の確認を実際の実行と同じ資源の上限で行う。サンドボックスの機構の起動の失敗を `NO_TESTS_RAN` ではなく `SANDBOX_UNAVAILABLE`（機構のエラーと対処を表示）とする（Red: 同じユーザーのスレッドを数百本立てた状態で、`test_red_verifier.py` が CI と同じく失敗する）（SBX-6）
 - [ ] 2. `auto-dev review-input`（正規の差分の書き出し）と、Checker の出力ファイルから判定を読み取り、差分・SPEC の切り出しを照合して記録する `record-review`。旧来の `--decision` だけの呼び出しは終了コード 2。`commit-step` はまだ変えない（Red-First）（GATE-5）
 - [ ] 3. （H1 の後）`commit-step` が、最新の検証に対応する査読の記録・判定・出力ファイルのハッシュ・モデル・正規の差分を照合する。`checker.review` を Evidence の記録に残す（Red: H1 で置いた `test_immunity_review_evidence.py`）（GATE-6）
 - [ ] 4. `run` / `teams run` / `demo` の経路の査読の証跡（GATE-7）と、Bundle への査読の証跡の収録・`verify-bundle` での照合・`format_version` 3（BDL-4）（Red-First）
