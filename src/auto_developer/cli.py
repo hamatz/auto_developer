@@ -12,6 +12,7 @@ from typing import Any, cast
 from auto_developer.audit import resolve_model_family_safe, verify_model_independence
 from auto_developer.boundary import BoundaryGuard
 from auto_developer.bundler import EvidenceBundler
+from auto_developer.demo import run_demo
 from auto_developer.dispatcher import TaskDispatcher
 from auto_developer.evidence import EvidenceStore
 from auto_developer.guard import GitGuard
@@ -584,6 +585,16 @@ def main(argv: list[str] | None = None) -> int:
     # Subcommand: init
     subparsers.add_parser("init", help="Initialize Auto Developer template files in the project")
 
+    # Subcommand: demo
+    demo_parser = subparsers.add_parser(
+        "demo", help="Run a self-contained demo in a temporary Git repository"
+    )
+    demo_parser.add_argument(
+        "--keep",
+        action="store_true",
+        help="Keep the temporary demo directory after completion and print its path",
+    )
+
     # Subcommand: run
     run_parser = subparsers.add_parser("run", help="Run autonomous sequential execution loop")
     run_parser.add_argument("--plan", type=Path, default=argparse.SUPPRESS, help="Path to PLAN.md")
@@ -839,6 +850,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+
+    if args.subcommand == "demo":
+        return run_demo(keep=bool(args.keep))
 
     work_dir = args.work_dir.resolve()
     plan_path = args.plan or (work_dir / "PLAN.md")
