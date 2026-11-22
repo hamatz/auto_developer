@@ -10,7 +10,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - [x] は実装済みでテストがあるもの、[ ] は未実装（現在のフェーズの対象）を表す。
 - 新しいフェーズの要件は「## 5. 次のリリースで追加する要件」に書き、リリース後に 4 章の該当領域へ移す。
   開発の経緯（なぜそうしたか）はここに書かず、LESSONS.md・CHANGELOG.md・git 履歴に残す。
-- Checker への入力は、現在のフェーズの節を機械的に切り出した原文とする（要約しない）。例（Phase 69）:
+- Checker への入力は、現在のフェーズの節を機械的に切り出した原文とする（要約しない）。例（Phase 70）:
     awk '/^### 5\.1/,/^### 5\.2/' SPEC.md > .dev/checker/spec_current.md
 - この SPEC は Elephant（人間と設計セッション）が書き、人間が承認する。Maker は変更できない（保護ファイル）。
 -->
@@ -49,6 +49,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - **INV-7 監査ループは終わる**: 監査役が指摘を返し続けても、P2 以下は実行タスクにならず、同一モジュールへの P0/P1 自動登録は上限で止まり人間に渡される。
 - **INV-8 計測はゲートに影響しない**: 計測（イベントログ・集計）の成否は、検証・査読・コミット・隔離の結果を変えない。
 - **INV-9 担当範囲を越えない**: チームとして作業するとき、担当範囲（`owns`）外のファイルを変更した作業は確定させず隔離する。
+- **INV-10 判定は申告ではなく出力から**: 査読の判定は、Checker の出力そのものから機械的に読み取り、記録の後に出力・差分が変わっていないことを確定の直前に確かめる。エージェントが申告した判定だけでは、確定させない（GATE-5〜7）。
 
 ## 4. 機能要件（実装済み）
 
@@ -92,12 +93,18 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - [x] **RPT-3 イベントログ**: `verify_step`, `commit_step`, `rollback_step`, `checker_review`, `audit_stage` のイベントを `events.jsonl` に追記だけで記録する。書き込みに失敗しても `METRICS_WARNING:` を出すのみとする（INV-8）。
 - [x] **RPT-4 フェーズ集計**: `auto-dev metrics [--phase N] [--json] [--append-to PATH]` は、フェーズごとの指標と直前のフェーズとの差を出力する。指標ごとに、イベントログ由来か Git 由来かを示す。算出できない指標は推定値で埋めずに null とする。指標の定義は METRICS.md に書く。
 - [x] **RPT-5 判断待ちの表示**: チームのジョブがあるときの `brief` と `NIGHTLY_REPORT.md` で、「判断待ちの事項」節には、そのジョブで人間が判断すべきことだけを表示する。判断すべきことがなければ「なし」とし、単一チーム用の文言を出さない。
+- [x] **RPT-6 レポートと Bundle の順序**: `auto-dev run` は、成功時・失敗時とも、Bundle の出力先を先に決め、そのパスを含むレポートを書いてから Bundle を作る。Bundle に入る `NIGHTLY_REPORT.md` は、その実行の結果を表す。
+- [x] **RPT-7 チームのジョブのレポート**（欠陥あり。Phase 70 の RPT-8 で修正）: チームのジョブを実行した後の `NIGHTLY_REPORT.md` と `brief` に、チームごとに次を表示する。
+  - 完了したタスク
+  - 各タスクの Checker の判定とモデル名（保全済みの Bundle、または worktree の Evidence の記録から読む）
+  - `NO_CHANGES` のチームはその旨
+  - 「最新コミット (HEAD)」の代わりに RC コミットを示し、main（基点）が変更されていないことがわかる表示にする。単一チームのレポートは変えない。
 
 ### 4.5 BDL — 提出パッケージ（Evidence Bundle）
 
 - [x] **BDL-1 生成**: `auto-dev bundle` は、Git 履歴、ソースのスナップショット、監査レコード、ジョブ状態、ログ、`NIGHTLY_REPORT.md`, `PLAN.md`, `SPEC.md`, `BACKLOG.md`、監査結果を1つの ZIP にまとめる。機密と OS の不要ファイルは除外し、`bundle_manifest.json` に全ファイルの SHA-256 を記録する。ジョブが完了したときにも自動で生成する。
 - [x] **BDL-2 検証**: `auto-dev verify-bundle <zip> [--json]` は、ファイルのハッシュ、Evidence とコミットの Tree SHA の一致、SPEC の不変性、Checker の承認を検証して、終了コード 0 / 1 で判定する。監査後に実装が変わっていれば `AUDIT_OUTDATED`、未解決の P0/P1 またはエスカレーションがあれば `RELEASE_BLOCKED` とする。
-- [x] **BDL-3 Bundle とレポートに入れる記録の選択**: `auto-dev bundle` と `NIGHTLY_REPORT.md` の生成で、次の規則に従って記録を選ぶ。
+- [x] **BDL-3 Bundle とレポートに入れる記録の選択**（欠陥あり。Phase 70 の BDL-5 で修正）: `auto-dev bundle` と `NIGHTLY_REPORT.md` の生成で、次の規則に従って記録を選ぶ。
   - 対象の計画ファイル（単一チームでは `PLAN.md`、チームの worktree ではそのチームの計画ファイル）で完了（`- [x]`）しているタスクの Evidence の記録だけを対象にする（CORE-10 の読み取り範囲に従う）。
   - 対象外とした記録は Bundle に入れず、manifest の `excluded_records` にタスク ID と理由を記録する。
   - 計画ファイルにタスクとして読める行が1つもない場合は、従来どおりすべての記録を対象にする。
@@ -209,7 +216,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - 削除の前に、そのチームの Bundle が統合ジョブの保存先（TEAM-5）にあることを確かめる。なければ削除しない。
   - それ以外の未コミットのファイルや無視ファイルがある場合は、従来どおり拒否する（`--force` なら隔離してから削除する）。
 - [x] **TEAM-23 隔離ブランチとジョブの対応**: チームのジョブで作る隔離ブランチの名前には、ジョブ ID を含める（`quarantine/<job_id>/<team_id>/...`）。`teams status`、`brief`、`NIGHTLY_REPORT.md` は、対象ジョブの隔離ブランチだけを表示・集計する。
-- [x] **TEAM-24 雛形をそのまま使う受入テスト**: 新しい受入テストで、一時リポジトリに対して次を確かめる。TEAM-19 の既存テストは変更しない。
+- [x] **TEAM-24 雛形をそのまま使う受入テスト**（欠陥あり。Phase 70 の TEAM-28 で修正）: 新しい受入テストで、一時リポジトリに対して次を確かめる。TEAM-19 の既存テストは変更しない。
   - 準備: `auto-dev init` と `auto-dev teams init --teams core,ui` の雛形を、そのまま使う（計画ファイルのコメントを削らない）。追記するのは、タスク行と、Python のテスト1件だけとする。
   - 実行環境: テストのサブプロセスでは、`PYTHONDONTWRITEBYTECODE` と `PYTHONPYCACHEPREFIX` を外す（バイトコードが worktree の中に生成される状態で実行し、環境によって結果が変わらないようにする）。
   - (a) `teams run` が成功し、RC タグができる。計画ファイルの進捗が、コメント内の記法例を数えずに正しく表示される。
@@ -217,6 +224,12 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - (c) 一方のチームの Maker が担当範囲外に書いた場合、そのチームの作業が、そのジョブの隔離ブランチ（TEAM-23）に退避される。worktree はクリーンに戻り、統合は行われない。
 - [x] **TEAM-25 `teams init` の基点ブランチ**: `teams init` は `teams.json` の `base.ref` に、現在のブランチ名を書く。コミットがまだないリポジトリでも、`HEAD` が指すブランチ名を使う。ブランチ名が取れない場合（detached HEAD など）は `main` を書き、その旨を表示する。
 - [x] **TEAM-26 統合ブランチの片付け**: 統合に成功したジョブの `teams cleanup` は、統合ブランチ `integration/<job_id>` も削除する。RC タグ `rc/<job_id>` は残す。統合に失敗したジョブ・未完了のジョブの統合ブランチは削除しない。
+- [x] **TEAM-27 変更のないチーム**: 統合の時点で、基点から自分のブランチへのコミットが0件のチームを「変更なし（`NO_CHANGES`）」として扱う。
+  - そのチームについては Bundle の検証とマージを省き、統合の結果とレポートに `NO_CHANGES` と表示する。
+  - すべてのチームが `NO_CHANGES` なら、RC タグを作らずにその旨を表示し、終了コード 0 とする。
+  - コミットが1件以上あるのに Evidence の記録がないチームは、従来どおり拒否する（TEAM-6）。
+  - 計画に未完了のタスクがあるチームは、従来どおり統合を拒否する（TEAM-14）。
+  - `teams run` も同じ規則に従う。
 
 ### 4.9 REL — リリースと互換性
 
@@ -224,6 +237,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - [x] **REL-3 CI**: CI は macOS と Linux（Ubuntu 24.04）、Python 3.10 と 3.12 の組み合わせで検証スクリプトを実行する。
   - Linux では bubblewrap と、その AppArmor プロファイルを準備する。
   - `AUTO_DEV_REQUIRE_SANDBOX=1` を設定し、サンドボックスのテストをスキップさせない。
+- [x] **REL-4 型検査の両 platform 対応**: `mypy --platform linux src scripts` と `mypy --platform darwin src scripts` の両方が通る。`sys.platform` で分岐する処理では、分岐の前で変数の型を宣言する。
 
 ### 4.10 DX — 利用者の体験
 
@@ -231,37 +245,12 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - 特定ベンダーのモデル名を、暗黙に記録しない。
   - `--mock` のときは、従来どおり既定値を使う。
   - ライブラリ（`NightlyOrchestrator` などのクラス）の既定値は変えない。
-
-## 5. 次のリリース（v0.9.0）で追加する要件
-
-<!-- v0.9.0 の目的: 4.8 TEAM を CLI とスキルから使えるようにし、初めての利用者がつまずかずに試せる状態にする。
-     Phase 66〜68 で実装した部分は 4 章に移した。以下は残りの要件。
-     要件ごとの影響分析は docs/contracts/phase69.md を参照。 -->
-
-### 5.1 Phase 69 — 初めての利用者が自分の環境とモデルで試せるようにする
-
-<!-- 起点: README のクイックスタートの確認（run --mock は必ず失敗し、シェルの1行コマンドで試すには偽のモデル名が要る。対応する系統が3社だけ）。
-     Phase 68 の CI（Ubuntu）と ad-team-trial での試行で見つかった欠陥の修正も含む。 -->
-
-- [ ] **REL-4 型検査の両 platform 対応**: `mypy --platform linux src scripts` と `mypy --platform darwin src scripts` の両方が通る。`sys.platform` で分岐する処理では、分岐の前で変数の型を宣言する。
-- [ ] **TEAM-27 変更のないチーム**: 統合の時点で、基点から自分のブランチへのコミットが0件のチームを「変更なし（`NO_CHANGES`）」として扱う。
-  - そのチームについては Bundle の検証とマージを省き、統合の結果とレポートに `NO_CHANGES` と表示する。
-  - すべてのチームが `NO_CHANGES` なら、RC タグを作らずにその旨を表示し、終了コード 0 とする。
-  - コミットが1件以上あるのに Evidence の記録がないチームは、従来どおり拒否する（TEAM-6）。
-  - 計画に未完了のタスクがあるチームは、従来どおり統合を拒否する（TEAM-14）。
-  - `teams run` も同じ規則に従う。
-- [ ] **RPT-6 レポートと Bundle の順序**: `auto-dev run` は、成功時・失敗時とも、Bundle の出力先を先に決め、そのパスを含むレポートを書いてから Bundle を作る。Bundle に入る `NIGHTLY_REPORT.md` は、その実行の結果を表す。
-- [ ] **RPT-7 チームのジョブのレポート**: チームのジョブを実行した後の `NIGHTLY_REPORT.md` と `brief` に、チームごとに次を表示する。
-  - 完了したタスク
-  - 各タスクの Checker の判定とモデル名（保全済みの Bundle、または worktree の Evidence の記録から読む）
-  - `NO_CHANGES` のチームはその旨
-  - 「最新コミット (HEAD)」の代わりに RC コミットを示し、main（基点）が変更されていないことがわかる表示にする。単一チームのレポートは変えない。
-- [ ] **DX-5 Python の選択と src/ の構成**: 次の3点を変える。
+- [x] **DX-5 Python の選択と src/ の構成**: 次の3点を変える。
   - `auto-dev init` が作る検証スクリプトは、テストの実行に、環境変数 `PYTHON` があればそれを、なければ PATH の `python3` を使う（`/usr/bin/python3` を優先しない）。
   - `src/` ディレクトリがあれば、`PYTHONPATH` に加えてテストを実行する。
   - 雛形の区切りの文字列「Running Project Tests」、テストの節に `|| true` を含まないこと、`teams.json` の保護は保つ。
   - ワーカーの既定の起動コマンドは、`"python3"` ではなく `sys.executable` を使う。
-- [ ] **DX-6 `auto-dev demo`**: 外部のエージェントやモデルを使わずに、次の流れを1コマンドで見せる。
+- [x] **DX-6 `auto-dev demo`**（欠陥あり。Phase 70 の DX-8 で修正）: 外部のエージェントやモデルを使わずに、次の流れを1コマンドで見せる。
   - 新しい一時ディレクトリに Git リポジトリを作り、`init` の雛形と2タスクの計画を置く。
   - 組み込みのスクリプトの Maker / Checker で2タスクを完了させる。
   - 次に、保護ファイル（`SPEC.md`）を書き換える Maker のタスクを1つ実行し、隔離されることを見せる。
@@ -270,7 +259,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - 期待どおりに進めば終了コード 0、そうでなければ 1 とする。
   - 既定では終了時に一時ディレクトリを削除する。`--keep` を付けると残し、場所を表示する。利用者のカレントディレクトリは変更しない。
   - Maker / Checker のモデル名と系統には、デモであることがわかる値（例: モデル名 `auto-dev-demo-maker`、系統 `demo-maker`）を DX-7 の明示で使い、実在のモデル名は記録しない。
-- [ ] **DX-7 モデルの系統**: 次の5点を変える。
+- [x] **DX-7 モデルの系統**: 次の5点を変える。
   - `run`, `teams run`, `commit-step`, `record-review` と独立監査の設定に、`--maker-family` / `--checker-family` / `--auditor-family` を追加し、系統を明示できるようにする。
   - 明示した系統は空でなく、`unknown` でないこと。
   - 指定した系統と、組み込みの判定で分かる系統が食い違う場合は拒否する（系統の偽装を防ぐ）。
@@ -278,9 +267,88 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - 組み込みの判定に `mistral` / `llama` / `qwen` / `deepseek` を加える。明示がない場合の既存の挙動（不明な系統の拒否、`"pro"` で終了コード 4 など）は変えない。
   - Evidence の記録と `checker_review` / `commit_step` のイベントに、系統が明示か推定か（`family_source`）を記録する。
 
-### 5.2 Phase 70 — README・サンプル・リリース
+## 5. 次のリリース（v0.9.0）で追加する要件
 
-<!-- README は「人間が書くもの」として、Phase 70 の準備コミットで先に書く（契約の一部）。DX-1 はその README に対して Red から始める。
+<!-- v0.9.0 の目的: 4.8 TEAM を CLI とスキルから使えるようにし、初めての利用者がつまずかずに試せる状態にする。
+     Phase 66〜69 で実装した部分は 4 章に移した。以下は残りの要件。
+     要件ごとの影響分析は docs/contracts/phase70.md を参照。 -->
+
+### 5.1 Phase 70 — 査読の証跡を機械で強制し、Checker に差し戻されたまま入った変更を直す（Linux のサンドボックスの起動の修正を含む）
+
+<!-- 起点: Phase 67〜69 で、Checker の出力が REJECT なのに APPROVE として記録・コミットされたものが4件あった
+     （Checker の完了通知が2回届き、1回目の APPROVE だけを見て記録した。`auto-dev` は判定を自己申告で受け取っていた）。
+     INV-6 と GATE-4 は「判定が正しく申告されること」を前提にしていた。この前提を、出力ファイルからの読み取りと照合に置き換える。 -->
+
+- [ ] **SBX-6 サンドボックスの起動の上限と失敗の分類**: 次の3点を変える。
+  - 候補テストに設定するプロセス数の上限（`RLIMIT_NPROC`）は、Linux ではスレッド（タスク）単位で数えた、同じユーザーの現在の数に余裕の分を足して決める。プロセスの数だけで決めない（Linux の `RLIMIT_NPROC` はスレッドを数えるため、スレッドの多いプロセスがある環境で bwrap が `Creating new namespace failed: Resource temporarily unavailable` で起動できなくなる）。
+  - サンドボックスの起動の確認（SBX-3）は、実際の候補テストの実行と同じ資源の上限をかけて行う。
+  - サンドボックスの機構（bwrap / sandbox-exec）がテストの実行より前に失敗した場合（結果の目印が出力されない、または機構自身のエラーが出る）は、`NO_TESTS_RAN` ではなく `SANDBOX_UNAVAILABLE` とし、機構のエラーの出力と、OS ごとの対処を示す。テストが実際に0件だった場合の `NO_TESTS_RAN` は変えない。
+- [ ] **GATE-5 査読の入力と記録**: 次の2つのサブコマンドを用意する。
+  - `auto-dev review-input --task-id N --out-dir DIR`: Checker に渡す差分を `DIR/diff.patch` に書き出す。
+    - 対象のタスクに、検証を通った Evidence がない場合は、終了コード 3 とする。
+    - 差分は「その Evidence のチェックポイントから、未追跡ファイル（無視ファイルを除く）を含む作業ツリー全体まで」とする。
+    - 作業ツリーのインデックスは変更しない。
+    - 色・外部の diff ツール・リネームの検出に依存しない、決まった形式で書く（以下「正規の差分」）。
+  - `auto-dev record-review --task-id N --checker-output FILE --diff-file FILE --spec-file FILE --maker-model M --checker-model M [--maker-family F] [--checker-family F] [--decision D] [--reason R]`: 3つのファイルを照合し、査読を記録する。
+    - 判定は、Checker の出力ファイルから CORE-6 の規則で読み取る。判定行がない場合、または APPROVE と REJECT が両方ある場合は、`CHECKER_POLICY_VIOLATION:` を出して終了コード 4 とし、査読を記録しない。
+    - `--decision` を指定した場合、出力から読み取った判定と食い違えば、終了コード 4 とする。
+    - 対象のタスクに、検証を通った Evidence がない場合は、終了コード 3 とする。
+    - `--diff-file` が、記録する時点の正規の差分と1バイトでも違う場合は、終了コード 3 とする。
+    - `--spec-file` が空の場合、または今の `SPEC.md` の連続した一部（要約ではない原文）でない場合は、終了コード 4 とする。
+    - モデルの系統の検査（GATE-4、DX-7）はここでは行わず、記録だけする。
+    - 記録が成功したら（REJECT の判定を含む）、終了コード 0 とする。記録するのは、その Evidence（検証）との対応、3つのファイルのパスと SHA-256、読み取った判定、モデルと系統、記録した時刻である。3つのファイルの写しは Evidence の保存先に置く。
+    - 査読の記録は Evidence を消費しない。計測のイベント（`checker_review`）の書き込みに失敗しても、記録の結果は変わらない（INV-8）。
+  - 旧来の、`--checker-output` を指定しない `record-review` は、終了コード 2 で拒否し、新しい使い方を示す。
+- [ ] **GATE-6 コミット時の査読の照合**: `commit-step` は、Evidence の照合・消費より前に、次のすべてを確かめる。満たさない場合は、HEAD・計画ファイル・Evidence を変えずに拒否する。
+  - そのタスクの最新の Evidence（検証）に対応する査読の記録がある。ない場合、または古い検証に対応する記録しかない場合は、`CHECKER_POLICY_VIOLATION:` を出して終了コード 4 とする。
+  - 記録された判定が APPROVE である。そうでなければ終了コード 4 とする。
+  - 記録したときのパスにある Checker の出力ファイルを読み直し、SHA-256 が記録と一致する。記録した後に出力が書き換わった場合は、終了コード 4 とする。
+  - `--maker-model` / `--checker-model`（と系統の明示）が、査読の記録と一致する。そのうえで GATE-4 の系統の検査を行う。一致しない場合は終了コード 4 とする。
+  - `--checker-decision` は省略できる。指定した場合は、記録された判定と一致しなければ終了コード 4 とする。
+  - 今の正規の差分の SHA-256 が、査読の記録と一致する。一致しない場合は終了コード 3 とする。
+  - 成功時は、Evidence の記録の `checker.review` に、`output_sha256`, `diff_sha256`, `spec_sha256`, `recorded_at` と、判定の出所（`decision_source: "checker_output"`）を残す。
+- [ ] **GATE-7 `run` の経路の査読の証跡**: `auto-dev run`（`teams run` と `demo` を含む）が Checker のコマンドを起動するときは、次を GATE-5 と同じ形式で Evidence の保存先に記録し、GATE-6 と同じ項目を Evidence の記録に残す。
+  - Checker に渡した正規の差分と SPEC
+  - Checker の出力
+  - それぞれの SHA-256
+- [ ] **BDL-4 Bundle の査読の証跡**: 次の3点を変える。
+  - Bundle には、収録するタスクごとに、査読の3つのファイルの写しを入れる。
+  - `bundle_manifest.json` の `format_version` は 3 とする。
+  - `verify-bundle` は、各タスクについて次の3つを確かめ、満たさなければ INVALID とする。`format_version` が 3 未満の Bundle は、v0.9 の開発版までの形式として、REL-1 と同じように案内を出して拒否する。
+    - 査読の記録があること
+    - Bundle 内のファイルの SHA-256 が記録と一致すること
+    - Bundle 内の Checker の出力から CORE-6 の規則で読み取った判定が APPROVE であること
+- [ ] **RCV-5 失敗ログの原因**: `logs/nightly/task_<id>_failure.log` の先頭に、次の2行を書く。
+  - 失敗した段階（`Failure Phase:`。例: `PROTECTED_FILES`, `MAKER_NO_DIFF`, `VERIFY`, `CHECKER_REJECT`, `BOUNDARY`）
+  - 原因（`Reason:`。保護ファイルの違反なら、そのファイルの一覧）
+- [ ] **DX-8 デモの修正（DX-6 の欠陥）**: 次の4点を直す。
+  - デモの Checker は、ファイル名などで独自に拒否せず、差分が空でなければ APPROVE を返す（保護ファイルを止めるのは INV-1 の検知であることを見せる）。
+  - 隔離の段階では、失敗ログの `Failure Phase: PROTECTED_FILES`（RCV-5）を確かめ、それ以外の原因で隔離された場合は終了コード 1 とする。
+  - Bundle の検証の判定は、`verify-bundle --json` の `status` が `VERIFIED` と完全に一致することで行う。
+  - 段階ごとの失敗（隔離の段階で終了コードが 1 でない、隔離ブランチがない、隔離の原因が違う、Bundle が VERIFIED でない）で終了コード 1 になることを、テストで確かめる。
+- [ ] **RPT-8 チームのジョブのレポートの修正（RPT-7 の欠陥）**: 次の4点を直す。
+  - 「main（基点）は変更されていない」と表示するのは、記録された基点のコミットと、今の基点の ref が指すコミットの両方が取れて、一致する場合に限る。どちらかが取れなければ「不明」と表示する。値がないときの既定を「未変更」にしない。
+  - Checker・Maker のモデル名は、そのタスクの Evidence の記録（保全済みの Bundle、または worktree）からだけ読む。記録がなければ「記録なし」と表示し、ジョブの設定やイベントログから補わない。
+  - 単一チームの要約の集計の挙動は、1de845d の時点に戻す。
+  - パスの先頭の `./` は、接頭辞としてだけ取り除く。
+- [ ] **BDL-5 記録の読み取り場所の修正（BDL-3 の欠陥）**: 次の4点を直す。
+  - Evidence の記録をどこから読むかは、`EvidenceStore` が保存先を決める規則と同じ規則（1つの関数）で決める。ディレクトリの列挙と、中身から記録かどうかを推測する判定（`token` の有無など）をやめる。
+  - 計画ファイルにタスクとして読める行がなく、すべての記録を対象にする場合でも、レポートの「今回の成果」には状態が `COMPLETED` の記録だけを載せ、件数と一覧を一致させる。
+  - 対象の計画ファイルを指定する経路は1つにする。
+  - `teams.json` が不正なときの扱いは、`report` / `brief` / `bundle` で揃える（`TEAMS_CONFIG_ERROR:` と終了コード 2）。
+- [ ] **TEAM-28 雛形の受入テストの実行環境（TEAM-24 の欠陥）**: TEAM-24 の受入テストは、次の2点で、どの OS でも同じ検査をする。
+  - 検証スクリプトが使う Python を、環境変数 `PYTHON`（DX-5）で、`sys.pycache_prefix` が設定されていないものに固定する。
+  - `teams cleanup` の前に、worktree の中に `__pycache__/*.pyc` があることを、条件なしで確かめる。
+- [ ] **CORE-12 スキルの査読の手順**: `skills/nightly-run/SKILL.md` の単一チームとチームの両方の経路を、次の手順にする。
+  1. `review-input` で差分を作る。
+  2. SPEC の該当節を原文のまま切り出す。
+  3. Checker のプロセスが終わり、出力ファイルに判定行がちょうど1つあることを確かめる。完了の通知だけでは次に進まない。
+  4. `record-review` に3つのファイルを渡す。
+  5. `commit-step` を実行する。
+
+### 5.2 Phase 71 — README・サンプル・リリース
+
+<!-- README は「人間が書くもの」として、Phase 71 の準備コミットで先に書く（契約の一部）。DX-1 はその README に対して Red から始める。
      クイックスタートの中心は `pip install` → `auto-dev demo`。 -->
 
 - [ ] **DX-1 README のクイックスタートをテストする**: README（日本語・英語）に書いたクイックスタートのコマンドを、一時ディレクトリでそのまま実行するテストを用意し、README と実際の挙動のずれを検査で検出する。対象は `auto-dev demo`、新しいリポジトリでの `init`、および `teams init` から `teams prepare` まで。外部のエージェントやモデルを要する手順は対象外とし、README の中でそれとわかるように書く。

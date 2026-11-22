@@ -28,12 +28,20 @@ v0.9.0 で、v0.8.0 までの 40 件超の教訓を、今も効いている原�
 
 ## 恒久教訓インデックス
 
+### [2026-11-22] 前提の確認を、本番と違う条件で行うと、確認は通るのに本番だけが失敗する (Probe Under Production Conditions)
+- Context: `src/auto_developer/verifier.py` の `_compute_nproc_limit` / `_apply_resource_limits` / `_probe_sandbox_backend`（SBX-3）、CI の Ubuntu 24.04。
+- Trap: 候補テストを bwrap で起動する前に、`RLIMIT_NPROC` を「同じユーザーのプロセス数 + 50」に設定していた。しかし Linux の `RLIMIT_NPROC` はスレッドを数えるため、スレッドの多いプロセスがあるランナーでは bwrap が `Creating new namespace failed: Resource temporarily unavailable` で起動できず、CI の Ubuntu だけで29件が失敗した。SBX-3 の起動の確認は、この上限をかけずに最小の引数で bwrap を起動していたので通っていた。起動の失敗は `NO_TESTS_RAN` と誤って分類され、原因がわからなかった。手元の Linux は同じユーザーのスレッドが少なかったので、全件が通った。
+- Rule: 前提の確認（起動できるか、使えるか）は、本番の実行と同じ条件（引数・資源の上限・環境変数）で行う。制限をかけるときは、その制限が実際に数える量（`RLIMIT_NPROC` ならスレッド）で現在の値を測る。下位の機構（bwrap など）の失敗は、上位の判定（テストが0件 など）に紛れさせず、機構の失敗として、元のエラーの出力とともに報告する。環境の差で再現しない失敗は、差を1つずつ作って再現させる（今回は、同じユーザーのスレッドを数百本立てて再現した）。
+- Rung: 作り（SBX-6）、検査（スレッドを立てた状態の再現テスト、CI の Ubuntu）
+- Immunity Test: Phase 70 で追加（SBX-6）
+- Proof: 2026-11-22 に、手元の Linux で同じユーザーのスレッドを 300 本（プロセスは 11 個）立てた状態で `test_red_verifier.py` の2件を実行し、CI と同じ2つのエラー（`NO_TESTS_RAN`、`bwrap: Creating new namespace failed`）が出ることを確認した。スレッドを立てなければ通る。
+
 ### [2026-11-22] 自己申告の査読は、見逃しを後から検出できない (Self-Reported Review Cannot Be Audited)
 - Context: ad-team-trial のシナリオ2（CLI-3、`src/cli/main.py`）、`record-review` / `commit-step`、`skills/nightly-run/SKILL.md`。
-- Trap: Maker が `OPERATORS` に組み込みの `pow` を足しただけの実装をし、Checker（claude-sonnet-5-5）が APPROVE した。この実装では、`10 ** 400` や `0 ** -1` で例外が外に出て、SPEC の CLI-2「例外を外に出さない」に反する。テストは通っていた。シナリオ1を含む全5件の査読の理由は同じ型の文で、Checker に渡した入力と、Checker の出力のファイルは残っていなかった。そのため、Checker が差分を読んで判断したのか、まとめ役のエージェントが記録だけを書いたのかを、後から区別できない。追加した要件（CLI-3）が1行だけで、異常系の扱いを書いていなかったことも見逃しを招いた。
-- Rule: Checker に渡した入力（SPEC の該当節、差分）と Checker の出力はファイルに保存し、記録からたどれるようにする。最終的には、`record-review` でそれらのハッシュを記録し、Bundle に入れる。Checker には、異常系・境界値の扱いを、差分とテストの両方で確かめるよう明示的に求める。要件を足すときは、既存の一般的な規則（例外を外に出さない など）が新しい機能にどう当てはまるかを書く。
-- Rung: 道具（PLAN.md の作業手順で、Checker の入出力を保存し、異常系の確認を求める）。将来は作り（BACKLOG IDEA-007: 入出力のハッシュを記録・Bundle に収録）
-- Immunity Test: なし（手順。IDEA-007 を実装した時点でテストを追加する）
+- Trap: Maker が `OPERATORS` に組み込みの `pow` を足しただけの実装をし、Checker（claude-sonnet-5-5）が APPROVE した。この実装では、`10 ** 400` や `0 ** -1` で例外が外に出て、SPEC の CLI-2「例外を外に出さない」に反する。テストは通っていた。シナリオ1を含む全5件の査読の理由は同じ型の文で、Checker に渡した入力と、Checker の出力のファイルは残っていなかった。そのため、Checker が差分を読んで判断したのか、まとめ役のエージェントが記録だけを書いたのかを、後から区別できない。追加した要件（CLI-3）が1行だけで、異常系の扱いを書いていなかったことも見逃しを招いた。 再発（同日、Phase 69 の完了後の確認）: このリポジトリ自身でも、Phase 67〜69 の査読の記録と Checker の出力ファイルを時刻で突き合わせると、REJECT の出力のまま APPROVE としてコミットされたものが4件（b7af7f2, 86eeea9, e5fa287, 84a0043）あった。原因は、バックグラウンドで起動した Checker の完了通知が2回届き（1回目が APPROVE、数秒後の2回目が REJECT）、オーケストレーターのエージェントが1回目の通知だけを見て、出力ファイルを読まずに記録・コミットしたこと。`auto-dev` は判定を文字列の引数で受け取っていたため、止められなかった。`verify-bundle` も、この状態の Bundle を VERIFIED と判定する。
+- Rule: Checker に渡した入力（SPEC の該当節、差分）と Checker の出力はファイルに保存し、記録からたどれるようにする。最終的には、`record-review` でそれらのハッシュを記録し、Bundle に入れる。Checker には、異常系・境界値の扱いを、差分とテストの両方で確かめるよう明示的に求める。要件を足すときは、既存の一般的な規則（例外を外に出さない など）が新しい機能にどう当てはまるかを書く。 通知やログの要約ではなく、成果物（出力ファイル）を正とする。判定は `auto-dev` が出力ファイルから読み取り、記録した後に出力が書き換わっていないことを、確定の直前に確かめる（INV-10）。フェーズの確認では、査読の記録と出力ファイルの突き合わせを常に行う。
+- Rung: 道具（PLAN.md の作業手順で、Checker の入出力を保存し、異常系の確認を求める）。将来は作り（BACKLOG IDEA-007: 入出力のハッシュを記録・Bundle に収録） → Phase 70 で作り・関門へ（GATE-5〜7、BDL-4。免疫テスト `test_immunity_review_evidence.py`）
+- Immunity Test: なし（手順。IDEA-007 を実装した時点でテストを追加する） → Phase 70 の H1 で `tests/immunity/test_immunity_review_evidence.py` を配置する
 - Proof: 2026-11-22 に、ad-team-trial の `team/cli` で `10 ** 400` / `0 ** -1` を実行し、例外が外に出ることを確認した。
 
 ### [2026-11-21] テストの期待値に OS 固有の挙動を書くと、他の OS では製品の欠陥と区別できなくなる (Assert Properties, Not OS Mechanisms)
