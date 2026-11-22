@@ -3340,6 +3340,8 @@ def run_teams_job(
     checker_cmd: str = "",
     maker_model: str | None = "gemini-3.8-flash",
     checker_model: str | None = "claude-opus-5.5",
+    maker_family: str | None = None,
+    checker_family: str | None = None,
     is_mock: bool = False,
     worker_timeout: float = 21600.0,
     verify_timeout: int = 300,
@@ -3386,11 +3388,23 @@ def run_teams_job(
         resolved_maker_model = norm_maker_model
         resolved_checker_model = norm_checker_model
 
-    from auto_developer.audit import verify_model_independence
+    from auto_developer.audit import resolve_model_family, verify_model_independence
 
-    ok_models, model_reason = verify_model_independence(resolved_maker_model, resolved_checker_model)
+    ok_models, model_reason = verify_model_independence(
+        resolved_maker_model,
+        resolved_checker_model,
+        maker_family=maker_family,
+        auditor_family=checker_family,
+    )
     if not ok_models:
         return None, 2, f"PRE-FLIGHT MODEL POLICY ERROR: {model_reason}"
+
+    resolved_maker_family, resolved_maker_family_source = resolve_model_family(
+        resolved_maker_model, maker_family
+    )
+    resolved_checker_family, resolved_checker_family_source = resolve_model_family(
+        resolved_checker_model, checker_family
+    )
 
     prep_payload, prep_code, prep_err = prepare_teams_job(resolved_repo, job_id=job_id)
     if prep_payload is None:
@@ -3407,7 +3421,11 @@ def run_teams_job(
     if job_rec is not None:
         job_rec["status"] = "RUNNING"
         job_rec["maker_model"] = resolved_maker_model
+        job_rec["maker_family"] = resolved_maker_family
+        job_rec["maker_family_source"] = resolved_maker_family_source
         job_rec["checker_model"] = resolved_checker_model
+        job_rec["checker_family"] = resolved_checker_family
+        job_rec["checker_family_source"] = resolved_checker_family_source
         job_rec["worker_timeout"] = worker_timeout
         job_rec["is_mock"] = is_mock
         job_rec["updated_at"] = time.time()
@@ -3443,8 +3461,12 @@ def run_teams_job(
             cmd.extend(["--checker-cmd", checker_cmd])
         if resolved_maker_model:
             cmd.extend(["--maker-model", resolved_maker_model])
+        if maker_family is not None:
+            cmd.extend(["--maker-family", maker_family])
         if resolved_checker_model:
             cmd.extend(["--checker-model", resolved_checker_model])
+        if checker_family is not None:
+            cmd.extend(["--checker-family", checker_family])
         if verify_timeout > 0:
             cmd.extend(["--timeout", str(verify_timeout)])
         return cmd

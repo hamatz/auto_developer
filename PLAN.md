@@ -61,7 +61,7 @@
 - [x] 3. `auto-dev run` で、成功時・失敗時とも、レポートを書いてから Bundle を作る（Red-First）（RPT-6）
 - [x] 4. 基点からのコミットが0件のチームを `NO_CHANGES` として統合の対象から外す。全チームが `NO_CHANGES` なら RC タグを作らずに終了コード 0。`teams run` も同じ規則に従う（Red-First）（TEAM-27）
 - [x] 5. チームのジョブのレポートと `brief` に、チームごとのタスク・Checker の判定とモデル・`NO_CHANGES` を表示し、RC コミットと main が変更されていないことを示す（Red-First）（RPT-7）
-- [ ] 6. モデルの系統の明示（`--maker-family` / `--checker-family` / `--auditor-family`）、食い違いの拒否、組み込みの判定への `mistral` / `llama` / `qwen` / `deepseek` の追加、`family_source` の記録（Red-First）（DX-7）
+- [x] 6. モデルの系統の明示（`--maker-family` / `--checker-family` / `--auditor-family`）、食い違いの拒否、組み込みの判定への `mistral` / `llama` / `qwen` / `deepseek` の追加、`family_source` の記録（Red-First）（DX-7）
 - [ ] 7. `auto-dev demo`: 一時ディレクトリで、正常な2タスク・保護ファイルの改変による隔離・`brief`・Bundle の検証を見せる。`--keep` で残す。デモ用のモデル名と系統は DX-7 の明示を使う（Red-First）（DX-6）
 
 ## 止まっていること・判断待ち

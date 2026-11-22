@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from auto_developer.audit import detect_model_family, verify_model_independence
+from auto_developer.audit import resolve_model_family_safe, verify_model_independence
 from auto_developer.boundary import BoundaryGuard
 from auto_developer.bundler import EvidenceBundler
 from auto_developer.dispatcher import TaskDispatcher
@@ -490,6 +490,19 @@ def _resolve_cli_run_models(
     return maker_model, checker_model, auditor_model, None
 
 
+def _validate_explicit_cli_families(
+    *items: tuple[str, str | None, str | None],
+) -> str | None:
+    """Validate explicit --*-family CLI options against empty/unknown values and built-in detection."""
+    for flag, model_name, raw_family in items:
+        if raw_family is None:
+            continue
+        _, _, err = resolve_model_family_safe(model_name or "", raw_family)
+        if err is not None:
+            return f"PRE-FLIGHT MODEL POLICY ERROR ({flag}): {err}"
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI エントリーポイント。"""
     parser = argparse.ArgumentParser(
@@ -542,6 +555,12 @@ def main(argv: list[str] | None = None) -> int:
         "--checker-model", type=str, default=None, help="Model identifier for Checker"
     )
     parser.add_argument(
+        "--maker-family", type=str, default=None, help="Explicit model family for Maker"
+    )
+    parser.add_argument(
+        "--checker-family", type=str, default=None, help="Explicit model family for Checker"
+    )
+    parser.add_argument(
         "--enable-audit", action="store_true", help="Enable independent repository audit stage on completion"
     )
     parser.add_argument(
@@ -549,6 +568,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--auditor-model", type=str, default=None, help="Model identifier for Independent Auditor"
+    )
+    parser.add_argument(
+        "--auditor-family", type=str, default=None, help="Explicit model family for Independent Auditor"
     )
     parser.add_argument(
         "--auditor-fallback-models", type=str, default="", help="Comma-separated fallback models for independent auditor"
@@ -580,9 +602,12 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--checker-cmd", type=str, default=argparse.SUPPRESS, help="Command template to execute Checker")
     run_parser.add_argument("--maker-model", type=str, default=argparse.SUPPRESS, help="Model identifier for Maker")
     run_parser.add_argument("--checker-model", type=str, default=argparse.SUPPRESS, help="Model identifier for Checker")
+    run_parser.add_argument("--maker-family", type=str, default=argparse.SUPPRESS, help="Explicit model family for Maker")
+    run_parser.add_argument("--checker-family", type=str, default=argparse.SUPPRESS, help="Explicit model family for Checker")
     run_parser.add_argument("--enable-audit", action="store_true", default=argparse.SUPPRESS, help="Enable independent repository audit stage on completion")
     run_parser.add_argument("--auditor-cmd", type=str, default=argparse.SUPPRESS, help="Command template to execute independent auditor")
     run_parser.add_argument("--auditor-model", type=str, default=argparse.SUPPRESS, help="Model identifier for Independent Auditor")
+    run_parser.add_argument("--auditor-family", type=str, default=argparse.SUPPRESS, help="Explicit model family for Independent Auditor")
     run_parser.add_argument("--auditor-fallback-models", type=str, default=argparse.SUPPRESS, help="Comma-separated fallback models for independent auditor")
     run_parser.add_argument("--audit-baseline", type=str, default=argparse.SUPPRESS, help="Baseline commit hash for independent audit comparison")
 
@@ -608,6 +633,8 @@ def main(argv: list[str] | None = None) -> int:
     commit_parser.add_argument("--checkpoint", type=str, default=None, help="Optional checkpoint commit hash to verify")
     commit_parser.add_argument("--maker-model", type=str, required=True, help="Model identifier for Maker")
     commit_parser.add_argument("--checker-model", type=str, required=True, help="Model identifier for Checker")
+    commit_parser.add_argument("--maker-family", type=str, default=None, help="Explicit model family for Maker")
+    commit_parser.add_argument("--checker-family", type=str, default=None, help="Explicit model family for Checker")
     commit_parser.add_argument("--checker-decision", type=str, required=True, help="Checker review decision (e.g. APPROVE)")
     commit_parser.add_argument("--checker-reason", type=str, default=None, help="Checker review justification")
     commit_parser.add_argument("--checker-json", type=str, default=None, help="Checker review structured JSON string")
@@ -629,6 +656,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     review_parser.add_argument("--checker-model", type=str, required=True, help="Checker model")
     review_parser.add_argument("--maker-model", type=str, required=True, help="Maker model")
+    review_parser.add_argument("--maker-family", type=str, default=None, help="Explicit model family for Maker")
+    review_parser.add_argument("--checker-family", type=str, default=None, help="Explicit model family for Checker")
     review_parser.add_argument("--reason", type=str, default="", help="Review reason")
 
     # Subcommand: metrics (XXX.4)
@@ -759,6 +788,18 @@ def main(argv: list[str] | None = None) -> int:
         type=str,
         default=argparse.SUPPRESS,
         help="Model identifier for Checker",
+    )
+    teams_run_parser.add_argument(
+        "--maker-family",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="Explicit model family for Maker",
+    )
+    teams_run_parser.add_argument(
+        "--checker-family",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="Explicit model family for Checker",
     )
     teams_run_parser.add_argument(
         "--timeout",
@@ -904,6 +945,8 @@ def main(argv: list[str] | None = None) -> int:
             teams_is_mock = bool(getattr(args, "mock", False))
             teams_maker_cmd = getattr(args, "maker_cmd", "")
             teams_checker_cmd = getattr(args, "checker_cmd", "")
+            teams_maker_family = getattr(args, "maker_family", None)
+            teams_checker_family = getattr(args, "checker_family", None)
             if not teams_is_mock and (not teams_maker_cmd or not teams_checker_cmd):
                 run_payload, run_code, run_err = run_teams_job(
                     work_dir,
@@ -912,6 +955,8 @@ def main(argv: list[str] | None = None) -> int:
                     checker_cmd=teams_checker_cmd,
                     maker_model=None,
                     checker_model=None,
+                    maker_family=teams_maker_family,
+                    checker_family=teams_checker_family,
                     is_mock=False,
                     worker_timeout=args.worker_timeout,
                     verify_timeout=args.timeout,
@@ -929,6 +974,13 @@ def main(argv: list[str] | None = None) -> int:
                 if teams_model_err is not None:
                     print(teams_model_err, file=sys.stderr)
                     return 2
+                teams_fam_err = _validate_explicit_cli_families(
+                    ("--maker-family", teams_maker_model, teams_maker_family),
+                    ("--checker-family", teams_checker_model, teams_checker_family),
+                )
+                if teams_fam_err is not None:
+                    print(teams_fam_err, file=sys.stderr)
+                    return 2
                 run_payload, run_code, run_err = run_teams_job(
                     work_dir,
                     job_id=args.job_id,
@@ -936,6 +988,8 @@ def main(argv: list[str] | None = None) -> int:
                     checker_cmd=teams_checker_cmd,
                     maker_model=teams_maker_model,
                     checker_model=teams_checker_model,
+                    maker_family=teams_maker_family,
+                    checker_family=teams_checker_family,
                     is_mock=teams_is_mock,
                     worker_timeout=args.worker_timeout,
                     verify_timeout=args.timeout,
@@ -1172,10 +1226,22 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: Task {args.task_id} not found in {effective_plan_path}", file=sys.stderr)
             return 1
 
-        # Checker Policy 検査 (機能XXX.1 / AGENTS.md Rule 6)
+        # Checker Policy 検査 (機能XXX.1 / AGENTS.md Rule 6 / DX-7)
         decision = (args.checker_decision or "").strip().upper()
-        maker_fam = detect_model_family(args.maker_model)
-        checker_fam = detect_model_family(args.checker_model)
+        maker_fam, maker_fam_source, _ = resolve_model_family_safe(args.maker_model, args.maker_family)
+        checker_fam, checker_fam_source, _ = resolve_model_family_safe(
+            args.checker_model, args.checker_family
+        )
+        commit_event_base: dict[str, Any] = {
+            "task_id": args.task_id,
+            "checker_decision": decision,
+            "checker_model": args.checker_model,
+            "checker_family": checker_fam,
+            "checker_family_source": checker_fam_source,
+            "maker_model": args.maker_model,
+            "maker_family": maker_fam,
+            "maker_family_source": maker_fam_source,
+        }
 
         if decision != "APPROVE":
             print(
@@ -1184,32 +1250,26 @@ def main(argv: list[str] | None = None) -> int:
             )
             metrics.record_event(
                 "commit_step",
-                task_id=args.task_id,
                 result="CHECKER_POLICY_VIOLATION",
                 commit=None,
-                checker_decision=decision,
-                checker_model=args.checker_model,
-                checker_family=checker_fam,
-                maker_model=args.maker_model,
-                maker_family=maker_fam,
+                **commit_event_base,
             )
             return 4
 
         is_independent, violation_msg = verify_model_independence(
-            args.maker_model, args.checker_model, strict=True
+            args.maker_model,
+            args.checker_model,
+            strict=True,
+            maker_family=args.maker_family,
+            auditor_family=args.checker_family,
         )
         if not is_independent:
             print(f"CHECKER_POLICY_VIOLATION: {violation_msg}", file=sys.stderr)
             metrics.record_event(
                 "commit_step",
-                task_id=args.task_id,
                 result="CHECKER_POLICY_VIOLATION",
                 commit=None,
-                checker_decision=decision,
-                checker_model=args.checker_model,
-                checker_family=checker_fam,
-                maker_model=args.maker_model,
-                maker_family=maker_fam,
+                **commit_event_base,
             )
             return 4
 
@@ -1230,14 +1290,9 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 metrics.record_event(
                     "commit_step",
-                    task_id=args.task_id,
                     result="BOUNDARY_VIOLATION",
                     commit=None,
-                    checker_decision=decision,
-                    checker_model=args.checker_model,
-                    checker_family=checker_fam,
-                    maker_model=args.maker_model,
-                    maker_family=maker_fam,
+                    **commit_event_base,
                 )
                 return 3
 
@@ -1256,14 +1311,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             metrics.record_event(
                 "commit_step",
-                task_id=args.task_id,
                 result="EVIDENCE_ERROR",
                 commit=None,
-                checker_decision=decision,
-                checker_model=args.checker_model,
-                checker_family=checker_fam,
-                maker_model=args.maker_model,
-                maker_family=maker_fam,
+                **commit_event_base,
             )
             return 3
         commit_hash = git_guard.commit_task(target)
@@ -1275,25 +1325,22 @@ def main(argv: list[str] | None = None) -> int:
             )
             metrics.record_event(
                 "commit_step",
-                task_id=args.task_id,
                 result="EVIDENCE_ERROR",
                 commit=commit_hash,
-                checker_decision=decision,
-                checker_model=args.checker_model,
-                checker_family=checker_fam,
-                maker_model=args.maker_model,
-                maker_family=maker_fam,
+                **commit_event_base,
             )
             return 3
 
-        # Checker 査読メタデータの抽出 (機能Q / 機能XXX.1)
+        # Checker 査読メタデータの抽出 (機能Q / 機能XXX.1 / DX-7)
         checker_info: dict[str, Any] = {
             "decision": decision,
             "reason": args.checker_reason or "",
             "model": args.checker_model,
             "family": checker_fam,
+            "family_source": checker_fam_source,
             "maker_model": args.maker_model,
             "maker_family": maker_fam,
+            "maker_family_source": maker_fam_source,
         }
         if args.checker_json:
             try:
@@ -1319,14 +1366,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         metrics.record_event(
             "commit_step",
-            task_id=args.task_id,
             result="COMMITTED",
             commit=commit_hash,
-            checker_decision=decision,
-            checker_model=args.checker_model,
-            checker_family=checker_fam,
-            maker_model=args.maker_model,
-            maker_family=maker_fam,
+            **commit_event_base,
         )
         print(f"COMMITTED: {commit_hash}")
         return 0
@@ -1396,8 +1438,18 @@ def main(argv: list[str] | None = None) -> int:
         if ctx_err != 0:
             return ctx_err
         effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
-        maker_fam = detect_model_family(args.maker_model)
-        checker_fam = detect_model_family(args.checker_model)
+        maker_fam, maker_fam_source, maker_fam_err = resolve_model_family_safe(
+            args.maker_model, args.maker_family
+        )
+        if maker_fam_err is not None:
+            print(f"PRE-FLIGHT MODEL POLICY ERROR (--maker-family): {maker_fam_err}", file=sys.stderr)
+            return 2
+        checker_fam, checker_fam_source, checker_fam_err = resolve_model_family_safe(
+            args.checker_model, args.checker_family
+        )
+        if checker_fam_err is not None:
+            print(f"PRE-FLIGHT MODEL POLICY ERROR (--checker-family): {checker_fam_err}", file=sys.stderr)
+            return 2
         metrics = MetricsLog(repo_dir=work_dir, plan_path=effective_plan_path)
         metrics.record_event(
             "checker_review",
@@ -1405,8 +1457,10 @@ def main(argv: list[str] | None = None) -> int:
             decision=dec,
             checker_model=args.checker_model,
             checker_family=checker_fam,
+            checker_family_source=checker_fam_source,
             maker_model=args.maker_model,
             maker_family=maker_fam,
+            maker_family_source=maker_fam_source,
             reason=args.reason or "",
         )
         return 0
@@ -1726,6 +1780,18 @@ def main(argv: list[str] | None = None) -> int:
         print(model_err, file=sys.stderr)
         return 2
 
+    maker_family = getattr(args, "maker_family", None)
+    checker_family = getattr(args, "checker_family", None)
+    auditor_family = getattr(args, "auditor_family", None)
+    fam_err = _validate_explicit_cli_families(
+        ("--maker-family", maker_model, maker_family),
+        ("--checker-family", checker_model, checker_family),
+        ("--auditor-family", auditor_model, auditor_family),
+    )
+    if fam_err is not None:
+        print(fam_err, file=sys.stderr)
+        return 2
+
     orchestrator = NightlyOrchestrator(
         repo_dir=work_dir,
         plan_path=effective_run_plan_path,
@@ -1741,9 +1807,12 @@ def main(argv: list[str] | None = None) -> int:
         owns_patterns=resolved_owns,
         maker_model=maker_model,
         checker_model=checker_model,
+        maker_family=maker_family,
+        checker_family=checker_family,
         enable_audit_stage=enable_audit,
         auditor_cmd_template=auditor_cmd,
         auditor_model=auditor_model,
+        auditor_family=auditor_family,
         fallback_models=fallback_models,
         audit_baseline_commit=audit_baseline,
     )

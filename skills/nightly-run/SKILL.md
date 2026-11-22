@@ -34,7 +34,7 @@ When running `/nightly-run` without `teams.json` (or invoking `auto-dev run` / `
      On REJECT, feed the reasons back to the Maker (counts toward the 2-attempt limit in Step C) instead of committing.
    - **Step E (Evidence-gated Commit & Advance)**: On approval only, commit via
      `auto-dev commit-step --task-id <task_id> --checkpoint <checkpoint> --maker-model <maker_model> --checker-model <checker_model> --checker-decision APPROVE --checker-reason "<reason>"`.
-     Use the real model identifiers actually used for this step. `commit-step` refuses with **exit 4** (`CHECKER_POLICY_VIOLATION`) if the decision is not APPROVE or if the two models are identical, of the same family, or of an unrecognized family; the Evidence Token is not consumed, so fix the cause (e.g. re-run the review on a different-family Checker) rather than retrying with altered names. Exit 3 means missing or stale evidence. On success the orchestrator consumes the Evidence Token, commits, and marks the task `- [x]` in `PLAN.md`.
+     Use the real model identifiers actually used for this step. If a model identifier is custom or not recognized by built-in family detection (`gemini`, `claude`, `openai`, `mistral`, `llama`, `qwen`, `deepseek`), explicitly pass `--maker-family <family>` and/or `--checker-family <family>` (non-empty, not `unknown`, and must not conflict with built-in detection; also supported on `record-review`, `run`, and `teams run`). `commit-step` refuses with **exit 4** (`CHECKER_POLICY_VIOLATION`) if the decision is not APPROVE or if the two models are identical, of the same family, of an unrecognized family, or have conflicting explicit families; the Evidence Token is not consumed, so fix the cause (e.g. re-run the review on a different-family Checker) rather than retrying with altered names. Exit 3 means missing or stale evidence. On success the orchestrator consumes the Evidence Token, commits, and marks the task `- [x]` in `PLAN.md`.
 3. **Morning Handoff & Evidence Bundle**:
    - Generate or refresh `NIGHTLY_REPORT.md` (Morning Brief) with `auto-dev report`, and include the phase metrics from `auto-dev metrics` (first-pass rate, rework ratio, Checker rejects, audit breakdown).
    - Automatically package the entire run into a sanitized, audit-ready Evidence Bundle via `auto-dev bundle` (saved to `.dev/bundles/bundle_<job_id>.zip`).
@@ -70,6 +70,7 @@ When `teams.json` exists and the agent orchestrates teams directly via subagents
      On `REJECT`, feed the reasons back to Maker (counts toward the 2-attempt limit).
    - **Evidence-Gated Commit**: On `APPROVE`, commit via:
      `auto-dev commit-step --task-id <task_id> --checkpoint <checkpoint> --maker-model <maker_model> --checker-model <checker_model> --checker-decision APPROVE --checker-reason "<reason>"`
+     (Add `--maker-family <family>` / `--checker-family <family>` when using custom or unrecognized model identifiers.)
    - If any team fails or is quarantined, **stop without calling `teams integrate`**. Leave worktrees intact and report `auto-dev teams status --job-id <job_id>` and `auto-dev report` / `auto-dev brief`.
 
 3. **Integration Gate & Morning Handoff**:

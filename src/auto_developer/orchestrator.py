@@ -45,6 +45,9 @@ class NightlyOrchestrator:
         fallback_models: list[str] | None = None,
         enable_audit_stage: bool = False,
         audit_baseline_commit: str | None = None,
+        maker_family: str | None = None,
+        checker_family: str | None = None,
+        auditor_family: str | None = None,
     ) -> None:
         self.repo_dir = repo_dir or Path.cwd()
         self.plan_path = plan_path or (self.repo_dir / "PLAN.md")
@@ -63,6 +66,9 @@ class NightlyOrchestrator:
         self._explicit_owns_patterns = owns_patterns
         self.maker_model = maker_model
         self.checker_model = checker_model
+        self.maker_family = maker_family
+        self.checker_family = checker_family
+        self.auditor_family = auditor_family
         self.allow_same_model_override = allow_same_model_override
         self.auditor_runner = auditor_runner
         self.auditor_model = auditor_model
@@ -95,20 +101,33 @@ class NightlyOrchestrator:
             self.plan_path = team_ctx.plan_path
             self.owns_patterns = team_ctx.owns_patterns or None
 
-        if self.maker_model and self.checker_model:
-            from auto_developer.audit import verify_model_independence
+        from auto_developer.audit import resolve_model_family, verify_model_independence
 
+        for fam_label, fam_model, fam_val in (
+            ("maker_family", self.maker_model, self.maker_family),
+            ("checker_family", self.checker_model, self.checker_family),
+            ("auditor_family", self.auditor_model, self.auditor_family),
+        ):
+            if fam_val is not None:
+                try:
+                    resolve_model_family(fam_model or "", fam_val)
+                except ValueError as err:
+                    print(f"PRE-FLIGHT MODEL POLICY ERROR ({fam_label}): {err}", file=sys.stderr)
+                    return 2
+
+        if self.maker_model and self.checker_model:
             ok, reason = verify_model_independence(
                 self.maker_model,
                 self.checker_model,
                 self.allow_same_model_override,
+                maker_family=self.maker_family,
+                auditor_family=self.checker_family,
             )
             if not ok:
                 print(f"PRE-FLIGHT MODEL POLICY ERROR: {reason}", file=sys.stderr)
                 return 2
 
         if self.enable_audit_stage:
-            from auto_developer.audit import verify_model_independence
             from auto_developer.runner import MockRunnerAdapter
 
             if (
@@ -127,6 +146,8 @@ class NightlyOrchestrator:
                     self.maker_model,
                     self.auditor_model,
                     self.allow_same_model_override,
+                    maker_family=self.maker_family,
+                    auditor_family=self.auditor_family,
                 )
                 if not ok:
                     print(f"PRE-FLIGHT AUDIT POLICY ERROR: {reason}", file=sys.stderr)
@@ -689,14 +710,18 @@ class NightlyOrchestrator:
                 "reason": checker_reason,
             }
             if self.checker_model or self.maker_model:
-                from auto_developer.audit import detect_model_family
+                from auto_developer.audit import resolve_model_family
 
                 if self.checker_model:
+                    c_fam, c_src = resolve_model_family(self.checker_model, self.checker_family)
                     checker_info["model"] = self.checker_model
-                    checker_info["family"] = detect_model_family(self.checker_model)
+                    checker_info["family"] = c_fam
+                    checker_info["family_source"] = c_src
                 if self.maker_model:
+                    m_fam, m_src = resolve_model_family(self.maker_model, self.maker_family)
                     checker_info["maker_model"] = self.maker_model
-                    checker_info["maker_family"] = detect_model_family(self.maker_model)
+                    checker_info["maker_family"] = m_fam
+                    checker_info["maker_family_source"] = m_src
 
             self.evidence_store.archive_record(
                 task_id=task.task_id,
@@ -802,6 +827,8 @@ class NightlyOrchestrator:
                 model_name=self.auditor_model or "claude-opus-5.5",
                 fallback_models=self.fallback_models,
                 maker_model=self.maker_model,
+                maker_family=self.maker_family,
+                auditor_family=self.auditor_family,
             )
 
         if not auditor:
@@ -953,6 +980,16 @@ class NightlyOrchestrator:
                 output_tokens = audit_metadata.get("output_tokens")
 
             from auto_developer.metrics import MetricsLog
+            event_extra: dict[str, Any] = {}
+            if audit_metadata.get("auditor_family") is not None:
+                event_extra["auditor_family"] = audit_metadata.get("auditor_family")
+            if audit_metadata.get("auditor_family_source") is not None:
+                event_extra["auditor_family_source"] = audit_metadata.get("auditor_family_source")
+            if audit_metadata.get("maker_family") is not None:
+                event_extra["maker_family"] = audit_metadata.get("maker_family")
+            if audit_metadata.get("maker_family_source") is not None:
+                event_extra["maker_family_source"] = audit_metadata.get("maker_family_source")
+
             MetricsLog(repo_dir=self.repo_dir, plan_path=self.plan_path).record_event(
                 "audit_stage",
                 status=status,
@@ -964,6 +1001,7 @@ class NightlyOrchestrator:
                 rejected=len(screen_res.get("rejected", [])),
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                **event_extra,
             )
         except Exception as ex:  # noqa: BLE001
             print(f"METRICS_WARNING: Failed to record audit_stage event: {ex}", file=sys.stderr)
