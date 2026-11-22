@@ -55,7 +55,12 @@
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 <!-- docs/contracts/phase70.md の 3 章の影響分析から作成。ここに書いていない既存テストは変更しない。どのステップでも、アサーションは変えない（下に明記したものを除く）。 -->
-- ステップ 1（SBX-6）: 既存テストは変更しない。特に `tests/test_red_verifier.py` の `test_nproc_limit_computation_and_status_recording`（状態の文字列 `applied: limit=` と、上限が余裕の分以上であること）と `test_rejects_class_without_test_methods_ran_zero`（テストが実際に0件のときの `NO_TESTS_RAN`）は、そのまま通ること。
+- ステップ 1（SBX-6）: 次の4件（`tests/test_red_verifier.py`）に限り、`subprocess.Popen` のモックが返す `stdout` の先頭に `===AUTO_DEV_RUNNER_STARTED===\n` を足す変更のみ許可する（SBX-6 の開始の目印の規則による。アサーションは変えない）。
+  - `test_bwrap_command_excludes_entire_etc_and_minimizes_mounts`
+  - `test_bwrap_command_includes_dir_before_bind_for_tmpfs_compatibility`
+  - `test_bwrap_virtualenv_in_home_mounts_only_prefix_not_home`
+  - `test_bwrap_virtualenv_in_home_subdirectory_mounts_only_bin_lib_not_entire_venv`
+  - 上記以外の既存テスト（特に `test_nproc_limit_computation_and_status_recording`、`test_rejects_class_without_test_methods_ran_zero`、`REPO_TAMPER_DETECTED` のテスト 506/562 行目付近）は変更せずそのまま通ること。
 - ステップ 2（GATE-5）: `record-review` を `--decision` だけで呼んでいる次の箇所を、新しい呼び方（`review-input` で作った差分、SPEC の切り出し、判定行を含む出力ファイルを渡す）に置き換えてよい。
   - `tests/test_metrics.py`（255, 272, 339 行目付近）。272 行目付近の不正な判定（`MAYBE`）の拒否は、判定行のない出力ファイルで終了コード 4 になることを確かめる形にしてよい。
   - `tests/test_dx7_model_families.py`（322, 338, 355 行目付近）
