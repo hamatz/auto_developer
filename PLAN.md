@@ -46,7 +46,9 @@
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
 <!-- docs/contracts/phase69.md の影響分析から作成。ここに書いていない既存テストは変更しない。 -->
-- ステップ 2（DX-5）: `tests/test_teams_template_e2e.py` の 149 行目付近に限り、検証スクリプトが使う Python を `/usr/bin/python3` と決め打ちしている箇所を、新しい規則（環境変数 `PYTHON`、なければ PATH の `python3`）で選ばれる Python に合わせて更新してよい。テストが確かめている内容（バイトコードが worktree の中に生成される状態で `teams run` → `teams cleanup` → 次の `teams prepare` が通ること）は変えない。
+- ステップ 2（DX-5）:
+  - `tests/test_teams_template_e2e.py` の 149 行目付近に限り、検証スクリプトが使う Python を `/usr/bin/python3` と決め打ちしている箇所を、新しい規則（環境変数 `PYTHON`、なければ PATH の `python3`）で選ばれる Python に合わせて更新してよい。テストが確かめている内容（バイトコードが worktree の中に生成される状態で `teams run` → `teams cleanup` → 次の `teams prepare` が通ること）は変えない。
+  - `tests/test_multi_team.py` の `test_run_workers_builds_correct_cli_command_order_and_arguments`（210 行目付近）に限り、`expected_cmd_prefix` の先頭要素 `"python3"` を `sys.executable` に更新してよい（他の要素・引数の順序・`team.env` の受け渡しアサーションは変更しない）。
 - 上記以外の既存テストは変更しない。免疫テスト（`tests/immunity/**`）は変更しない。
 - 特に次の既存テストは、新しい規則でも変更せずに通ること（守るべき挙動）。
   - TEAM-27: `tests/test_teams_integrate.py` の `test_integrate_rejects_missing_evidence_audit_failure_and_keeps_worktrees`
