@@ -901,7 +901,7 @@ class MultiTeamOrchestrator:
             if worker_cmd_factory is not None:
                 cmd = worker_cmd_factory(team.team_id, wt_path)
             else:
-                cmd = ["python3", "-m", "auto_developer.cli", "--work-dir", str(wt_path), "run", *team.extra_args]
+                cmd = [sys.executable, "-m", "auto_developer.cli", "--work-dir", str(wt_path), "run", *team.extra_args]
 
             if not cmd:
                 return TeamExecutionResult(

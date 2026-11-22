@@ -207,7 +207,7 @@ class TestMultiTeamOrchestration(unittest.TestCase):
 
         # 引数の順序が python3 -m auto_developer.cli --work-dir <wt> run であること (run --work-dir は Exit 2 となる)
         expected_cmd_prefix = [
-            "python3",
+            sys.executable,
             "-m",
             "auto_developer.cli",
             "--work-dir",

@@ -74,13 +74,21 @@ if [ ! -d "tests" ] || [ -z "$(find tests -name 'test_*.py' 2>/dev/null)" ]; the
   exit 1
 fi
 
-if [ -x "/usr/bin/python3" ]; then
-  PYTHON="/usr/bin/python3"
-elif command -v python3 >/dev/null 2>&1; then
-  PYTHON="python3"
-else
-  echo "ERROR: python3 not found to execute tests"
-  exit 1
+if [ -z "${PYTHON:-}" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON="python3"
+  else
+    echo "ERROR: python3 not found to execute tests"
+    exit 1
+  fi
+fi
+
+if [ -d "src" ]; then
+  if [ -n "${PYTHONPATH:-}" ]; then
+    export PYTHONPATH="$(pwd)/src:${PYTHONPATH}"
+  else
+    export PYTHONPATH="$(pwd)/src"
+  fi
 fi
 
 "$PYTHON" -m unittest discover -s tests -p "test_*.py"

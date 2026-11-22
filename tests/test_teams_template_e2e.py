@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -145,12 +146,15 @@ class TestTeamsTemplateE2E(unittest.TestCase):
         self.assertEqual(_git(self.repo_dir, "tag", "--list", rc_tag).stdout.strip(), rc_tag)
         self.assertEqual(_git(self.repo_dir, "rev-parse", "main").stdout.strip(), self.base_commit)
 
+        clean_env = _clean_subprocess_env()
         verify_py = (
-            "/usr/bin/python3" if os.access("/usr/bin/python3", os.X_OK) else sys.executable
+            clean_env.get("PYTHON")
+            or shutil.which("python3", path=clean_env.get("PATH"))
+            or sys.executable
         )
         builtin_prefix = subprocess.run(
             [verify_py, "-c", "import sys; print(sys.pycache_prefix or '')"],
-            env=_clean_subprocess_env(),
+            env=clean_env,
             capture_output=True,
             text=True,
             check=True,
