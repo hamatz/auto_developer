@@ -492,6 +492,34 @@ print(json.dumps(data))
         re.compile(r"(api[_-]?key|secret[_-]?key|private[_-]?key|auth[_-]?token)\s*[:=]\s*['\"][a-zA-Z0-9_\-]{16,}['\"]", re.IGNORECASE),  # gitleaks:allow
     )
 
+    SECRET_ENV_ALLOWLIST = frozenset({".env.example", ".env.sample", ".env.template"})
+    SECRET_KEY_EXTENSIONS = (".key", ".pem", ".pkcs12", ".pfx")
+    SECRET_SSH_FILENAMES = frozenset({"id_rsa", "id_ed25519", "id_ecdsa"})
+
+    @classmethod
+    def is_forbidden_commit_secret_path(cls, rel_path: str) -> bool:
+        """GATE-10: コミット対象として拒否すべき機密ファイル名か判定する。"""
+        base = Path(rel_path).name
+        if base == ".env" or base.startswith(".env."):
+            return base not in cls.SECRET_ENV_ALLOWLIST
+        lower = base.lower()
+        if lower.endswith(cls.SECRET_KEY_EXTENSIONS):
+            return True
+        return lower in cls.SECRET_SSH_FILENAMES
+
+    def find_secret_files_in_tree(self, checkpoint: str, tree_sha: str) -> list[str]:
+        """GATE-10: チェックポイントから tree_sha にかけて追加・変更された機密ファイル一覧を返す。"""
+        proc = self._run_git([
+            "-c", "diff.renames=false",
+            "diff-tree", "-r", "--name-only", "--diff-filter=AM",
+            f"{checkpoint}^{{tree}}", tree_sha,
+        ])
+        return [
+            line.strip()
+            for line in proc.stdout.splitlines()
+            if line.strip() and self.is_forbidden_commit_secret_path(line.strip())
+        ]
+
     @classmethod
     def is_secret_file(cls, filename: str) -> bool:
         """シークレット・認証情報ファイル名パターンに合致するか判定する。"""

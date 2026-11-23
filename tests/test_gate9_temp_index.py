@@ -30,12 +30,11 @@ class TestGate9TempIndex(unittest.TestCase):
             ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
         ).stdout.strip()
 
-    def test_verify_step_does_not_stage_untracked_env_in_real_index(self) -> None:
+    def test_verify_step_does_not_stage_untracked_files_in_real_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             checkpoint = self._init_repo(repo)
             (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
-            (repo / ".env").write_text("DUMMY=1\n", encoding="utf-8")
 
             status_before = subprocess.run(
                 ["git", "status", "--porcelain"],
@@ -58,6 +57,34 @@ class TestGate9TempIndex(unittest.TestCase):
             non_plan_before = [l for l in status_before.splitlines() if not l.endswith(" PLAN.md")]
             non_plan_after = [l for l in status_after.splitlines() if not l.endswith(" PLAN.md")]
             self.assertEqual(non_plan_after, non_plan_before)
+            self.assertIn("?? app.py", status_after)
+            self.assertNotIn("A  app.py", status_after)
+
+    def test_verify_step_does_not_stage_untracked_env_in_real_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            checkpoint = self._init_repo(repo)
+            (repo / ".env").write_text("DUMMY=1\n", encoding="utf-8")
+
+            status_before = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+
+            rc = cli_main(["--work-dir", str(repo), "verify-step", "--checkpoint", checkpoint, "--task-id", "1"])
+            self.assertEqual(rc, 1)
+
+            status_after = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            self.assertEqual(status_after, status_before)
             self.assertIn("?? .env", status_after)
             self.assertNotIn("A  .env", status_after)
 

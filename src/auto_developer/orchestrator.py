@@ -689,6 +689,24 @@ class NightlyOrchestrator:
 
             spec_text = self.spec_path.read_text(encoding="utf-8") if self.spec_path.exists() else ""
             reviewed_tree_sha = self.git_guard.get_working_tree_sha()
+            secret_files = self.git_guard.find_secret_files_in_tree(checkpoint, reviewed_tree_sha)
+            if secret_files:
+                secret_msg = (
+                    f"SECRET_FILE_IN_COMMIT: {', '.join(secret_files)} — remove or add to .gitignore before committing."
+                )
+                print(f"  {secret_msg}", file=sys.stderr)
+                return self._handle_failure(
+                    task,
+                    checkpoint,
+                    total_tasks,
+                    succeeded_tasks,
+                    job_state,
+                    "SECRET_FILE_IN_COMMIT",
+                    secret_msg,
+                    attempt_1_log=attempt_1_log,
+                    attempt_2_log=attempt_2_log,
+                    attempts=task_attempts,
+                )
             reviewed_spec_sha = self.git_guard.get_spec_sha(self.spec_path)
             if isinstance(self.runner_adapter, CommandRunnerAdapter):
                 self.runner_adapter.last_checker_output = ""
@@ -735,6 +753,24 @@ class NightlyOrchestrator:
 
             # 1. すでに検証・査読を通過した作業ツリー全体の Tree SHA と SPEC SHA を取得
             final_tree_sha = self.git_guard.get_working_tree_sha()
+            secret_files_final = self.git_guard.find_secret_files_in_tree(checkpoint, final_tree_sha)
+            if secret_files_final:
+                secret_msg = (
+                    f"SECRET_FILE_IN_COMMIT: {', '.join(secret_files_final)} — remove or add to .gitignore before committing."
+                )
+                print(f"  {secret_msg}", file=sys.stderr)
+                return self._handle_failure(
+                    task,
+                    checkpoint,
+                    total_tasks,
+                    succeeded_tasks,
+                    job_state,
+                    "SECRET_FILE_IN_COMMIT",
+                    secret_msg,
+                    attempt_1_log=attempt_1_log,
+                    attempt_2_log=attempt_2_log,
+                    attempts=task_attempts,
+                )
             spec_sha = self.git_guard.get_spec_sha(self.spec_path)
 
             # 2. 検証済みツリーに対する証跡を発行

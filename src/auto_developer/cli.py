@@ -162,6 +162,9 @@ DEFAULT_GITIGNORE_ENTRIES: tuple[str, ...] = (
     ".pytest_cache/",
     ".mypy_cache/",
     ".ruff_cache/",
+    ".env",
+    ".env.*",
+    "!.env.example",
 )
 
 
@@ -1222,6 +1225,24 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 1
         tree_sha = git_guard.get_working_tree_sha()
+        secret_files = git_guard.find_secret_files_in_tree(args.checkpoint, tree_sha)
+        if secret_files:
+            effective_plan_path.write_text(original_plan_content, encoding="utf-8")
+            print(
+                f"SECRET_FILE_IN_COMMIT: {', '.join(secret_files)} — remove or add to .gitignore before verifying.",
+                file=sys.stderr,
+            )
+            metrics.record_event(
+                "verify_step",
+                task_id=args.task_id,
+                checkpoint=args.checkpoint,
+                result="FAILED",
+                exit_code=1,
+                duration_sec=duration_sec,
+                attempt=attempt,
+                phase=phase,
+            )
+            return 1
         spec_sha = git_guard.get_spec_sha(spec_path)
         out_lines = [line.strip() for line in out.strip().splitlines() if line.strip()]
         evidence = evidence_store.issue_evidence(
@@ -1442,6 +1463,21 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 3
 
+        current_tree_sha = git_guard.get_working_tree_sha()
+        secret_files = git_guard.find_secret_files_in_tree(chk_ref, current_tree_sha)
+        if secret_files:
+            print(
+                f"SECRET_FILE_IN_COMMIT: {', '.join(secret_files)} — remove or add to .gitignore before committing.",
+                file=sys.stderr,
+            )
+            metrics.record_event(
+                "commit_step",
+                result="SECRET_FILE_IN_COMMIT",
+                commit=None,
+                **commit_event_base,
+            )
+            return 4
+
         try:
             current_diff_bytes = _compute_canonical_diff(
                 work_dir, str(commit_evidence.get("checkpoint", chk_ref))
@@ -1464,7 +1500,6 @@ def main(argv: list[str] | None = None) -> int:
 
         decision = recorded_decision
 
-        current_tree_sha = git_guard.get_working_tree_sha()
         current_spec_sha = git_guard.get_spec_sha(spec_path)
         if not evidence_store.verify_and_consume(
             task_id=args.task_id,
