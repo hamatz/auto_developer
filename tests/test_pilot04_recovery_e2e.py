@@ -6,6 +6,7 @@ ChatGPT 6.1-sol 氏のレビュー推奨に基づき、実物のクラッシュ�
 """
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -15,10 +16,13 @@ from pathlib import Path
 from auto_developer.models import JobState
 from auto_developer.recovery import RecoveryDiagnosis, RecoveryEngine
 
-ZIP_PATH = Path("/Users/hamatsumakoto/.gemini/antigravity/brain/d5a0cd95-dc79-481e-828c-48e50566f41a/.user_uploaded/media_1793812425094_fb637520.zip")
+_ZIP_ENV = os.environ.get("PILOT04_ZIP_PATH", "").strip()
+ZIP_PATH: Path | None = Path(_ZIP_ENV) if _ZIP_ENV else None
 
 
-def _is_zip_readable(path: Path) -> bool:
+def _is_zip_readable(path: Path | None) -> bool:
+    if path is None:
+        return False
     try:
         with open(path, "rb") as f:
             f.read(4)
@@ -27,9 +31,13 @@ def _is_zip_readable(path: Path) -> bool:
         return False
 
 
-@unittest.skipUnless(_is_zip_readable(ZIP_PATH), "Pilot 04 result zip file is not available or readable in local test environment")
+@unittest.skipUnless(
+    _is_zip_readable(ZIP_PATH),
+    "PILOT04_ZIP_PATH is not set or zip file is not available/readable in local test environment",
+)
 class TestPilot04RecoveryE2E(unittest.TestCase):
     def setUp(self):
+        assert ZIP_PATH is not None
         self.tmpdir = tempfile.TemporaryDirectory()
         self.work_root = Path(self.tmpdir.name)
         # ZIP を Unix パーミッション (executable bit) を復元して展開

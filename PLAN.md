@@ -66,7 +66,7 @@
 - [x] 3. `verify-step`（`run` の経路を含む）で、作業ツリーの Tree SHA を一時的なインデックスで求め、本物のインデックスを変えない。`commit-step` は最後に求めた Tree SHA のツリーをそのままコミットする（Red: `verify-step` の後に、gitignore していない `.env` がステージされている）（GATE-9）
 - [x] 4. `init` / `teams init` の `.gitignore` に `.env`・`.env.*`・`!.env.example` を加える。`verify-step` と `commit-step`（`run` の経路を含む）で、チェックポイントから追加・変更された `.env*`（例示用の3つを除く）・鍵ファイル・SSH の鍵の名前のファイルを `SECRET_FILE_IN_COMMIT:` で拒否する（Red: gitignore していない `.env` が `commit-step` でコミットされる）（GATE-10）
 - [x] 5. `verify-step --checkpoint` に参照名を渡しても、Evidence・査読の記録・イベントに解決した SHA を記録する（Red-First）（DX-9）
-- [ ] 6. 追跡しているファイルからローカルの絶対パスを除き、環境変数で渡す形にする。追跡しているファイルを検査するテストを置く（Red: 検査のテストが、今の2ファイルで失敗する）（REL-5）
+- [x] 6. 追跡しているファイルからローカルの絶対パスを除き、環境変数で渡す形にする。追跡しているファイルを検査するテストを置く（Red: 検査のテストが、今の2ファイルで失敗する）（REL-5）
 - [ ] 7. `scripts/gen_cli_reference.py` で argparse から `docs/cli.md` を生成し、ずれを検出するテストを置く（Red-First）（DX-4）
 - [ ] 8. `examples/two-teams/`（2チームの電卓）を置き、一時ディレクトリに写して `teams prepare` まで通ることを確かめる（Red-First）（DX-3）
 - [ ] 9. README.md と README.en.md の `<!-- readme-test: run -->` のブロックを一時ディレクトリで実行するテストと、日英のブロックの一致の検査（Red: テストがまだない／README のコマンドが通らなければ止まって報告）（DX-1）
