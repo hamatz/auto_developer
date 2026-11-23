@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
 from auto_developer.models import Task
+
+_CHECKER_DECISION_LINE_RE = re.compile(r"^\s*(?:DECISION:\s*)?(APPROVE|REJECT)\s*$", re.IGNORECASE)
+
+
+def parse_checker_decision_from_text(output: str) -> str | None:
+    """CORE-6: Checker の出力テキストから行単位の一意な判定 (APPROVE/REJECT) を読み取る。"""
+    decisions: set[str] = set()
+    for line in output.splitlines():
+        m = _CHECKER_DECISION_LINE_RE.match(line)
+        if m:
+            decisions.add(m.group(1).upper())
+    if len(decisions) == 1:
+        return next(iter(decisions))
+    return None
 
 
 class RunnerAdapter(ABC):
@@ -159,16 +174,9 @@ class CommandRunnerAdapter(RunnerAdapter):
                     pass
 
             # 2. テキスト判定 (Fail-Closed: 行単位判定行の一意性を要求)
-            pattern = re.compile(r"^\s*(?:DECISION:\s*)?(APPROVE|REJECT)\s*$", re.IGNORECASE)
-            decisions = set()
-            for line in output.splitlines():
-                m = pattern.match(line)
-                if m:
-                    decisions.add(m.group(1).upper())
-
-            if len(decisions) == 1:
-                dec = next(iter(decisions))
-                return dec == "APPROVE", output.strip()
+            parsed_dec = parse_checker_decision_from_text(output)
+            if parsed_dec is not None:
+                return parsed_dec == "APPROVE", output.strip()
             return False, output.strip()
         except subprocess.TimeoutExpired:
             return False, f"Checker timed out after {self.timeout_sec}s"

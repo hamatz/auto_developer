@@ -311,7 +311,20 @@ class TestDx7CliAndE2E(unittest.TestCase):
     def test_record_review_records_family_source_and_rejects_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
-            _init_single_repo(repo)
+            checkpoint = _init_single_repo(repo)
+            (repo / "feature.py").write_text("X = 1\n", encoding="utf-8")
+            vs = _run_cli(repo, "verify-step", "--checkpoint", checkpoint, "--task-id", "1")
+            self.assertEqual(vs.returncode, 0, vs.stderr)
+            io_dir = repo / ".dev" / "checker_io"
+            ri = _run_cli(repo, "review-input", "--task-id", "1", "--out-dir", str(io_dir))
+            self.assertEqual(ri.returncode, 0, ri.stderr)
+            diff_file = io_dir / "diff.patch"
+            spec_file = io_dir / "spec.md"
+            spec_file.write_text("# SPEC\n", encoding="utf-8")
+            out_app = io_dir / "approve.txt"
+            out_app.write_text("OK\nDECISION: APPROVE\n", encoding="utf-8")
+            out_rej = io_dir / "reject.txt"
+            out_rej.write_text("Needs test\nDECISION: REJECT\n", encoding="utf-8")
 
             # 食い違いと unknown は終了コード 2 で拒否
             res_bad = _run_cli(
@@ -319,6 +332,12 @@ class TestDx7CliAndE2E(unittest.TestCase):
                 "record-review",
                 "--task-id",
                 "1",
+                "--checker-output",
+                str(out_app),
+                "--diff-file",
+                str(diff_file),
+                "--spec-file",
+                str(spec_file),
                 "--decision",
                 "APPROVE",
                 "--maker-model",
@@ -335,6 +354,12 @@ class TestDx7CliAndE2E(unittest.TestCase):
                 "record-review",
                 "--task-id",
                 "1",
+                "--checker-output",
+                str(out_app),
+                "--diff-file",
+                str(diff_file),
+                "--spec-file",
+                str(spec_file),
                 "--decision",
                 "APPROVE",
                 "--maker-model",
@@ -352,6 +377,12 @@ class TestDx7CliAndE2E(unittest.TestCase):
                 "record-review",
                 "--task-id",
                 "1",
+                "--checker-output",
+                str(out_rej),
+                "--diff-file",
+                str(diff_file),
+                "--spec-file",
+                str(spec_file),
                 "--decision",
                 "REJECT",
                 "--maker-model",

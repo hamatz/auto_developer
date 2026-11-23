@@ -80,7 +80,7 @@
 
 ## ステップ
 - [x] 1. サンドボックスの起動の上限と失敗の分類: `RLIMIT_NPROC` をスレッド単位で数えて決める。起動の確認を実際の実行と同じ資源の上限で行う。サンドボックスの機構の起動の失敗を `NO_TESTS_RAN` ではなく `SANDBOX_UNAVAILABLE`（機構のエラーと対処を表示）とする（Red: 同じユーザーのスレッドを数百本立てた状態で、`test_red_verifier.py` が CI と同じく失敗する）（SBX-6）
-- [ ] 2. `auto-dev review-input`（正規の差分の書き出し）と、Checker の出力ファイルから判定を読み取り、差分・SPEC の切り出しを照合して記録する `record-review`。旧来の `--decision` だけの呼び出しは終了コード 2。`commit-step` はまだ変えない（Red-First）（GATE-5）
+- [x] 2. `auto-dev review-input`（正規の差分の書き出し）と、Checker の出力ファイルから判定を読み取り、差分・SPEC の切り出しを照合して記録する `record-review`。旧来の `--decision` だけの呼び出しは終了コード 2。`commit-step` はまだ変えない（Red-First）（GATE-5）
 - [ ] 3. （H1 の後）`commit-step` が、最新の検証に対応する査読の記録・判定・出力ファイルのハッシュ・モデル・正規の差分を照合する。`checker.review` を Evidence の記録に残す（Red: H1 で置いた `test_immunity_review_evidence.py`）（GATE-6）
 - [ ] 4. `run` / `teams run` / `demo` の経路の査読の証跡（GATE-7）と、Bundle への査読の証跡の収録・`verify-bundle` での照合・`format_version` 3（BDL-4）（Red-First）
 - [ ] 5. 失敗ログの先頭に `Failure Phase:` と `Reason:` を書く（Red-First）（RCV-5）

@@ -249,15 +249,35 @@ class TestMetricsLog(unittest.TestCase):
         self.assertIsNotNone(rb_events[0]["quarantine_branch"])
 
     def test_record_review_subcommand_case_insensitive_and_validation(self) -> None:
+        v_res = self._orch(
+            "--verify-script", str(self.verify),
+            "verify-step", "--checkpoint", self.checkpoint, "--task-id", "1",
+        )
+        self.assertEqual(v_res.returncode, 0, v_res.stderr)
+        io_dir = Path(self._tmp.name) / "checker_io"
+        self.assertEqual(
+            self._orch("review-input", "--task-id", "1", "--out-dir", str(io_dir)).returncode,
+            0,
+        )
+        diff_file = io_dir / "diff.patch"
+        spec_file = io_dir / "spec.md"
+        spec_file.write_text("# SPEC\n", encoding="utf-8")
+        out_rej = io_dir / "review_rej.txt"
+        out_rej.write_text("Missing edge case\nDECISION: REJECT\n", encoding="utf-8")
+
         # 大文字小文字を受け付けて正規化して記録すること
         res = self._orch(
+            "--spec", str(spec_file),
             "record-review", "--task-id", "1",
+            "--checker-output", str(out_rej),
+            "--diff-file", str(diff_file),
+            "--spec-file", str(spec_file),
             "--decision", "Reject",
             "--checker-model", "claude-opus-5-5-medium",
             "--maker-model", "gemini-3.8-flash",
             "--reason", "Missing edge case",
         )
-        self.assertEqual(res.returncode, 0)
+        self.assertEqual(res.returncode, 0, res.stderr)
         events_file = self.repo / ".git" / "nightly_evidence" / "events.jsonl"
         lines = [json.loads(line) for line in events_file.read_text(encoding="utf-8").strip().splitlines()]
         r_events = [e for e in lines if e["event"] == "checker_review"]
@@ -266,14 +286,19 @@ class TestMetricsLog(unittest.TestCase):
         self.assertEqual(r_events[0]["checker_family"], "claude")
         self.assertEqual(r_events[0]["maker_family"], "gemini")
 
-        # 無効な decision は拒絶されること
+        # 判定行のない出力ファイルは拒絶されること
+        out_invalid = io_dir / "review_invalid.txt"
+        out_invalid.write_text("MAYBE\n", encoding="utf-8")
         res_invalid = self._orch(
+            "--spec", str(spec_file),
             "record-review", "--task-id", "1",
-            "--decision", "MAYBE",
+            "--checker-output", str(out_invalid),
+            "--diff-file", str(diff_file),
+            "--spec-file", str(spec_file),
             "--checker-model", "claude-opus-5-5-medium",
             "--maker-model", "gemini-3.8-flash",
         )
-        self.assertEqual(res_invalid.returncode, 2)
+        self.assertEqual(res_invalid.returncode, 4)
 
     def test_metrics_non_interference_when_write_fails_across_all_gates(self) -> None:
         """書き込み先がディレクトリで塞がれていても、全ゲートの動作・終了コードが一切変わらないこと。"""
@@ -334,13 +359,31 @@ class TestMetricsLog(unittest.TestCase):
         self.assertIn("METRICS_WARNING", rb_res.stderr)
 
         # 6. record-review
+        v2_res = self._orch(
+            "--verify-script", str(self.verify),
+            "verify-step", "--checkpoint", new_head, "--task-id", "1",
+        )
+        self.assertEqual(v2_res.returncode, 0, v2_res.stderr)
+        io_dir = Path(self._tmp.name) / "checker_io_6"
+        self.assertEqual(
+            self._orch("review-input", "--task-id", "1", "--out-dir", str(io_dir)).returncode,
+            0,
+        )
+        spec_file = io_dir / "spec.md"
+        spec_file.write_text("# SPEC\n", encoding="utf-8")
+        out_ok = io_dir / "review_ok.txt"
+        out_ok.write_text("OK\nDECISION: APPROVE\n", encoding="utf-8")
         rr_res = self._orch(
+            "--spec", str(spec_file),
             "record-review", "--task-id", "1",
+            "--checker-output", str(out_ok),
+            "--diff-file", str(io_dir / "diff.patch"),
+            "--spec-file", str(spec_file),
             "--decision", "APPROVE",
             "--checker-model", "claude-opus-5-5-medium",
             "--maker-model", "gemini-3.8-flash",
         )
-        self.assertEqual(rr_res.returncode, 0)
+        self.assertEqual(rr_res.returncode, 0, rr_res.stderr)
         self.assertIn("METRICS_WARNING", rr_res.stderr)
 
     def test_audit_stage_event_recorded_on_success(self) -> None:

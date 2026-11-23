@@ -123,11 +123,26 @@ def _complete_task_via_lowlevel_cli(
     if vs.returncode != 0:
         raise AssertionError(f"verify-step failed in {wt_dir}: {vs.stderr}")
 
+    io_dir = wt_dir / ".dev" / "checker_io"
+    ri = _run_cli(wt_dir, "review-input", "--task-id", task_id, "--out-dir", str(io_dir))
+    if ri.returncode != 0:
+        raise AssertionError(f"review-input failed in {wt_dir}: {ri.stderr}")
+    spec_file = io_dir / "spec.md"
+    spec_file.write_text((wt_dir / "SPEC.md").read_text(encoding="utf-8"), encoding="utf-8")
+    out_file = io_dir / "review.txt"
+    out_file.write_text("Looks good\nDECISION: APPROVE\n", encoding="utf-8")
+
     rr = _run_cli(
         wt_dir,
         "record-review",
         "--task-id",
         task_id,
+        "--checker-output",
+        str(out_file),
+        "--diff-file",
+        str(io_dir / "diff.patch"),
+        "--spec-file",
+        str(spec_file),
         "--decision",
         "APPROVE",
         "--maker-model",

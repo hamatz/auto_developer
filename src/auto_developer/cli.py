@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -41,7 +43,12 @@ from auto_developer.multi_team import (
 )
 from auto_developer.orchestrator import NightlyOrchestrator
 from auto_developer.reporter import MorningReporter
-from auto_developer.runner import CommandRunnerAdapter, MockRunnerAdapter, RunnerAdapter
+from auto_developer.runner import (
+    CommandRunnerAdapter,
+    MockRunnerAdapter,
+    RunnerAdapter,
+    parse_checker_decision_from_text,
+)
 from auto_developer.verifier import DeterministicVerifier
 
 VERSION = "0.8.0"
@@ -260,6 +267,29 @@ def _parse_owns_arg(raw_owns: list[str] | None) -> list[str] | None:
             if cleaned:
                 patterns.append(cleaned)
     return patterns
+
+
+def _compute_canonical_diff(work_dir: Path, checkpoint: str) -> bytes:
+    """GATE-5: 作業ツリーのインデックスを変更せず、checkpoint から未追跡ファイルを含む正規の差分を算出する。"""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_index = Path(tmp_dir) / "index"
+        env = dict(os.environ)
+        env["GIT_INDEX_FILE"] = str(tmp_index)
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=work_dir,
+            env=env,
+            check=True,
+            capture_output=True,
+        )
+        proc = subprocess.run(
+            ["git", "diff", "--cached", "--no-color", "--no-ext-diff", "--no-renames", checkpoint],
+            cwd=work_dir,
+            env=env,
+            check=True,
+            capture_output=True,
+        )
+        return proc.stdout
 
 
 def _resolve_cli_team_context(
@@ -656,14 +686,24 @@ def main(argv: list[str] | None = None) -> int:
     rollback_parser.add_argument("--task-id", type=str, required=True, help="Task ID to mark failed")
     rollback_parser.add_argument("--reason", type=str, default="Verification failed", help="Failure reason")
 
+    # Subcommand: review-input (GATE-5)
+    review_input_parser = subparsers.add_parser(
+        "review-input", help="Write canonical diff for Checker review without modifying git index"
+    )
+    review_input_parser.add_argument("--task-id", type=str, required=True, help="Task ID")
+    review_input_parser.add_argument("--out-dir", type=Path, required=True, help="Output directory")
+
     # Subcommand: record-review
-    review_parser = subparsers.add_parser("record-review", help="Record Checker review outcome to metrics log")
+    review_parser = subparsers.add_parser("record-review", help="Record Checker review outcome from output file")
     review_parser.add_argument("--task-id", type=str, required=True, help="Task ID")
+    review_parser.add_argument("--checker-output", type=Path, default=None, help="Path to Checker output file")
+    review_parser.add_argument("--diff-file", type=Path, default=None, help="Path to canonical diff file")
+    review_parser.add_argument("--spec-file", type=Path, default=None, help="Path to SPEC excerpt file")
     review_parser.add_argument(
         "--decision",
         type=str,
-        required=True,
-        help="Review decision (APPROVE or REJECT)",
+        default=None,
+        help="Optional declared decision (verified against --checker-output)",
     )
     review_parser.add_argument("--checker-model", type=str, required=True, help="Checker model")
     review_parser.add_argument("--maker-model", type=str, required=True, help="Maker model")
@@ -1439,11 +1479,46 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ROLLED BACK TO {args.checkpoint} (Work quarantined to: {quarantine_branch or 'none'})")
         return 0
 
+    elif args.subcommand == "review-input":
+        team_ctx, ctx_err = _resolve_cli_team_context(
+            work_dir,
+            ref="HEAD",
+            explicit_plan=args.plan,
+        )
+        if ctx_err != 0:
+            return ctx_err
+        evidence_store = EvidenceStore(repo_dir=work_dir)
+        review_evidence = evidence_store.get_evidence(args.task_id)
+        if review_evidence is None:
+            print(f"EVIDENCE_ERROR: No valid verification evidence for task {args.task_id}", file=sys.stderr)
+            return 3
+        checkpoint = str(review_evidence.get("checkpoint", "")).strip()
+        if not checkpoint:
+            print(f"EVIDENCE_ERROR: Evidence for task {args.task_id} has no checkpoint", file=sys.stderr)
+            return 3
+        try:
+            diff_bytes = _compute_canonical_diff(work_dir, checkpoint)
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR: Failed to compute canonical diff from {checkpoint}: {e}", file=sys.stderr)
+            return 3
+        out_dir: Path = args.out_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        diff_out = out_dir / "diff.patch"
+        diff_out.write_bytes(diff_bytes)
+        print(f"REVIEW_INPUT_WRITTEN: {diff_out}")
+        return 0
+
     elif args.subcommand == "record-review":
-        dec = (args.decision or "").strip().upper()
-        if dec not in ("APPROVE", "REJECT"):
-            print(f"ERROR: --decision must be APPROVE or REJECT (got '{args.decision}')", file=sys.stderr)
+        if args.checker_output is None or args.diff_file is None or args.spec_file is None:
+            print(
+                "ERROR: Legacy record-review without --checker-output/--diff-file/--spec-file is no longer supported.\n"
+                "Usage: auto-dev record-review --task-id N --checker-output FILE --diff-file FILE "
+                "--spec-file FILE --maker-model M --checker-model M [--maker-family F] "
+                "[--checker-family F] [--decision D] [--reason R]",
+                file=sys.stderr,
+            )
             return 2
+
         team_ctx, ctx_err = _resolve_cli_team_context(
             work_dir,
             ref="HEAD",
@@ -1464,6 +1539,86 @@ def main(argv: list[str] | None = None) -> int:
         if checker_fam_err is not None:
             print(f"PRE-FLIGHT MODEL POLICY ERROR (--checker-family): {checker_fam_err}", file=sys.stderr)
             return 2
+
+        evidence_store = EvidenceStore(repo_dir=work_dir)
+        target_evidence = evidence_store.get_evidence(args.task_id)
+        if target_evidence is None:
+            print(f"EVIDENCE_ERROR: No valid verification evidence for task {args.task_id}", file=sys.stderr)
+            return 3
+
+        checker_output_path: Path = args.checker_output
+        if not checker_output_path.is_file():
+            print(
+                f"CHECKER_POLICY_VIOLATION: Checker output file not found: {checker_output_path}",
+                file=sys.stderr,
+            )
+            return 4
+        try:
+            output_text = checker_output_path.read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"CHECKER_POLICY_VIOLATION: Failed to read checker output: {e}", file=sys.stderr)
+            return 4
+
+        dec = parse_checker_decision_from_text(output_text)
+        if dec is None:
+            print(
+                "CHECKER_POLICY_VIOLATION: Checker output must contain exactly one DECISION line (APPROVE or REJECT)",
+                file=sys.stderr,
+            )
+            return 4
+
+        if args.decision is not None:
+            declared = args.decision.strip().upper()
+            if declared != dec:
+                print(
+                    f"CHECKER_POLICY_VIOLATION: Declared --decision '{declared}' does not match checker output '{dec}'",
+                    file=sys.stderr,
+                )
+                return 4
+
+        diff_file: Path = args.diff_file
+        if not diff_file.is_file():
+            print(f"EVIDENCE_ERROR: Diff file not found: {diff_file}", file=sys.stderr)
+            return 3
+        checkpoint = str(target_evidence.get("checkpoint", "")).strip()
+        try:
+            expected_diff = _compute_canonical_diff(work_dir, checkpoint)
+        except subprocess.CalledProcessError as e:
+            print(f"EVIDENCE_ERROR: Failed to compute canonical diff: {e}", file=sys.stderr)
+            return 3
+        if diff_file.read_bytes() != expected_diff:
+            print("EVIDENCE_ERROR: --diff-file does not match current canonical diff", file=sys.stderr)
+            return 3
+
+        spec_excerpt_file: Path = args.spec_file
+        if not spec_excerpt_file.is_file():
+            print(f"CHECKER_POLICY_VIOLATION: Spec file not found: {spec_excerpt_file}", file=sys.stderr)
+            return 4
+        spec_excerpt = spec_excerpt_file.read_text(encoding="utf-8")
+        full_spec = spec_path.read_text(encoding="utf-8") if spec_path.exists() else ""
+        if not spec_excerpt.strip() or spec_excerpt not in full_spec:
+            print(
+                "CHECKER_POLICY_VIOLATION: --spec-file must be a non-empty contiguous excerpt of SPEC.md",
+                file=sys.stderr,
+            )
+            return 4
+
+        evidence_store.record_review(
+            task_id=args.task_id,
+            evidence=target_evidence,
+            decision=dec,
+            checker_output_path=checker_output_path,
+            diff_path=diff_file,
+            spec_path=spec_excerpt_file,
+            maker_model=args.maker_model,
+            maker_family=maker_fam,
+            maker_family_source=maker_fam_source,
+            checker_model=args.checker_model,
+            checker_family=checker_fam,
+            checker_family_source=checker_fam_source,
+            reason=args.reason or "",
+        )
+
         metrics = MetricsLog(repo_dir=work_dir, plan_path=effective_plan_path)
         metrics.record_event(
             "checker_review",

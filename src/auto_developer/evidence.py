@@ -187,6 +187,101 @@ class EvidenceStore:
         except (OSError, json.JSONDecodeError):
             return None
 
+    def get_evidence(self, task_id: str) -> dict[str, Any] | None:
+        """指定タスクの有効な検証証跡（未消費）を取得する。"""
+        import json
+
+        path = self.evidence_dir / f"task_{task_id}.json"
+        if not path.exists():
+            return None
+        try:
+            data = cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if str(data.get("task_id")) != str(task_id):
+            return None
+        return data
+
+    def record_review(
+        self,
+        *,
+        task_id: str,
+        evidence: dict[str, Any],
+        decision: str,
+        checker_output_path: Path,
+        diff_path: Path,
+        spec_path: Path,
+        maker_model: str,
+        maker_family: str,
+        maker_family_source: str,
+        checker_model: str,
+        checker_family: str,
+        checker_family_source: str,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """GATE-5: 査読の3ファイルの写しを Evidence 保存先へ置き、照合用メタデータを記録する。"""
+        import hashlib
+        import json
+        import shutil
+        import time
+
+        self.evidence_dir.mkdir(parents=True, exist_ok=True)
+        reviews_dir = self.evidence_dir / "reviews"
+        copies_dir = reviews_dir / f"task_{task_id}"
+        copies_dir.mkdir(parents=True, exist_ok=True)
+
+        out_copy = copies_dir / "checker_output.txt"
+        diff_copy = copies_dir / "diff.patch"
+        spec_copy = copies_dir / "spec_excerpt.md"
+        shutil.copyfile(checker_output_path, out_copy)
+        shutil.copyfile(diff_path, diff_copy)
+        shutil.copyfile(spec_path, spec_copy)
+
+        def _sha256(p: Path) -> str:
+            return hashlib.sha256(p.read_bytes()).hexdigest()
+
+        record: dict[str, Any] = {
+            "task_id": str(task_id),
+            "evidence_token": str(evidence.get("token", "")),
+            "evidence_issued_at": evidence.get("issued_at"),
+            "checkpoint": str(evidence.get("checkpoint", "")),
+            "decision": decision,
+            "checker_output_path": str(checker_output_path.resolve()),
+            "checker_output_sha256": _sha256(checker_output_path),
+            "diff_path": str(diff_path.resolve()),
+            "diff_sha256": _sha256(diff_path),
+            "spec_path": str(spec_path.resolve()),
+            "spec_sha256": _sha256(spec_path),
+            "copies": {
+                "checker_output": str(out_copy),
+                "diff": str(diff_copy),
+                "spec": str(spec_copy),
+            },
+            "maker_model": maker_model,
+            "maker_family": maker_family,
+            "maker_family_source": maker_family_source,
+            "checker_model": checker_model,
+            "checker_family": checker_family,
+            "checker_family_source": checker_family_source,
+            "reason": reason,
+            "recorded_at": time.time(),
+        }
+        review_path = reviews_dir / f"task_{task_id}.json"
+        review_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        return record
+
+    def get_review_record(self, task_id: str) -> dict[str, Any] | None:
+        """指定タスクの査読記録を取得する。"""
+        import json
+
+        review_path = self.evidence_dir / "reviews" / f"task_{task_id}.json"
+        if not review_path.exists():
+            return None
+        try:
+            return cast(dict[str, Any], json.loads(review_path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            return None
+
     def clear_evidence(self, task_id: str | None = None) -> None:
         """証跡ファイルを破棄する。"""
         if task_id:
