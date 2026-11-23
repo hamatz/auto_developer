@@ -96,7 +96,7 @@
 - [x] 8. 記録の読み取り場所を `EvidenceStore` と同じ規則に一本化し、中身からの推測をやめる。フォールバック時は `COMPLETED` だけを成果に載せる。計画ファイルの指定経路を1つにし、`teams.json` の不正の扱いを揃える（Red-First）（BDL-5）
 - [x] 9. 雛形の受入テストで、検証スクリプトの Python を固定し、worktree の中の `.pyc` を条件なしで確かめる（TEAM-28）
 - [x] 10. `skills/nightly-run/SKILL.md` の単一チーム・チームの両経路の査読の手順を、`review-input` → 原文の SPEC の切り出し → Checker の終了と判定行の確認 → `record-review` → `commit-step` にする（CORE-12）
-- [ ] 11. 正規の差分で、機密の内容の規則に当たる行を決まった文字列に置き換え、`.env*`・鍵ファイル・SSH の鍵の名前のファイルは内容を出さずに変更の事実だけを示す。名前に `secret` / `token` / `credential` を含むだけのファイルは省略しない（Red-First）（GATE-8）
+- [x] 11. 正規の差分で、機密の内容の規則に当たる行を決まった文字列に置き換え、`.env*`・鍵ファイル・SSH の鍵の名前のファイルは内容を出さずに変更の事実だけを示す。名前に `secret` / `token` / `credential` を含むだけのファイルは省略しない（Red-First）（GATE-8）
 
 ## 止まっていること・判断待ち
 - （解決済み）ステップ 4（GATE-7 / BDL-4）: `SPEC.md` の GATE-5 / GATE-7 / CORE-12 が更新されたため、新しい規則に合わせて再実装・再検証する。
