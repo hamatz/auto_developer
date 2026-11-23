@@ -61,7 +61,8 @@
   - `test_bwrap_virtualenv_in_home_mounts_only_prefix_not_home`
   - `test_bwrap_virtualenv_in_home_subdirectory_mounts_only_bin_lib_not_entire_venv`
   - また、`tests/test_sandbox_preflight.py` の `test_linux_bwrap_unlaunchable_returns_none_and_apparmor_guidance` と `test_macos_sandbox_exec_unlaunchable_returns_none_and_guidance` に限り、(1) `patch.object(self.verifier, "_compute_nproc_limit", return_value=((500, 500), "applied: limit=500 (test)"))` で上限を固定し、(2) 引数なしの `_get_sandbox_backend()` を `_get_sandbox_backend(timeout_sec=30, nproc_limits=(500, 500))` に変えて `verify_candidate_test` と同じ値の組にすることのみ許可する（`assertEqual(len(captured), 1)` を含めアサーションは変えない）。
-  - 上記以外の既存テスト（特に `test_nproc_limit_computation_and_status_recording`、`test_rejects_class_without_test_methods_ran_zero`、`REPO_TAMPER_DETECTED` のテスト 506/562 行目付近）は変更せずそのまま通ること。
+  - また、`tests/test_red_verifier.py` の `test_repo_tamper_detected_when_parent_repo_modified` と `test_repo_tamper_detected_when_untracked_content_tampered_in_flight` に限り、`verify_candidate_test` を呼ぶ `with` に `patch.object(self.verifier, "_get_sandbox_backend", return_value=("sandbox-exec" if sys.platform == "darwin" else "bwrap"))` を足すことのみ許可する（`popen_router`、モックの出力、アサーションは変えない）。
+  - 上記以外の既存テスト（特に `test_nproc_limit_computation_and_status_recording`、`test_rejects_class_without_test_methods_ran_zero`）は変更せずそのまま通ること。
 - ステップ 2（GATE-5）: `record-review` を `--decision` だけで呼んでいる次の箇所を、新しい呼び方（`review-input` で作った差分、SPEC の切り出し、判定行を含む出力ファイルを渡す）に置き換えてよい。
   - `tests/test_metrics.py`（255, 272, 339 行目付近）。272 行目付近の不正な判定（`MAYBE`）の拒否は、判定行のない出力ファイルで終了コード 4 になることを確かめる形にしてよい。
   - `tests/test_dx7_model_families.py`（322, 338, 355 行目付近）
