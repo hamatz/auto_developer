@@ -292,7 +292,11 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
     - 作業ツリーのインデックスは変更しない。
     - 色・外部の diff ツール・リネームの検出に依存しない、決まった形式で書く（以下「正規の差分」）。
   - `auto-dev record-review --task-id N --checker-output FILE --diff-file FILE --spec-file FILE --maker-model M --checker-model M [--maker-family F] [--checker-family F] [--decision D] [--reason R]`: 3つのファイルを照合し、査読を記録する。
-    - 判定は、Checker の出力ファイルから CORE-6 の規則で読み取る。判定行がない場合、または APPROVE と REJECT が両方ある場合は、`CHECKER_POLICY_VIOLATION:` を出して終了コード 4 とし、査読を記録しない。
+    - 判定は、Checker の出力ファイルから、次の規則（CORE-6 を明確にしたもの。以下「判定の読み取りの規則」）で読み取る。`run` の経路（GATE-7）と `verify-bundle`（BDL-4）も同じ規則を使う。
+      - 出力全体（前後の空白を除く）が1つの JSON オブジェクトとして読め、`decision` が `APPROVE` または `REJECT` のときは、その判定とする。
+      - それ以外の出力では、判定行（行全体が `APPROVE` / `REJECT`。`DECISION:` の前置可）がちょうど1種類あるときに、その判定とする。
+      - 出力の一部に含まれる JSON（差分やコードの引用など）は、判定に使わない。
+    - 判定が1つに決まらない場合（判定行がない、APPROVE と REJECT が両方ある、など）は、`CHECKER_POLICY_VIOLATION:` を出して終了コード 4 とし、査読を記録しない。
     - `--decision` を指定した場合、出力から読み取った判定と食い違えば、終了コード 4 とする。
     - 対象のタスクに、検証を通った Evidence がない場合は、終了コード 3 とする。
     - `--diff-file` が、記録する時点の正規の差分と1バイトでも違う場合は、終了コード 3 とする。
@@ -314,6 +318,9 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - Checker に渡した正規の差分と SPEC
   - Checker の出力
   - それぞれの SHA-256
+  - 判定は、GATE-5 の判定の読み取りの規則で、Checker の出力から読み取る。どのアダプタ（外部コマンド・組み込みのモック・Python で書いたアダプタ）でも同じとし、`run_checker` の返り値の真偽値は、偽のときに不承認とするためだけに使う。
+  - 承認の場合: 3つのファイルと記録を GATE-5 と同じ場所・形式で保存し、発行する Evidence の記録の `checker.review` に GATE-6 と同じ項目を残す。検証の Evidence はまだないため、対応は査読した作業ツリーの Tree SHA と SPEC の SHA で示し、発行する Evidence と一致することを確かめる。
+  - 不承認の場合（判定が読み取れない場合を含む）: 3つのファイルと、GATE-5 と同じ形式の記録（各ファイルの SHA-256、判定、モデルと系統、記録した時刻）を `reviews/rejected/<job_id>/task_<id>/` に保存する。上書きしない。Evidence との対応は空とする。保存の成否は、タスクの失敗・隔離の結果を変えない。不承認の査読は Bundle に入れない。
 - [ ] **BDL-4 Bundle の査読の証跡**: 次の3点を変える。
   - Bundle には、収録するタスクごとに、査読の3つのファイルの写しを入れる。
   - `bundle_manifest.json` の `format_version` は 3 とする。
@@ -346,7 +353,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - [ ] **CORE-12 スキルの査読の手順**: `skills/nightly-run/SKILL.md` の単一チームとチームの両方の経路を、次の手順にする。
   1. `review-input` で差分を作る。
   2. SPEC の該当節を原文のまま切り出す。
-  3. Checker のプロセスが終わり、出力ファイルに判定行がちょうど1つあることを確かめる。完了の通知だけでは次に進まない。
+  3. Checker のプロセスが終わり、出力ファイルから GATE-5 の判定の読み取りの規則で判定が1つに決まることを確かめる。完了の通知だけでは次に進まない。
   4. `record-review` に3つのファイルを渡す。
   5. `commit-step` を実行する。
 - [ ] **GATE-8 正規の差分の機密（INV-5）**: `review-input` と `record-review` が作る正規の差分（GATE-5）で、次のように機密を出さない。
