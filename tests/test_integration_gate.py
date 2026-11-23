@@ -537,6 +537,9 @@ class TestIntegrationGateAcceptance(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo_dir, team_id)
 
         bundler = EvidenceBundler(repo_dir=self.repo_dir)
         bundle_path = self.repo_dir / f"bundle_{team_id}.zip"

@@ -95,7 +95,9 @@
 - [ ] 11. 正規の差分で、機密の内容の規則に当たる行を決まった文字列に置き換え、`.env*`・鍵ファイル・SSH の鍵の名前のファイルは内容を出さずに変更の事実だけを示す。名前に `secret` / `token` / `credential` を含むだけのファイルは省略しない（Red-First）（GATE-8）
 
 ## 止まっていること・判断待ち
-- なし。
+- （解決済み）ステップ 4（GATE-7 / BDL-4）: `SPEC.md` の GATE-5 / GATE-7 / CORE-12 が更新されたため、新しい規則に合わせて再実装・再検証する。
+  1. `SPEC.md` の GATE-5 / CORE-12（「判定行がない場合は拒否」）と、CORE-6 の JSON 形式受理の整合。
+  2. `GATE-7` の REJECT 経路の保存仕様。
 
 ## 人間が行うこと（Maker は実行しない）
 - [x] Phase 70 の準備コミット: SPEC.md（Phase 69 の要件を 4 章へ移し、欠陥のある4件に注記。INV-10 を追加。5.1 に Phase 70、5.2 に Phase 71 の要件）、PLAN.md、LESSONS.md、BACKLOG.md、docs/contracts/phase70.md、docs/contracts/phase70/immunity/（免疫テストの案）。

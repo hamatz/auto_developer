@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-BUNDLE_FORMAT_VERSION = 2
+BUNDLE_FORMAT_VERSION = 3
 
 
 def _get_tool_version() -> str:
@@ -229,6 +229,9 @@ class EvidenceBundler:
                 pass
 
             from auto_developer.dispatcher import get_plan_task_states, resolve_target_plan_path
+            from auto_developer.evidence import EvidenceStore
+
+            evidence_store = EvidenceStore(repo_dir=self.repo_dir)
 
             target_plan_path = resolve_target_plan_path(
                 self.repo_dir,
@@ -273,6 +276,32 @@ class EvidenceBundler:
                                         "reason": excl_reason,
                                     })
                                     continue
+
+                                checker_obj = data.get("checker", {})
+                                review_meta = (
+                                    checker_obj.get("review")
+                                    if isinstance(checker_obj, dict)
+                                    else None
+                                )
+                                reviews_task_dir = evidence_store.evidence_dir / "reviews" / f"task_{rec_task_id}"
+                                rev_out = reviews_task_dir / "checker_output.txt"
+                                rev_diff = reviews_task_dir / "diff.patch"
+                                rev_spec = reviews_task_dir / "spec_excerpt.md"
+                                if (
+                                    not isinstance(review_meta, dict)
+                                    or not rev_out.is_file()
+                                    or not rev_diff.is_file()
+                                    or not rev_spec.is_file()
+                                ):
+                                    excluded_records.append({
+                                        "task_id": rec_task_id,
+                                        "reason": "NO_REVIEW_EVIDENCE",
+                                    })
+                                    continue
+
+                                items_to_zip.append((rev_out, f"evidence/reviews/task_{rec_task_id}/checker_output.txt"))
+                                items_to_zip.append((rev_diff, f"evidence/reviews/task_{rec_task_id}/diff.patch"))
+                                items_to_zip.append((rev_spec, f"evidence/reviews/task_{rec_task_id}/spec_excerpt.md"))
 
                                 commit_val = data.get("commit", "")
                                 if isinstance(commit_val, dict):
@@ -441,10 +470,16 @@ class EvidenceBundler:
                 )
                 return result
             if format_version < BUNDLE_FORMAT_VERSION:
-                result.errors.append(
-                    f"Unsupported bundle format_version={format_version}: "
-                    "v0.8 以前の形式です。v0.8.0 の auto-dev で検証してください。"
-                )
+                if format_version < 2:
+                    result.errors.append(
+                        f"Unsupported bundle format_version={format_version}: "
+                        "v0.8 以前の形式です。v0.8.0 の auto-dev で検証してください。"
+                    )
+                else:
+                    result.errors.append(
+                        f"Unsupported bundle format_version={format_version}: "
+                        "v0.9 開発版までの形式です。v0.9 系の auto-dev で検証してください。"
+                    )
                 return result
             if format_version > BUNDLE_FORMAT_VERSION:
                 result.errors.append(
@@ -731,6 +766,43 @@ class EvidenceBundler:
                                 f"Task {task_id} has invalid Checker decision: {decision} (expected APPROVE)"
                             )
 
+                        # BDL-4: 査読の証跡（checker.review、3ファイルのSHA-256、出力ファイルのCORE-6判定）を検証
+                        review_meta = checker.get("review") if isinstance(checker, dict) else None
+                        if not isinstance(review_meta, dict):
+                            result.errors.append(
+                                f"Task {task_id} is missing checker.review metadata"
+                            )
+                        else:
+                            from auto_developer.runner import parse_checker_decision
+
+                            rev_dir = evidence_dir / "reviews" / f"task_{task_id}"
+                            rev_files = {
+                                "output_sha256": rev_dir / "checker_output.txt",
+                                "diff_sha256": rev_dir / "diff.patch",
+                                "spec_sha256": rev_dir / "spec_excerpt.md",
+                            }
+                            for sha_key, f_path in rev_files.items():
+                                expected_sha = str(review_meta.get(sha_key, "")).strip()
+                                if not f_path.is_file():
+                                    result.errors.append(
+                                        f"Task {task_id} missing bundled review file: {f_path.name}"
+                                    )
+                                elif not expected_sha or self._calc_sha256(f_path) != expected_sha:
+                                    result.errors.append(
+                                        f"Task {task_id} review file hash mismatch for {f_path.name}"
+                                    )
+                            out_file = rev_files["output_sha256"]
+                            if out_file.is_file():
+                                try:
+                                    out_txt = out_file.read_text(encoding="utf-8")
+                                except OSError:
+                                    out_txt = ""
+                                parsed_out_dec = parse_checker_decision(out_txt)
+                                if parsed_out_dec != "APPROVE":
+                                    result.errors.append(
+                                        f"Task {task_id} bundled checker_output.txt decision is not APPROVE (got {parsed_out_dec})"
+                                    )
+
                         # Status の検証
                         if status != "COMPLETED":
                             result.errors.append(
@@ -892,15 +964,27 @@ class EvidenceBundler:
                 except (json.JSONDecodeError, OSError) as e:
                     result.warnings.append(f"Failed to parse evidence/audit_stage.json: {e}")
 
+        excluded_list = manifest_data.get("excluded_records", []) if isinstance(manifest_data, dict) else []
+        no_review_ids = [
+            str(e.get("task_id", "")).strip()
+            for e in excluded_list
+            if isinstance(e, dict) and e.get("reason") == "NO_REVIEW_EVIDENCE"
+        ]
+        if no_review_ids:
+            result.warnings.append(
+                f"NO_REVIEW_EVIDENCE: Tasks excluded due to missing review evidence: {', '.join(no_review_ids)}"
+            )
+
         if result.errors:
             result.status = "INVALID"
             result.is_valid = False
-        elif approved_records_count == 0 or len(result.tasks) == 0:
+        elif approved_records_count == 0 or len(result.tasks) == 0 or no_review_ids:
             result.status = "INTEGRITY_ONLY"
             result.is_valid = False
-            result.warnings.append(
-                "Audit rejected: No verified Evidence Records found in bundle (Integrity preserved, but approval cannot be proven)"
-            )
+            if approved_records_count == 0 or len(result.tasks) == 0:
+                result.warnings.append(
+                    "Audit rejected: No verified Evidence Records found in bundle (Integrity preserved, but approval cannot be proven)"
+                )
         else:
             result.status = "VERIFIED"
             result.is_valid = True

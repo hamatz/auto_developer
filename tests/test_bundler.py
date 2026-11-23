@@ -63,6 +63,9 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "1")
 
         # .dev/job_state.json
         dev_dir = self.repo / ".dev"
@@ -144,6 +147,9 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "1")
 
         bundler = EvidenceBundler(repo_dir=self.repo)
         out_zip = bundler.create_bundle(dest_path=self.repo / "valid_bundle.zip")
@@ -183,6 +189,9 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "1")
 
         bundler = EvidenceBundler(repo_dir=self.repo)
         out_zip = bundler.create_bundle(dest_path=self.repo / "dict_commit_bundle.zip")
@@ -248,6 +257,10 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "2")
+        ensure_synthetic_review_evidence(self.repo, "3")
 
         bundler = EvidenceBundler(repo_dir=self.repo)
         out_zip = bundler.create_bundle(dest_path=self.repo / "all_locations.zip")
@@ -280,6 +293,9 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "1")
 
         bundler = EvidenceBundler(repo_dir=self.repo)
         valid_zip = bundler.create_bundle(dest_path=self.repo / "valid_audit.zip")
@@ -311,6 +327,9 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "1", checker_output="Bad logic\nDECISION: REJECT\n")
         rejected_zip = bundler.create_bundle(dest_path=self.repo / "rejected.zip")
         res_rejected = bundler.verify_bundle(rejected_zip)
         self.assertEqual(res_rejected.status, "INVALID")
@@ -332,6 +351,9 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "synthetic")
 
         bundler = EvidenceBundler(repo_dir=self.repo)
         synth_zip = bundler.create_bundle(dest_path=self.repo / "synthetic_bundle.zip")
@@ -905,7 +927,7 @@ class TestEvidenceBundler(unittest.TestCase):
 
         self.assertIn("format_version", manifest)
         self.assertIs(type(manifest["format_version"]), int)
-        self.assertEqual(manifest["format_version"], 2)
+        self.assertEqual(manifest["format_version"], 3)
         self.assertEqual(manifest.get("tool_version"), auto_developer.__version__)
         self.assertEqual(manifest.get("tool_version"), VERSION)
 
@@ -972,9 +994,9 @@ class TestEvidenceBundler(unittest.TestCase):
             if bad_fv == 1:
                 self.assertEqual(main(["--work-dir", str(self.repo), "verify-bundle", str(bad_zip)]), 1)
 
-        # 未対応の将来バージョン (3) も拒否すること
+        # 未対応の将来バージョン (4) も拒否すること
         future_zip = self.repo / "rel1_future_fv.zip"
-        self._rewrite_manifest(base_zip, future_zip, lambda m: m.__setitem__("format_version", 3))
+        self._rewrite_manifest(base_zip, future_zip, lambda m: m.__setitem__("format_version", 4))
         res_future = bundler.verify_bundle(future_zip)
         self.assertFalse(res_future.is_valid)
         self.assertEqual(res_future.status, "INVALID")
@@ -1033,6 +1055,9 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "1")
         # 2, 3, 8 (前フェーズ残骸), 90 (コメント内), 91 (別節): 古い SPEC hash を持つ対象外レコード
         stale_spec_hash = "0" * 64
         for stale_id in ["2", "3", "8", "90", "91"]:
@@ -1115,6 +1140,9 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "2")
 
         # Case 1: 番号なしの行のみ（parse_plan が空）
         bundler = EvidenceBundler(repo_dir=self.repo)
@@ -1234,6 +1262,9 @@ class TestEvidenceBundler(unittest.TestCase):
                 }),
                 encoding="utf-8",
             )
+            from review_test_helpers import ensure_synthetic_review_evidence
+
+            ensure_synthetic_review_evidence(core_wt, "1")
             (wt_ev / "task_2.json").write_text(
                 json.dumps({
                     "task_id": "2",

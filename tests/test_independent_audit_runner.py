@@ -229,6 +229,9 @@ class T(unittest.TestCase):
             "timestamp": "2026-11-14T12:00:00Z",
         }
         (records_dir / "task_1.json").write_text(json.dumps(record), encoding="utf-8")
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo_dir, "1")
 
         bundler = EvidenceBundler(repo_dir=self.repo_dir)
         bundle_path = self.repo_dir / "valid_bundle.zip"

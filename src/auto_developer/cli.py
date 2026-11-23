@@ -3,11 +3,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -17,7 +15,7 @@ from auto_developer.boundary import BoundaryGuard
 from auto_developer.bundler import EvidenceBundler
 from auto_developer.demo import run_demo
 from auto_developer.dispatcher import TaskDispatcher
-from auto_developer.evidence import EvidenceStore
+from auto_developer.evidence import EvidenceStore, compute_canonical_diff
 from auto_developer.guard import GitGuard
 from auto_developer.manifest import (
     ManifestValidationError,
@@ -48,7 +46,7 @@ from auto_developer.runner import (
     CommandRunnerAdapter,
     MockRunnerAdapter,
     RunnerAdapter,
-    parse_checker_decision_from_text,
+    parse_checker_decision,
 )
 from auto_developer.verifier import DeterministicVerifier
 
@@ -271,26 +269,8 @@ def _parse_owns_arg(raw_owns: list[str] | None) -> list[str] | None:
 
 
 def _compute_canonical_diff(work_dir: Path, checkpoint: str) -> bytes:
-    """GATE-5: 作業ツリーのインデックスを変更せず、checkpoint から未追跡ファイルを含む正規の差分を算出する。"""
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_index = Path(tmp_dir) / "index"
-        env = dict(os.environ)
-        env["GIT_INDEX_FILE"] = str(tmp_index)
-        subprocess.run(
-            ["git", "add", "-A"],
-            cwd=work_dir,
-            env=env,
-            check=True,
-            capture_output=True,
-        )
-        proc = subprocess.run(
-            ["git", "diff", "--cached", "--no-color", "--no-ext-diff", "--no-renames", checkpoint],
-            cwd=work_dir,
-            env=env,
-            check=True,
-            capture_output=True,
-        )
-        return proc.stdout
+    """GATE-5: compute_canonical_diff への委譲。"""
+    return compute_canonical_diff(work_dir, checkpoint)
 
 
 def _resolve_cli_team_context(
@@ -1700,7 +1680,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"CHECKER_POLICY_VIOLATION: Failed to read checker output: {e}", file=sys.stderr)
             return 4
 
-        dec = parse_checker_decision_from_text(output_text)
+        dec = parse_checker_decision(output_text)
         if dec is None:
             print(
                 "CHECKER_POLICY_VIOLATION: Checker output must contain exactly one DECISION line (APPROVE or REJECT)",

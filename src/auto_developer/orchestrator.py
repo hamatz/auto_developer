@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -191,6 +192,116 @@ class NightlyOrchestrator:
         except OSError as e:
             print(f"LOCK ERROR: Could not open lock file {lock_file}: {e}", file=sys.stderr)
             return 2
+
+    def _record_gate7_review(
+        self,
+        *,
+        task_id: str,
+        evidence: dict[str, Any],
+        decision: str,
+        checker_output_text: str,
+        diff_bytes: bytes,
+        spec_text: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """GATE-7: Checker 起動時の入出力3ファイルを GATE-5 と同じ形式で Evidence 保存先へ記録する。"""
+        with tempfile.TemporaryDirectory() as review_tmp:
+            tmp_dir = Path(review_tmp)
+            out_p = tmp_dir / "checker_output.txt"
+            diff_p = tmp_dir / "diff.patch"
+            spec_p = tmp_dir / "spec_excerpt.md"
+            out_p.write_text(checker_output_text, encoding="utf-8")
+            diff_p.write_bytes(diff_bytes)
+            spec_p.write_text(spec_text, encoding="utf-8")
+            c_fam_rec, c_src_rec = ("unknown", "inferred")
+            m_fam_rec, m_src_rec = ("unknown", "inferred")
+            if self.checker_model or self.maker_model:
+                from auto_developer.audit import resolve_model_family
+
+                if self.checker_model:
+                    c_fam_rec, c_src_rec = resolve_model_family(self.checker_model, self.checker_family)
+                if self.maker_model:
+                    m_fam_rec, m_src_rec = resolve_model_family(self.maker_model, self.maker_family)
+            return self.evidence_store.record_review(
+                task_id=task_id,
+                evidence=evidence,
+                decision=decision,
+                checker_output_path=out_p,
+                diff_path=diff_p,
+                spec_path=spec_p,
+                maker_model=self.maker_model or "",
+                maker_family=m_fam_rec,
+                maker_family_source=m_src_rec,
+                checker_model=self.checker_model or "",
+                checker_family=c_fam_rec,
+                checker_family_source=c_src_rec,
+                reason=reason,
+            )
+
+    def _save_rejected_gate7_review(
+        self,
+        *,
+        job_id: str,
+        task_id: str,
+        decision: str,
+        checker_output_text: str,
+        diff_bytes: bytes,
+        spec_text: str,
+        reason: str,
+    ) -> None:
+        """GATE-7: 不承認時の査読入出力3ファイルと GATE-5 形式の記録を上書きせず保存する（失敗・隔離結果を変えない）。"""
+        import hashlib
+
+        try:
+            base_dir = self.evidence_store.evidence_dir / "reviews" / "rejected" / job_id / f"task_{task_id}"
+            idx = 1
+            while (base_dir / f"attempt_{idx}").exists():
+                idx += 1
+            attempt_dir = base_dir / f"attempt_{idx}"
+            attempt_dir.mkdir(parents=True, exist_ok=False)
+
+            out_p = attempt_dir / "checker_output.txt"
+            diff_p = attempt_dir / "diff.patch"
+            spec_p = attempt_dir / "spec_excerpt.md"
+            out_p.write_text(checker_output_text, encoding="utf-8")
+            diff_p.write_bytes(diff_bytes)
+            spec_p.write_text(spec_text, encoding="utf-8")
+
+            c_fam, c_src = ("unknown", "inferred")
+            m_fam, m_src = ("unknown", "inferred")
+            if self.checker_model or self.maker_model:
+                from auto_developer.audit import resolve_model_family
+
+                if self.checker_model:
+                    c_fam, c_src = resolve_model_family(self.checker_model, self.checker_family)
+                if self.maker_model:
+                    m_fam, m_src = resolve_model_family(self.maker_model, self.maker_family)
+
+            record = {
+                "task_id": str(task_id),
+                "evidence_token": "",
+                "decision": decision,
+                "checker_output_path": str(out_p),
+                "checker_output_sha256": hashlib.sha256(out_p.read_bytes()).hexdigest(),
+                "diff_path": str(diff_p),
+                "diff_sha256": hashlib.sha256(diff_p.read_bytes()).hexdigest(),
+                "spec_path": str(spec_p),
+                "spec_sha256": hashlib.sha256(spec_p.read_bytes()).hexdigest(),
+                "maker_model": self.maker_model or "",
+                "maker_family": m_fam,
+                "maker_family_source": m_src,
+                "checker_model": self.checker_model or "",
+                "checker_family": c_fam,
+                "checker_family_source": c_src,
+                "reason": reason,
+                "recorded_at": time.time(),
+            }
+            (attempt_dir / "review.json").write_text(
+                json.dumps(record, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"Warning: Failed to save rejected review artifacts: {e}", file=sys.stderr)
 
     def _run_loop(self) -> int:
 
@@ -560,30 +671,43 @@ class NightlyOrchestrator:
             print("  [Phase D: Checker] Running independent review...")
             job_state.transition_phase("CHECKER")
             job_state.save(self.state_path)
-            diff_proc = self.git_guard._run_git(["diff", checkpoint])
-            diff_text = diff_proc.stdout
 
-            # 未追跡の新規作成ファイルも Checker への差分に含める
-            status_proc = self.git_guard._run_git(["status", "--porcelain"])
-            untracked_diffs: list[str] = []
-            for line in status_proc.stdout.splitlines():
-                if line.startswith("?? "):
-                    u_path = line[3:].strip().strip('"')
-                    full_p = self.repo_dir / u_path
-                    if full_p.is_file():
-                        try:
-                            content = full_p.read_text(encoding="utf-8")
-                            untracked_diffs.append(f"--- /dev/null\n+++ b/{u_path}\n@@ -0,0 +1 @@\n{content}")
-                        except (OSError, UnicodeDecodeError):
-                            pass
+            # GATE-7: 正規の差分を算出し、Checker に渡す
+            from auto_developer.evidence import compute_canonical_diff
+            from auto_developer.runner import CommandRunnerAdapter, parse_checker_decision
 
-            if untracked_diffs:
-                diff_text = (diff_text + "\n" + "\n".join(untracked_diffs)).strip()
+            canonical_diff_bytes = compute_canonical_diff(self.repo_dir, checkpoint)
+            diff_text = canonical_diff_bytes.decode("utf-8", errors="replace")
 
             spec_text = self.spec_path.read_text(encoding="utf-8") if self.spec_path.exists() else ""
+            reviewed_tree_sha = self.git_guard.get_working_tree_sha()
+            reviewed_spec_sha = self.git_guard.get_spec_sha(self.spec_path)
+            if isinstance(self.runner_adapter, CommandRunnerAdapter):
+                self.runner_adapter.last_checker_output = ""
             approved, checker_reason = self.runner_adapter.run_checker(task, diff=diff_text, spec_content=spec_text)
-            if not approved:
-                print(f"  Checker REJECTED task {task.task_id}: {checker_reason}", file=sys.stderr)
+            raw_checker_output = (
+                self.runner_adapter.last_checker_output
+                if isinstance(self.runner_adapter, CommandRunnerAdapter)
+                and self.runner_adapter.last_checker_output
+                else checker_reason
+            )
+            parsed_dec = parse_checker_decision(raw_checker_output)
+            if not approved or parsed_dec != "APPROVE":
+                reject_reason = checker_reason
+                if approved and parsed_dec != "APPROVE":
+                    reject_reason = (
+                        f"CHECKER_POLICY_VIOLATION: Checker output lacks unique DECISION: APPROVE line\n{checker_reason}"
+                    )
+                self._save_rejected_gate7_review(
+                    job_id=job_state.job_id,
+                    task_id=task.task_id,
+                    decision=parsed_dec or "UNKNOWN",
+                    checker_output_text=raw_checker_output,
+                    diff_bytes=canonical_diff_bytes,
+                    spec_text=spec_text,
+                    reason=reject_reason,
+                )
+                print(f"  Checker REJECTED task {task.task_id}: {reject_reason}", file=sys.stderr)
                 return self._handle_failure(
                     task,
                     checkpoint,
@@ -613,7 +737,7 @@ class NightlyOrchestrator:
             }
             if red_green_proof:
                 verification_meta["red_green_proof"] = red_green_proof
-            self.evidence_store.issue_evidence(
+            issued_ev = self.evidence_store.issue_evidence(
                 task.task_id,
                 checkpoint,
                 tree_sha=final_tree_sha,
@@ -624,8 +748,6 @@ class NightlyOrchestrator:
                     "attempts": task_attempts,
                 },
             )
-
-            # 3. 証跡の検証と消費（ツリー整合性照合）
             final_violations = self._check_boundary(checkpoint)
             if final_violations:
                 err_msg = f"BOUNDARY ERROR: Unauthorized files detected at commit gate: {final_violations}"
@@ -648,6 +770,35 @@ class NightlyOrchestrator:
                     attempt_2_log=second_log,
                     attempts=task_attempts,
                 )
+            if issued_ev.get("tree_sha") != reviewed_tree_sha or issued_ev.get("spec_sha") != reviewed_spec_sha:
+                err_msg = (
+                    f"Tree/SPEC SHA changed between Checker review ({reviewed_tree_sha[:8]}/{reviewed_spec_sha[:8]}) "
+                    f"and Evidence issuance ({final_tree_sha[:8]}/{spec_sha[:8]})"
+                )
+                print(f"  EVIDENCE ERROR: {err_msg}", file=sys.stderr)
+                return self._handle_failure(
+                    task,
+                    checkpoint,
+                    total_tasks,
+                    succeeded_tasks,
+                    job_state,
+                    "EVIDENCE_ERROR",
+                    err_msg,
+                    attempt_1_log=attempt_1_log,
+                    attempt_2_log=attempt_2_log,
+                    attempts=task_attempts,
+                )
+            review_rec = self._record_gate7_review(
+                task_id=task.task_id,
+                evidence=issued_ev,
+                decision=parsed_dec,
+                checker_output_text=raw_checker_output,
+                diff_bytes=canonical_diff_bytes,
+                spec_text=spec_text,
+                reason=checker_reason,
+            )
+
+            # 3. 証跡の検証と消費（ツリー整合性照合）
 
             current_tree = self.git_guard.get_working_tree_sha()
             current_spec = self.git_guard.get_spec_sha(self.spec_path)
@@ -704,10 +855,17 @@ class NightlyOrchestrator:
                 )
                 return 3
 
-            # 6. 永続監査レコード（Evidence Record）の保存 (機能N / P1-1, 機能U)
+            # 6. 永続監査レコード（Evidence Record）の保存 (機能N / P1-1, 機能U, GATE-7)
             checker_info: dict[str, Any] = {
                 "decision": "APPROVE",
                 "reason": checker_reason,
+                "review": {
+                    "output_sha256": review_rec["checker_output_sha256"],
+                    "diff_sha256": review_rec["diff_sha256"],
+                    "spec_sha256": review_rec["spec_sha256"],
+                    "recorded_at": review_rec["recorded_at"],
+                    "decision_source": "checker_output",
+                },
             }
             if self.checker_model or self.maker_model:
                 from auto_developer.audit import resolve_model_family

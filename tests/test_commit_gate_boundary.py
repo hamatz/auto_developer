@@ -132,7 +132,7 @@ class TestCommitGateBoundaryOrchestrator(unittest.TestCase):
             def run_checker(self, task: Any, diff: str, spec_content: str) -> tuple[bool, str]:
                 # Checker unexpectedly writes outside owns right before commit gate
                 (self.work_dir / "src" / "ui" / "checker_leak.py").write_text("LEAK = 1\n", encoding="utf-8")
-                return True, "APPROVE: with side effect"
+                return True, "APPROVE: with side effect\nDECISION: APPROVE"
 
         orch = NightlyOrchestrator(repo_dir=wt_dir, runner_adapter=RogueCheckerAdapter(wt_dir))
         exit_code = orch.run()

@@ -73,7 +73,7 @@ class _SuccessRunner(RunnerAdapter):
         return 0, f"created {self.filename}"
 
     def run_checker(self, task: Task, diff: str, spec_content: str) -> tuple[bool, str]:
-        return True, "APPROVE: implemented"
+        return True, "APPROVE: implemented\nDECISION: APPROVE"
 
 
 class _RejectingCheckerRunner(RunnerAdapter):

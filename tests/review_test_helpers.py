@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
+from typing import Any
 
 from auto_developer.evidence import EvidenceStore
 
@@ -97,3 +101,50 @@ def record_test_review(
         check=False,
         timeout=120,
     )
+
+
+def ensure_synthetic_review_evidence(
+    repo_dir: Path,
+    task_id: str,
+    *,
+    diff_text: str = "diff --git a/app.py b/app.py\n+pass\n",
+    spec_text: str = "# SPEC\n",
+    checker_output: str = "Synthetic review\nDECISION: APPROVE\n",
+) -> dict[str, Any]:
+    """BDL-4 テスト用ヘルパー: 製品コードを使わずに査読の3ファイルと checker.review を用意する。"""
+    git_path = repo_dir / ".git"
+    if git_path.is_dir():
+        ev_dir = git_path / "nightly_evidence"
+        candidate_recs = [
+            ev_dir / "records" / f"task_{task_id}.json",
+            ev_dir / "archive" / f"task_{task_id}.json",
+            repo_dir / ".dev" / "evidence" / f"task_{task_id}.json",
+        ]
+    else:
+        ev_dir = repo_dir / ".dev" / "evidence"
+        candidate_recs = [ev_dir / f"task_{task_id}.json"]
+
+    rev_dir = ev_dir / "reviews" / f"task_{task_id}"
+    rev_dir.mkdir(parents=True, exist_ok=True)
+    out_file = rev_dir / "checker_output.txt"
+    diff_file = rev_dir / "diff.patch"
+    spec_file = rev_dir / "spec_excerpt.md"
+    out_file.write_text(checker_output, encoding="utf-8")
+    diff_file.write_text(diff_text, encoding="utf-8")
+    spec_file.write_text(spec_text, encoding="utf-8")
+
+    review_meta: dict[str, Any] = {
+        "output_sha256": hashlib.sha256(out_file.read_bytes()).hexdigest(),
+        "diff_sha256": hashlib.sha256(diff_file.read_bytes()).hexdigest(),
+        "spec_sha256": hashlib.sha256(spec_file.read_bytes()).hexdigest(),
+        "recorded_at": time.time(),
+        "decision_source": "checker_output",
+    }
+    for rec_path in candidate_recs:
+        if rec_path.is_file():
+            data = json.loads(rec_path.read_text(encoding="utf-8"))
+            if isinstance(data.get("checker"), dict):
+                data["checker"]["review"] = review_meta
+                rec_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return review_meta
+

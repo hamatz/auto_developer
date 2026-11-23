@@ -241,7 +241,7 @@ class TestPostVerifyBoundaryOrchestrator(unittest.TestCase):
 
             def run_checker(self, task: Any, diff: str, spec_content: str) -> tuple[bool, str]:
                 self.checker_called += 1
-                return True, "APPROVE: clean"
+                return True, "APPROVE: clean\nDECISION: APPROVE"
 
         adapter = FixOnRetryAdapter(wt_dir)
         orch = NightlyOrchestrator(repo_dir=wt_dir, runner_adapter=adapter)

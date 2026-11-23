@@ -1,7 +1,33 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, cast
+
+
+def compute_canonical_diff(work_dir: Path, checkpoint: str) -> bytes:
+    """GATE-5: 作業ツリーのインデックスを変更せず、checkpoint から未追跡ファイルを含む正規の差分を算出する。"""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_index = Path(tmp_dir) / "index"
+        env = dict(os.environ)
+        env["GIT_INDEX_FILE"] = str(tmp_index)
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=work_dir,
+            env=env,
+            check=True,
+            capture_output=True,
+        )
+        proc = subprocess.run(
+            ["git", "diff", "--cached", "--no-color", "--no-ext-diff", "--no-renames", checkpoint],
+            cwd=work_dir,
+            env=env,
+            check=True,
+            capture_output=True,
+        )
+        return proc.stdout
 
 
 class EvidenceStore:

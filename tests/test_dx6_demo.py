@@ -157,7 +157,7 @@ class TestDx6DemoCommand(unittest.TestCase):
 
                 with zipfile.ZipFile(bundle_zip, "r") as zf:
                     manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
-                    self.assertEqual(manifest.get("format_version"), 2)
+                    self.assertEqual(manifest.get("format_version"), 3)
                     task_ids = [t.get("task_id") for t in manifest.get("tasks", [])]
                     self.assertEqual(task_ids, ["1", "2"])
 

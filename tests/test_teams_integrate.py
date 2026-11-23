@@ -188,6 +188,9 @@ def _record_synthetic_approved_commit(
         checker_info={"decision": "APPROVE", "reason": "ok"},
         verification_info={"exit_code": 0},
     )
+    from review_test_helpers import ensure_synthetic_review_evidence
+
+    ensure_synthetic_review_evidence(wt_dir, task_id)
     return commit_sha
 
 
@@ -544,6 +547,9 @@ class TestTeamsIntegrateCli(unittest.TestCase):
                 checker_info={"decision": "APPROVE", "reason": "ok"},
                 verification_info={"exit_code": 0},
             )
+            from review_test_helpers import ensure_synthetic_review_evidence
+
+            ensure_synthetic_review_evidence(wt, "1")
 
         res = _run_cli(self.repo_dir, "teams", "integrate", "--job-id", job_id)
         self.assertEqual(res.returncode, 0, f"stdout={res.stdout}\nstderr={res.stderr}")

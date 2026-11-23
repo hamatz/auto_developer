@@ -245,6 +245,9 @@ class TestMultiTeamFoundation(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo_dir, "1")
 
         verified_bundle = bundler.create_bundle(dest_path=self.repo_dir / "audit_test_verified.zip")
         res_verified = bundler.verify_bundle(verified_bundle)
@@ -263,6 +266,7 @@ class TestMultiTeamFoundation(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        ensure_synthetic_review_evidence(self.repo_dir, "synthetic")
         synth_bundle = bundler.create_bundle(dest_path=self.repo_dir / "audit_test_synth.zip")
         res_synth = bundler.verify_bundle(synth_bundle)
         self.assertEqual(res_synth.status, "INVALID")
@@ -292,6 +296,7 @@ class TestMultiTeamFoundation(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        ensure_synthetic_review_evidence(self.repo_dir, "1")
         fake_commit_bundle = bundler.create_bundle(dest_path=self.repo_dir / "audit_test_fake_commit.zip")
         res_fake_commit = bundler.verify_bundle(fake_commit_bundle)
         self.assertEqual(res_fake_commit.status, "INVALID")

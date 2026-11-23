@@ -458,7 +458,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
                 def run_checker(self, task: Task, diff: str, spec_content: str):
                     if "feature.py" in diff:
-                        return True, "APPROVE: feature.py correctly implemented"
+                        return True, "APPROVE: feature.py correctly implemented\nDECISION: APPROVE"
                     return False, "REJECT: feature.py missing"
 
             state_file = repo_dir / ".dev" / "job_state.json"
@@ -2144,7 +2144,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
                     return 0, f"maker attempt {len(self.maker_calls)}"
 
                 def run_checker(self, task, diff, spec_content):
-                    return True, "APPROVE: looks good"
+                    return True, "APPROVE: looks good\nDECISION: APPROVE"
 
             runner = RetryMakerRunner()
             orchestrator = NightlyOrchestrator(
