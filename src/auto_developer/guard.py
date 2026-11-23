@@ -130,11 +130,13 @@ class GitGuard:
 
     def __init__(self, repo_dir: Path | None = None) -> None:
         self.repo_dir = repo_dir or Path.cwd()
+        self._last_working_tree_sha: str | None = None
 
-    def _run_git(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+    def _run_git(self, args: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git"] + args,
             cwd=self.repo_dir,
+            env=env,
             capture_output=True,
             text=True,
             check=True,
@@ -154,10 +156,18 @@ class GitGuard:
         return proc.stdout.strip()
 
     def get_working_tree_sha(self) -> str:
-        """現在の作業ツリーのステージ済み Git Tree SHA を取得する (git write-tree)。"""
-        self._run_git(["add", "-A"])
-        proc = self._run_git(["write-tree"])
-        return proc.stdout.strip()
+        """現在の作業ツリーの Git Tree SHA を一時インデックス (GIT_INDEX_FILE) で取得する (GATE-9)。"""
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_index = Path(tmp_dir) / "index"
+            env = {**os.environ, "GIT_INDEX_FILE": str(temp_index)}
+            self._run_git(["add", "-A"], env=env)
+            proc = self._run_git(["write-tree"], env=env)
+            tree_sha = proc.stdout.strip()
+        self._last_working_tree_sha = tree_sha
+        return tree_sha
 
     def get_commit_tree_sha(self, commit_ref: str = "HEAD") -> str:
         """指定したコミットの Git Tree SHA を取得する (git rev-parse <ref>^{tree})。"""
@@ -448,10 +458,14 @@ print(json.dumps(data))
 
         return True
 
-    def commit_task(self, task: Task) -> str:
-        """タスクの変更をアトミックにコミットする。すでにステージ済みのIndexから直接コミットを作成する。"""
+    def commit_task(self, task: Task, tree_sha: str | None = None) -> str:
+        """タスクの変更をアトミックにコミットする。指定または直前に求めた Tree SHA を read-tree してコミットする (GATE-9)。"""
+        target_tree = tree_sha or self._last_working_tree_sha
+        if target_tree:
+            self._run_git(["read-tree", target_tree])
         msg = f"feat: {task.title} [refs: {task.task_id}]"
         self._run_git(["commit", "-m", msg])
+        self._last_working_tree_sha = None
         return self.get_current_checkpoint()
 
     def get_current_branch(self) -> str:

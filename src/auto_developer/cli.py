@@ -1484,7 +1484,7 @@ def main(argv: list[str] | None = None) -> int:
                 **commit_event_base,
             )
             return 3
-        commit_hash = git_guard.commit_task(target)
+        commit_hash = git_guard.commit_task(target, tree_sha=current_tree_sha)
         committed_tree = git_guard.get_commit_tree_sha("HEAD")
         if committed_tree != current_tree_sha:
             print(

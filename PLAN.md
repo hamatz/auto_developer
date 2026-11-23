@@ -63,7 +63,7 @@
 ## ステップ
 - [x] 1. macOS で、Python の実行ファイルがシンボリックリンクでも候補テストを起動できるようにする。リンクの先までの途中のパスについて、リンクの読み取りとメタデータの読み取りだけを `literal` で許可する（Red: ホームの中に実際の Python を指すリンクを作り、それを使うと `SANDBOX_UNAVAILABLE` になる）（SBX-7）
 - [x] 2. Linux の `/opt` の確認から、Python の置き場所とその途中のディレクトリを除く（テストのみ。製品の挙動は変えない）（SBX-8）
-- [ ] 3. `verify-step`（`run` の経路を含む）で、作業ツリーの Tree SHA を一時的なインデックスで求め、本物のインデックスを変えない。`commit-step` は最後に求めた Tree SHA のツリーをそのままコミットする（Red: `verify-step` の後に、gitignore していない `.env` がステージされている）（GATE-9）
+- [x] 3. `verify-step`（`run` の経路を含む）で、作業ツリーの Tree SHA を一時的なインデックスで求め、本物のインデックスを変えない。`commit-step` は最後に求めた Tree SHA のツリーをそのままコミットする（Red: `verify-step` の後に、gitignore していない `.env` がステージされている）（GATE-9）
 - [ ] 4. `init` / `teams init` の `.gitignore` に `.env`・`.env.*`・`!.env.example` を加える。`verify-step` と `commit-step`（`run` の経路を含む）で、チェックポイントから追加・変更された `.env*`（例示用の3つを除く）・鍵ファイル・SSH の鍵の名前のファイルを `SECRET_FILE_IN_COMMIT:` で拒否する（Red: gitignore していない `.env` が `commit-step` でコミットされる）（GATE-10）
 - [ ] 5. `verify-step --checkpoint` に参照名を渡しても、Evidence・査読の記録・イベントに解決した SHA を記録する（Red-First）（DX-9）
 - [ ] 6. 追跡しているファイルからローカルの絶対パスを除き、環境変数で渡す形にする。追跡しているファイルを検査するテストを置く（Red: 検査のテストが、今の2ファイルで失敗する）（REL-5）

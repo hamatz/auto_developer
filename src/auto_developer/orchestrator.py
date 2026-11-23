@@ -836,7 +836,7 @@ class NightlyOrchestrator:
                 return 3
 
             # 4. コミット実行（固定されたインデックスから直接コミット）
-            commit_hash = self.git_guard.commit_task(task)
+            commit_hash = self.git_guard.commit_task(task, tree_sha=current_tree)
 
             # 5. コミットされた Git Commit の Tree SHA と Evidence Tree SHA の完全一致を検証
             committed_tree_sha = self.git_guard.get_commit_tree_sha(commit_hash)
