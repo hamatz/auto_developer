@@ -268,6 +268,18 @@ class TestDx7CliAndE2E(unittest.TestCase):
                     self.assertEqual(_git(repo, "rev-parse", "HEAD").stdout.strip(), checkpoint)
 
             # 2. 片方明示 (unknown モデル + llama)、片方推定 (deepseek-r1) でコミット成功
+            from review_test_helpers import record_test_review
+
+            rr_ok = record_test_review(
+                repo,
+                "1",
+                maker_model="my-local-model",
+                maker_family="llama",
+                checker_model="deepseek-r1",
+                reason="ok",
+            )
+            self.assertEqual(rr_ok.returncode, 0, rr_ok.stderr)
+
             res_ok = _run_cli(
                 repo,
                 "commit-step",
@@ -573,6 +585,16 @@ class TestDx7CliAndE2E(unittest.TestCase):
             self.assertEqual(v_res.returncode, 0, v_res.stderr)
 
             # 系統未指定のときは inferred が記録され、checker_json で上書きできないこと
+            from review_test_helpers import record_test_review
+
+            rr_res = record_test_review(
+                repo,
+                "1",
+                maker_model="gemini-3.8-flash",
+                checker_model="claude-opus-5.5",
+            )
+            self.assertEqual(rr_res.returncode, 0, rr_res.stderr)
+
             wrapper = Path(__file__).resolve().parents[1] / "scripts" / "nightly_orchestrator.py"
             res_commit = subprocess.run(
                 [

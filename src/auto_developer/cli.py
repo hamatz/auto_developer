@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -676,7 +677,12 @@ def main(argv: list[str] | None = None) -> int:
     commit_parser.add_argument("--checker-model", type=str, required=True, help="Model identifier for Checker")
     commit_parser.add_argument("--maker-family", type=str, default=None, help="Explicit model family for Maker")
     commit_parser.add_argument("--checker-family", type=str, default=None, help="Explicit model family for Checker")
-    commit_parser.add_argument("--checker-decision", type=str, required=True, help="Checker review decision (e.g. APPROVE)")
+    commit_parser.add_argument(
+        "--checker-decision",
+        type=str,
+        default=None,
+        help="Optional Checker review decision (verified against recorded review)",
+    )
     commit_parser.add_argument("--checker-reason", type=str, default=None, help="Checker review justification")
     commit_parser.add_argument("--checker-json", type=str, default=None, help="Checker review structured JSON string")
 
@@ -1280,15 +1286,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: Task {args.task_id} not found in {effective_plan_path}", file=sys.stderr)
             return 1
 
-        # Checker Policy 検査 (機能XXX.1 / AGENTS.md Rule 6 / DX-7)
-        decision = (args.checker_decision or "").strip().upper()
+        # Checker Policy 検査 (機能XXX.1 / AGENTS.md Rule 6 / DX-7 / GATE-6)
+        declared_decision = (
+            args.checker_decision.strip().upper() if args.checker_decision is not None else None
+        )
         maker_fam, maker_fam_source, _ = resolve_model_family_safe(args.maker_model, args.maker_family)
         checker_fam, checker_fam_source, _ = resolve_model_family_safe(
             args.checker_model, args.checker_family
         )
         commit_event_base: dict[str, Any] = {
             "task_id": args.task_id,
-            "checker_decision": decision,
+            "checker_decision": declared_decision or "",
             "checker_model": args.checker_model,
             "checker_family": checker_fam,
             "checker_family_source": checker_fam_source,
@@ -1297,7 +1305,7 @@ def main(argv: list[str] | None = None) -> int:
             "maker_family_source": maker_fam_source,
         }
 
-        if decision != "APPROVE":
+        if declared_decision is not None and declared_decision != "APPROVE":
             print(
                 f"CHECKER_POLICY_VIOLATION: Checker review decision must be APPROVE (got '{args.checker_decision}')",
                 file=sys.stderr,
@@ -1319,6 +1327,110 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not is_independent:
             print(f"CHECKER_POLICY_VIOLATION: {violation_msg}", file=sys.stderr)
+            metrics.record_event(
+                "commit_step",
+                result="CHECKER_POLICY_VIOLATION",
+                commit=None,
+                **commit_event_base,
+            )
+            return 4
+
+        # GATE-6: Evidence 消費前に、最新の検証に対応する査読記録・出力ファイル・差分・モデルを照合
+        commit_evidence = evidence_store.get_evidence(args.task_id)
+        if commit_evidence is None:
+            print(
+                f"EVIDENCE ERROR: No valid verification evidence found for task {args.task_id}.",
+                file=sys.stderr,
+            )
+            metrics.record_event(
+                "commit_step",
+                result="EVIDENCE_ERROR",
+                commit=None,
+                **commit_event_base,
+            )
+            return 3
+
+        review_record = evidence_store.get_review_record(args.task_id)
+        if review_record is None or str(review_record.get("evidence_token", "")) != str(
+            commit_evidence.get("token", "")
+        ):
+            print(
+                f"CHECKER_POLICY_VIOLATION: No recorded review matching the latest verification evidence for task {args.task_id}",
+                file=sys.stderr,
+            )
+            metrics.record_event(
+                "commit_step",
+                result="CHECKER_POLICY_VIOLATION",
+                commit=None,
+                **commit_event_base,
+            )
+            return 4
+
+        recorded_decision = str(review_record.get("decision", "")).strip().upper()
+        commit_event_base["checker_decision"] = recorded_decision
+        if recorded_decision != "APPROVE":
+            print(
+                f"CHECKER_POLICY_VIOLATION: Recorded review decision is '{recorded_decision}', must be APPROVE",
+                file=sys.stderr,
+            )
+            metrics.record_event(
+                "commit_step",
+                result="CHECKER_POLICY_VIOLATION",
+                commit=None,
+                **commit_event_base,
+            )
+            return 4
+
+        if declared_decision is not None and declared_decision != recorded_decision:
+            print(
+                f"CHECKER_POLICY_VIOLATION: Declared --checker-decision '{declared_decision}' does not match recorded '{recorded_decision}'",
+                file=sys.stderr,
+            )
+            metrics.record_event(
+                "commit_step",
+                result="CHECKER_POLICY_VIOLATION",
+                commit=None,
+                **commit_event_base,
+            )
+            return 4
+
+        recorded_out_path = Path(str(review_record.get("checker_output_path", "")))
+        if not recorded_out_path.is_file():
+            print(
+                f"CHECKER_POLICY_VIOLATION: Recorded checker output file missing: {recorded_out_path}",
+                file=sys.stderr,
+            )
+            metrics.record_event(
+                "commit_step",
+                result="CHECKER_POLICY_VIOLATION",
+                commit=None,
+                **commit_event_base,
+            )
+            return 4
+        actual_out_sha256 = hashlib.sha256(recorded_out_path.read_bytes()).hexdigest()
+        if actual_out_sha256 != str(review_record.get("checker_output_sha256", "")):
+            print(
+                "CHECKER_POLICY_VIOLATION: Checker output file was modified after record-review",
+                file=sys.stderr,
+            )
+            metrics.record_event(
+                "commit_step",
+                result="CHECKER_POLICY_VIOLATION",
+                commit=None,
+                **commit_event_base,
+            )
+            return 4
+
+        if (
+            str(review_record.get("maker_model", "")) != args.maker_model
+            or str(review_record.get("checker_model", "")) != args.checker_model
+            or str(review_record.get("maker_family", "")) != maker_fam
+            or str(review_record.get("checker_family", "")) != checker_fam
+        ):
+            print(
+                "CHECKER_POLICY_VIOLATION: Maker/Checker model or family does not match recorded review",
+                file=sys.stderr,
+            )
             metrics.record_event(
                 "commit_step",
                 result="CHECKER_POLICY_VIOLATION",
@@ -1349,6 +1461,28 @@ def main(argv: list[str] | None = None) -> int:
                     **commit_event_base,
                 )
                 return 3
+
+        try:
+            current_diff_bytes = _compute_canonical_diff(
+                work_dir, str(commit_evidence.get("checkpoint", chk_ref))
+            )
+            current_diff_sha256 = hashlib.sha256(current_diff_bytes).hexdigest()
+        except subprocess.CalledProcessError:
+            current_diff_sha256 = ""
+        if current_diff_sha256 != str(review_record.get("diff_sha256", "")):
+            print(
+                "EVIDENCE ERROR: Current canonical diff does not match recorded review diff.",
+                file=sys.stderr,
+            )
+            metrics.record_event(
+                "commit_step",
+                result="EVIDENCE_ERROR",
+                commit=None,
+                **commit_event_base,
+            )
+            return 3
+
+        decision = recorded_decision
 
         current_tree_sha = git_guard.get_working_tree_sha()
         current_spec_sha = git_guard.get_spec_sha(spec_path)
@@ -1385,7 +1519,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 3
 
-        # Checker 査読メタデータの抽出 (機能Q / 機能XXX.1 / DX-7)
+        # Checker 査読メタデータの抽出 (機能Q / 機能XXX.1 / DX-7 / GATE-6)
         checker_info: dict[str, Any] = {
             "decision": decision,
             "reason": args.checker_reason or "",
@@ -1395,6 +1529,13 @@ def main(argv: list[str] | None = None) -> int:
             "maker_model": args.maker_model,
             "maker_family": maker_fam,
             "maker_family_source": maker_fam_source,
+            "review": {
+                "output_sha256": review_record["checker_output_sha256"],
+                "diff_sha256": review_record["diff_sha256"],
+                "spec_sha256": review_record["spec_sha256"],
+                "recorded_at": review_record["recorded_at"],
+                "decision_source": "checker_output",
+            },
         }
         if args.checker_json:
             try:

@@ -233,6 +233,11 @@ class TestCommitStepBoundaryCli(unittest.TestCase):
         v_ok = _run_cli(wt_dir, "verify-step", "--checkpoint", wt_checkpoint, "--task-id", "1")
         self.assertEqual(v_ok.returncode, 0, f"stdout={v_ok.stdout}\nstderr={v_ok.stderr}")
 
+        from review_test_helpers import record_test_review
+
+        rr = record_test_review(wt_dir, "1", reason="looks good")
+        self.assertEqual(rr.returncode, 0, rr.stderr)
+
         evidence_file = EvidenceStore(repo_dir=wt_dir).evidence_dir / "task_1.json"
         self.assertTrue(evidence_file.exists())
         plan_before_commit = (wt_dir / "plans" / "core.md").read_text(encoding="utf-8")

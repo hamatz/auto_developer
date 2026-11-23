@@ -108,6 +108,12 @@ def _complete_task_via_lowlevel_cli(
     if vs.returncode != 0:
         raise AssertionError(f"verify-step failed in {wt_dir}: {vs.stderr}")
 
+    from review_test_helpers import record_test_review
+
+    rr = record_test_review(wt_dir, task_id, checker_model="claude-opus-5.5", reason="Looks good")
+    if rr.returncode != 0:
+        raise AssertionError(f"record-review failed in {wt_dir}: {rr.stderr}")
+
     cs = _run_cli(
         wt_dir,
         "commit-step",

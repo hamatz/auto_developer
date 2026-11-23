@@ -105,6 +105,11 @@ class TestMetricsLog(unittest.TestCase):
         )
         self.assertEqual(v_res.returncode, 0, f"verify-step in worktree failed: {v_res.stderr}")
 
+        from review_test_helpers import record_test_review
+
+        rr_res = record_test_review(wt_repo, "1", plan_path=wt_plan, reason="wt test")
+        self.assertEqual(rr_res.returncode, 0, f"record-review in worktree failed: {rr_res.stderr}")
+
         # commit-step 実行（.dev/metrics/events.jsonl の存在がツリーSHAを狂わせず、正常にコミットできること）
         c_res = subprocess.run(
             [sys.executable, str(ORCH), "--plan", str(wt_plan),
@@ -141,6 +146,11 @@ class TestMetricsLog(unittest.TestCase):
             "verify-step", "--checkpoint", self.checkpoint, "--task-id", "1"
         )
         self.assertEqual(v_res.returncode, 0)
+
+        from review_test_helpers import record_test_review
+
+        rr_res = record_test_review(self.repo, "1", plan_path=self.plan, reason="looks good")
+        self.assertEqual(rr_res.returncode, 0, rr_res.stderr)
 
         c_res = self._orch(
             "commit-step", "--task-id", "1", "--checkpoint", self.checkpoint,
@@ -328,6 +338,10 @@ class TestMetricsLog(unittest.TestCase):
         self.assertEqual(self._head(), self.checkpoint)
 
         # 3. commit-step COMMITTED (exit 0, Evidence消費, HEAD移動)
+        from review_test_helpers import record_test_review
+
+        rr_ok = record_test_review(self.repo, "1", plan_path=self.plan, reason="ok")
+        self.assertEqual(rr_ok.returncode, 0, rr_ok.stderr)
         c_res = self._orch(
             "commit-step", "--task-id", "1", "--checkpoint", self.checkpoint,
             "--maker-model", "gemini-3.8-flash",

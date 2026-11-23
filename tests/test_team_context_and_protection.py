@@ -255,6 +255,11 @@ class TestTeamWorktreeCliSubcommands(unittest.TestCase):
         self.assertEqual(v_ok.returncode, 0, v_ok.stderr)
         self.assertIn("VERIFICATION PASSED", v_ok.stdout)
 
+        from review_test_helpers import record_test_review
+
+        rr_ok = record_test_review(self.wt_dir, "1", reason="looks good")
+        self.assertEqual(rr_ok.returncode, 0, rr_ok.stderr)
+
         # plans/core.md was updated to [x], PLAN.md was untouched
         self.assertIn("- [x] 1. Update core module", (self.wt_dir / "plans" / "core.md").read_text(encoding="utf-8"))
         self.assertIn("- [ ] 1. Root task", (self.wt_dir / "PLAN.md").read_text(encoding="utf-8"))
@@ -292,6 +297,9 @@ class TestTeamWorktreeCliSubcommands(unittest.TestCase):
         v_reverify = self._run_cli("verify-step", "--checkpoint", self.wt_checkpoint, "--task-id", "1")
         self.assertEqual(v_reverify.returncode, 0, v_reverify.stderr)
         self.assertIn("VERIFICATION PASSED", v_reverify.stdout)
+
+        rr_reverify = record_test_review(self.wt_dir, "1", reason="looks good")
+        self.assertEqual(rr_reverify.returncode, 0, rr_reverify.stderr)
 
         c_ok = self._run_cli(
             "commit-step",
