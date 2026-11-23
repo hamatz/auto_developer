@@ -76,7 +76,9 @@
 - ステップ 11（GATE-8）: 既存テストは変更しない。
 - ステップ 6（DX-8）: `tests/test_dx6_demo.py` の `VERIFIED` の部分一致による確認（85, 176 行目付近）を完全な一致の確認に変えてよい。あわせて、デモの Checker の振る舞いの変更（独自に拒否しない）に合わせて、テストの期待を変えてよい。
 - ステップ 7（RPT-8）: `tests/test_rpt7_team_report.py` のうち、`base_unchanged: True` を前提にした準備（199, 276, 355 行目付近）と、記録のないモデル名をジョブの設定から補うことを前提にしたアサーションを、新しい規則（「不明」「記録なし」）に合わせて変えてよい。
-- ステップ 8（BDL-5）: `tests/test_bundler.py`（1207〜1224 行目付近）と `tests/test_reporter.py`（700 行目付近）で、worktree の Evidence の置き場所を作る準備を、記録の読み取り場所の規則（`EvidenceStore` と同じ規則）に合わせて変えてよい。アサーションは変えない。
+- ステップ 8（BDL-5）:
+  - `tests/test_bundler.py`（1207〜1224 行目付近）と `tests/test_reporter.py`（700 行目付近）で、worktree の Evidence の置き場所を作る準備を、記録の読み取り場所の規則（`EvidenceStore` と同じ規則）に合わせて変えてよい。アサーションは変えない。
+  - `tests/test_bundler.py` の `test_bundle_collects_evidence_records_from_all_locations` を BDL-5 の規則へ置き換える。同じ準備（`records/` の `task_1`、`archive/` の `task_2`、`.dev/evidence/` の `task_3`）のまま、Bundle に入るのは `EvidenceStore` の保存先にある `task_1` だけで、`task_2` と `task_3` は入らないことを確かめるアサーションに変え、テスト名を `test_bundle_reads_records_only_from_evidence_store_location` に変える。
 - ステップ 9（TEAM-28）: `tests/test_teams_template_e2e.py` で、検証スクリプトが使う Python を環境変数 `PYTHON` で固定し、worktree の中の `__pycache__/*.pyc` を条件なしで確かめる形に変えてよい。
 - 免疫テスト（`tests/immunity/**`）は変更しない。H1 で人間が置き換える。
 - どのステップでも、変更したテスト名をコミットメッセージに列挙する。
