@@ -136,12 +136,12 @@ def resolve_target_plan_path(
             else (resolved_repo / explicit_plan_path)
         )
     try:
-        from auto_developer.manifest import ManifestValidationError, resolve_team_context
+        from auto_developer.manifest import resolve_team_context
 
         team_ctx = resolve_team_context(resolved_repo)
         if team_ctx is not None:
             return team_ctx.plan_path
-    except (ManifestValidationError, OSError):
+    except OSError:
         pass
     return resolved_repo / "PLAN.md"
 

@@ -228,8 +228,8 @@ class TestEvidenceBundler(unittest.TestCase):
         self.assertEqual(result.status, "INVALID")
         self.assertTrue(any("Hash mismatch" in err for err in result.errors))
 
-    def test_bundle_collects_evidence_records_from_all_locations(self):
-        # archive ディレクトリと .dev/evidence ディレクトリのレコード収集
+    def test_bundle_reads_records_only_from_evidence_store_location(self):
+        # BDL-5: EvidenceStore の保存先 (records/) のみから収集し、archive/ や .dev/evidence/ は読まない
         archive_dir = self.repo / ".git" / "nightly_evidence" / "archive"
         archive_dir.mkdir(parents=True, exist_ok=True)
         (archive_dir / "task_2.json").write_text(
@@ -268,8 +268,8 @@ class TestEvidenceBundler(unittest.TestCase):
         with zipfile.ZipFile(out_zip, "r") as zf:
             namelist = zf.namelist()
             self.assertIn("evidence/task_1.json", namelist)
-            self.assertIn("evidence/task_2.json", namelist)
-            self.assertIn("evidence/task_3.json", namelist)
+            self.assertNotIn("evidence/task_2.json", namelist)
+            self.assertNotIn("evidence/task_3.json", namelist)
 
     def test_verify_bundle_three_way_audit(self):
         # 1. 証跡ありで完全合格 -> VERIFIED
@@ -1289,7 +1289,7 @@ class TestEvidenceBundler(unittest.TestCase):
                 manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
                 self.assertEqual([t["task_id"] for t in manifest["tasks"]], ["1"])
                 excluded_ids = {e["task_id"] for e in manifest.get("excluded_records", [])}
-                self.assertEqual(excluded_ids, {"2", "8", "9"})
+                self.assertEqual(excluded_ids, {"2"})
 
                 # 同梱された NIGHTLY_REPORT.md も core の計画に基づくこと
                 report_text = zf.read("NIGHTLY_REPORT.md").decode("utf-8")

@@ -123,8 +123,8 @@ class TestMorningReporterEvidenceVerification(unittest.TestCase):
         self.assertNotIn("git push origin", content)
         self.assertIn("git log", content)
 
-    def test_write_report_locates_evidence_in_archive_and_aligns_tree_sha(self):
-        """DD.4 / P2: archive 配下の証跡レコードを検出し、Git 実態の Tree SHA と厳密整合することの実証。"""
+    def test_write_report_ignores_archive_directory(self):
+        """BDL-5: archive 配下の証跡レコードは読まず UNVERIFIED (No Evidence Record) となること。"""
         # テスト用コミット作成
         test_file = self.repo / "test_dd4.txt"
         test_file.write_text("dd4 verification", encoding="utf-8")
@@ -175,8 +175,8 @@ class TestMorningReporterEvidenceVerification(unittest.TestCase):
         )
 
         content = report_path.read_text(encoding="utf-8")
-        self.assertIn(f"`{tree_sha[:7]}`", content)
-        self.assertIn("APPROVE (Verified)", content)
+        self.assertNotIn(f"`{tree_sha[:7]}`", content)
+        self.assertIn("UNVERIFIED (No Evidence Record)", content)
 
     def test_feature_www_5_audit_counts_split(self):
         """機能WWW.5: 監査ステージの結果として、登録（DISPATCHED）・Backlog 送り（BACKLOGGED）・エスカレーション（ESCALATED）の件数を分けて表示すること。"""

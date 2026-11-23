@@ -198,35 +198,10 @@ class EvidenceBundler:
                 except (subprocess.CalledProcessError, OSError):
                     pass
 
-            # (C) Evidence records 収集
-            candidate_dirs: list[Path] = [
-                self.repo_dir / ".git" / "nightly_evidence" / "records",
-                self.repo_dir / ".git" / "nightly_evidence" / "archive",
-                self.repo_dir / ".git" / "nightly_evidence",
-                self.repo_dir / ".dev" / "evidence" / "records",
-                self.repo_dir / ".dev" / "evidence",
-            ]
+            # (C) Evidence records 収集 (BDL-5: EvidenceStore と同じ単一関数で解決)
+            from auto_developer.evidence import resolve_evidence_records_dir
 
-            # Git common-dir (worktree 対応) の解決
-            try:
-                c_res = subprocess.run(
-                    ["git", "rev-parse", "--git-common-dir"],
-                    cwd=self.repo_dir,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if c_res.returncode == 0 and c_res.stdout.strip():
-                    common_p = Path(c_res.stdout.strip())
-                    if not common_p.is_absolute():
-                        common_p = (self.repo_dir / common_p).resolve()
-                    candidate_dirs.extend([
-                        common_p / "nightly_evidence" / "records",
-                        common_p / "nightly_evidence" / "archive",
-                        common_p / "nightly_evidence",
-                    ])
-            except OSError:
-                pass
+            candidate_dirs: list[Path] = [resolve_evidence_records_dir(self.repo_dir)]
 
             from auto_developer.dispatcher import get_plan_task_states, resolve_target_plan_path
             from auto_developer.evidence import EvidenceStore

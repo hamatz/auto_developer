@@ -53,37 +53,13 @@ class MorningReporter:
     ) -> None:
         """NIGHTLY_REPORT.md を意思決定支援型 Morning Brief として作成・更新する。"""
         from auto_developer.dispatcher import get_plan_task_states, resolve_target_plan_path
+        from auto_developer.evidence import resolve_evidence_records_dir
 
         effective_repo = repo_dir or self.repo_dir or report_path.parent
         target_plan = resolve_target_plan_path(effective_repo, plan_path)
         has_plan_tasks, completed_task_ids, _, _ = get_plan_task_states(target_plan)
-        candidate_dirs = [
-            effective_repo / ".git" / "nightly_evidence" / "records",
-            effective_repo / ".git" / "nightly_evidence" / "archive",
-            effective_repo / ".git" / "nightly_evidence",
-            effective_repo / ".dev" / "evidence" / "records",
-            effective_repo / ".dev" / "evidence",
-        ]
-        try:
-            c_res = subprocess.run(
-                ["git", "rev-parse", "--git-common-dir"],
-                cwd=effective_repo,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if c_res.returncode == 0 and c_res.stdout.strip():
-                common_p = Path(c_res.stdout.strip())
-                if not common_p.is_absolute():
-                    common_p = (effective_repo / common_p).resolve()
-                candidate_dirs.extend([
-                    common_p / "nightly_evidence" / "records",
-                    common_p / "nightly_evidence" / "archive",
-                    common_p / "nightly_evidence",
-                ])
-        except OSError:
-            pass
-        records_dir = effective_repo / ".git" / "nightly_evidence" / "records"
+        records_dir = resolve_evidence_records_dir(effective_repo)
+        candidate_dirs = [records_dir]
 
         status = summary_data.get("status", "UNKNOWN")
         total = summary_data.get("total_tasks", 0)
@@ -919,27 +895,10 @@ class MorningReporter:
             except OSError:
                 initial_checkpoint = head_commit
 
-        # 3. Evidence records 候補ディレクトリの収集
-        candidate_dirs = [
-            effective_repo / ".git" / "nightly_evidence" / "records",
-            effective_repo / ".dev" / "evidence" / "records",
-            effective_repo / ".dev" / "evidence",
-        ]
-        try:
-            c_res = subprocess.run(
-                ["git", "rev-parse", "--git-common-dir"],
-                cwd=effective_repo,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if c_res.returncode == 0 and c_res.stdout.strip():
-                common_p = Path(c_res.stdout.strip())
-                if not common_p.is_absolute():
-                    common_p = (effective_repo / common_p).resolve()
-                candidate_dirs.append(common_p / "nightly_evidence" / "records")
-        except OSError:
-            pass
+        # 3. Evidence records ディレクトリの解決 (BDL-5: EvidenceStore と同じ単一関数で解決)
+        from auto_developer.evidence import resolve_evidence_records_dir
+
+        candidate_dirs = [resolve_evidence_records_dir(effective_repo)]
 
         def _resolve_committed_tree(t_commit: str) -> str:
             if not t_commit:
@@ -1037,13 +996,6 @@ class MorningReporter:
                         rec_data = json.loads(rec_file.read_text(encoding="utf-8"))
                     except (json.JSONDecodeError, OSError):
                         continue
-                    if (
-                        "token" in rec_data
-                        and "status" not in rec_data
-                        and "checker" not in rec_data
-                        and "commit" not in rec_data
-                    ):
-                        continue
                     seen_rec_names.add(rec_file.name)
                     task_id = str(rec_data.get("task_id", "")).strip() or rec_file.stem.removeprefix("task_")
                     title = str(rec_data.get("title") or f"Task {task_id}")
@@ -1052,14 +1004,14 @@ class MorningReporter:
                     total_tasks += 1
                     if rec_data.get("status") == "COMPLETED":
                         succeeded_count += 1
-                    completed_tasks.append({
-                        "task_id": task_id,
-                        "title": title,
-                        "commit": task_commit,
-                        "evidence_tree_sha": evidence_tree_sha,
-                        "committed_tree_sha": committed_tree_sha,
-                        "checker_decision": checker_dec,
-                    })
+                        completed_tasks.append({
+                            "task_id": task_id,
+                            "title": title,
+                            "commit": task_commit,
+                            "evidence_tree_sha": evidence_tree_sha,
+                            "committed_tree_sha": committed_tree_sha,
+                            "checker_decision": checker_dec,
+                        })
             completed_tasks.sort(
                 key=lambda item: (
                     (0, int(str(item["task_id"])), "")

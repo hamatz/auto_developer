@@ -30,6 +30,15 @@ def compute_canonical_diff(work_dir: Path, checkpoint: str) -> bytes:
         return proc.stdout
 
 
+def resolve_evidence_records_dir(repo_dir: Path | None = None) -> Path:
+    """BDL-5: EvidenceStore の保存規則に従ってレコード格納ディレクトリを1つの関数で解決する。"""
+    resolved_repo = repo_dir or Path.cwd()
+    git_path = resolved_repo / ".git"
+    if git_path.is_dir():
+        return git_path / "nightly_evidence" / "records"
+    return resolved_repo / ".dev" / "evidence"
+
+
 class EvidenceStore:
     """検証合格の証跡（Evidence Token）の発行・検証・失効および監査レコード（Evidence Record）の永続化を管理するモジュール。"""
 
@@ -38,10 +47,9 @@ class EvidenceStore:
         git_path = self.repo_dir / ".git"
         if git_path.is_dir():
             self.evidence_dir = git_path / "nightly_evidence"
-            self.records_dir = self.evidence_dir / "records"
         else:
             self.evidence_dir = self.repo_dir / ".dev" / "evidence"
-            self.records_dir = self.evidence_dir
+        self.records_dir = resolve_evidence_records_dir(self.repo_dir)
 
     def issue_evidence(
         self,
