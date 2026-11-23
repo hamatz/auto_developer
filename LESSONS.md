@@ -28,6 +28,22 @@ v0.9.0 で、v0.8.0 までの 40 件超の教訓を、今も効いている原�
 
 ## 恒久教訓インデックス
 
+### [2026-11-23] 検査が「どの環境で」動いたかを確かめないと、試したつもりの環境を試していない (Verify What You Claim To Test)
+- Context: `scripts/verify_local.sh`、`.github/workflows`（REL-3 の CI マトリクス: macOS / Ubuntu × Python 3.10 / 3.12）、`src/auto_developer/verifier.py` のサンドボックスの設定。
+- Trap: 検証スクリプトが `/usr/bin/python3` を優先していたため、CI はマトリクスの Python ではなく、macOS では Xcode の Python 3.9、Ubuntu では OS の Python 3.12 でテストを動かしていた。CI は緑だったが、python.org や setup-python のシンボリックリンクの Python では macOS のサンドボックスが起動できない欠陥（SBX-7）と、`/opt` の下の Python を前提にしないテスト（SBX-8）を見逃していた。Phase 70 の準備で Python の選び方を直したとたん、両方が表に出た。
+- Rule: 検査のログに、実際に使った環境（Python のパスと版、OS、サンドボックスの機構）を必ず出し、マトリクスで指定したものと一致することを確かめる。利用者が使いそうな入手経路（python.org、Homebrew、pyenv、setup-python）の違いは、パスの形の違いとして、テストの前提から外さない。
+- Rung: 検査（検証スクリプトの `Using Python:` の表示、CI のマトリクス）、作り（SBX-7）
+- Immunity Test: Phase 71 で追加（SBX-7、SBX-8）
+- Proof: 2026-11-23、Phase 70 の後の CI で、macOS は 72 件の失敗と 9 件のエラー、Ubuntu は 1 件の失敗を確認した（docs/contracts/phase71.md の 1.1 節）。
+
+### [2026-11-23] 影響分析は、テストが内部の形にどう依存しているかまで探さないと漏れる (Hidden Coupling In Tests)
+- Context: Phase 70（SBX-6、BDL-4、GATE-7、BDL-5）、`PLAN.md` の「既存テスト変更の理由」、`docs/contracts/phase70.md`。
+- Trap: 要件の指紋（関数名・コマンド名）だけを検索したため、判定の目印をモックで作るテスト、キャッシュの呼び出し回数を確かめるテスト、範囲の広すぎるモック、Evidence の記録を合成するテストを見落とし、既存テストの承認のために 10 回近く止まった。あわせて、`verify-step` が本物のインデックスにステージする副作用で、承認の記録のコミットに実装が混ざった。
+- Rule: 判定・形式・キャッシュを変える要件では、その判定が読む目印や出力の形、記録の形式、呼び出し回数を、テストの中で作ったり確かめたりしている箇所まで検索して数える（docs/contracts/phase71.md の 6 章）。手順書に書くコマンドは、本物のインデックスや作業ツリーを変えるかどうかを確かめてから書く。
+- Rung: 検査（契約書の影響分析の手順）、作り（GATE-9）。将来は Spec Compiler（BACKLOG IDEA-008）で機械化する。
+- Immunity Test: なし（手順の教訓）。GATE-9 は Phase 71 で追加。
+- Proof: Phase 70 の止まった記録（PLAN.md の承認の記録のコミット 8 件と f51e971）。
+
 ### [2026-11-22] 前提の確認を、本番と違う条件で行うと、確認は通るのに本番だけが失敗する (Probe Under Production Conditions)
 - Context: `src/auto_developer/verifier.py` の `_compute_nproc_limit` / `_apply_resource_limits` / `_probe_sandbox_backend`（SBX-3）、CI の Ubuntu 24.04。
 - Trap: 候補テストを bwrap で起動する前に、`RLIMIT_NPROC` を「同じユーザーのプロセス数 + 50」に設定していた。しかし Linux の `RLIMIT_NPROC` はスレッドを数えるため、スレッドの多いプロセスがあるランナーでは bwrap が `Creating new namespace failed: Resource temporarily unavailable` で起動できず、CI の Ubuntu だけで29件が失敗した。SBX-3 の起動の確認は、この上限をかけずに最小の引数で bwrap を起動していたので通っていた。起動の失敗は `NO_TESTS_RAN` と誤って分類され、原因がわからなかった。手元の Linux は同じユーザーのスレッドが少なかったので、全件が通った。
