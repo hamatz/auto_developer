@@ -9,8 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from auto_developer.bundler import check_audit_diff_status
 from auto_developer.dispatcher import TaskDispatcher, strip_html_comments_preserving_lines
-from auto_developer.evidence import EvidenceStore
+from auto_developer.evidence import EvidenceStore, resolve_evidence_records_dir
 from auto_developer.metrics import MetricsLog
 
 STATUS_SCHEMA = "auto-dev-status/1"
@@ -18,6 +19,7 @@ _TASK_EVENTS = frozenset({"verify_step", "checker_review", "commit_step", "rollb
 _BLOCKED_HEADING_RE = re.compile(r"^#{1,6}\s+.*(?:止まっていること|判断待ち|Blocked|Waiting)", re.IGNORECASE)
 _ANY_HEADING_RE = re.compile(r"^#{1,6}\s+")
 _REFS_RE = re.compile(r"\[refs:\s*([^\]]+)\]")
+_EMPTY_BLOCKED_PLACEHOLDERS = frozenset({"なし", "なし。", "none", "-"})
 
 
 def _run_git_text(repo_dir: Path, args: list[str]) -> tuple[bool, str, str]:
@@ -54,7 +56,7 @@ def _extract_blocked_items(plan_path: Path) -> list[str]:
             continue
         if in_section and line.startswith(("- ", "* ")):
             item_text = line[2:].strip()
-            if item_text and not item_text.startswith("["):
+            if item_text and not item_text.startswith("[") and item_text.lower() not in _EMPTY_BLOCKED_PLACEHOLDERS:
                 items.append(item_text)
     return items
 
@@ -77,7 +79,7 @@ def _collect_commit_refs(repo_dir: Path) -> dict[str, str]:
 
 
 def _read_audit_stage(repo_dir: Path, head_sha: str | None) -> dict[str, Any]:
-    audit_path = repo_dir / ".dev" / "audit_stage.json"
+    audit_path = resolve_evidence_records_dir(repo_dir) / "audit_stage.json"
     if not audit_path.is_file():
         return {"present": False, "status": None, "reason": "audit_stage.json not found"}
     try:
@@ -103,7 +105,12 @@ def _read_audit_stage(repo_dir: Path, head_sha: str | None) -> dict[str, Any]:
         if isinstance(raw.get("audit_metadata"), dict)
         else None
     )
-    outdated = bool(head_sha and target_commit and str(target_commit) != head_sha)
+    diff_status, diff_msg = check_audit_diff_status(
+        repo_dir,
+        str(target_commit) if target_commit is not None else None,
+        head_sha,
+    )
+    outdated = diff_status != "OK"
     return {
         "present": True,
         "status": raw.get("status"),
@@ -112,6 +119,7 @@ def _read_audit_stage(repo_dir: Path, head_sha: str | None) -> dict[str, Any]:
         "findings_count": findings_count,
         "p0_p1_count": p0_p1_count,
         "outdated": outdated,
+        "outdated_reason": diff_msg or None,
         "reason": None,
     }
 
@@ -121,9 +129,48 @@ def _ref_exists(repo_dir: Path, ref_name: str) -> bool:
     return ok
 
 
+def _collect_team_failure_reason(
+    team: dict[str, Any],
+    wt_path: Path,
+    wt_exists: bool,
+) -> str | None:
+    reasons: list[str] = []
+    worker_error = str(team.get("worker_error") or "").strip()
+    if worker_error:
+        reasons.append(worker_error)
+
+    if wt_exists:
+        logs_dir = wt_path / "logs" / "nightly"
+        if logs_dir.is_dir():
+            for log_file in sorted(logs_dir.glob("task_*_failure.log")):
+                try:
+                    lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+                except OSError:
+                    continue
+                phase = ""
+                reason = ""
+                for raw_line in lines[:10]:
+                    stripped = raw_line.strip()
+                    if stripped.startswith("Failure Phase:"):
+                        phase = stripped[len("Failure Phase:"):].strip()
+                    elif stripped.startswith("Reason:"):
+                        reason = stripped[len("Reason:"):].strip()
+                parts = []
+                if phase:
+                    parts.append(f"Failure Phase: {phase}")
+                if reason:
+                    parts.append(f"Reason: {reason}")
+                if parts:
+                    entry = ", ".join(parts)
+                    if entry not in reasons:
+                        reasons.append(entry)
+    return "; ".join(reasons) if reasons else None
+
+
 def _collect_teams_snapshot(
     repo_dir: Path,
     attention: list[dict[str, Any]],
+    seen_quarantines: set[str] | None = None,
 ) -> dict[str, Any] | None:
     if not (repo_dir / "teams.json").is_file():
         return None
@@ -179,20 +226,30 @@ def _collect_teams_snapshot(
                     "status": rec.get("status"),
                 })
 
+        failure_reason = _collect_team_failure_reason(team, wt_path, wt_exists)
+
         enriched_teams.append({
             **team,
             "no_changes": worker_status == "NO_CHANGES",
+            "failure_reason": failure_reason,
             "evidence_records": ev_records,
         })
 
         if failed_tasks > 0 or worker_status in {"FAILED", "STALE", "TIMEOUT", "CRASHED"}:
+            msg = f"Team '{tid}' status={worker_status}, failed_tasks={failed_tasks}"
+            if failure_reason:
+                msg += f", reason={failure_reason}"
             attention.append({
                 "kind": "TEAM_FAILURE",
                 "severity": "HIGH",
                 "task_id": None,
-                "message": f"Team '{tid}' status={worker_status}, failed_tasks={failed_tasks}",
+                "message": msg,
             })
         for qb in quarantines:
+            if seen_quarantines is not None:
+                if qb in seen_quarantines:
+                    continue
+                seen_quarantines.add(qb)
             attention.append({
                 "kind": "TEAM_QUARANTINE",
                 "severity": "HIGH",
@@ -369,7 +426,13 @@ def collect_status_snapshot(
                         "message": f"Task {t.task_id} was rejected by Checker ({ev.get('model') or 'unknown'})",
                     })
 
+    seen_quarantines: set[str] = set()
+    teams_info = _collect_teams_snapshot(resolved_repo, attention, seen_quarantines=seen_quarantines)
+
     for q_br in quarantine_branches:
+        if q_br in seen_quarantines:
+            continue
+        seen_quarantines.add(q_br)
         attention.append({
             "kind": "QUARANTINE_BRANCH",
             "severity": "HIGH",
@@ -396,14 +459,16 @@ def collect_status_snapshot(
                 "message": f"Independent audit has {p0_p1} P0/P1 finding(s)",
             })
         if audit_info.get("outdated"):
+            outdated_msg = str(
+                audit_info.get("outdated_reason")
+                or f"Independent audit target ({audit_info.get('target_commit')}) is older than HEAD ({head_sha})"
+            )
             attention.append({
                 "kind": "AUDIT_OUTDATED",
                 "severity": "MEDIUM",
                 "task_id": None,
-                "message": f"Independent audit target ({audit_info.get('target_commit')}) is older than HEAD ({head_sha})",
+                "message": outdated_msg,
             })
-
-    teams_info = _collect_teams_snapshot(resolved_repo, attention)
 
     return {
         "schema": STATUS_SCHEMA,
@@ -480,11 +545,16 @@ def format_status_text(snapshot: dict[str, Any]) -> str:
                 f"rc_tag={integration.get('rc_tag')} (exists={integration.get('rc_tag_exists')})"
             )
         for tm in teams.get("teams") or []:
-            lines.append(
+            line = (
                 f"  - {tm.get('team_id')}: status={tm.get('worker_status')} "
                 f"tasks={tm.get('completed_tasks')}/{tm.get('total_tasks')} "
                 f"no_changes={tm.get('no_changes')} branch={tm.get('branch')}"
             )
+            if tm.get("failed_tasks"):
+                line += f" failed_tasks={tm.get('failed_tasks')}"
+            if tm.get("failure_reason"):
+                line += f" reason={tm.get('failure_reason')}"
+            lines.append(line)
 
     lines.append("")
     if audit.get("present"):

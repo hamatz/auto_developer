@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from auto_developer.cli import main as cli_main
+from auto_developer.evidence import resolve_evidence_records_dir
 from auto_developer.metrics import MetricsLog
 
 
@@ -47,9 +48,9 @@ class TestStat1StatusSingle(unittest.TestCase):
             metrics.record_event("verify_step", task_id="2", checkpoint=head_sha, result="SANDBOX_UNAVAILABLE", exit_code=1)
             metrics.record_event("checker_review", task_id="3", checkpoint=head_sha, decision="REJECT", model="claude-sonnet-5-5")
 
-            dev_dir = repo / ".dev"
-            dev_dir.mkdir(parents=True, exist_ok=True)
-            (dev_dir / "audit_stage.json").write_text(
+            records_dir = resolve_evidence_records_dir(repo)
+            records_dir.mkdir(parents=True, exist_ok=True)
+            (records_dir / "audit_stage.json").write_text(
                 json.dumps({
                     "status": "SUCCESS",
                     "mode": "LIVE",

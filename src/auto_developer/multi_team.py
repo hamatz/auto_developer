@@ -1831,6 +1831,12 @@ def get_teams_status(
         ):
             worker_status = "NO_CHANGES"
 
+        worker_error: str | None = None
+        if reg is not None and isinstance(reg.details, dict):
+            raw_err = reg.details.get("error")
+            if raw_err:
+                worker_error = str(raw_err).strip() or None
+
         team_statuses.append(
             {
                 "team_id": tid,
@@ -1843,6 +1849,7 @@ def get_teams_status(
                 "total_tasks": total_tasks,
                 "failed_tasks": failed_tasks,
                 "worker_status": worker_status,
+                "worker_error": worker_error,
                 "quarantine_branches": quarantines,
             }
         )

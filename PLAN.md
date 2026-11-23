@@ -60,7 +60,7 @@
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [ ] 1. `status` の修正: 独立監査の記録を Evidence の記録の場所から読み、`AUDIT_OUTDATED` を `verify-bundle` と同じ関数で判定する。「なし」だけの判断待ちを数えない。隔離の重複をなくす。チームの失敗の数と原因を示す。`examples/two-teams/.gitignore` に CORE-11 の行をすべて入れる（Red-First）（STAT-8, DX-12）
+- [x] 1. `status` の修正: 独立監査の記録を Evidence の記録の場所から読み、`AUDIT_OUTDATED` を `verify-bundle` と同じ関数で判定する。「なし」だけの判断待ちを数えない。隔離の重複をなくす。チームの失敗の数と原因を示す。`examples/two-teams/.gitignore` に CORE-11 の行をすべて入れる（Red-First）（STAT-8, DX-12）
 - [ ] 2. `record-review` が、記録のたびに写しと記録を `reviews/task_<id>/history/<連番>/` に残す（上書きしない。最新の記録と Bundle の中身は変えない）（Red-First）（GATE-12）
 - [ ] 3. `run` / `teams run` の経路で `verify_step` / `checker_review` / `commit_step` / `rollback_step` を書く。`task_start` を加える（`run` は Maker の起動の直前、低レベルの経路は `pre-flight`）。worktree のイベントにチームの ID を入れる（Red: `teams run` の後に `events.jsonl` がない）（STAT-4）
 - [ ] 4. 統合のイベント（`integration_start` / `integration_merge` / `integration_reverify` / `rc_tag` / `integration_failed`）を書く（Red-First）（STAT-4）
