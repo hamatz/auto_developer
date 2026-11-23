@@ -83,7 +83,7 @@ def compute_canonical_diff(work_dir: Path, checkpoint: str) -> bytes:
             capture_output=True,
         )
         proc = subprocess.run(
-            ["git", "diff", "--cached", "--no-color", "--no-ext-diff", "--no-renames", checkpoint],
+            ["git", "-c", "core.quotePath=false", "diff", "--cached", "--no-color", "--no-ext-diff", "--no-renames", checkpoint],
             cwd=work_dir,
             env=env,
             check=True,
