@@ -298,7 +298,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
     - `--diff-file` が、記録する時点の正規の差分と1バイトでも違う場合は、終了コード 3 とする。
     - `--spec-file` が空の場合、または今の `SPEC.md` の連続した一部（要約ではない原文）でない場合は、終了コード 4 とする。
     - 系統の独立性の検査（GATE-4、INV-6）はここでは行わず、記録だけする（GATE-6 でコミットのときに行う）。明示した系統の入力の検査（DX-7: 空・`unknown`・組み込みの判定との食い違いは終了コード 2）は、ここでも行う。
-    - 正規の差分に含まれる機密に当たるファイル（INV-5）の扱いは、この要件では変えない（BDL-4 より前に、別の要件として決める）。
+    - 正規の差分に含まれる機密に当たるファイル（INV-5）の扱いは、この要件では変えない（GATE-8 で決める）。
     - 記録が成功したら（REJECT の判定を含む）、終了コード 0 とする。記録するのは、その Evidence（検証）との対応、3つのファイルのパスと SHA-256、読み取った判定、モデルと系統、記録した時刻である。3つのファイルの写しは Evidence の保存先に置く。
     - 査読の記録は Evidence を消費しない。計測のイベント（`checker_review`）の書き込みに失敗しても、記録の結果は変わらない（INV-8）。
   - 旧来の、`--checker-output` を指定しない `record-review` は、終了コード 2 で拒否し、新しい使い方を示す。
@@ -321,6 +321,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
     - 査読の記録があること
     - Bundle 内のファイルの SHA-256 が記録と一致すること
     - Bundle 内の Checker の出力から CORE-6 の規則で読み取った判定が APPROVE であること
+  - 査読の記録がない Evidence の記録（GATE-6 より前にコミットしたタスク）は、Bundle に入れず、`excluded_records` に理由 `NO_REVIEW_EVIDENCE` で記録する。この理由の除外があるときは、ほかの検査をすべて満たしても、`verify-bundle` の結果を VERIFIED ではなく INTEGRITY_ONLY とし、対象のタスク ID を示す。Bundle に入っている記録に査読の証跡が欠けている場合は、これまでどおり INVALID とする。
 - [ ] **RCV-5 失敗ログの原因**: `logs/nightly/task_<id>_failure.log` の先頭に、次の2行を書く。
   - 失敗した段階（`Failure Phase:`。例: `PROTECTED_FILES`, `MAKER_NO_DIFF`, `VERIFY`, `CHECKER_REJECT`, `BOUNDARY`）
   - 原因（`Reason:`。保護ファイルの違反なら、そのファイルの一覧）
@@ -348,6 +349,11 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   3. Checker のプロセスが終わり、出力ファイルに判定行がちょうど1つあることを確かめる。完了の通知だけでは次に進まない。
   4. `record-review` に3つのファイルを渡す。
   5. `commit-step` を実行する。
+- [ ] **GATE-8 正規の差分の機密（INV-5）**: `review-input` と `record-review` が作る正規の差分（GATE-5）で、次のように機密を出さない。
+  - 内容が INV-5 の機密の内容の規則（秘密鍵・API キーなどの形。隔離ブランチの作成と同じ規則）に当たる行は、行ごと `[auto-dev: INV-5 の規則により省略]` に置き換える。ファイルのほかの行は変えない。
+  - ファイル名が `.env*`、鍵ファイル（`*.key` / `*.pem` / `*.pkcs12` / `*.pfx`）、SSH の鍵の名前（`id_rsa` / `id_ed25519` / `id_ecdsa`）に当たるファイルは、内容を出さず、変更があったことだけを1行で示す。ハッシュは書かない。
+  - 名前に `secret` / `token` / `credential` を含むことだけを理由に、ファイルの内容を省略しない（Checker から隠せる抜け穴にしない）。
+  - 置き換えは決まった規則で行う。`record-review` と `commit-step` の照合（1バイトの一致、SHA-256 の一致）は変えない。
 
 ### 5.2 Phase 71 — README・サンプル・リリース
 

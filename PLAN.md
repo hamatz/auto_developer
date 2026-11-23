@@ -8,7 +8,7 @@
 -->
 
 ## 現在の目標
-- Phase 70: 査読の証跡を機械で強制し、Checker に差し戻されたまま入った変更を直す（SPEC.md 5.1: SBX-6, GATE-5, GATE-6, GATE-7, BDL-4, RCV-5, DX-8, RPT-8, BDL-5, TEAM-28, CORE-12）
+- Phase 70: 査読の証跡を機械で強制し、Checker に差し戻されたまま入った変更を直す（SPEC.md 5.1: SBX-6, GATE-5, GATE-6, GATE-7, BDL-4, RCV-5, DX-8, RPT-8, BDL-5, TEAM-28, CORE-12, GATE-8）
   - 最初に、CI の Ubuntu で候補テストのサンドボックスが起動できない欠陥（SBX-6）を直す（docs/contracts/phase70.md の 1.1 節）。Linux のデスクトップでも起きる。
   - Phase 67〜69 で、Checker の出力が REJECT なのに APPROVE として記録・コミットされたものが4件あった（docs/contracts/phase70.md の 1 章）。
   - 判定を Checker の出力ファイルから読み取り、差分・SPEC・順序に拘束する。そのうえで4件の欠陥を直す。
@@ -71,6 +71,7 @@
 - ステップ 3（GATE-6）: `commit-step` の前に、査読を記録する共通のヘルパー（新規ファイル `tests/review_test_helpers.py` に置く）の呼び出しを足してよい。アサーションは変えない。対象は次のファイル。
   - `tests/test_commit_gate_boundary.py`, `tests/test_dx7_model_families.py`, `tests/test_metrics.py`, `tests/test_nightly_orchestrator.py`, `tests/test_rpt7_team_report.py`, `tests/test_team27_no_changes.py`, `tests/test_team_context_and_protection.py`, `tests/test_teams_cli_e2e.py`, `tests/test_teams_integrate.py`, `tests/test_teams_report_and_brief.py`, `tests/test_teams_report_pending_decisions.py`, `tests/test_teams_run_and_recover.py`
 - ステップ 4（BDL-4）: `tests/test_bundler.py` 908 行目付近と `tests/test_dx6_demo.py` 160 行目付近の `format_version` の期待値を、2 から 3 に変えてよい。
+- ステップ 11（GATE-8）: 既存テストは変更しない。
 - ステップ 6（DX-8）: `tests/test_dx6_demo.py` の `VERIFIED` の部分一致による確認（85, 176 行目付近）を完全な一致の確認に変えてよい。あわせて、デモの Checker の振る舞いの変更（独自に拒否しない）に合わせて、テストの期待を変えてよい。
 - ステップ 7（RPT-8）: `tests/test_rpt7_team_report.py` のうち、`base_unchanged: True` を前提にした準備（199, 276, 355 行目付近）と、記録のないモデル名をジョブの設定から補うことを前提にしたアサーションを、新しい規則（「不明」「記録なし」）に合わせて変えてよい。
 - ステップ 8（BDL-5）: `tests/test_bundler.py`（1207〜1224 行目付近）と `tests/test_reporter.py`（700 行目付近）で、worktree の Evidence の置き場所を作る準備を、記録の読み取り場所の規則（`EvidenceStore` と同じ規則）に合わせて変えてよい。アサーションは変えない。
@@ -82,13 +83,14 @@
 - [x] 1. サンドボックスの起動の上限と失敗の分類: `RLIMIT_NPROC` をスレッド単位で数えて決める。起動の確認を実際の実行と同じ資源の上限で行う。サンドボックスの機構の起動の失敗を `NO_TESTS_RAN` ではなく `SANDBOX_UNAVAILABLE`（機構のエラーと対処を表示）とする（Red: 同じユーザーのスレッドを数百本立てた状態で、`test_red_verifier.py` が CI と同じく失敗する）（SBX-6）
 - [x] 2. `auto-dev review-input`（正規の差分の書き出し）と、Checker の出力ファイルから判定を読み取り、差分・SPEC の切り出しを照合して記録する `record-review`。旧来の `--decision` だけの呼び出しは終了コード 2。`commit-step` はまだ変えない（Red-First）（GATE-5）
 - [x] 3. （H1 の後）`commit-step` が、最新の検証に対応する査読の記録・判定・出力ファイルのハッシュ・モデル・正規の差分を照合する。`checker.review` を Evidence の記録に残す（Red: H1 で置いた `test_immunity_review_evidence.py`）（GATE-6）
-- [ ] 4. `run` / `teams run` / `demo` の経路の査読の証跡（GATE-7）と、Bundle への査読の証跡の収録・`verify-bundle` での照合・`format_version` 3（BDL-4）（Red-First）
+- [ ] 4. `run` / `teams run` / `demo` の経路の査読の証跡（GATE-7）と、Bundle への査読の証跡の収録・`verify-bundle` での照合・`format_version` 3（BDL-4）。査読の証跡がない記録（GATE-6 より前にコミットした Phase 70 のタスク 1・2 など）は `excluded_records` に `NO_REVIEW_EVIDENCE` で記録し、結果を INTEGRITY_ONLY とする（Red-First）
 - [ ] 5. 失敗ログの先頭に `Failure Phase:` と `Reason:` を書く（Red-First）（RCV-5）
 - [ ] 6. デモの修正: Checker は独自に拒否しない。隔離の原因が `PROTECTED_FILES` であることを確かめる。`verify-bundle --json` の `status` の完全な一致。段階ごとの失敗のテスト（Red-First）（DX-8）
 - [ ] 7. チームのジョブのレポートの修正: 基点が未変更であることは確認できたときだけ表示し、それ以外は「不明」。モデル名は記録からだけ読み、なければ「記録なし」。単一チームの集計を 1de845d の時点に戻す。`./` の接頭辞の扱い（Red-First）（RPT-8）
 - [ ] 8. 記録の読み取り場所を `EvidenceStore` と同じ規則に一本化し、中身からの推測をやめる。フォールバック時は `COMPLETED` だけを成果に載せる。計画ファイルの指定経路を1つにし、`teams.json` の不正の扱いを揃える（Red-First）（BDL-5）
 - [ ] 9. 雛形の受入テストで、検証スクリプトの Python を固定し、worktree の中の `.pyc` を条件なしで確かめる（TEAM-28）
 - [ ] 10. `skills/nightly-run/SKILL.md` の単一チーム・チームの両経路の査読の手順を、`review-input` → 原文の SPEC の切り出し → Checker の終了と判定行の確認 → `record-review` → `commit-step` にする（CORE-12）
+- [ ] 11. 正規の差分で、機密の内容の規則に当たる行を決まった文字列に置き換え、`.env*`・鍵ファイル・SSH の鍵の名前のファイルは内容を出さずに変更の事実だけを示す。名前に `secret` / `token` / `credential` を含むだけのファイルは省略しない（Red-First）（GATE-8）
 
 ## 止まっていること・判断待ち
 - なし。
@@ -101,12 +103,14 @@
   - `test_immunity_checker_policy.py` と `test_immunity_metrics_non_interference.py` は置き換え、`test_immunity_review_evidence.py` は新規に置く。
   - 置き換えた2つは通ること、新しい1つは `commit-step` の照合の部分が Red になることを確かめる。
   - Maker は、このチェックが付くまでステップ 3 に着手しない。
-- [ ] ステップ 10 の完了後:
+- [ ] ステップ 11 の完了後:
   - Linux（Ubuntu・bwrap が動く環境）で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。
   - CI（macOS / Ubuntu × Python 3.10 / 3.12）が通ることを確かめる。
   - Phase 70 の全タスクについて、査読の記録（Evidence の `checker.review`）と `.dev/checker/` の出力ファイルを突き合わせ、食い違いが0件であることを確かめる。
 
 ## 記録
+- 2026-11-23: ステップ 4 の前に、SPEC に2点を足した。(1) BDL-4: Phase 70 のタスク 1・2 は GATE-6 より前の経路でコミットしたため査読の証跡がなく、後から記録できない。これらは `excluded_records`（`NO_REVIEW_EVIDENCE`）として扱い、Phase 70 の Bundle は INTEGRITY_ONLY になる（v0.9.0 の歴史の断絶として受け入れる）。(2) GATE-8: ステップ 2 の査読で指摘された、正規の差分の機密（INV-5）。番号がずれないよう、最後のステップ 11 とした。
+- 2026-11-23: `verify-step` が作業ツリーの SHA の計算で `git add -A` を実行し、本物のインデックスにステージする（`guard.py` の `get_working_tree_sha`）。承認の記録のコミットに実装が混ざった（f51e971、人間が作り直した）。承認の記録は `git commit -m "..." -- PLAN.md` の形でコミットする。製品の修正は BACKLOG へ。
 - 2026-11-22: Phase 69 の完了後、CI の Ubuntu 24.04 で `test_red_verifier.py` の29件が失敗した（大半が `NO_TESTS_RAN`、1件で `bwrap: Creating new namespace failed: Resource temporarily unavailable`）。候補テストに設定する `RLIMIT_NPROC` をプロセス数で決めていたが、Linux の `RLIMIT_NPROC` はスレッドを数えるため、スレッドの多いランナーで上限に当たっていた。手元の Linux で同じユーザーのスレッドを 300 本立てると、同じ失敗を再現できた。あわせて、CI の Ubuntu ではテストが OS の Python 3.12 で走っていた（Traceback の `^^^` の表示から）。
 - 2026-11-22: Phase 69 の完了後の確認で、Phase 67〜69 の全タスクの査読の記録と Checker の出力ファイルを突き合わせた。REJECT の出力のまま APPROVE としてコミットされたもの4件（b7af7f2, 86eeea9, e5fa287, 84a0043）と、出力より先にコミットしたもの2件（判定は一致）を見つけた。原因は、Checker のバックグラウンドの完了通知が2回届き、1回目だけを見て記録したこと（Antigravity 側の分析）。
 - 2026-11-22: Phase 69 の完了後、Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テストを実行し、800 件がすべて通った。`pip install` → `auto-dev demo` は終了コード 0 で通った。
