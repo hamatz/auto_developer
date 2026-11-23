@@ -10,7 +10,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - [x] は実装済みでテストがあるもの、[ ] は未実装（現在のフェーズの対象）を表す。
 - 新しいフェーズの要件は「## 5. 次のリリースで追加する要件」に書き、リリース後に 4 章の該当領域へ移す。
   開発の経緯（なぜそうしたか）はここに書かず、LESSONS.md・CHANGELOG.md・git 履歴に残す。
-- Checker への入力は、現在のフェーズの節を機械的に切り出した原文とする（要約しない）。例（Phase 71）:
+- Checker への入力は、現在のフェーズの節を機械的に切り出した原文とする（要約しない）。例（Phase 72）:
     awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_current.md
 - この SPEC は Elephant（人間と設計セッション）が書き、人間が承認する。Maker は変更できない（保護ファイル）。
 -->
@@ -50,6 +50,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - **INV-8 計測はゲートに影響しない**: 計測（イベントログ・集計）の成否は、検証・査読・コミット・隔離の結果を変えない。
 - **INV-9 担当範囲を越えない**: チームとして作業するとき、担当範囲（`owns`）外のファイルを変更した作業は確定させず隔離する。
 - **INV-10 判定は申告ではなく出力から**: 査読の判定は、Checker の出力そのものから機械的に読み取り、記録の後に出力・差分が変わっていないことを確定の直前に確かめる。エージェントが申告した判定だけでは、確定させない（GATE-5〜7）。
+- **INV-11 表示は記録から**: 状態の表示（`status`、ダッシュボード）は、Auto Developer 自身が書いた記録（イベントログ、Evidence と査読の記録、ジョブとチームの状態、Git）と計画ファイルから作る。エージェントが進み具合を自己申告で書いたファイルを、表示の元にしない。計画ファイルの完了の印は、記録と照らし合わせて示す。
 
 ## 4. 機能要件（実装済み）
 
@@ -125,6 +126,17 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - ファイル名が `.env*`、鍵ファイル（`*.key` / `*.pem` / `*.pkcs12` / `*.pfx`）、SSH の鍵の名前（`id_rsa` / `id_ed25519` / `id_ecdsa`）に当たるファイルは、内容を出さず、変更があったことだけを1行で示す。ハッシュは書かない。
   - 名前に `secret` / `token` / `credential` を含むことだけを理由に、ファイルの内容を省略しない（Checker から隠せる抜け穴にしない）。
   - 置き換えは決まった規則で行う。`record-review` と `commit-step` の照合（1バイトの一致、SHA-256 の一致）は変えない。
+- [x] **GATE-9 検証で本物のインデックスを変えない**: `verify-step`（`run` の経路の検証を含む）は、作業ツリーの Tree SHA を、一時的なインデックス（`GIT_INDEX_FILE`）で求め、本物のインデックスを変更しない。`verify-step` の前後で、計画ファイルの完了の印を除き、`git status --porcelain` の出力が変わらないことを、テストで確かめる（`.env` などの未追跡ファイルが、`verify-step` によってステージされないこと）。
+  - `commit-step` は、これまでどおり「検証した Tree SHA と一致するツリー」だけをコミットする。コミットの直前に求めた Tree SHA のツリーを、そのままコミットする（`read-tree` してからコミットするなど）。コミットしたツリーと検証したツリーの照合（一致しなければ致命的な誤りとして止める）は変えない。
+  - 検証した後に作業ツリーに加わったファイルを、コミットに含めない挙動は変えない（`tests/test_nightly_orchestrator.py` の `commit_task must NOT restage unverified files` の検査）。
+  - 隔離（`rollback-step` と失敗時の隔離）が、退避のためにステージする挙動は変えない。
+- [x] **GATE-10 機密のファイルをコミットしない（INV-5）**: 次の3点を変える。
+  - `auto-dev init` と `auto-dev teams init` は、CORE-11 の行に加えて、`.gitignore` に `.env`、`.env.*`、`!.env.example` を追記する（既にある行は重複させない。CORE-11 と同じ規則）。
+  - `verify-step` と `commit-step`（`run` / `teams run` の経路を含む）は、コミットするツリーに、チェックポイントから追加または変更された次のファイルが含まれる場合、`SECRET_FILE_IN_COMMIT:` とそのパスを出して拒否する。`.gitignore` に加えるよう案内も出す。
+    - ファイル名が `.env` または `.env.*`（`.env.example`, `.env.sample`, `.env.template` を除く）
+    - 鍵ファイル（`*.key`, `*.pem`, `*.pkcs12`, `*.pfx`）と、SSH の鍵の名前（`id_rsa`, `id_ed25519`, `id_ecdsa`）
+  - 拒否のときの扱い: `verify-step` は検証の失敗（終了コード 1）とし、Evidence を発行しない。`commit-step` は終了コード 4 とし、HEAD・計画ファイル・Evidence を変えない。`run` の経路では、そのタスクの失敗として隔離する（隔離ブランチには、INV-5 のとおり機密を入れない）。
+  - 名前に `secret` / `token` / `credential` を含むことだけを理由に拒否しない（GATE-8 と同じ）。チェックポイントの時点で既に追跡されていて、変更されていないファイルは対象にしない。
 
 ### 4.3 RCV — 失敗時の保全と復旧
 
@@ -224,6 +236,11 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - 候補テストを動かすスクリプトは、サンドボックスの中で、テストの読み込みより前に「開始の目印」（`===AUTO_DEV_RUNNER_STARTED===`）を1行出力する。
   - 候補テストの出力に開始の目印がない場合は、サンドボックスの機構（bwrap / sandbox-exec）がテストの実行より前に失敗したものとして、終了コードや出力の文字列にかかわらず `SANDBOX_UNAVAILABLE` とする。機構のエラーの出力（標準エラー出力）と、OS ごとの対処を示す。機構のエラーの文字列（`bwrap:`、`sandbox-exec:` など）は、表示にだけ使い、分類には使わない。
   - 開始の目印がある場合の分類（結果の目印がない場合のフォールバック、終了コード 5 の扱い、テストが実際に0件だった場合の `NO_TESTS_RAN` を含む）は変えない。
+- [x] **SBX-7 macOS のシンボリックリンクの Python**: macOS で、候補テストを動かす Python の実行ファイル（`sys.executable`）がシンボリックリンクで、リンクの先がサンドボックスで読み取りを許可していない場所を通る場合でも、候補テストを起動できるようにする。python.org のインストーラの Python（`/Library/Frameworks/Python.framework`）と、GitHub Actions の setup-python の Python（ホームの中の `hostedtoolcache` から `/Library/Frameworks` へのリンク）がこれに当たる。
+  - `sys.executable` からリンクの先の実体まで、たどる途中のリンクそのものと、各パスの親ディレクトリについて、Python の起動に必要な最小の読み取り（リンクの読み取りとメタデータの読み取り）だけを許可する。
+  - ホームディレクトリ・`~/.ssh`・元のリポジトリ・`/Library` の機密の場所などの読み取りの禁止（SBX-1、SBX-5 の macOS のテスト）は弱めない。許可するのはパスそのもの（`literal`）に限り、ディレクトリの中身（`subpath`）を新たに許可しない。
+  - CI の macOS（Python 3.10 / 3.12）で、`realpath: ... Operation not permitted` による `SANDBOX_UNAVAILABLE` にならない。
+- [x] **SBX-8 Linux の `/opt` の確認の修正（SBX-5）**: Linux の実行テストで「許可していないホストのパスが読めない」ことを確かめるとき、候補テストを動かす Python の置き場所として読み取り専用で見せるパス（とその途中のディレクトリ）を、読めてよいものとして除く。Python の置き場所が `/opt` の下にある環境（GitHub Actions の setup-python の `/opt/hostedtoolcache`）でも、置き場所に当たらない `/opt` の中身が見えないことを確かめる。そのような中身がない環境では、この確認をスキップし、理由を表示する。サンドボックスの製品の挙動（Python の置き場所だけをマウントする）は変えない。
 
 ### 4.8 TEAM — マルチチーム実行
 
@@ -315,6 +332,10 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - Linux では bubblewrap と、その AppArmor プロファイルを準備する。
   - `AUTO_DEV_REQUIRE_SANDBOX=1` を設定し、サンドボックスのテストをスキップさせない。
 - [x] **REL-4 型検査の両 platform 対応**: `mypy --platform linux src scripts` と `mypy --platform darwin src scripts` の両方が通る。`sys.platform` で分岐する処理では、分岐の前で変数の型を宣言する。
+- [x] **REL-5 公開前の清掃**: 追跡しているファイルに、開発者のローカルの絶対パス（`/Users/<名前>/...` や `/home/<名前>/...` のうち、例示用の名前でないもの）を含めない。
+  - `scripts/run_pilot04_recovery_experiment.py` と `tests/test_pilot04_recovery_e2e.py` のパスは、環境変数で渡す形にし、指定がなければスキップする（テストのスキップの理由を表示する）。
+  - 追跡しているファイルを検査し、該当するパスがあれば失敗するテストを置く。例示用の名前（`runner`, `user`, `alice` など）と、テストが一時的に作るパスは除く。
+- [x] **REL-2 バージョン表記**: `pyproject.toml`, `plugin.json`, `auto_developer.__version__`, CLI の表示を 0.9.0 に揃える。タグは `v0.9.0` の形式とする（v0.8.0 までの `v.0.x.0` 形式は使わない）。`CHANGELOG.md` に `## [0.9.0]` 節を、`docs/releases/v0.9.0.md` にリリースノートを置く。
 
 ### 4.10 DX — 利用者の体験
 
@@ -348,47 +369,46 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - 隔離の段階では、失敗ログの `Failure Phase: PROTECTED_FILES`（RCV-5）を確かめ、それ以外の原因で隔離された場合は終了コード 1 とする。
   - Bundle の検証の判定は、`verify-bundle --json` の `status` が `VERIFIED` と完全に一致することで行う。
   - 段階ごとの失敗（隔離の段階で終了コードが 1 でない、隔離ブランチがない、隔離の原因が違う、Bundle が VERIFIED でない）で終了コード 1 になることを、テストで確かめる。
-
-## 5. 次のリリース（v0.9.0）で追加する要件
-
-<!-- v0.9.0 の目的: 4.8 TEAM を CLI とスキルから使えるようにし、初めての利用者がつまずかずに試せる状態にする。
-     Phase 66〜70 で実装した部分は 4 章に移した。以下は v0.9.0 の最後のフェーズの要件。
-     要件ごとの影響分析は docs/contracts/phase71.md を参照。 -->
-
-### 5.1 Phase 71 — macOS の CI の修正・README・サンプル・リリース
-
-<!-- README.md（日本語）と README.en.md は、人間が書くものとして Phase 71 の準備コミットで先に置いた（契約の一部）。DX-1 はその README に対して Red から始める。
-     SBX-7 と SBX-8 は、Phase 70 の後の CI で見つかった（Phase 70 の準備で、検証スクリプトがマトリクスの Python を使うようになったため）。 -->
-
-- [ ] **SBX-7 macOS のシンボリックリンクの Python**: macOS で、候補テストを動かす Python の実行ファイル（`sys.executable`）がシンボリックリンクで、リンクの先がサンドボックスで読み取りを許可していない場所を通る場合でも、候補テストを起動できるようにする。python.org のインストーラの Python（`/Library/Frameworks/Python.framework`）と、GitHub Actions の setup-python の Python（ホームの中の `hostedtoolcache` から `/Library/Frameworks` へのリンク）がこれに当たる。
-  - `sys.executable` からリンクの先の実体まで、たどる途中のリンクそのものと、各パスの親ディレクトリについて、Python の起動に必要な最小の読み取り（リンクの読み取りとメタデータの読み取り）だけを許可する。
-  - ホームディレクトリ・`~/.ssh`・元のリポジトリ・`/Library` の機密の場所などの読み取りの禁止（SBX-1、SBX-5 の macOS のテスト）は弱めない。許可するのはパスそのもの（`literal`）に限り、ディレクトリの中身（`subpath`）を新たに許可しない。
-  - CI の macOS（Python 3.10 / 3.12）で、`realpath: ... Operation not permitted` による `SANDBOX_UNAVAILABLE` にならない。
-- [ ] **SBX-8 Linux の `/opt` の確認の修正（SBX-5）**: Linux の実行テストで「許可していないホストのパスが読めない」ことを確かめるとき、候補テストを動かす Python の置き場所として読み取り専用で見せるパス（とその途中のディレクトリ）を、読めてよいものとして除く。Python の置き場所が `/opt` の下にある環境（GitHub Actions の setup-python の `/opt/hostedtoolcache`）でも、置き場所に当たらない `/opt` の中身が見えないことを確かめる。そのような中身がない環境では、この確認をスキップし、理由を表示する。サンドボックスの製品の挙動（Python の置き場所だけをマウントする）は変えない。
-- [ ] **GATE-9 検証で本物のインデックスを変えない**: `verify-step`（`run` の経路の検証を含む）は、作業ツリーの Tree SHA を、一時的なインデックス（`GIT_INDEX_FILE`）で求め、本物のインデックスを変更しない。`verify-step` の前後で `git status --porcelain` の出力が変わらないことを、テストで確かめる（`.env` などの未追跡ファイルが、`verify-step` によってステージされないこと）。
-  - `commit-step` は、これまでどおり「検証した Tree SHA と一致するツリー」だけをコミットする。コミットの直前に求めた Tree SHA のツリーを、そのままコミットする（`read-tree` してからコミットするなど）。コミットしたツリーと検証したツリーの照合（一致しなければ致命的な誤りとして止める）は変えない。
-  - 検証した後に作業ツリーに加わったファイルを、コミットに含めない挙動は変えない（`tests/test_nightly_orchestrator.py` の `commit_task must NOT restage unverified files` の検査）。
-  - 隔離（`rollback-step` と失敗時の隔離）が、退避のためにステージする挙動は変えない。
-- [ ] **GATE-10 機密のファイルをコミットしない（INV-5）**: 次の3点を変える。
-  - `auto-dev init` と `auto-dev teams init` は、CORE-11 の行に加えて、`.gitignore` に `.env`、`.env.*`、`!.env.example` を追記する（既にある行は重複させない。CORE-11 と同じ規則）。
-  - `verify-step` と `commit-step`（`run` / `teams run` の経路を含む）は、コミットするツリーに、チェックポイントから追加または変更された次のファイルが含まれる場合、`SECRET_FILE_IN_COMMIT:` とそのパスを出して拒否する。`.gitignore` に加えるよう案内も出す。
-    - ファイル名が `.env` または `.env.*`（`.env.example`, `.env.sample`, `.env.template` を除く）
-    - 鍵ファイル（`*.key`, `*.pem`, `*.pkcs12`, `*.pfx`）と、SSH の鍵の名前（`id_rsa`, `id_ed25519`, `id_ecdsa`）
-  - 拒否のときの扱い: `verify-step` は検証の失敗（終了コード 1）とし、Evidence を発行しない。`commit-step` は終了コード 4 とし、HEAD・計画ファイル・Evidence を変えない。`run` の経路では、そのタスクの失敗として隔離する（隔離ブランチには、INV-5 のとおり機密を入れない）。
-  - 名前に `secret` / `token` / `credential` を含むことだけを理由に拒否しない（GATE-8 と同じ）。チェックポイントの時点で既に追跡されていて、変更されていないファイルは対象にしない。
-- [ ] **DX-9 チェックポイントの記録**: `verify-step --checkpoint` に `HEAD` などの参照名を渡した場合も、Evidence の記録・査読の記録・イベントには、解決したコミットの SHA（40 桁）を記録する。解決できない参照は、これまでどおり拒否する。
-- [ ] **REL-5 公開前の清掃**: 追跡しているファイルに、開発者のローカルの絶対パス（`/Users/<名前>/...` や `/home/<名前>/...` のうち、例示用の名前でないもの）を含めない。
-  - `scripts/run_pilot04_recovery_experiment.py` と `tests/test_pilot04_recovery_e2e.py` のパスは、環境変数で渡す形にし、指定がなければスキップする（テストのスキップの理由を表示する）。
-  - 追跡しているファイルを検査し、該当するパスがあれば失敗するテストを置く。例示用の名前（`runner`, `user`, `alice` など）と、テストが一時的に作るパスは除く。
-- [ ] **DX-4 CLI リファレンスの生成**: `docs/cli.md` を、CLI の引数定義（argparse）から生成するスクリプト（`scripts/gen_cli_reference.py`）を置く。生成結果と `docs/cli.md` が一致しない場合に失敗するテストを用意し、CLI の変更でリファレンスが古くならないようにする。README からは `docs/cli.md` に案内する。
-- [ ] **DX-3 サンプル**: `examples/two-teams/` に、2チーム構成の最小プロジェクトを置く（ad-team-trial を原型とする電卓。`teams.json`, `plans/`, SPEC, 検証スクリプト、テスト）。シナリオ2（cli の例外が外に出る実装）の欠陥は持ち込まない。DX-1 のテストから、このサンプルを一時ディレクトリに写して `teams prepare` まで通る経路を確かめる。
-- [ ] **DX-1 README のクイックスタートをテストする**: README（`README.md` と `README.en.md`）に書いたコマンドを、一時ディレクトリでそのまま実行するテストを用意し、README と実際の挙動のずれを検査で検出する。
+- [x] **DX-9 チェックポイントの記録**: `verify-step --checkpoint` に `HEAD` などの参照名を渡した場合も、Evidence の記録・査読の記録・イベントには、解決したコミットの SHA（40 桁）を記録する。解決できない参照は、これまでどおり拒否する。
+- [x] **DX-4 CLI リファレンスの生成**: `docs/cli.md` を、CLI の引数定義（argparse）から生成するスクリプト（`scripts/gen_cli_reference.py`）を置く。生成結果と `docs/cli.md` が一致しない場合に失敗するテストを用意し、CLI の変更でリファレンスが古くならないようにする。README からは `docs/cli.md` に案内する。
+- [x] **DX-3 サンプル**: `examples/two-teams/` に、2チーム構成の最小プロジェクトを置く（ad-team-trial を原型とする電卓。`teams.json`, `plans/`, SPEC, 検証スクリプト、テスト）。シナリオ2（cli の例外が外に出る実装）の欠陥は持ち込まない。DX-1 のテストから、このサンプルを一時ディレクトリに写して `teams prepare` まで通る経路を確かめる。
+- [x] **DX-1 README のクイックスタートをテストする**: README（`README.md` と `README.en.md`）に書いたコマンドを、一時ディレクトリでそのまま実行するテストを用意し、README と実際の挙動のずれを検査で検出する。
   - 実行の対象は、README の中の `<!-- readme-test: run -->` の直後にあるコードブロックだけとする。対象のブロックは、`auto-dev demo`、新しいリポジトリでの `init`、`teams init` から `teams prepare` まで、`examples/two-teams` を使う手順を含む。
   - 対象のブロックは、ブロックごとに独立して `bash` で実行する。そのとき、`HOME` を新しい一時ディレクトリにし、作業ディレクトリをリポジトリの直下にする（README の手順は `~/` の下に作業用のディレクトリを作る）。Git の作者の名前とメールアドレスは環境変数で与える。実行の後に、リポジトリの作業ツリーが変わっていないことも確かめる。
   - 対象のブロックの中で `pip install` で始まる行は実行せず、テストを動かしている環境に入っている `auto-dev` を使う（ネットワークに依存しない）。
   - 外部のエージェントやモデル、実行の結果などを要する手順のブロックには `<!-- readme-test: skip（理由） -->` を付け、実行しない。README の本文でもそれとわかるように書く。
   - 日本語と英語の README で、実行の対象のブロックの数と、その中のコマンドが同じであることも確かめる。
-- [ ] **REL-2 バージョン表記**: `pyproject.toml`, `plugin.json`, `auto_developer.__version__`, CLI の表示を 0.9.0 に揃える。タグは `v0.9.0` の形式とする（v0.8.0 までの `v.0.x.0` 形式は使わない）。`CHANGELOG.md` に `## [0.9.0]` 節を、`docs/releases/v0.9.0.md` にリリースノートを置く。
+
+## 5. 次のリリース（v0.10.0）で追加する要件
+
+<!-- v0.10.0 の目的: Auto Developer を「良い SPEC を書ける人」以外にも使えるようにする（Spec Compiler とダッシュボード）。
+     全体の方針は docs/contracts/v0.10-draft.md、Phase 72 の影響分析は docs/contracts/phase72.md を参照。
+     Spec Compiler（CMP）の要件と INV-12 は、Phase 73 の準備で加える。 -->
+
+### 5.1 Phase 72 — 機密の検査の修正・状態のスナップショット・ダッシュボード
+
+- [ ] **GATE-11 機密の検査のファイル名の扱い（GATE-10 の修正）**: 次の3点を直す。
+  - `SECRET_FILE_IN_COMMIT` の検査（GATE-10）は、ファイル名を引用符で囲まれない形（`-z` による NUL 区切り、または `core.quotePath=false`）で読み、日本語などを含むファイル名（例: `鍵.pem`）も名前の規則で判定する（BACKLOG AUD-1004）。
+  - 正規の差分の機密の省略（GATE-8）は、日本語などを含むファイル名の中身を、今も正しく省略している。ただし省略の表示のファイル名が8進数の形（`\351\215\265.pem`）になるので、同じ読み方にそろえて、元のファイル名で表示する。省略の規則は変えない。
+  - `SECRET_FILE_IN_COMMIT` の検査は、チェックポイントからの追加・変更に加えて、種類の変更（`T`。シンボリックリンクから通常のファイルへ、など）も対象にする（BACKLOG AUD-1005）。
+- [ ] **STAT-1 状態のスナップショット**: `auto-dev status --json` が、次をまとめた1つの JSON を標準出力に書く。読むのは INV-11 の記録だけとする。記録が読めない項目は、推測で埋めず `null` と理由を書く。
+  - `schema`（形式の版。`"auto-dev-status/1"`）、作成した時刻、リポジトリの HEAD とブランチ。
+  - 計画: 対象の計画ファイル（CORE-10 の読み取り範囲）のタスクと、その状態（未着手・完了・`[FAILED]`）。「止まっていること・判断待ち」の節の項目。
+  - 計画で完了（`[x]`）なのに、そのタスクのコミット（`[refs: <id>]`）か Evidence の記録がないものは、食い違いとして `attention[]` に入れる。
+  - タスクごとの経過: そのタスクの `verify_step` / `checker_review` / `commit_step` / `rollback_step` のイベント（時刻・結果・判定・モデル）。Evidence の記録があれば、コミットと査読の記録の有無。
+  - 隔離ブランチ（`quarantine/*`）の一覧。
+  - チームのジョブ（`teams.json` があり、ジョブがある場合）: ジョブの状態、チームごとの worktree・ブランチ・タスクの進み具合・`NO_CHANGES`・隔離、統合の結果（`integration/<job_id>` と `rc/<job_id>` の有無）。worktree の記録（`.dev/evidence/`）も読む。
+  - 最新の独立監査の結果（`audit_stage.json` の状態・モード・対象のコミット・指摘の件数）。
+  - 人間が判断すべきこと（`attention[]`）: 隔離、`[FAILED]` のタスク、「止まっていること・判断待ち」の項目、`SANDBOX_UNAVAILABLE` などの検証の失敗、Checker の REJECT、独立監査の P0/P1、`AUDIT_OUTDATED` の状態。
+  - `--json` を付けない `auto-dev status` は、同じ内容を人が読む形で表示する。
+- [ ] **STAT-2 ダッシュボード**: `auto-dev dashboard [--out FILE] [--watch [SECONDS]]` が、STAT-1 のスナップショットを埋め込んだ1枚の HTML を書く（既定は `.dev/dashboard.html`）。
+  - 標準ライブラリだけで作り、外部のファイル・フォント・スクリプトを読み込まない（オフラインで開ける）。
+  - 表示の中心は `attention[]`（人間が判断すべきこと）とする。成功した項目より先に、隔離・失敗・判断待ちを目立たせる。
+  - 単一チームでは計画のタスクの並びを、チームのジョブではチームごとの列と統合の段を表示する。各タスクに、検証・査読（判定とモデル）・コミットの状態を示す。
+  - main への取り込みは行わない（RC タグまで）ことを、統合の段の表示で正しく示す。存在しない機能を表示しない。
+  - `--watch` は、指定した秒数（既定 5 秒）ごとにスナップショットを作り直して HTML を書き直す。HTML は自分で一定の間隔で再読み込みする。サーバーは起動しない。終了は Ctrl-C。
+  - スナップショットの `schema` が想定と違う場合は、HTML にその旨を表示する。
+  - スナップショットの中の文字列（タスクの題名、理由など）は HTML に埋め込む前にエスケープする。
 
 ## 6. スコープ外
 

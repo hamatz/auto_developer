@@ -4,91 +4,78 @@
 現在のタスク進捗と次の一手。会話ログではなく、ここに状態を残す。
 実装エージェントは1回に1ステップだけを担当し、終わったらチェックを付けてコミットする。
 セッションが切れても、SPEC.md・このファイル・git の履歴を読めば作業を再開できる状態に保つ。
-前のフェーズの PLAN は git の履歴で参照する（Phase 70 は 898fe57 時点の PLAN.md）。
+前のフェーズの PLAN は git の履歴で参照する（Phase 71 は 12140dd 時点の PLAN.md）。
 -->
 
 ## 現在の目標
-- Phase 71: v0.9.0 を、初めての利用者が macOS と Linux のどちらでもつまずかずに試せる状態にして、リリースする（SPEC.md 5.1: SBX-7, SBX-8, GATE-9, GATE-10, DX-9, REL-5, DX-4, DX-3, DX-1, REL-2）
-  - 最初に、Phase 70 の後の CI で見つかった macOS と Ubuntu の失敗を直す（docs/contracts/phase71.md の 1.1 節）。
-  - README.md（日本語）と README.en.md は、準備のコミットで人間が書いた。DX-1 は、その README に書いたコマンドを実行するテストである。README を Maker が書き換えてはならない（ずれが見つかったら止まって報告する）。
-  - 要件ごとの影響分析は docs/contracts/phase71.md を参照する。「既存テスト変更の理由」は、この分析から作っている。
-- スコープ外: チーム間の依存関係（`depends_on`）、統合結果の main への自動マージ。
+- Phase 72: 機密の検査の修正と、記録だけから作る状態のスナップショット・ダッシュボード（SPEC.md 5.1: GATE-11, STAT-1, STAT-2）
+  - v0.10.0 の目的は、Auto Developer を「良い SPEC を書ける人」以外にも使えるようにすること（docs/contracts/v0.10-draft.md）。このフェーズは、その土台となる状態の表示を作る。
+  - 要件ごとの影響分析は docs/contracts/phase72.md を参照する。「既存テスト変更の理由」は、この分析から作っている。
+- スコープ外: Spec Compiler（Phase 73〜74）、README の更新（v0.10.0 のリリースのフェーズ）。
 
-## 作業手順（Phase 71・LESSONS.md に基づく）
-- Maker と Checker は別系統のモデルにする（`commit-step` が終了コード 4 で強制する）。
-  - Maker: Gemini 3.8 Flash (`gemini-3.8-flash`)
-  - Checker: Claude Opus 5.5 (`claude-opus-5-5`、Anthropic API 利用。環境変数 `ANTHROPIC_API_KEY` を利用)
-- **Checker の完了の通知だけでは、次に進まない。** Checker のプロセスが終わり、出力ファイルから判定が1つに決まること（GATE-5 の判定の読み取りの規則）を確かめてから記録する。通知と出力ファイルが食い違う場合は、出力ファイルを正とする。
-- Checker には、指摘は要点だけにして、判定行（`DECISION: APPROVE` または `DECISION: REJECT`）を必ず最後の行に書くよう求める（出力が途中で切れて判定行がなくなるのを防ぐ）。
+## 作業手順（Phase 72・LESSONS.md に基づく）
+- Maker と Checker は別系統のモデルにする（`commit-step` が終了コード 4 で強制する）。使うモデルを変えたときは、この節と「記録」に書く。
+  - Maker: `gemini-4-hydrogen-medium`
+  - Checker: `claude-sonnet-5-5`（Anthropic API 利用。環境変数 `ANTHROPIC_API_KEY` を利用）
+- **Checker の完了の通知だけでは、次に進まない。** Checker のプロセスが終わり、出力ファイルから判定が1つに決まること（GATE-5 の判定の読み取りの規則）を確かめてから記録する。
+- Checker には、指摘は要点だけにして、判定（`DECISION: APPROVE` / `DECISION: REJECT` の行、または出力全体が1つの JSON）を必ず出力の最後に書くよう求める。
 - Checker への入力は、要約・再構成しない。
-  1. SPEC の該当節: `awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_phase71.md`（原文。`record-review` が、SPEC.md の連続した一部であることを確かめる）
+  1. SPEC の該当節: `awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_phase72.md`
   2. 差分: `auto-dev review-input --task-id <n> --out-dir .dev/checker/task<n>`
-  3. Checker の出力: `.dev/checker/review_p71_task<n>.txt`（やり直したときは `_v2` などを付け、上書きしない）
+  3. Checker の出力: **`.dev/checker/review_p72_task<n>.txt`** に置く（Antigravity の作業領域ではなく、このリポジトリの中。やり直したときは `_v2` などを付け、上書きしない）。
 - Checker には、SPEC の要件のうち、例外・異常系・境界値の扱いを満たしているかを、差分とテストの両方で確かめるよう求める。
 - verify-step の前に `git status --porcelain` を確認し、意図しないファイルがないことを確かめる。実験は `mktemp -d` の中で行う。
-- `--checkpoint` には、参照名（`HEAD`）ではなくコミットの SHA を渡す（`git rev-parse HEAD`。ステップ 5 の DX-9 の完了までは、記録に参照名がそのまま残るため）。
+- `--checkpoint` にはコミットの SHA を渡す（`git rev-parse HEAD`）。
 - 査読記録の順序:
   1. `auto-dev verify-step --checkpoint <SHA> --task-id <n>`
   2. Checker の査読。1回の verify-step に対して査読は1回とする。
-  3. 判定が APPROVE でも REJECT でも、`auto-dev record-review --task-id <n> --checker-output <出力> --diff-file <diff.patch> --spec-file <spec の切り出し> --maker-model <maker> --checker-model <checker> --reason "<理由>"` で記録する（REJECT も記録して、計測の数を正しくする）。
+  3. 判定が APPROVE でも REJECT でも、`auto-dev record-review --task-id <n> --checker-output <出力> --diff-file <diff.patch> --spec-file <spec の切り出し> --maker-model <maker> --checker-model <checker> --reason "<理由>"` で記録する。
   4. REJECT なら commit-step を呼ばず、手直しして 1 からやり直す。
   5. APPROVE なら `auto-dev commit-step --task-id <n> --checkpoint <SHA> --maker-model <maker> --checker-model <checker> --checker-reason "<reason>"`
-  6. commit-step が終了コード 3 で拒否されたら、verify-step からやり直す。再検証した後も、査読と record-review をやり直す（作業ツリーが変わっていなくても省略しない）。
+  6. commit-step が終了コード 3 で拒否されたら、verify-step からやり直す。再検証した後も、査読と record-review をやり直す。
   7. commit-step が終了コード 4 で拒否されたら、原因を「止まっていること・判断待ち」に書いて止まる。引数を変えて再実行しない。
 - Checker の判定が2回続けて承認にならなかったら（REJECT、または判定が読み取れない）、INV-4 に従って隔離して止まる。
-- **人間の承認を PLAN.md に記録するコミットは、必ず `git commit -m "docs(plan): ..." -- PLAN.md` の形にする。** ステップ 3（GATE-9）の完了までは、`verify-step` が本物のインデックスにステージするため、`git add PLAN.md && git commit` では実装が混ざる（Phase 70 の f51e971）。
+- 人間の承認を PLAN.md に記録するコミットは、`git commit -m "docs(plan): ..." -- PLAN.md` の形にする。
+- CLI にサブコマンドを足すステップでは、同じステップで `python scripts/gen_cli_reference.py` を実行して `docs/cli.md` を作り直す（DX-4 のテストが一致を確かめる）。
 - コミットした後に欠陥が見つかった場合は、`git reset` などで正規の経路の外から巻き戻さない。「止まっていること・判断待ち」に書いて止まり、修正は新しいステップとして行う。
 - テストを書く途中で製品の欠陥に気づいた場合は、テスト側で回避しない。「止まっていること・判断待ち」に書いて止まる（AGENTS.md Rule 4）。
 - 「既存テスト変更の理由」に書いていない既存テストが失敗した場合は、変更せずに止まって報告する。
-- E2E テストで作る一時リポジトリ・worktree は、必ず `tempfile` の中に作る。`git init` には必ず `-b <ブランチ名>` を付けるか、既定のブランチに依存しない書き方をする。
-- サブプロセスを起動するテストでは、`PYTHONDONTWRITEBYTECODE` と `PYTHONPYCACHEPREFIX` を環境から外して実行し、macOS と Linux で結果が変わらないようにする。
-- `sys.platform` で分岐する処理を書くときは、分岐の前で変数の型を宣言する（検証スクリプトが両 platform の mypy を実行する）。
-- 各ステップの検証は手元の macOS で行う。Linux での確認は人間が行う。Maker は、Linux で結果が変わりうる変更をしたときは、コミットメッセージにその旨を書く。
-- SPEC.md はフェーズの途中で変えない（変えると、それより前のタスクの Evidence が Bundle の検証で食い違う。Phase 70 のタスク 3）。SPEC にあいまいさや矛盾を見つけたら、止まって報告する。
-- Bundle を生成した後に、SPEC.md や追跡ファイルを変更しない。SPEC の完了マークは、次のフェーズの準備コミットで人間が付ける。
+- E2E テストで作る一時リポジトリ・worktree は、必ず `tempfile` の中に作る。`git init` には必ず `-b <ブランチ名>` を付ける。
+- サブプロセスを起動するテストでは、`PYTHONDONTWRITEBYTECODE` と `PYTHONPYCACHEPREFIX` を環境から外して実行する。
+- `sys.platform` で分岐する処理を書くときは、分岐の前で変数の型を宣言する。
+- 各ステップの検証は手元の macOS で行う。Linux での確認は人間が行う。
+- SPEC.md はフェーズの途中で変えない。SPEC にあいまいさや矛盾を見つけたら、止まって報告する。
+- Bundle を生成した後に、SPEC.md や追跡ファイルを変更しない。
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-<!-- docs/contracts/phase71.md の 3 章の影響分析から作成。ここに書いていない既存テストは変更しない。どのステップでも、アサーションは変えない（下に明記したものを除く）。 -->
-- ステップ 1（SBX-7）: 既存テストは変更しない。特に macOS の `test_sandbox_blocks_reading_*`（`tests/test_red_verifier.py`）と `tests/test_sandbox_preflight.py` は、そのまま通ること。
-- ステップ 2（SBX-8）: `tests/test_linux_bwrap_isolation.py` の `test_bwrap_blocks_reading_unallowed_host_paths` のうち、`/opt` を確かめる部分だけを、SBX-8 の規則（Python の置き場所とその途中のディレクトリに当たらない `/opt` の直下のエントリを選び、読めないことを `_assert_read_blocked` で確かめる。該当するエントリがなければ理由を示してスキップ）に変えてよい。一時ディレクトリを確かめる部分は変えない。
-- ステップ 3（GATE-9）: 既存テストは変更しない。特に `tests/test_nightly_orchestrator.py` 1420 行目付近（`commit_task must NOT restage unverified files`）と `tests/test_commit_gate_boundary.py` 146〜151 行目付近は、`commit_task` の引数を変えずに、そのまま通ること。
-- ステップ 4（GATE-10）: 既存テストは変更しない。特に `tests/test_init_gitignore.py`（CORE-11 の行が1回ずつ入ること）、`tests/test_nightly_orchestrator.py` 1217 行目付近と `tests/test_recovery.py` 1202 行目付近（隔離に `.env` や鍵を入れないこと）、`tests/test_multi_team_foundation.py` 305〜420 行目付近（`.env` のある worktree を消さないこと）は、そのまま通ること。
-- ステップ 5（DX-9）: 既存テストは変更しない。
-- ステップ 6（REL-5）: `tests/test_pilot04_recovery_e2e.py` の `ZIP_PATH`（18 行目付近）を、環境変数で渡し、指定がなければ理由を示してスキップする形に変えてよい。アサーションは変えない。
-- ステップ 7〜9（DX-4・DX-3・DX-1）: 既存テストは変更しない。README.md と README.en.md は変更しない。
-- ステップ 10（REL-2）: `tests/test_version_consistency.py` の期待値を、`0.8.0` から `0.9.0` に（`## [0.9.0] - `、`docs/releases/v0.9.0.md`、`v0.9.0` を含む）変えてよい。`tests/test_bundler.py` の `v0.8.0` の案内は変えない。
+<!-- docs/contracts/phase72.md の 3 章の影響分析から作成。ここに書いていない既存テストは変更しない。 -->
+- どのステップでも、既存テストは変更しない。
+  - ステップ 1（GATE-11）: `tests/test_gate10_secret_commit.py`、`tests/test_gate8_canonical_diff_redaction.py`、`tests/test_gate5_review_evidence.py`、`tests/immunity/test_immunity_review_evidence.py` は、そのまま通ること。
+  - ステップ 2〜5（STAT-1・STAT-2）: `docs/cli.md` の作り直しは既存テストの変更ではない。`tests/test_dx4_cli_reference.py` は、作り直した `docs/cli.md` でそのまま通ること。
 - 免疫テスト（`tests/immunity/**`）は変更しない。
-- どのステップでも、変更したテスト名をコミットメッセージに列挙する。
 
 ## ステップ
-- [x] 1. macOS で、Python の実行ファイルがシンボリックリンクでも候補テストを起動できるようにする。リンクの先までの途中のパスについて、リンクの読み取りとメタデータの読み取りだけを `literal` で許可する（Red: ホームの中に実際の Python を指すリンクを作り、それを使うと `SANDBOX_UNAVAILABLE` になる）（SBX-7）
-- [x] 2. Linux の `/opt` の確認から、Python の置き場所とその途中のディレクトリを除く（テストのみ。製品の挙動は変えない）（SBX-8）
-- [x] 3. `verify-step`（`run` の経路を含む）で、作業ツリーの Tree SHA を一時的なインデックスで求め、本物のインデックスを変えない。`commit-step` は最後に求めた Tree SHA のツリーをそのままコミットする（Red: `verify-step` の後に、gitignore していない `.env` がステージされている）（GATE-9）
-- [x] 4. `init` / `teams init` の `.gitignore` に `.env`・`.env.*`・`!.env.example` を加える。`verify-step` と `commit-step`（`run` の経路を含む）で、チェックポイントから追加・変更された `.env*`（例示用の3つを除く）・鍵ファイル・SSH の鍵の名前のファイルを `SECRET_FILE_IN_COMMIT:` で拒否する（Red: gitignore していない `.env` が `commit-step` でコミットされる）（GATE-10）
-- [x] 5. `verify-step --checkpoint` に参照名を渡しても、Evidence・査読の記録・イベントに解決した SHA を記録する（Red-First）（DX-9）
-- [x] 6. 追跡しているファイルからローカルの絶対パスを除き、環境変数で渡す形にする。追跡しているファイルを検査するテストを置く（Red: 検査のテストが、今の2ファイルで失敗する）（REL-5）
-- [x] 7. `scripts/gen_cli_reference.py` で argparse から `docs/cli.md` を生成し、ずれを検出するテストを置く（Red-First）（DX-4）
-- [x] 8. `examples/two-teams/`（2チームの電卓）を置き、一時ディレクトリに写して `teams prepare` まで通ることを確かめる（Red-First）（DX-3）
-- [x] 9. README.md と README.en.md の `` のブロックを一時ディレクトリで実行するテストと、日英のブロックの一致の検査（Red: テストがまだない／README のコマンドが通らなければ止まって報告）（DX-1）
-- [x] 10. バージョンを 0.9.0 に揃え、CHANGELOG の `## [0.9.0]` 節と `docs/releases/v0.9.0.md` を置く（Red: `test_version_consistency.py` の新しい期待値）（REL-2）
+- [ ] 1. 機密の検査で、Git のファイル名を引用符で囲まれない形（`-z` または `core.quotePath=false`）で読み、日本語などを含むファイル名も判定する（GATE-10 の `SECRET_FILE_IN_COMMIT`。GATE-8 の省略の表示も元のファイル名にそろえる）。種類の変更（`T`）も `SECRET_FILE_IN_COMMIT` の対象にする（Red: `鍵.pem` が `verify-step` を通る。`review-input` の省略の表示が8進数の形になる。`.env` のシンボリックリンクを通常のファイルに置き換えると通る）（GATE-11）
+- [ ] 2. `auto-dev status [--json]` の単一チームの部分: 計画のタスクと状態、タスクごとのイベント、計画と記録の食い違い、隔離ブランチ、独立監査、`attention[]`。既存の読み取りの関数を使う。`docs/cli.md` を作り直す（Red-First）（STAT-1）
+- [ ] 3. `auto-dev status [--json]` のチームの部分: ジョブの状態、チームごとの worktree・ブランチ・進み具合・`NO_CHANGES`・隔離、統合の結果（`integration/<job_id>`、`rc/<job_id>`）。worktree の記録も読む（Red-First）（STAT-1）
+- [ ] 4. `auto-dev dashboard [--out FILE]`: スナップショットを埋め込んだ1枚の HTML。`attention[]` を先頭に、エスケープ、外部の読み込みなし、`schema` の確認。`docs/cli.md` を作り直す（Red-First）（STAT-2）
+- [ ] 5. `auto-dev dashboard --watch [SECONDS]`: 一定の間隔でスナップショットと HTML を作り直し、HTML は自分で再読み込みする。サーバーは起動しない（Red-First）（STAT-2）
 
 ## 止まっていること・判断待ち
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [x] Phase 71 の準備コミット: SPEC.md（Phase 70 の要件を 4 章へ移し、5.1 に Phase 71 の要件）、PLAN.md、README.md、README.en.md、LESSONS.md、BACKLOG.md、docs/contracts/phase71.md。
-- [x] 準備のコミットの前に: Phase 70 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase70/` に退かせる。
-- [ ] ステップ 2 の完了後: CI（macOS / Ubuntu × Python 3.10 / 3.12）が通ることを確かめる。
-- [ ] ステップ 10 の完了後:
-  - Linux（Ubuntu・bwrap が動く環境）で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。
-  - CI が通ることを確かめる。
-  - Phase 71 の全タスクについて、査読の記録と `.dev/checker/` の出力ファイルを突き合わせ、食い違いが0件であることを確かめる。
+- [x] Phase 72 の準備コミット: SPEC.md（Phase 71 の要件を 4 章へ移し、GATE-9 の文を直し、INV-11 と 5.1 に Phase 72 の要件）、PLAN.md、BACKLOG.md、docs/contracts/phase72.md、docs/contracts/v0.10-draft.md。
+- [x] 準備のコミットの前に: Phase 71 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase71/` に退かせる。
+- [ ] ステップ 1 の完了後: CI（macOS / Ubuntu × Python 3.10 / 3.12）が通ることを確かめる。
+- [ ] ステップ 5 の完了後:
+  - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI が通ることを確かめる。
+  - 査読の記録と `.dev/checker/` の出力ファイルを突き合わせ、食い違いが0件であることを確かめる。
   - Bundle を作り、`verify-bundle` が VERIFIED になることを確かめる。
-  - 最新の HEAD に対する独立監査を行い、`AUDIT_OUTDATED` / `RELEASE_BLOCKED` がないことを確かめる。
-  - CONTRIBUTING.md は見送る（製品が安定するまで Pull Request を受け付けないため）。
-  - `v0.9.0` のタグを付ける。
+  - このリポジトリと `examples/two-teams` で `auto-dev dashboard` を開き、表示を目で確かめる。
 
 ## 記録
+- 2026-11-23: v0.9.0 をリリースした（タグ `v0.9.0`）。v0.10 の方針を docs/contracts/v0.10-draft.md にまとめ、7 章の5点を提案どおりに決めた。
 - 2026-11-23: リリース前の独立監査（`claude-opus-5-5`、LIVE、起点 7ea39c0、対象 f98c251、入力約 25 万トークン）。P0・P1 なし、P2 の2件（AUD-1004、AUD-1005）を BACKLOG に入れた。監査の後の Bundle（`bundle_job-1795428778.zip`）は VERIFIED、警告なし（`audit_stage_verified: true`）。
 - 2026-11-23: Phase 71 の完了後の確認。10 ステップすべて完了し、止まったステップはなかった。査読の記録と出力の写しの突き合わせで食い違いは0件（Checker は JSON の判定で返した）。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 866 件が通った（既知の不安定な2件を除く）。Bundle は VERIFIED（警告は `AUDIT_OUTDATED` のみ）。Maker は `gemini-4-hydrogen-medium`、Checker は `claude-sonnet-5-5` だった（PLAN の記載と違う）。Checker の出力は `.dev/checker/` ではなく Antigravity の作業領域に置かれた（正規の写しは `.git/nightly_evidence/reviews/`）。
 - 2026-11-23: Phase 71 の後の CI は、macOS・Ubuntu とも DX-1 の4件だけが失敗した（`auto-dev: command not found`）。CI がパッケージをインストールしていなかったため。`.github/workflows/verify.yml` に `pip install -e .` を加えた（人間の変更）。SBX-7・SBX-8 の失敗は解消した。
