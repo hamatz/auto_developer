@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tarfile
@@ -33,6 +32,7 @@ def _clean_subprocess_env() -> dict[str, str]:
     env.pop("PYTHONDONTWRITEBYTECODE", None)
     env.pop("PYTHONPYCACHEPREFIX", None)
     env.pop("AUTO_DEV_JOB_ID", None)
+    env["PYTHON"] = sys.executable
     existing_pp = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{SRC_DIR}:{existing_pp}" if existing_pp else SRC_DIR
     return env
@@ -147,11 +147,8 @@ class TestTeamsTemplateE2E(unittest.TestCase):
         self.assertEqual(_git(self.repo_dir, "rev-parse", "main").stdout.strip(), self.base_commit)
 
         clean_env = _clean_subprocess_env()
-        verify_py = (
-            clean_env.get("PYTHON")
-            or shutil.which("python3", path=clean_env.get("PATH"))
-            or sys.executable
-        )
+        self.assertIsNone(sys.pycache_prefix, "Verification Python must not set sys.pycache_prefix")
+        verify_py = clean_env["PYTHON"]
         builtin_prefix = subprocess.run(
             [verify_py, "-c", "import sys; print(sys.pycache_prefix or '')"],
             env=clean_env,
@@ -159,6 +156,7 @@ class TestTeamsTemplateE2E(unittest.TestCase):
             text=True,
             check=True,
         ).stdout.strip()
+        self.assertEqual(builtin_prefix, "", "Pinned PYTHON must not set sys.pycache_prefix")
 
         for tid, rel_files in (
             ("core", ("src/core/engine.py", "src/core/service.py")),
@@ -174,17 +172,11 @@ class TestTeamsTemplateE2E(unittest.TestCase):
             for rel_file in rel_files:
                 self.assertTrue(_git(self.repo_dir, "show", f"{rc_tag}:{rel_file}").stdout)
 
-            # バイトコード (.pyc) が実際に生成されたことを無条件で検証する
-            # （標準 Python/Linux は worktree 内 __pycache__、macOS /usr/bin/python3 は組み込み sys.pycache_prefix 配下）
+            # バイトコード (.pyc) が worktree 内の __pycache__/*.pyc に生成されたことを条件なしで検証する (TEAM-28)
             wt_dir = self.repo_dir / ".dev" / "worktrees" / tid
             self.assertTrue(wt_dir.is_dir())
-            pyc_root = (
-                Path(builtin_prefix) / str(wt_dir.resolve()).lstrip("/")
-                if builtin_prefix
-                else wt_dir
-            )
-            pyc_files = list(pyc_root.rglob("*.pyc"))
-            self.assertTrue(pyc_files, f"Expected .pyc files under {pyc_root}")
+            pyc_files = list(wt_dir.rglob("__pycache__/*.pyc"))
+            self.assertTrue(pyc_files, f"Expected __pycache__/*.pyc files under {wt_dir}")
 
         # (a) 進捗がコメント内の記法例（3行）を数えず 2/2 として表示されること
         status_json_proc = _run_cli(self.repo_dir, "teams", "status", "--job-id", job_id, "--json")
