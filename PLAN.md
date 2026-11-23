@@ -69,7 +69,7 @@
 - [x] 6. 追跡しているファイルからローカルの絶対パスを除き、環境変数で渡す形にする。追跡しているファイルを検査するテストを置く（Red: 検査のテストが、今の2ファイルで失敗する）（REL-5）
 - [x] 7. `scripts/gen_cli_reference.py` で argparse から `docs/cli.md` を生成し、ずれを検出するテストを置く（Red-First）（DX-4）
 - [x] 8. `examples/two-teams/`（2チームの電卓）を置き、一時ディレクトリに写して `teams prepare` まで通ることを確かめる（Red-First）（DX-3）
-- [ ] 9. README.md と README.en.md の `<!-- readme-test: run -->` のブロックを一時ディレクトリで実行するテストと、日英のブロックの一致の検査（Red: テストがまだない／README のコマンドが通らなければ止まって報告）（DX-1）
+- [x] 9. README.md と README.en.md の `` のブロックを一時ディレクトリで実行するテストと、日英のブロックの一致の検査（Red: テストがまだない／README のコマンドが通らなければ止まって報告）（DX-1）
 - [ ] 10. バージョンを 0.9.0 に揃え、CHANGELOG の `## [0.9.0]` 節と `docs/releases/v0.9.0.md` を置く（Red: `test_version_consistency.py` の新しい期待値）（REL-2）
 
 ## 止まっていること・判断待ち
