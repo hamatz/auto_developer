@@ -518,8 +518,8 @@ def _validate_explicit_cli_families(
     return None
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI エントリーポイント。"""
+def build_parser() -> argparse.ArgumentParser:
+    """CLI の ArgumentParser を構築して返す。"""
     parser = argparse.ArgumentParser(
         prog="auto-dev",
         description="Auto Developer: Trustworthy Autonomous Pipeline Orchestrator",
@@ -877,7 +877,12 @@ def main(argv: list[str] | None = None) -> int:
     teams_recover_parser.add_argument(
         "--json", action="store_true", help="Output recovery result in JSON format"
     )
+    return parser
 
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI エントリーポイント。"""
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     if args.subcommand == "demo":
@@ -1076,7 +1081,10 @@ def main(argv: list[str] | None = None) -> int:
                 return rec_code
             print(rec_err, file=sys.stderr)
             return rec_code
-        teams_parser.print_help()
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction) and "teams" in action.choices:
+                action.choices["teams"].print_help()
+                break
         return 2
 
     # Subcommand: pre-flight

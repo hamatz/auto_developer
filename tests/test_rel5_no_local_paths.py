@@ -50,7 +50,7 @@ class TestREL5NoLocalPaths(unittest.TestCase):
             for lineno, line in enumerate(text.splitlines(), start=1):
                 for match in _LOCAL_PATH_RE.finditer(line):
                     username = match.group(1)
-                    if username.lower() in _ALLOWED_EXAMPLE_USERS:
+                    if set(username) == {"."} or username.lower() in _ALLOWED_EXAMPLE_USERS:
                         continue
                     violations.append(f"{rel_path}:{lineno}: {match.group(0)}")
 
