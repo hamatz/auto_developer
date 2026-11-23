@@ -116,6 +116,107 @@ def _read_audit_stage(repo_dir: Path, head_sha: str | None) -> dict[str, Any]:
     }
 
 
+def _ref_exists(repo_dir: Path, ref_name: str) -> bool:
+    ok, _, _ = _run_git_text(repo_dir, ["show-ref", "--verify", "--quiet", ref_name])
+    return ok
+
+
+def _collect_teams_snapshot(
+    repo_dir: Path,
+    attention: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not (repo_dir / "teams.json").is_file():
+        return None
+
+    from auto_developer.multi_team import get_teams_status
+
+    payload, rc, err = get_teams_status(repo_dir)
+    if rc != 0 or payload is None:
+        reason = err or "Failed to read teams status"
+        attention.append({
+            "kind": "TEAMS_STATUS_ERROR",
+            "severity": "HIGH",
+            "task_id": None,
+            "message": reason,
+        })
+        return {
+            "job_id": None,
+            "job_state": None,
+            "integration": None,
+            "teams": [],
+            "reason": reason,
+        }
+
+    job_id = payload.get("job_id")
+    job_state = payload.get("job_state")
+    raw_rc_tag = payload.get("rc_tag")
+    rc_tag_name = str(raw_rc_tag).removeprefix("refs/tags/") if raw_rc_tag else (f"rc/{job_id}" if job_id else None)
+    int_branch = f"integration/{job_id}" if job_id else None
+    integration = {
+        "integration_branch": int_branch,
+        "integration_branch_exists": bool(int_branch and _ref_exists(repo_dir, f"refs/heads/{int_branch}")),
+        "rc_tag": rc_tag_name,
+        "rc_tag_exists": bool(rc_tag_name and _ref_exists(repo_dir, f"refs/tags/{rc_tag_name}")),
+    }
+
+    enriched_teams: list[dict[str, Any]] = []
+    for team in payload.get("teams") or []:
+        tid = str(team.get("team_id", ""))
+        wt_path = Path(str(team.get("worktree_path", "")))
+        wt_exists = bool(team.get("worktree_exists")) and wt_path.is_dir()
+        worker_status = str(team.get("worker_status") or "UNKNOWN")
+        quarantines = list(team.get("quarantine_branches") or [])
+        failed_tasks = int(team.get("failed_tasks") or 0)
+
+        ev_records: list[dict[str, Any]] = []
+        if wt_exists:
+            wt_store = EvidenceStore(repo_dir=wt_path)
+            for rec in wt_store.get_records():
+                ev_records.append({
+                    "task_id": rec.get("task_id"),
+                    "tree_sha": rec.get("tree_sha"),
+                    "commit": rec.get("commit"),
+                    "status": rec.get("status"),
+                })
+
+        enriched_teams.append({
+            **team,
+            "no_changes": worker_status == "NO_CHANGES",
+            "evidence_records": ev_records,
+        })
+
+        if failed_tasks > 0 or worker_status in {"FAILED", "STALE", "TIMEOUT", "CRASHED"}:
+            attention.append({
+                "kind": "TEAM_FAILURE",
+                "severity": "HIGH",
+                "task_id": None,
+                "message": f"Team '{tid}' status={worker_status}, failed_tasks={failed_tasks}",
+            })
+        for qb in quarantines:
+            attention.append({
+                "kind": "TEAM_QUARANTINE",
+                "severity": "HIGH",
+                "task_id": None,
+                "message": f"Team '{tid}' quarantine branch: {qb}",
+            })
+
+    if job_state == "FAILED":
+        attention.append({
+            "kind": "TEAM_JOB_FAILED",
+            "severity": "HIGH",
+            "task_id": None,
+            "message": f"Team job '{job_id}' is in FAILED state",
+        })
+
+    return {
+        "job_id": job_id,
+        "job_state": job_state,
+        "integration": integration,
+        "teams": enriched_teams,
+        "reason": None,
+    }
+
+
 def collect_status_snapshot(
     repo_dir: Path,
     plan_path: Path | None = None,
@@ -302,6 +403,8 @@ def collect_status_snapshot(
                 "message": f"Independent audit target ({audit_info.get('target_commit')}) is older than HEAD ({head_sha})",
             })
 
+    teams_info = _collect_teams_snapshot(resolved_repo, attention)
+
     return {
         "schema": STATUS_SCHEMA,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -320,7 +423,7 @@ def collect_status_snapshot(
         },
         "quarantine_branches": quarantine_branches,
         "audit": audit_info,
-        "teams": None,
+        "teams": teams_info,
         "attention": attention,
     }
 
@@ -364,6 +467,24 @@ def format_status_text(snapshot: dict[str, Any]) -> str:
         lines.append("Quarantine Branches:")
         for qb in quarantine:
             lines.append(f"  - {qb}")
+
+    teams = snapshot.get("teams")
+    if isinstance(teams, dict):
+        lines.append("")
+        lines.append(f"Teams (job={teams.get('job_id') or 'none'}, state={teams.get('job_state') or 'unknown'}):")
+        integration = teams.get("integration") or {}
+        if integration:
+            lines.append(
+                f"  Integration: branch={integration.get('integration_branch')} "
+                f"(exists={integration.get('integration_branch_exists')}), "
+                f"rc_tag={integration.get('rc_tag')} (exists={integration.get('rc_tag_exists')})"
+            )
+        for tm in teams.get("teams") or []:
+            lines.append(
+                f"  - {tm.get('team_id')}: status={tm.get('worker_status')} "
+                f"tasks={tm.get('completed_tasks')}/{tm.get('total_tasks')} "
+                f"no_changes={tm.get('no_changes')} branch={tm.get('branch')}"
+            )
 
     lines.append("")
     if audit.get("present"):

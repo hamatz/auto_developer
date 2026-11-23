@@ -57,7 +57,7 @@
 ## ステップ
 - [x] 1. 機密の検査で、Git のファイル名を引用符で囲まれない形（`-z` または `core.quotePath=false`）で読み、日本語などを含むファイル名も判定する（GATE-10 の `SECRET_FILE_IN_COMMIT`。GATE-8 の省略の表示も元のファイル名にそろえる）。種類の変更（`T`）も `SECRET_FILE_IN_COMMIT` の対象にする（Red: `鍵.pem` が `verify-step` を通る。`review-input` の省略の表示が8進数の形になる。`.env` のシンボリックリンクを通常のファイルに置き換えると通る）（GATE-11）
 - [x] 2. `auto-dev status [--json]` の単一チームの部分: 計画のタスクと状態、タスクごとのイベント、計画と記録の食い違い、隔離ブランチ、独立監査、`attention[]`。既存の読み取りの関数を使う。`docs/cli.md` を作り直す（Red-First）（STAT-1）
-- [ ] 3. `auto-dev status [--json]` のチームの部分: ジョブの状態、チームごとの worktree・ブランチ・進み具合・`NO_CHANGES`・隔離、統合の結果（`integration/<job_id>`、`rc/<job_id>`）。worktree の記録も読む（Red-First）（STAT-1）
+- [x] 3. `auto-dev status [--json]` のチームの部分: ジョブの状態、チームごとの worktree・ブランチ・進み具合・`NO_CHANGES`・隔離、統合の結果（`integration/<job_id>`、`rc/<job_id>`）。worktree の記録も読む（Red-First）（STAT-1）
 - [ ] 4. `auto-dev dashboard [--out FILE]`: スナップショットを埋め込んだ1枚の HTML。`attention[]` を先頭に、エスケープ、外部の読み込みなし、`schema` の確認。`docs/cli.md` を作り直す（Red-First）（STAT-2）
 - [ ] 5. `auto-dev dashboard --watch [SECONDS]`: 一定の間隔でスナップショットと HTML を作り直し、HTML は自分で再読み込みする。サーバーは起動しない（Red-First）（STAT-2）
 
