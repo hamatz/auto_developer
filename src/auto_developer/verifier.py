@@ -13,7 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1012,7 +1012,9 @@ class CommitCheckoutError(RuntimeError):
     """指定されたコミットのチェックアウトに失敗した際のエラー (Fail-Closed) (III.1)。"""
 
 
-_SANDBOX_PROBE_CACHE: dict[str, tuple[str | None, str]] = {}
+_ProbeCacheKey = tuple[str, int, tuple[int, int] | None]
+_SANDBOX_PROBE_CACHE: dict[_ProbeCacheKey, tuple[str | None, str]] = {}
+_LINUX_PROC_DIR = Path("/proc")
 
 
 def _reset_sandbox_backend_cache() -> None:
@@ -1020,7 +1022,62 @@ def _reset_sandbox_backend_cache() -> None:
     _SANDBOX_PROBE_CACHE.clear()
 
 
-def _run_sandbox_probe(cmd: list[str]) -> tuple[bool, str]:
+def _count_linux_user_threads(uid: int, proc_dir: Path | None = None) -> int | None:
+    """Linux の /proc から指定 UID（実 UID）が持つスレッド（タスク）総数を数える (SBX-6)。"""
+    target_proc = proc_dir if proc_dir is not None else _LINUX_PROC_DIR
+    if not target_proc.is_dir():
+        return None
+    total_threads = 0
+    matched_any = False
+    try:
+        with os.scandir(target_proc) as entries:
+            for entry in entries:
+                if not entry.name.isdigit():
+                    continue
+                pid_dir = Path(entry.path)
+                try:
+                    status_text = (pid_dir / "status").read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                real_uid: int | None = None
+                threads_from_status: int | None = None
+                for line in status_text.splitlines():
+                    if line.startswith("Uid:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            with contextlib.suppress(ValueError):
+                                real_uid = int(parts[1])
+                    elif line.startswith("Threads:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            with contextlib.suppress(ValueError):
+                                threads_from_status = int(parts[1])
+                if real_uid != uid:
+                    continue
+                matched_any = True
+                task_count = 0
+                task_dir = pid_dir / "task"
+                try:
+                    with os.scandir(task_dir) as task_entries:
+                        task_count = sum(1 for t in task_entries if t.name.isdigit())
+                except OSError:
+                    task_count = 0
+                if task_count > 0:
+                    total_threads += task_count
+                elif threads_from_status is not None and threads_from_status > 0:
+                    total_threads += threads_from_status
+                else:
+                    total_threads += 1
+    except OSError:
+        return None
+    return total_threads if matched_any else None
+
+
+def _run_sandbox_probe(
+    cmd: list[str],
+    timeout_sec: int = 10,
+    preexec_fn: Callable[[], None] | None = None,
+) -> tuple[bool, str]:
     """最小コマンドをサンドボックス内で 1 回実行し、(起動成功, 失敗詳細) を返す。"""
     try:
         proc = subprocess.run(
@@ -1028,7 +1085,8 @@ def _run_sandbox_probe(cmd: list[str]) -> tuple[bool, str]:
             capture_output=True,
             text=True,
             check=False,
-            timeout=10,
+            timeout=max(1, timeout_sec),
+            preexec_fn=preexec_fn,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)
@@ -1322,6 +1380,8 @@ if protected_repo:
 
     sys.addaudithook(_security_audit_hook)
 
+print("===AUTO_DEV_RUNNER_STARTED===", flush=True)
+
 loader = unittest.defaultTestLoader
 try:
     suite = loader.discover(start_dir=search_dir, pattern=pattern)
@@ -1469,30 +1529,39 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                     pass
 
     def _compute_nproc_limit(self, margin: int = 50) -> tuple[tuple[int, int] | None, str]:
-        """現在のユーザープロセス数に基づいて RLIMIT_NPROC の (soft, hard) 上限を計算する (JJJ.3)。
+        """現在のユーザープロセス/スレッド数に基づいて RLIMIT_NPROC の (soft, hard) 上限を計算する (JJJ.3, SBX-6)。
 
-        RLIMIT_NPROC はプロセス単位ではなくユーザー(UID)全体のプロセス数上限であるため、
-        現在のプロセス数 + マージンで設定する。取得に失敗した場合は制限を設定せずステータスを返す。
+        RLIMIT_NPROC はプロセス単位ではなくユーザー(UID)全体の上限であり、Linux ではスレッド（タスク）
+        単位で数えられるため、Linux ではスレッド総数 + マージンで設定する。取得に失敗した場合は制限を設定せずステータスを返す。
         """
         if not hasattr(resource, "RLIMIT_NPROC") or os.name != "posix":
             return None, "unsupported"
 
         try:
             _cur_soft, cur_hard = resource.getrlimit(resource.RLIMIT_NPROC)
-            res = subprocess.run(
-                ["ps", "-u", str(os.getuid()), "-o", "pid="],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if res.returncode != 0:
-                return None, f"ps_failed(code={res.returncode})"
-            lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
-            cur_proc_count = len(lines)
-            target = cur_proc_count + margin
+            cur_count: int | None = None
+            if sys.platform.startswith("linux"):
+                cur_count = _count_linux_user_threads(os.getuid())
+            if cur_count is None:
+                ps_cmd: list[str]
+                if sys.platform.startswith("linux"):
+                    ps_cmd = ["ps", "-L", "-u", str(os.getuid()), "-o", "lwp="]
+                else:
+                    ps_cmd = ["ps", "-u", str(os.getuid()), "-o", "pid="]
+                res = subprocess.run(
+                    ps_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if res.returncode != 0:
+                    return None, f"ps_failed(code={res.returncode})"
+                lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+                cur_count = len(lines)
+            target = cur_count + margin
             if cur_hard != resource.RLIM_INFINITY and target > cur_hard:
                 target = cur_hard
-            return (target, cur_hard), f"applied: limit={target} (cur_count={cur_proc_count}, margin={margin})"
+            return (target, cur_hard), f"applied: limit={target} (cur_count={cur_count}, margin={margin})"
         except Exception as e:  # noqa: BLE001
             return None, f"error: {e}"
 
@@ -1525,11 +1594,22 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 with contextlib.suppress(ValueError, OSError):
                     resource.setrlimit(resource.RLIMIT_NPROC, nproc_limits)
 
-    def _probe_sandbox_backend(self) -> tuple[str | None, str]:
-        """利用可能な OS サンドボックス機構を最小コマンドの実働で確認し、結果をプロセス内でキャッシュする (SBX-3)。"""
-        cached = _SANDBOX_PROBE_CACHE.get("result")
+    def _probe_sandbox_backend(
+        self,
+        timeout_sec: int = 30,
+        nproc_limits: tuple[int, int] | None = None,
+    ) -> tuple[str | None, str]:
+        """利用可能な OS サンドボックス機構を最小コマンドの実働で確認し、渡した値の組ごとに結果をキャッシュする (SBX-3, SBX-6)。"""
+        cache_key: _ProbeCacheKey = (sys.platform, timeout_sec, nproc_limits)
+        cached = _SANDBOX_PROBE_CACHE.get(cache_key)
         if cached is not None:
             return cached
+
+        preexec: Callable[[], None] | None = (
+            (lambda: self._apply_resource_limits(timeout_sec, nproc_limits))
+            if os.name == "posix"
+            else None
+        )
 
         res: tuple[str | None, str]
         if sys.platform == "darwin":
@@ -1540,7 +1620,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 )
             else:
                 ok, err = _run_sandbox_probe(
-                    ["sandbox-exec", "-p", "(version 1)(allow default)(deny network*)", "true"]
+                    ["sandbox-exec", "-p", "(version 1)(allow default)(deny network*)", "true"],
+                    timeout_sec=timeout_sec,
+                    preexec_fn=preexec,
                 )
                 res = (
                     ("sandbox-exec", "")
@@ -1555,7 +1637,9 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 )
             else:
                 ok, err = _run_sandbox_probe(
-                    ["bwrap", "--unshare-net", "--ro-bind", "/", "/", "true"]
+                    ["bwrap", "--unshare-net", "--ro-bind", "/", "/", "true"],
+                    timeout_sec=timeout_sec,
+                    preexec_fn=preexec,
                 )
                 res = (
                     ("bwrap", "")
@@ -1565,17 +1649,26 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         else:
             res = (None, _format_sandbox_unavailable_message(sys.platform))
 
-        _SANDBOX_PROBE_CACHE["result"] = res
+        _SANDBOX_PROBE_CACHE[cache_key] = res
         return res
 
-    def _get_sandbox_backend(self) -> str | None:
+    def _get_sandbox_backend(
+        self,
+        timeout_sec: int = 30,
+        nproc_limits: tuple[int, int] | None = None,
+    ) -> str | None:
         """利用可能な OS サンドボックス機構を検出する (macOS: sandbox-exec, Linux: bwrap)。"""
-        backend, _ = self._probe_sandbox_backend()
+        backend, _ = self._probe_sandbox_backend(timeout_sec=timeout_sec, nproc_limits=nproc_limits)
         return backend
 
-    def _get_sandbox_unavailable_detail(self) -> str:
+    def _get_sandbox_unavailable_detail(
+        self,
+        timeout_sec: int = 30,
+        nproc_limits: tuple[int, int] | None = None,
+    ) -> str:
         """SANDBOX_UNAVAILABLE 時の OS ごとの対処メッセージを返す。"""
-        cached = _SANDBOX_PROBE_CACHE.get("result")
+        cache_key: _ProbeCacheKey = (sys.platform, timeout_sec, nproc_limits)
+        cached = _SANDBOX_PROBE_CACHE.get(cache_key)
         if cached is not None and cached[0] is None and cached[1]:
             return cached[1]
         return _format_sandbox_unavailable_message(sys.platform)
@@ -1733,9 +1826,15 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             )
 
         # 0.1 OS サンドボックス基盤の確認 (Fail-Closed: サンドボックス不可時は即座に拒絶)
-        backend = self._get_sandbox_backend()
+        backend = self._get_sandbox_backend(
+            timeout_sec=timeout_sec,
+            nproc_limits=nproc_limits,
+        )
         if not backend:
-            unavailable_msg = self._get_sandbox_unavailable_detail()
+            unavailable_msg = self._get_sandbox_unavailable_detail(
+                timeout_sec=timeout_sec,
+                nproc_limits=nproc_limits,
+            )
             return _res(
                 is_reproduced=False,
                 exit_code=1,
@@ -2038,13 +2137,20 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             )
 
         returncode = proc.returncode if proc.returncode is not None else 1
-        if returncode != 0 and ("sandbox-exec:" in stderr or "sandbox_apply:" in stderr):
+        started_marker = "===AUTO_DEV_RUNNER_STARTED==="
+        if started_marker not in stdout.splitlines():
+            stderr_text = stderr.strip()
+            guidance = _format_sandbox_unavailable_message(
+                sys.platform,
+                probe_error=stderr_text or f"exit code {returncode}",
+            )
+            combined_output = f"{stderr_text}\n{guidance}".strip() if stderr_text else guidance
             return _res(
                 is_reproduced=False,
                 exit_code=returncode,
                 reason="SANDBOX_UNAVAILABLE",
-                output=stderr,
-                reason_detail="OS sandbox failed to execute candidate test.",
+                output=combined_output,
+                reason_detail=guidance,
             )
 
         output = (stdout + "\n" + stderr).strip()

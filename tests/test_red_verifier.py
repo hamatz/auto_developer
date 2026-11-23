@@ -522,7 +522,14 @@ class TamperingTest(unittest.TestCase):
     def test_repro(self):
         self.assertEqual(1, 2)
 """
-        with patch("subprocess.Popen", side_effect=popen_router):
+        with (
+            patch("subprocess.Popen", side_effect=popen_router),
+            patch.object(
+                self.verifier,
+                "_get_sandbox_backend",
+                return_value=("sandbox-exec" if sys.platform == "darwin" else "bwrap"),
+            ),
+        ):
             result = self.verifier.verify_candidate_test(code)
             # アサーション失敗があっても GENUINE_RED にならず REPO_TAMPER_DETECTED で拒絶されること
             self.assertFalse(result.is_reproduced)
@@ -577,7 +584,14 @@ class TamperingUntrackedContentTest(unittest.TestCase):
     def test_repro(self):
         self.assertEqual(1, 2)
 """
-        with patch("subprocess.Popen", side_effect=popen_router):
+        with (
+            patch("subprocess.Popen", side_effect=popen_router),
+            patch.object(
+                self.verifier,
+                "_get_sandbox_backend",
+                return_value=("sandbox-exec" if sys.platform == "darwin" else "bwrap"),
+            ),
+        ):
             result = self.verifier.verify_candidate_test(code)
             self.assertFalse(result.is_reproduced)
             self.assertEqual(result.reason, "REPO_TAMPER_DETECTED")
@@ -802,7 +816,7 @@ class SimplePassTest(unittest.TestCase):
                 mock_p.pid = 12345
                 mock_p.returncode = 0
                 mock_p.communicate.return_value = (
-                    '===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [], "errors": []}',
+                    '===AUTO_DEV_RUNNER_STARTED===\n===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [], "errors": []}',
                     "",
                 )
                 return mock_p
@@ -852,7 +866,7 @@ class PassTest(unittest.TestCase):
                 mock_p.pid = 12345
                 mock_p.returncode = 0
                 mock_p.communicate.return_value = (
-                    '===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [], "errors": []}',
+                    '===AUTO_DEV_RUNNER_STARTED===\n===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [], "errors": []}',
                     "",
                 )
                 return mock_p
@@ -923,7 +937,7 @@ class ReadKeychainTest(unittest.TestCase):
                 mock_p.pid = 12345
                 mock_p.returncode = 0
                 mock_p.communicate.return_value = (
-                    '===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [], "errors": []}',
+                    '===AUTO_DEV_RUNNER_STARTED===\n===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [], "errors": []}',
                     "",
                 )
                 return mock_p
@@ -967,7 +981,7 @@ class PassTest(unittest.TestCase):
                 mock_p.pid = 12345
                 mock_p.returncode = 0
                 mock_p.communicate.return_value = (
-                    '===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [], "errors": []}',
+                    '===AUTO_DEV_RUNNER_STARTED===\n===AUTO_DEV_TEST_RESULT===\n{"tests_run": 1, "failures": [], "errors": []}',
                     "",
                 )
                 return mock_p

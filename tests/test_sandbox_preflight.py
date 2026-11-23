@@ -111,8 +111,13 @@ class TestSandboxPreflight(unittest.TestCase):
             patch("auto_developer.verifier.sys.platform", "linux"),
             patch("auto_developer.verifier.shutil.which", side_effect=lambda name: "/usr/bin/bwrap" if name == "bwrap" else None),
             patch("auto_developer.verifier.subprocess.run", side_effect=router),
+            patch.object(
+                self.verifier,
+                "_compute_nproc_limit",
+                return_value=((500, 500), "applied: limit=500 (test)"),
+            ),
         ):
-            self.assertIsNone(self.verifier._get_sandbox_backend())
+            self.assertIsNone(self.verifier._get_sandbox_backend(timeout_sec=30, nproc_limits=(500, 500)))
             result = self.verifier.verify_candidate_test(self.sample_test)
 
         self.assertEqual(len(captured), 1, "bwrap probe must run exactly once and be cached")
@@ -171,8 +176,13 @@ class TestSandboxPreflight(unittest.TestCase):
                 side_effect=lambda name: "/usr/bin/sandbox-exec" if name == "sandbox-exec" else None,
             ),
             patch("auto_developer.verifier.subprocess.run", side_effect=router),
+            patch.object(
+                self.verifier,
+                "_compute_nproc_limit",
+                return_value=((500, 500), "applied: limit=500 (test)"),
+            ),
         ):
-            self.assertIsNone(self.verifier._get_sandbox_backend())
+            self.assertIsNone(self.verifier._get_sandbox_backend(timeout_sec=30, nproc_limits=(500, 500)))
             result = self.verifier.verify_candidate_test(self.sample_test)
 
         self.assertEqual(len(captured), 1, "sandbox-exec probe must run exactly once and be cached")
