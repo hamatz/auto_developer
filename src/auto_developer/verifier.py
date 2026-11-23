@@ -1134,6 +1134,53 @@ def _format_sandbox_unavailable_message(
     )
 
 
+def _macos_symlink_traversal_rules(target_path: Path) -> list[str]:
+    """Build minimal literal Seatbelt rules to traverse symlinks and parent dirs (SBX-7)."""
+    rules: list[str] = []
+    seen_paths: set[str] = set()
+    queue: list[Path] = [Path(os.path.abspath(str(target_path)))]
+    hops = 0
+
+    while queue and hops < 40:
+        hops += 1
+        current_target = queue.pop(0)
+        norm_str = os.path.normpath(str(current_target))
+        if norm_str in seen_paths:
+            continue
+        seen_paths.add(norm_str)
+
+        parts = Path(norm_str).parts
+        if not parts or parts[0] != "/":
+            continue
+
+        curr = Path("/")
+        for idx, part in enumerate(parts[1:], start=1):
+            curr = curr / part
+            curr_str = str(curr)
+            try:
+                is_link = curr.is_symlink()
+            except OSError:
+                is_link = False
+
+            if is_link:
+                rules.append(f'(allow file-read* (literal "{curr_str}"))')
+                try:
+                    raw_link = Path(os.readlink(curr))
+                except OSError:
+                    break
+                next_base = raw_link if raw_link.is_absolute() else (curr.parent / raw_link)
+                remaining = parts[idx + 1 :]
+                next_path = next_base.joinpath(*remaining) if remaining else next_base
+                queue.append(Path(os.path.normpath(str(next_path))))
+                break
+            elif idx == len(parts) - 1:
+                rules.append(f'(allow file-read* (literal "{curr_str}"))')
+            else:
+                rules.append(f'(allow file-read-metadata (literal "{curr_str}"))')
+
+    return list(dict.fromkeys(rules))
+
+
 class RedTestVerifier:
     """監査役や外部から提示されたテスト候補が、現在のコードベースで確実に Red になるかを判定するハーネス。"""
 
@@ -1923,6 +1970,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 if Path(opt_path).exists():
                     extra_allow_rules.append(f'(allow file-read* (subpath "{opt_path}"))')
             extra_allow_str = "\n".join(extra_allow_rules)
+            symlink_rules_str = "\n".join(_macos_symlink_traversal_rules(py_raw))
 
             # NNN.1: 広範な /Library, /private/etc, /etc の一括 allow を廃止し、
             # /private/var に対しても db, root, log, audit 等の機密領域を明示拒否（deny）し、
@@ -1982,6 +2030,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 (allow file-read* (subpath "/private/etc/ssl"))
 (allow file-read* (subpath "/etc/ssl"))
 {pfx_rules_str}
+{symlink_rules_str}
 (allow file-read* (literal "{py_raw}"))
 (allow file-read* (literal "{py_bin}"))
 (allow file-read* (subpath "{py_bin}"))
