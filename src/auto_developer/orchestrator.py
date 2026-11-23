@@ -84,6 +84,55 @@ class NightlyOrchestrator:
         self.reporter = MorningReporter(repo_dir=self.repo_dir)
         self.evidence_store = EvidenceStore(repo_dir=self.repo_dir)
 
+    def _metrics(self) -> Any:
+        from auto_developer.metrics import MetricsLog
+
+        return MetricsLog(repo_dir=self.repo_dir, plan_path=self.plan_path, team_id=self.team_id)
+
+    def _record_event(self, event: str, **kwargs: Any) -> None:
+        try:
+            self._metrics().record_event(event, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            print(f"METRICS_WARNING: Failed to record metrics event '{event}': {e}", file=sys.stderr)
+
+    def _resolve_model_families(self) -> tuple[str, str, str, str, str, str]:
+        m_model = self.maker_model or ""
+        c_model = self.checker_model or ""
+        m_fam, m_src = ("unknown", "inferred")
+        c_fam, c_src = ("unknown", "inferred")
+        if m_model or c_model:
+            try:
+                from auto_developer.audit import resolve_model_family_safe
+
+                if m_model:
+                    m_fam, m_src, _ = resolve_model_family_safe(m_model, self.maker_family)
+                if c_model:
+                    c_fam, c_src, _ = resolve_model_family_safe(c_model, self.checker_family)
+            except Exception as e:  # noqa: BLE001
+                print(f"METRICS_WARNING: Failed to resolve model families: {e}", file=sys.stderr)
+        return m_model, m_fam, m_src, c_model, c_fam, c_src
+
+    def _run_and_record_verification(self, task_id: str, checkpoint: str, attempt: int) -> tuple[int, str]:
+        t0 = time.time()
+        code, out = self._run_verification_with_boundary(checkpoint)
+        dur = round(time.time() - t0, 2)
+        if code == 0:
+            verify_result = "PASSED"
+        elif "BOUNDARY VIOLATION after verification:" in out:
+            verify_result = "BOUNDARY_VIOLATION"
+        else:
+            verify_result = "FAILED"
+        self._record_event(
+            "verify_step",
+            task_id=task_id,
+            checkpoint=checkpoint,
+            result=verify_result,
+            exit_code=code,
+            duration_sec=dur,
+            attempt=attempt,
+        )
+        return code, out
+
     def run(self) -> int:
         try:
             team_ctx = resolve_team_context(
@@ -458,6 +507,12 @@ class NightlyOrchestrator:
                     f"  [Level 7: Rule 10] Injected {len(matching_lessons)} relevant lessons from LESSONS.md into Maker context"
                 )
 
+            self._record_event(
+                "task_start",
+                task_id=task.task_id,
+                checkpoint=checkpoint,
+                attempt=1,
+            )
             maker_code, maker_out = self.runner_adapter.run_maker(
                 task,
                 context={
@@ -560,7 +615,7 @@ class NightlyOrchestrator:
 
             # Phase C: 決定論的検証 & 再試行 (Verification Gate)
             print(f"  [Phase C: Verifier] Running {self.verify_script}...")
-            code, out = self._run_verification_with_boundary(checkpoint)
+            code, out = self._run_and_record_verification(task.task_id, checkpoint, attempt=1)
             last_out_lines = [l.strip() for l in out.strip().splitlines() if l.strip()]
             task_attempts.append({
                 "attempt": 1,
@@ -576,6 +631,12 @@ class NightlyOrchestrator:
                 job_state.save(self.state_path)
 
                 # Attempt 2: Maker retry with verification failure output
+                self._record_event(
+                    "task_start",
+                    task_id=task.task_id,
+                    checkpoint=checkpoint,
+                    attempt=2,
+                )
                 maker_code2, maker_out2 = self.runner_adapter.run_maker(
                     task,
                     context={
@@ -650,7 +711,7 @@ class NightlyOrchestrator:
                     )
 
                 self.dispatcher.mark_task_status(self.plan_path, task, status="completed")
-                code, out = self._run_verification_with_boundary(checkpoint)
+                code, out = self._run_and_record_verification(task.task_id, checkpoint, attempt=2)
                 last_out_lines2 = [l.strip() for l in out.strip().splitlines() if l.strip()]
                 task_attempts.append({
                     "attempt": 2,
@@ -718,12 +779,29 @@ class NightlyOrchestrator:
                 else checker_reason
             )
             parsed_dec = parse_checker_decision(raw_checker_output)
+            m_model, m_fam, m_src, c_model, c_fam, c_src = self._resolve_model_families()
             if not approved or parsed_dec != "APPROVE":
                 reject_reason = checker_reason
                 if approved and parsed_dec != "APPROVE":
                     reject_reason = (
                         f"CHECKER_POLICY_VIOLATION: Checker output lacks unique DECISION: APPROVE line\n{checker_reason}"
                     )
+                if not approved:
+                    review_dec = "UNKNOWN" if parsed_dec == "UNKNOWN" else "REJECT"
+                else:
+                    review_dec = parsed_dec or "UNKNOWN"
+                self._record_event(
+                    "checker_review",
+                    task_id=task.task_id,
+                    decision=review_dec,
+                    checker_model=c_model,
+                    checker_family=c_fam,
+                    checker_family_source=c_src,
+                    maker_model=m_model,
+                    maker_family=m_fam,
+                    maker_family_source=m_src,
+                    reason=reject_reason,
+                )
                 self._save_rejected_gate7_review(
                     job_id=job_state.job_id,
                     task_id=task.task_id,
@@ -746,6 +824,19 @@ class NightlyOrchestrator:
                     attempt_2_log=attempt_2_log,
                     attempts=task_attempts,
                 )
+
+            self._record_event(
+                "checker_review",
+                task_id=task.task_id,
+                decision="APPROVE",
+                checker_model=c_model,
+                checker_family=c_fam,
+                checker_family_source=c_src,
+                maker_model=m_model,
+                maker_family=m_fam,
+                maker_family_source=m_src,
+                reason=checker_reason,
+            )
 
             # Phase E: 確定とコミット (Evidence & Commit)
             print("  [Phase E: Commit] Checker approved. Finalizing plan and issuing evidence...")
@@ -854,6 +945,19 @@ class NightlyOrchestrator:
             ):
                 err_msg = f"Could not verify evidence for task {task.task_id}"
                 print(f"  EVIDENCE ERROR: {err_msg}", file=sys.stderr)
+                self._record_event(
+                    "commit_step",
+                    result="EVIDENCE_ERROR",
+                    commit=None,
+                    task_id=task.task_id,
+                    checker_decision="APPROVE",
+                    checker_model=c_model,
+                    checker_family=c_fam,
+                    checker_family_source=c_src,
+                    maker_model=m_model,
+                    maker_family=m_fam,
+                    maker_family_source=m_src,
+                )
                 self._write_report_then_create_bundle(
                     job_id=job_state.job_id,
                     summary_data={
@@ -872,7 +976,36 @@ class NightlyOrchestrator:
                 return 3
 
             # 4. コミット実行（固定されたインデックスから直接コミット）
-            commit_hash = self.git_guard.commit_task(task, tree_sha=current_tree)
+            try:
+                commit_hash = self.git_guard.commit_task(task, tree_sha=current_tree)
+            except (subprocess.CalledProcessError, OSError) as err:
+                err_msg = f"Git commit failed for task {task.task_id}: {err}"
+                print(f"  COMMIT ERROR: {err_msg}", file=sys.stderr)
+                self._record_event(
+                    "commit_step",
+                    result="COMMIT_ERROR",
+                    commit=None,
+                    task_id=task.task_id,
+                    checker_decision="APPROVE",
+                    checker_model=c_model,
+                    checker_family=c_fam,
+                    checker_family_source=c_src,
+                    maker_model=m_model,
+                    maker_family=m_fam,
+                    maker_family_source=m_src,
+                )
+                return self._handle_failure(
+                    task,
+                    checkpoint,
+                    total_tasks,
+                    succeeded_tasks,
+                    job_state,
+                    "COMMIT_ERROR",
+                    err_msg,
+                    attempt_1_log=attempt_1_log,
+                    attempt_2_log=attempt_2_log,
+                    attempts=task_attempts,
+                )
 
             # 5. コミットされた Git Commit の Tree SHA と Evidence Tree SHA の完全一致を検証
             committed_tree_sha = self.git_guard.get_commit_tree_sha(commit_hash)
@@ -881,6 +1014,19 @@ class NightlyOrchestrator:
                 print(
                     f"  FATAL INVARIANT BREACH: {err_msg}!",
                     file=sys.stderr,
+                )
+                self._record_event(
+                    "commit_step",
+                    result="EVIDENCE_ERROR",
+                    commit=commit_hash,
+                    task_id=task.task_id,
+                    checker_decision="APPROVE",
+                    checker_model=c_model,
+                    checker_family=c_fam,
+                    checker_family_source=c_src,
+                    maker_model=m_model,
+                    maker_family=m_fam,
+                    maker_family_source=m_src,
                 )
                 self._write_report_then_create_bundle(
                     job_id=job_state.job_id,
@@ -938,6 +1084,20 @@ class NightlyOrchestrator:
                 checker_info=checker_info,
                 verification_info=verification_meta,
                 attempts=task_attempts,
+            )
+
+            self._record_event(
+                "commit_step",
+                result="COMMITTED",
+                commit=commit_hash,
+                task_id=task.task_id,
+                checker_decision="APPROVE",
+                checker_model=c_model,
+                checker_family=c_fam,
+                checker_family_source=c_src,
+                maker_model=m_model,
+                maker_family=m_fam,
+                maker_family_source=m_src,
             )
 
             task_info = {
@@ -1181,7 +1341,6 @@ class NightlyOrchestrator:
             if output_tokens is None:
                 output_tokens = audit_metadata.get("output_tokens")
 
-            from auto_developer.metrics import MetricsLog
             event_extra: dict[str, Any] = {}
             if audit_metadata.get("auditor_family") is not None:
                 event_extra["auditor_family"] = audit_metadata.get("auditor_family")
@@ -1192,7 +1351,7 @@ class NightlyOrchestrator:
             if audit_metadata.get("maker_family_source") is not None:
                 event_extra["maker_family_source"] = audit_metadata.get("maker_family_source")
 
-            MetricsLog(repo_dir=self.repo_dir, plan_path=self.plan_path).record_event(
+            self._metrics().record_event(
                 "audit_stage",
                 status=status,
                 findings_by_severity=findings_by_severity,
@@ -1303,6 +1462,13 @@ class NightlyOrchestrator:
             task_id=task.task_id,
             job_id=job_state.job_id,
             team_id=self.team_id or "",
+        )
+        self._record_event(
+            "rollback_step",
+            task_id=task.task_id,
+            checkpoint=checkpoint,
+            quarantine_branch=quarantine_branch or None,
+            reason=reason,
         )
 
         log_path = self.repo_dir / "logs" / "nightly" / f"task_{task.task_id}_failure.log"

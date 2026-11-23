@@ -16,9 +16,15 @@ from auto_developer.dispatcher import extract_plan_scope_lines, strip_html_comme
 class MetricsLog:
     """決定論的パイプラインの各段階におけるイベントログを記録する (機能XXX.3)。"""
 
-    def __init__(self, repo_dir: Path | None = None, plan_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        repo_dir: Path | None = None,
+        plan_path: Path | None = None,
+        team_id: str | None = None,
+    ) -> None:
         self.repo_dir = repo_dir or Path.cwd()
         self.plan_path = plan_path or (self.repo_dir / "PLAN.md")
+        self.team_id = team_id or None
         git_dir = self.repo_dir / ".git"
         if git_dir.is_dir():
             self.events_path = git_dir / "nightly_evidence" / "events.jsonl"
@@ -129,12 +135,14 @@ class MetricsLog:
         try:
             phase = kwargs.pop("phase", None) or self.get_current_phase()
             head = kwargs.pop("head", None) or self.get_current_head()
+            team = kwargs.pop("team", self.team_id)
             record: dict[str, Any] = {
                 "schema": 1,
                 "ts": int(time.time()),
                 "event": event,
                 "phase": phase,
                 "head": head,
+                **({"team": team} if team else {}),
                 **kwargs,
             }
             self.events_path.parent.mkdir(parents=True, exist_ok=True)

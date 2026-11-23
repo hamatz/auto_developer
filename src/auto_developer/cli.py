@@ -1165,6 +1165,24 @@ def main(argv: list[str] | None = None) -> int:
             result["team_id"] = team_ctx.team_id
             result["plan"] = team_ctx.plan_rel_path
             result["owns"] = team_ctx.owns_patterns
+        if next_task is not None:
+            try:
+                metrics = MetricsLog(
+                    repo_dir=work_dir,
+                    plan_path=effective_plan_path,
+                    team_id=team_ctx.team_id if team_ctx else None,
+                )
+                pf_phase = metrics.get_current_phase()
+                pf_attempt = metrics.count_verify_attempts(next_task.task_id, checkpoint, phase=pf_phase) + 1
+                metrics.record_event(
+                    "task_start",
+                    task_id=next_task.task_id,
+                    checkpoint=checkpoint,
+                    attempt=pf_attempt,
+                    phase=pf_phase,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"METRICS_WARNING: Failed to record task_start event: {e}", file=sys.stderr)
         print(json.dumps(result, ensure_ascii=False))
         return 0
 
@@ -1192,7 +1210,11 @@ def main(argv: list[str] | None = None) -> int:
         if ctx_err != 0:
             return ctx_err
         effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
-        metrics = MetricsLog(repo_dir=work_dir, plan_path=effective_plan_path)
+        metrics = MetricsLog(
+            repo_dir=work_dir,
+            plan_path=effective_plan_path,
+            team_id=team_ctx.team_id if team_ctx else None,
+        )
         start_time = time.time()
         phase = metrics.get_current_phase()
         tasks = dispatcher.parse_plan(effective_plan_path)
@@ -1364,7 +1386,11 @@ def main(argv: list[str] | None = None) -> int:
         if ctx_err != 0:
             return ctx_err
         effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
-        metrics = MetricsLog(repo_dir=work_dir, plan_path=effective_plan_path)
+        metrics = MetricsLog(
+            repo_dir=work_dir,
+            plan_path=effective_plan_path,
+            team_id=team_ctx.team_id if team_ctx else None,
+        )
         tasks = dispatcher.parse_plan(effective_plan_path)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
         if not target:
@@ -1676,7 +1702,11 @@ def main(argv: list[str] | None = None) -> int:
         if ctx_err != 0:
             return ctx_err
         effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
-        metrics = MetricsLog(repo_dir=work_dir, plan_path=effective_plan_path)
+        metrics = MetricsLog(
+            repo_dir=work_dir,
+            plan_path=effective_plan_path,
+            team_id=team_ctx.team_id if team_ctx else None,
+        )
         tasks = dispatcher.parse_plan(effective_plan_path)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
         task_id = target.task_id if target else args.task_id
@@ -1861,7 +1891,11 @@ def main(argv: list[str] | None = None) -> int:
             reason=args.reason or "",
         )
 
-        metrics = MetricsLog(repo_dir=work_dir, plan_path=effective_plan_path)
+        metrics = MetricsLog(
+            repo_dir=work_dir,
+            plan_path=effective_plan_path,
+            team_id=team_ctx.team_id if team_ctx else None,
+        )
         metrics.record_event(
             "checker_review",
             task_id=args.task_id,
