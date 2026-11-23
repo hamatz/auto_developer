@@ -735,6 +735,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output verification result in JSON format",
     )
 
+    # Subcommand: status
+    status_parser = subparsers.add_parser("status", help="Show repository and task status snapshot")
+    status_parser.add_argument("--json", action="store_true", help="Output status snapshot in JSON format")
+
     # Subcommand: teams
     teams_parser = subparsers.add_parser("teams", help="Multi-team execution commands")
     teams_subparsers = teams_parser.add_subparsers(
@@ -906,6 +910,16 @@ def main(argv: list[str] | None = None) -> int:
         return init_project(work_dir)
 
     # Subcommand: teams
+    if args.subcommand == "status":
+        from auto_developer.status import collect_status_snapshot, format_status_text
+
+        snapshot = collect_status_snapshot(work_dir, plan_path=args.plan)
+        if args.json:
+            print(json.dumps(snapshot, ensure_ascii=False, indent=2))
+        else:
+            print(format_status_text(snapshot))
+        return 0
+
     if args.subcommand == "teams":
         if args.teams_subcommand == "init":
             if args.teams is not None:

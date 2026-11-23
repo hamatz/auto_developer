@@ -156,6 +156,12 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | `bundle_path` | Yes | - | Path to bundle ZIP file |
 | `--json` | No | `False` | Output verification result in JSON format |
 
+### `auto-dev status`
+
+| Argument / Option | Required | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | No | `False` | Output status snapshot in JSON format |
+
 ### `auto-dev teams`
 
 #### `auto-dev teams init`
