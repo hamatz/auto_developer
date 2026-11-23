@@ -4,25 +4,25 @@
 現在のタスク進捗と次の一手。会話ログではなく、ここに状態を残す。
 実装エージェントは1回に1ステップだけを担当し、終わったらチェックを付けてコミットする。
 セッションが切れても、SPEC.md・このファイル・git の履歴を読めば作業を再開できる状態に保つ。
-前のフェーズの PLAN は git の履歴で参照する（Phase 71 は 12140dd 時点の PLAN.md）。
+前のフェーズの PLAN は git の履歴で参照する（Phase 72 は 5ee1f2a 時点の PLAN.md）。
 -->
 
 ## 現在の目標
-- Phase 72: 機密の検査の修正と、記録だけから作る状態のスナップショット・ダッシュボード（SPEC.md 5.1: GATE-11, STAT-1, STAT-2）
-  - v0.10.0 の目的は、Auto Developer を「良い SPEC を書ける人」以外にも使えるようにすること（docs/contracts/v0.10-draft.md）。このフェーズは、その土台となる状態の表示を作る。
-  - 要件ごとの影響分析は docs/contracts/phase72.md を参照する。「既存テスト変更の理由」は、この分析から作っている。
-- スコープ外: Spec Compiler（Phase 73〜74）、README の更新（v0.10.0 のリリースのフェーズ）。
+- Phase 73: 夜の作業を再生できるダッシュボード（SPEC.md 5.1: STAT-8, DX-12, GATE-12, STAT-4, STAT-5, STAT-6, STAT-7, DX-10, DX-11）
+  - デザインは、人間が承認した見本 docs/designs/dashboard-prototype.html を契約とする。見本と違う見た目にしない。違えたい場合は止まって相談する。画面の文言は英語。
+  - 要件ごとの影響分析は docs/contracts/phase73.md を参照する。「既存テスト変更の理由」は、この分析から作っている。
+- スコープ外: Spec Compiler（Phase 74 以降）、README の更新（リリースのフェーズ）。
 
-## 作業手順（Phase 72・LESSONS.md に基づく）
+## 作業手順（Phase 73・LESSONS.md に基づく）
 - Maker と Checker は別系統のモデルにする（`commit-step` が終了コード 4 で強制する）。使うモデルを変えたときは、この節と「記録」に書く。
   - Maker: `gemini-4-hydrogen-medium`
   - Checker: `claude-sonnet-5-5`（Anthropic API 利用。環境変数 `ANTHROPIC_API_KEY` を利用）
 - **Checker の完了の通知だけでは、次に進まない。** Checker のプロセスが終わり、出力ファイルから判定が1つに決まること（GATE-5 の判定の読み取りの規則）を確かめてから記録する。
 - Checker には、指摘は要点だけにして、判定（`DECISION: APPROVE` / `DECISION: REJECT` の行、または出力全体が1つの JSON）を必ず出力の最後に書くよう求める。
 - Checker への入力は、要約・再構成しない。
-  1. SPEC の該当節: `awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_phase72.md`
+  1. SPEC の該当節: `awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_phase73.md`
   2. 差分: `auto-dev review-input --task-id <n> --out-dir .dev/checker/task<n>`
-  3. Checker の出力: **`.dev/checker/review_p72_task<n>.txt`** に置く（Antigravity の作業領域ではなく、このリポジトリの中。やり直したときは `_v2` などを付け、上書きしない）。
+  3. Checker の出力: `.dev/checker/review_p73_task<n>.txt` に置く（やり直したときは `_v2` などを付け、上書きしない）。ステップ 2（GATE-12）の完了後は、`record-review` が記録のたびに履歴を残す。
 - Checker には、SPEC の要件のうち、例外・異常系・境界値の扱いを満たしているかを、差分とテストの両方で確かめるよう求める。
 - verify-step の前に `git status --porcelain` を確認し、意図しないファイルがないことを確かめる。実験は `mktemp -d` の中で行う。
 - `--checkpoint` にはコミットの SHA を渡す（`git rev-parse HEAD`）。
@@ -48,33 +48,44 @@
 - Bundle を生成した後に、SPEC.md や追跡ファイルを変更しない。
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-<!-- docs/contracts/phase72.md の 3 章の影響分析から作成。ここに書いていない既存テストは変更しない。 -->
-- どのステップでも、既存テストは変更しない。
-  - ステップ 1（GATE-11）: `tests/test_gate10_secret_commit.py`、`tests/test_gate8_canonical_diff_redaction.py`、`tests/test_gate5_review_evidence.py`、`tests/immunity/test_immunity_review_evidence.py` は、そのまま通ること。
-  - ステップ 2〜5（STAT-1・STAT-2）: `docs/cli.md` の作り直しは既存テストの変更ではない。`tests/test_dx4_cli_reference.py` は、作り直した `docs/cli.md` でそのまま通ること。
+<!-- docs/contracts/phase73.md の 4 章の影響分析から作成。ここに書いていない既存テストは変更しない。 -->
+- ステップ 1（STAT-8）: `tests/test_stat1_status_single.py` の準備で `audit_stage.json` を書く場所を、`.dev/` から Evidence の記録の場所（`.git/nightly_evidence/records/`）に変えてよい。アサーションは変えない。
+- ステップ 2（GATE-12）: 既存テストは変更しない。`tests/test_gate5_review_evidence.py`、`tests/immunity/test_immunity_review_evidence.py`、`tests/test_bundler.py` はそのまま通ること。
+- ステップ 3・4（STAT-4）: 既存テストは変更しない。`events.jsonl` の件数や中身を確かめる既存テストが、`run` の経路のイベントが増えたことで失敗した場合は、変更せずに止まって報告する。
+- ステップ 5（STAT-5）: `tests/test_stat1_status_single.py` の `schema` の期待を `auto-dev-status/2` に変えてよい。
+- ステップ 6（STAT-6）: `tests/test_stat2_dashboard.py` を、新しいデザインの構造に合わせて書き直してよい。ただし、1枚で完結すること（外部の読み込みがない）、文字列のエスケープ、`attention[]` が最上部にあること、`schema` の不一致の表示、`--watch` での書き直しと終了、の確認は残す。
+- ステップ 7（STAT-7）: 既存テストは変更しない。`tests/immunity/test_immunity_metrics_non_interference.py` はそのまま通ること。スキルの文言を確かめている既存テストが失敗した場合は、止まって報告する。
+- ステップ 8・9（DX-10・DX-11）: 既存テストは変更しない。`tests/test_dx6_demo.py` と DX-8 のテストはそのまま通ること。
+- CLI を変えたステップでは `docs/cli.md` を作り直す（既存テストの変更ではない）。
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [x] 1. 機密の検査で、Git のファイル名を引用符で囲まれない形（`-z` または `core.quotePath=false`）で読み、日本語などを含むファイル名も判定する（GATE-10 の `SECRET_FILE_IN_COMMIT`。GATE-8 の省略の表示も元のファイル名にそろえる）。種類の変更（`T`）も `SECRET_FILE_IN_COMMIT` の対象にする（Red: `鍵.pem` が `verify-step` を通る。`review-input` の省略の表示が8進数の形になる。`.env` のシンボリックリンクを通常のファイルに置き換えると通る）（GATE-11）
-- [x] 2. `auto-dev status [--json]` の単一チームの部分: 計画のタスクと状態、タスクごとのイベント、計画と記録の食い違い、隔離ブランチ、独立監査、`attention[]`。既存の読み取りの関数を使う。`docs/cli.md` を作り直す（Red-First）（STAT-1）
-- [x] 3. `auto-dev status [--json]` のチームの部分: ジョブの状態、チームごとの worktree・ブランチ・進み具合・`NO_CHANGES`・隔離、統合の結果（`integration/<job_id>`、`rc/<job_id>`）。worktree の記録も読む（Red-First）（STAT-1）
-- [x] 4. `auto-dev dashboard [--out FILE]`: スナップショットを埋め込んだ1枚の HTML。`attention[]` を先頭に、エスケープ、外部の読み込みなし、`schema` の確認。`docs/cli.md` を作り直す（Red-First）（STAT-2）
-- [x] 5. `auto-dev dashboard --watch [SECONDS]`: 一定の間隔でスナップショットと HTML を作り直し、HTML は自分で再読み込みする。サーバーは起動しない（Red-First）（STAT-2）
+- [ ] 1. `status` の修正: 独立監査の記録を Evidence の記録の場所から読み、`AUDIT_OUTDATED` を `verify-bundle` と同じ関数で判定する。「なし」だけの判断待ちを数えない。隔離の重複をなくす。チームの失敗の数と原因を示す。`examples/two-teams/.gitignore` に CORE-11 の行をすべて入れる（Red-First）（STAT-8, DX-12）
+- [ ] 2. `record-review` が、記録のたびに写しと記録を `reviews/task_<id>/history/<連番>/` に残す（上書きしない。最新の記録と Bundle の中身は変えない）（Red-First）（GATE-12）
+- [ ] 3. `run` / `teams run` の経路で `verify_step` / `checker_review` / `commit_step` / `rollback_step` を書く。`task_start` を加える（`run` は Maker の起動の直前、低レベルの経路は `pre-flight`）。worktree のイベントにチームの ID を入れる（Red: `teams run` の後に `events.jsonl` がない）（STAT-4）
+- [ ] 4. 統合のイベント（`integration_start` / `integration_merge` / `integration_reverify` / `rc_tag` / `integration_failed`）を書く（Red-First）（STAT-4）
+- [ ] 5. スナップショットに `timeline[]`（行数つき）と `backlog` と始まり・終わりの時刻を加え、`schema` を `auto-dev-status/2` にする（Red-First）（STAT-5）
+- [ ] 6. `auto-dev dashboard` を、見本 docs/designs/dashboard-prototype.html と同じ構成・動きの再生できる HTML にする（単一チームの形、空の時系列、10 分を超える空白の圧縮を含む）（Red-First）（STAT-6）
+- [ ] 7. `auto-dev dashboard --enable / --disable`（`.dev/dashboard.json`）、`run` / `teams run` の `--dashboard`、イベントを書くたびの作り直し（失敗は警告だけ）、`/nightly-run` と `/nightly-setup` のスキルの選択肢。`docs/cli.md` を作り直す（Red-First）（STAT-7）
+- [ ] 8. `auto-dev demo --teams [--keep]`: デモ用の Maker と Checker で2チームを並行して実行し（一方のタスクで検証に一度失敗して2回目で直る）、統合して RC タグを作り、ダッシュボードの場所を表示する。`docs/cli.md` を作り直す（Red-First）（DX-10）
+- [ ] 9. `scripts/record_dashboard.py`: ダッシュボードを再生して GIF に書き出す開発用のスクリプト。必要なライブラリがなければ、入れ方を表示して終了コード 2（Red-First）（DX-11）
 
 ## 止まっていること・判断待ち
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [x] Phase 72 の準備コミット: SPEC.md（Phase 71 の要件を 4 章へ移し、GATE-9 の文を直し、INV-11 と 5.1 に Phase 72 の要件）、PLAN.md、BACKLOG.md、docs/contracts/phase72.md、docs/contracts/v0.10-draft.md。
-- [x] 準備のコミットの前に: Phase 71 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase71/` に退かせる。
-- [ ] ステップ 1 の完了後: CI（macOS / Ubuntu × Python 3.10 / 3.12）が通ることを確かめる。
-- [ ] ステップ 5 の完了後:
+- [x] Phase 73 の準備コミット: SPEC.md（Phase 72 の要件を 4 章へ移し、4.11 STAT を新設。5.1 に Phase 73 の要件）、PLAN.md、BACKLOG.md、docs/contracts/phase73.md、docs/designs/dashboard-prototype.html。
+- [x] 準備のコミットの前に: Phase 72 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase72/` に退かせる。
+- [ ] ステップ 6 の完了後: このリポジトリと `examples/two-teams` のダッシュボードを開き、見本と比べて目で確かめる。
+- [ ] ステップ 9 の完了後:
   - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI が通ることを確かめる。
-  - 査読の記録と `.dev/checker/` の出力ファイルを突き合わせ、食い違いが0件であることを確かめる。
+  - 査読の記録（履歴を含む）と Checker の出力を突き合わせ、食い違いが0件であることを確かめる。
   - Bundle を作り、`verify-bundle` が VERIFIED になることを確かめる。
-  - このリポジトリと `examples/two-teams` で `auto-dev dashboard` を開き、表示を目で確かめる。
+  - `auto-dev demo --teams` を実行し、`scripts/record_dashboard.py` で GIF を書き出せることを確かめる。
 
 ## 記録
+- 2026-11-23: Phase 72 の完了後の確認。5 ステップすべて完了し、止まったステップはなかった。査読の記録の突き合わせで食い違いは0件。Linux で 874 件が通った（既知の不安定な2件を除く）。Bundle は VERIFIED（`AUDIT_OUTDATED` は 11/23 の監査の後のコードのため）。実際に使うと、`status` が独立監査の記録を誤った場所から読む（監査が「ない」と表示される）、判断待ちの「なし。」を HIGH として数える、などの不具合があった（STAT-8）。Checker の出力は、今回も Antigravity の作業領域に置かれた（GATE-12 で履歴を残す形にした）。
+- 2026-11-23: ダッシュボード v2 の見本（docs/designs/dashboard-prototype.html）を、`examples/two-teams` で実際に `teams run` を実行した記録から作り、人間が承認した（backlog のチケットが減り、コミットが積み上がる流れを含む。画面は英語）。見本を作る途中で、`run` / `teams run` の経路がイベントを書いていないこと（STAT-4）と、サンプルの `.gitignore` の不足（DX-12）が見つかった。
 - 2026-11-23: v0.9.0 をリリースした（タグ `v0.9.0`）。v0.10 の方針を docs/contracts/v0.10-draft.md にまとめ、7 章の5点を提案どおりに決めた。
 - 2026-11-23: リリース前の独立監査（`claude-opus-5-5`、LIVE、起点 7ea39c0、対象 f98c251、入力約 25 万トークン）。P0・P1 なし、P2 の2件（AUD-1004、AUD-1005）を BACKLOG に入れた。監査の後の Bundle（`bundle_job-1795428778.zip`）は VERIFIED、警告なし（`audit_stage_verified: true`）。
 - 2026-11-23: Phase 71 の完了後の確認。10 ステップすべて完了し、止まったステップはなかった。査読の記録と出力の写しの突き合わせで食い違いは0件（Checker は JSON の判定で返した）。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 866 件が通った（既知の不安定な2件を除く）。Bundle は VERIFIED（警告は `AUDIT_OUTDATED` のみ）。Maker は `gemini-4-hydrogen-medium`、Checker は `claude-sonnet-5-5` だった（PLAN の記載と違う）。Checker の出力は `.dev/checker/` ではなく Antigravity の作業領域に置かれた（正規の写しは `.git/nightly_evidence/reviews/`）。
