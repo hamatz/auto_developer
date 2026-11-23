@@ -744,6 +744,15 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard_parser.add_argument(
         "--out", type=Path, default=None, help="Output HTML file path (default: .dev/dashboard.html)"
     )
+    dashboard_parser.add_argument(
+        "--watch",
+        nargs="?",
+        const=5,
+        default=None,
+        type=int,
+        metavar="SECONDS",
+        help="Regenerate dashboard HTML every N seconds (default: 5) until Ctrl-C",
+    )
 
     # Subcommand: teams
     teams_parser = subparsers.add_parser("teams", help="Multi-team execution commands")
@@ -927,8 +936,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.subcommand == "dashboard":
-        from auto_developer.dashboard import write_dashboard
+        from auto_developer.dashboard import watch_dashboard, write_dashboard
 
+        if args.watch is not None:
+            if args.watch < 1:
+                print("ERROR: --watch interval must be >= 1 second.", file=sys.stderr)
+                return 2
+            return watch_dashboard(
+                work_dir,
+                out_path=args.out,
+                plan_path=args.plan,
+                interval_sec=args.watch,
+            )
         out_file = write_dashboard(work_dir, out_path=args.out, plan_path=args.plan)
         print(f"DASHBOARD WRITTEN: {out_file}")
         return 0

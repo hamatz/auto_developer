@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import time
 from pathlib import Path
 from typing import Any
 
@@ -220,3 +221,27 @@ def write_dashboard(
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(html_text, encoding="utf-8")
     return target
+
+
+def watch_dashboard(
+    repo_dir: Path,
+    out_path: Path | None = None,
+    plan_path: Path | None = None,
+    interval_sec: int = 5,
+) -> int:
+    """Regenerate HTML dashboard at fixed intervals until KeyboardInterrupt."""
+    if interval_sec < 1:
+        raise ValueError("interval_sec must be >= 1")
+    try:
+        while True:
+            out_file = write_dashboard(
+                repo_dir,
+                out_path=out_path,
+                plan_path=plan_path,
+                refresh_seconds=interval_sec,
+            )
+            print(f"DASHBOARD UPDATED: {out_file} (refresh every {interval_sec}s, Ctrl-C to stop)")
+            time.sleep(interval_sec)
+    except KeyboardInterrupt:
+        print("\nDashboard watch stopped.")
+        return 0

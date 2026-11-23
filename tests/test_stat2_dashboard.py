@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from auto_developer.cli import main as cli_main
 
@@ -84,6 +85,27 @@ class TestStat2Dashboard(unittest.TestCase):
             self.assertIn("cli", team_html)
             self.assertIn("main", team_html)
             self.assertIn("rc/", team_html)
+
+    def test_dashboard_watch_regenerates_html_with_meta_refresh_and_stops_on_ctrl_c(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self._init_repo(repo)
+            sleep_calls: list[float] = []
+
+            def fake_sleep(sec: float) -> None:
+                sleep_calls.append(sec)
+                if len(sleep_calls) >= 2:
+                    raise KeyboardInterrupt
+
+            with patch("time.sleep", side_effect=fake_sleep):
+                rc = cli_main(["--work-dir", str(repo), "dashboard", "--watch", "3"])
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(sleep_calls, [3, 3])
+            out_file = repo / ".dev" / "dashboard.html"
+            self.assertTrue(out_file.is_file())
+            html_text = out_file.read_text(encoding="utf-8")
+            self.assertIn('<meta http-equiv="refresh" content="3">', html_text)
 
 
 if __name__ == "__main__":

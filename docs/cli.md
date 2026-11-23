@@ -167,6 +167,7 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | Argument / Option | Required | Default | Description |
 | --- | --- | --- | --- |
 | `--out OUT` | No | - | Output HTML file path (default: .dev/dashboard.html) |
+| `--watch SECONDS` | No | - | Regenerate dashboard HTML every N seconds (default: 5) until Ctrl-C |
 
 ### `auto-dev teams`
 
