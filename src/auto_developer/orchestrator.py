@@ -499,6 +499,14 @@ class NightlyOrchestrator:
             if not self.git_guard.check_protected_files_untouched(
                 checkpoint, allow_immunity_additions=allow_immunity
             ):
+                violated_files = self.git_guard.get_modified_protected_files(
+                    checkpoint, allow_immunity_additions=allow_immunity
+                )
+                reason_msg = (
+                    f"Protected file modification detected: {', '.join(violated_files)}"
+                    if violated_files
+                    else "Protected file modification detected"
+                )
                 print(f"  CIRCUIT BREAKER: Protected file modified in task {task.task_id}!", file=sys.stderr)
                 return self._handle_failure(
                     task,
@@ -506,8 +514,8 @@ class NightlyOrchestrator:
                     total_tasks,
                     succeeded_tasks,
                     job_state,
-                    "INVARIANT_BREACH",
-                    "Protected file modification detected",
+                    "PROTECTED_FILES",
+                    reason_msg,
                     attempt_1_log=maker_out,
                 )
 
@@ -1269,6 +1277,8 @@ class NightlyOrchestrator:
                 "title": task.title,
                 "checkpoint": checkpoint,
                 "quarantined_branch": quarantine_branch,
+                "failure_phase": phase,
+                "reason": reason,
                 "attempt_1_log": attempt_1_log or reason,
                 "attempt_2_log": attempt_2_log or "(none)",
                 "attempts": attempts or [],

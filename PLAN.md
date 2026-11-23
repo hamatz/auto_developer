@@ -86,7 +86,7 @@
 - [x] 2. `auto-dev review-input`（正規の差分の書き出し）と、Checker の出力ファイルから判定を読み取り、差分・SPEC の切り出しを照合して記録する `record-review`。旧来の `--decision` だけの呼び出しは終了コード 2。`commit-step` はまだ変えない（Red-First）（GATE-5）
 - [x] 3. （H1 の後）`commit-step` が、最新の検証に対応する査読の記録・判定・出力ファイルのハッシュ・モデル・正規の差分を照合する。`checker.review` を Evidence の記録に残す（Red: H1 で置いた `test_immunity_review_evidence.py`）（GATE-6）
 - [x] 4. `run` / `teams run` / `demo` の経路の査読の証跡（GATE-7）と、Bundle への査読の証跡の収録・`verify-bundle` での照合・`format_version` 3（BDL-4）。査読の証跡がない記録（GATE-6 より前にコミットした Phase 70 のタスク 1・2 など）は `excluded_records` に `NO_REVIEW_EVIDENCE` で記録し、結果を INTEGRITY_ONLY とする（Red-First）
-- [ ] 5. 失敗ログの先頭に `Failure Phase:` と `Reason:` を書く（Red-First）（RCV-5）
+- [x] 5. 失敗ログの先頭に `Failure Phase:` と `Reason:` を書く（Red-First）（RCV-5）
 - [ ] 6. デモの修正: Checker は独自に拒否しない。隔離の原因が `PROTECTED_FILES` であることを確かめる。`verify-bundle --json` の `status` の完全な一致。段階ごとの失敗のテスト（Red-First）（DX-8）
 - [ ] 7. チームのジョブのレポートの修正: 基点が未変更であることは確認できたときだけ表示し、それ以外は「不明」。モデル名は記録からだけ読み、なければ「記録なし」。単一チームの集計を 1de845d の時点に戻す。`./` の接頭辞の扱い（Red-First）（RPT-8）
 - [ ] 8. 記録の読み取り場所を `EvidenceStore` と同じ規則に一本化し、中身からの推測をやめる。フォールバック時は `COMPLETED` だけを成果に載せる。計画ファイルの指定経路を1つにし、`teams.json` の不正の扱いを揃える（Red-First）（BDL-5）

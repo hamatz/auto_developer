@@ -302,6 +302,45 @@ print(json.dumps(data))
             return False
         return validate_test_ast(target)
 
+    def get_modified_protected_files(
+        self, checkpoint: str, allow_immunity_additions: bool = False
+    ) -> list[str]:
+        """チェックポイント以降に変更・追加された保護ファイルのパス一覧を返す。"""
+        files_to_check: set[str] = set()
+        proc_diff = self._run_git(["diff", "--name-only", checkpoint])
+        for line in proc_diff.stdout.splitlines():
+            if line.strip():
+                files_to_check.add(line.strip())
+
+        proc_status = self._run_git(["status", "--porcelain"])
+        for line in proc_status.stdout.splitlines():
+            if not line.strip():
+                continue
+            raw_path = line[3:].strip()
+            if " -> " in raw_path:
+                for p in raw_path.split(" -> "):
+                    files_to_check.add(p.strip().strip('"'))
+            else:
+                files_to_check.add(raw_path.strip('"'))
+
+        patterns = self.BASE_PROTECTED_PATTERNS if allow_immunity_additions else self.PROTECTED_PATTERNS
+        matched = [
+            fp for fp in sorted(files_to_check) if any(pat.search(fp) for pat in patterns)
+        ]
+        if allow_immunity_additions:
+            for fp in sorted(files_to_check):
+                if fp.startswith("tests/immunity/") and fp not in matched:
+                    p_obj = self.repo_dir / fp
+                    if not (
+                        p_obj.exists()
+                        and not p_obj.is_symlink()
+                        and p_obj.is_file()
+                        and p_obj.name.startswith("test_")
+                        and p_obj.name.endswith(".py")
+                    ):
+                        matched.append(fp)
+        return matched
+
     def check_protected_files_untouched(
         self, checkpoint: str, allow_immunity_additions: bool = False
     ) -> bool:

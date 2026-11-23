@@ -776,7 +776,13 @@ class MorningReporter:
     def write_failure_log(self, log_path: Path, failure_data: dict[str, Any]) -> None:
         """logs/nightly/task_<id>_failure.log を作成する。"""
         log_path.parent.mkdir(parents=True, exist_ok=True)
+        failure_phase = str(
+            failure_data.get("failure_phase") or failure_data.get("phase") or "UNKNOWN"
+        ).strip()
+        reason_line = str(failure_data.get("reason") or "").replace("\r", " ").replace("\n", " ").strip()
         content = [
+            f"Failure Phase: {failure_phase}",
+            f"Reason: {reason_line}",
             "=== TASK FAILURE DUMP ===",
             f"Task ID: {failure_data.get('task_id')}",
             f"Task Title: {failure_data.get('title')}",

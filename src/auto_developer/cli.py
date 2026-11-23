@@ -1587,6 +1587,8 @@ def main(argv: list[str] | None = None) -> int:
                     "title": target.title,
                     "checkpoint": args.checkpoint,
                     "quarantined_branch": quarantine_branch,
+                    "failure_phase": "ROLLBACK",
+                    "reason": args.reason or "Verification failed",
                     "attempt_1_log": args.reason,
                 },
             )
