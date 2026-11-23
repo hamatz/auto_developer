@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.0] - 2026-11-23
+
+### Major Milestone: Sandbox Hardening, Secret Commit Gate, Developer Experience & Release Readiness (Phase 71)
+
+Auto Developer v0.9.0 hardens OS sandbox execution on macOS and Linux, prevents accidental staging or committing of secret files, and adds generated CLI reference docs, a two-team calculator example, and automated README quickstart verification.
+
+### Added
+- **Secret File Commit Rejection (`GATE-10`)**:
+  - `auto-dev init` and `auto-dev teams init` now append `.env`, `.env.*`, and `!.env.example` to `.gitignore` without duplicating existing lines.
+  - `verify-step`, `commit-step`, and `run` / `teams run` reject added or modified `.env` / `.env.*` (except `.env.example`, `.env.sample`, `.env.template`), key files (`*.key`, `*.pem`, `*.pkcs12`, `*.pfx`), and SSH key filenames (`id_rsa`, `id_ed25519`, `id_ecdsa`) with `SECRET_FILE_IN_COMMIT:`.
+- **CLI Reference Generator (`DX-4`)**:
+  - Added `scripts/gen_cli_reference.py` and generated `docs/cli.md` directly from `argparse`, with a drift-detection test.
+- **Two-Team Example (`DX-3`) & README Quickstart Verification (`DX-1`)**:
+  - Added `examples/two-teams/` (two-team calculator project) and automated tests for `teams prepare` and all `<!-- readme-test: run -->` blocks across `README.md` and `README.en.md`.
+- **Pre-Release Local Path Audit (`REL-5`)**:
+  - Replaced developer-specific local paths in Pilot 04 scripts/tests with environment variables and added a tracked-file scan test.
+
+### Fixed
+- **macOS Symlinked Python Sandbox (`SBX-7`)**: Allowed minimal `literal` symlink and parent-directory metadata traversal in `sandbox-exec` profiles so symlinked `sys.executable` (e.g. `setup-python` / `hostedtoolcache`) runs candidate tests without weakening home/repo read denials.
+- **Linux `/opt` Isolation Test (`SBX-8`)**: Excluded mounted Python prefix paths and their ancestor directories when checking unallowed `/opt` host paths in `test_linux_bwrap_isolation.py`.
+- **Temporary Index for Tree SHA (`GATE-9`)**: `get_working_tree_sha()` now uses a temporary `GIT_INDEX_FILE` so `verify-step` does not stage untracked files in the real index, while `commit_task()` commits the verified tree via `git read-tree`.
+- **Checkpoint SHA Resolution (`DX-9`)**: `verify-step --checkpoint` resolves refs such as `HEAD` to 40-character commit SHAs when recording Evidence, review records, and metrics events.
+
+### Changed
+- Synchronized package version to `0.9.0` across `pyproject.toml`, `plugin.json`, `auto_developer.__init__`, and `cli.VERSION`.
+
+---
+
 ## [0.8.0] - 2026-11-19
 
 ### Major Milestone: Autonomous Governance, Multi-LLM Review Enforcement, Outcome Metrics, and Autonomous Reporting (Phases 63 - 65)

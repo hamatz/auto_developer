@@ -50,7 +50,7 @@ from auto_developer.runner import (
 )
 from auto_developer.verifier import DeterministicVerifier
 
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 
 DEFAULT_VERIFY_SH = """#!/usr/bin/env bash
 set -euo pipefail
