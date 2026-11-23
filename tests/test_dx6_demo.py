@@ -82,7 +82,7 @@ class TestDx6DemoCommand(unittest.TestCase):
             self.assertIn("init", out.lower())
             self.assertIn("quarantine/", out)
             self.assertIn("MORNING BRIEF", out)
-            self.assertIn("VERIFIED", out)
+            self.assertIn("Bundle verification status: VERIFIED", out)
 
             # 一時ディレクトリのパスが出力され、終了後には削除されていること
             m = re.search(r"Demo workspace(?:\s+path)?:\s*(.+)", out)
@@ -171,9 +171,11 @@ class TestDx6DemoCommand(unittest.TestCase):
                         self.assertEqual(checker.get("maker_family"), "demo-maker")
                         self.assertEqual(checker.get("maker_family_source"), "explicit")
 
-                vb = _run_cli_subprocess(kept_dir, "--work-dir", str(kept_dir), "verify-bundle", str(bundle_zip))
+                vb = _run_cli_subprocess(
+                    kept_dir, "--work-dir", str(kept_dir), "verify-bundle", str(bundle_zip), "--json"
+                )
                 self.assertEqual(vb.returncode, 0, f"verify-bundle failed:\n{vb.stdout}\n{vb.stderr}")
-                self.assertIn("VERIFIED", vb.stdout)
+                self.assertEqual(json.loads(vb.stdout).get("status"), "VERIFIED")
 
                 # 実在ベンダーのモデル名がレポート・証跡に出力されないこと
                 for vendor_token in ("gemini-", "claude-", "gpt-", "deepseek-", "qwen", "llama", "mistral"):
@@ -297,8 +299,9 @@ class TestDx6DemoCommand(unittest.TestCase):
     def test_demo_returns_1_when_verify_bundle_fails_or_not_verified(self) -> None:
         """verify-bundle が非0終了または VERIFIED を返さない場合、終了コード 1 で停止し後始末すること。"""
         for verify_rc, verify_out in (
-            (1, "Status: INVALID"),
-            (0, "Status: INTEGRITY_ONLY"),
+            (1, json.dumps({"status": "INVALID"})),
+            (0, json.dumps({"status": "INTEGRITY_ONLY"})),
+            (0, json.dumps({"status": "UNVERIFIED"})),
         ):
             with self.subTest(verify_rc=verify_rc, verify_out=verify_out):
                 run_count = [0]
@@ -324,6 +327,9 @@ class TestDx6DemoCommand(unittest.TestCase):
                         _git(repo_dir, "add", "PLAN.md")
                         _git(repo_dir, "commit", "-m", "quarantine")
                         _git(repo_dir, "checkout", "main")
+                        log_p = repo_dir / "logs" / "nightly" / "task_3_failure.log"
+                        log_p.parent.mkdir(parents=True, exist_ok=True)
+                        log_p.write_text("Failure Phase: PROTECTED_FILES\nReason: SPEC.md\n", encoding="utf-8")
                         return 1, "quarantined", ""
                     if cmd == "brief":
                         return 0, "MORNING BRIEF", ""

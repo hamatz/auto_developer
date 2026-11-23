@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -92,9 +93,6 @@ def main() -> int:
     diff_section = payload.split("--- SPEC ---", 1)[0]
     if not diff_section.strip():
         print(json.dumps({"decision": "REJECT", "findings": ["Empty diff"]}))
-        return 0
-    if "+++ b/SPEC.md" in diff_section:
-        print(json.dumps({"decision": "REJECT", "findings": ["Protected file SPEC.md modified"]}))
         return 0
     print(json.dumps({"decision": "APPROVE", "findings": []}))
     return 0
@@ -260,6 +258,15 @@ def run_demo(*, keep: bool = False) -> int:
             q_plan = _run_git(repo_dir, "show", f"{q_branch}:PLAN.md").stdout
             if "**[FAILED]**" not in q_plan:
                 raise RuntimeError(f"Expected **[FAILED]** marker in quarantined {q_branch}:PLAN.md.")
+            failure_log = repo_dir / "logs" / "nightly" / "task_3_failure.log"
+            if not failure_log.is_file():
+                raise RuntimeError("Expected logs/nightly/task_3_failure.log to be created.")
+            failure_lines = failure_log.read_text(encoding="utf-8").splitlines()
+            if not failure_lines or failure_lines[0].strip() != "Failure Phase: PROTECTED_FILES":
+                first_line = failure_lines[0] if failure_lines else "(empty)"
+                raise RuntimeError(
+                    f"Expected Failure Phase: PROTECTED_FILES in task_3_failure.log, got: {first_line}"
+                )
             print(
                 f"  -> Circuit breaker caught SPEC.md edit: exited with 1, quarantined work with "
                 f"**[FAILED]** to {q_branch}, and restored clean main."
@@ -287,11 +294,18 @@ def run_demo(*, keep: bool = False) -> int:
                     raise RuntimeError("No Evidence Bundle ZIP was created by `auto-dev bundle`.")
                 bundle_path = bundles[-1]
 
-            rc, out_verify, err_verify = _run_demo_cli(repo_dir, "verify-bundle", str(bundle_path))
-            _ensure_cli_ok("auto-dev verify-bundle", rc, out_verify, err_verify)
-            if "VERIFIED" not in out_verify:
-                raise RuntimeError(f"Expected VERIFIED in verify-bundle output, got:\n{out_verify}")
-            print(out_verify.rstrip())
+            rc, out_verify, err_verify = _run_demo_cli(
+                repo_dir, "verify-bundle", str(bundle_path), "--json"
+            )
+            _ensure_cli_ok("auto-dev verify-bundle --json", rc, out_verify, err_verify)
+            try:
+                verify_data = json.loads(out_verify)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Invalid JSON from verify-bundle --json: {exc}\n{out_verify}") from exc
+            verify_status = verify_data.get("status")
+            if verify_status != "VERIFIED":
+                raise RuntimeError(f"Expected verify-bundle status == 'VERIFIED', got: {verify_status!r}")
+            print(f"Bundle verification status: {verify_status}")
 
             print("\n=== Demo completed successfully! ===")
             return 0
