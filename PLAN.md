@@ -8,7 +8,7 @@
 -->
 
 ## 現在の目標
-- Phase 71: v0.9.0 を、初めての利用者が macOS と Linux のどちらでもつまずかずに試せる状態にして、リリースする（SPEC.md 5.1: SBX-7, SBX-8, GATE-9, DX-9, REL-5, DX-4, DX-3, DX-1, REL-2）
+- Phase 71: v0.9.0 を、初めての利用者が macOS と Linux のどちらでもつまずかずに試せる状態にして、リリースする（SPEC.md 5.1: SBX-7, SBX-8, GATE-9, GATE-10, DX-9, REL-5, DX-4, DX-3, DX-1, REL-2）
   - 最初に、Phase 70 の後の CI で見つかった macOS と Ubuntu の失敗を直す（docs/contracts/phase71.md の 1.1 節）。
   - README.md（日本語）と README.en.md は、準備のコミットで人間が書いた。DX-1 は、その README に書いたコマンドを実行するテストである。README を Maker が書き換えてはならない（ずれが見つかったら止まって報告する）。
   - 要件ごとの影響分析は docs/contracts/phase71.md を参照する。「既存テスト変更の理由」は、この分析から作っている。
@@ -26,7 +26,7 @@
   3. Checker の出力: `.dev/checker/review_p71_task<n>.txt`（やり直したときは `_v2` などを付け、上書きしない）
 - Checker には、SPEC の要件のうち、例外・異常系・境界値の扱いを満たしているかを、差分とテストの両方で確かめるよう求める。
 - verify-step の前に `git status --porcelain` を確認し、意図しないファイルがないことを確かめる。実験は `mktemp -d` の中で行う。
-- `--checkpoint` には、参照名（`HEAD`）ではなくコミットの SHA を渡す（`git rev-parse HEAD`。ステップ 4 の DX-9 の完了までは、記録に参照名がそのまま残るため）。
+- `--checkpoint` には、参照名（`HEAD`）ではなくコミットの SHA を渡す（`git rev-parse HEAD`。ステップ 5 の DX-9 の完了までは、記録に参照名がそのまま残るため）。
 - 査読記録の順序:
   1. `auto-dev verify-step --checkpoint <SHA> --task-id <n>`
   2. Checker の査読。1回の verify-step に対して査読は1回とする。
@@ -52,10 +52,11 @@
 - ステップ 1（SBX-7）: 既存テストは変更しない。特に macOS の `test_sandbox_blocks_reading_*`（`tests/test_red_verifier.py`）と `tests/test_sandbox_preflight.py` は、そのまま通ること。
 - ステップ 2（SBX-8）: `tests/test_linux_bwrap_isolation.py` の `test_bwrap_blocks_reading_unallowed_host_paths` のうち、`/opt` を確かめる部分だけを、SBX-8 の規則（Python の置き場所とその途中のディレクトリに当たらない `/opt` の直下のエントリを選び、読めないことを `_assert_read_blocked` で確かめる。該当するエントリがなければ理由を示してスキップ）に変えてよい。一時ディレクトリを確かめる部分は変えない。
 - ステップ 3（GATE-9）: 既存テストは変更しない。特に `tests/test_nightly_orchestrator.py` 1420 行目付近（`commit_task must NOT restage unverified files`）と `tests/test_commit_gate_boundary.py` 146〜151 行目付近は、`commit_task` の引数を変えずに、そのまま通ること。
-- ステップ 4（DX-9）: 既存テストは変更しない。
-- ステップ 5（REL-5）: `tests/test_pilot04_recovery_e2e.py` の `ZIP_PATH`（18 行目付近）を、環境変数で渡し、指定がなければ理由を示してスキップする形に変えてよい。アサーションは変えない。
-- ステップ 6〜8（DX-4・DX-3・DX-1）: 既存テストは変更しない。README.md と README.en.md は変更しない。
-- ステップ 9（REL-2）: `tests/test_version_consistency.py` の期待値を、`0.8.0` から `0.9.0` に（`## [0.9.0] - `、`docs/releases/v0.9.0.md`、`v0.9.0` を含む）変えてよい。`tests/test_bundler.py` の `v0.8.0` の案内は変えない。
+- ステップ 4（GATE-10）: 既存テストは変更しない。特に `tests/test_init_gitignore.py`（CORE-11 の行が1回ずつ入ること）、`tests/test_nightly_orchestrator.py` 1217 行目付近と `tests/test_recovery.py` 1202 行目付近（隔離に `.env` や鍵を入れないこと）、`tests/test_multi_team_foundation.py` 305〜420 行目付近（`.env` のある worktree を消さないこと）は、そのまま通ること。
+- ステップ 5（DX-9）: 既存テストは変更しない。
+- ステップ 6（REL-5）: `tests/test_pilot04_recovery_e2e.py` の `ZIP_PATH`（18 行目付近）を、環境変数で渡し、指定がなければ理由を示してスキップする形に変えてよい。アサーションは変えない。
+- ステップ 7〜9（DX-4・DX-3・DX-1）: 既存テストは変更しない。README.md と README.en.md は変更しない。
+- ステップ 10（REL-2）: `tests/test_version_consistency.py` の期待値を、`0.8.0` から `0.9.0` に（`## [0.9.0] - `、`docs/releases/v0.9.0.md`、`v0.9.0` を含む）変えてよい。`tests/test_bundler.py` の `v0.8.0` の案内は変えない。
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 - どのステップでも、変更したテスト名をコミットメッセージに列挙する。
 
@@ -63,12 +64,13 @@
 - [ ] 1. macOS で、Python の実行ファイルがシンボリックリンクでも候補テストを起動できるようにする。リンクの先までの途中のパスについて、リンクの読み取りとメタデータの読み取りだけを `literal` で許可する（Red: ホームの中に実際の Python を指すリンクを作り、それを使うと `SANDBOX_UNAVAILABLE` になる）（SBX-7）
 - [ ] 2. Linux の `/opt` の確認から、Python の置き場所とその途中のディレクトリを除く（テストのみ。製品の挙動は変えない）（SBX-8）
 - [ ] 3. `verify-step`（`run` の経路を含む）で、作業ツリーの Tree SHA を一時的なインデックスで求め、本物のインデックスを変えない。`commit-step` は最後に求めた Tree SHA のツリーをそのままコミットする（Red: `verify-step` の後に、gitignore していない `.env` がステージされている）（GATE-9）
-- [ ] 4. `verify-step --checkpoint` に参照名を渡しても、Evidence・査読の記録・イベントに解決した SHA を記録する（Red-First）（DX-9）
-- [ ] 5. 追跡しているファイルからローカルの絶対パスを除き、環境変数で渡す形にする。追跡しているファイルを検査するテストを置く（Red: 検査のテストが、今の2ファイルで失敗する）（REL-5）
-- [ ] 6. `scripts/gen_cli_reference.py` で argparse から `docs/cli.md` を生成し、ずれを検出するテストを置く（Red-First）（DX-4）
-- [ ] 7. `examples/two-teams/`（2チームの電卓）を置き、一時ディレクトリに写して `teams prepare` まで通ることを確かめる（Red-First）（DX-3）
-- [ ] 8. README.md と README.en.md の `<!-- readme-test: run -->` のブロックを一時ディレクトリで実行するテストと、日英のブロックの一致の検査（Red: テストがまだない／README のコマンドが通らなければ止まって報告）（DX-1）
-- [ ] 9. バージョンを 0.9.0 に揃え、CHANGELOG の `## [0.9.0]` 節と `docs/releases/v0.9.0.md` を置く（Red: `test_version_consistency.py` の新しい期待値）（REL-2）
+- [ ] 4. `init` / `teams init` の `.gitignore` に `.env`・`.env.*`・`!.env.example` を加える。`verify-step` と `commit-step`（`run` の経路を含む）で、チェックポイントから追加・変更された `.env*`（例示用の3つを除く）・鍵ファイル・SSH の鍵の名前のファイルを `SECRET_FILE_IN_COMMIT:` で拒否する（Red: gitignore していない `.env` が `commit-step` でコミットされる）（GATE-10）
+- [ ] 5. `verify-step --checkpoint` に参照名を渡しても、Evidence・査読の記録・イベントに解決した SHA を記録する（Red-First）（DX-9）
+- [ ] 6. 追跡しているファイルからローカルの絶対パスを除き、環境変数で渡す形にする。追跡しているファイルを検査するテストを置く（Red: 検査のテストが、今の2ファイルで失敗する）（REL-5）
+- [ ] 7. `scripts/gen_cli_reference.py` で argparse から `docs/cli.md` を生成し、ずれを検出するテストを置く（Red-First）（DX-4）
+- [ ] 8. `examples/two-teams/`（2チームの電卓）を置き、一時ディレクトリに写して `teams prepare` まで通ることを確かめる（Red-First）（DX-3）
+- [ ] 9. README.md と README.en.md の `<!-- readme-test: run -->` のブロックを一時ディレクトリで実行するテストと、日英のブロックの一致の検査（Red: テストがまだない／README のコマンドが通らなければ止まって報告）（DX-1）
+- [ ] 10. バージョンを 0.9.0 に揃え、CHANGELOG の `## [0.9.0]` 節と `docs/releases/v0.9.0.md` を置く（Red: `test_version_consistency.py` の新しい期待値）（REL-2）
 
 ## 止まっていること・判断待ち
 - なし。
@@ -77,7 +79,7 @@
 - [x] Phase 71 の準備コミット: SPEC.md（Phase 70 の要件を 4 章へ移し、5.1 に Phase 71 の要件）、PLAN.md、README.md、README.en.md、LESSONS.md、BACKLOG.md、docs/contracts/phase71.md。
 - [x] 準備のコミットの前に: Phase 70 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase70/` に退かせる。
 - [ ] ステップ 2 の完了後: CI（macOS / Ubuntu × Python 3.10 / 3.12）が通ることを確かめる。
-- [ ] ステップ 9 の完了後:
+- [ ] ステップ 10 の完了後:
   - Linux（Ubuntu・bwrap が動く環境）で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。
   - CI が通ることを確かめる。
   - Phase 71 の全タスクについて、査読の記録と `.dev/checker/` の出力ファイルを突き合わせ、食い違いが0件であることを確かめる。
@@ -87,6 +89,7 @@
   - `v0.9.0` のタグを付ける。
 
 ## 記録
+- 2026-11-23: 準備のコミット（d93b66d）の後、BACKLOG IDEA-014（gitignore していない `.env` が `commit-step` でコミットされる）を GATE-10 として加え、ステップ 4 とした（以降のステップの番号を1つずつ繰り下げた。どのステップにも着手する前）。
 - 2026-11-23: Phase 70 の完了後の確認。11 ステップすべて完了。保護ファイルを変えたのは人間のコミットだけ。査読の記録と Checker の出力ファイルの突き合わせで、REJECT のままコミットされたものは0件（タスク 3〜11 は機械で照合、タスク 1・2 は最後の出力が APPROVE）。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 849 件が通った（時間に依存する3件が、負荷の高い1回目だけ失敗し、単独では通る）。`auto-dev demo` は終了コード 0、Bundle は VERIFIED。
 - 2026-11-23: Phase 70 の Bundle（`bundle_job_1795414157.zip`）は `verify-bundle` で INVALID。タスク 3 の Evidence の SPEC の SHA が、フェーズの途中の SPEC の変更（265e605、c30b6cf）より前のもの。タスク 1・2 は `NO_REVIEW_EVIDENCE` で除外。後から直す手段はなく、v0.9.0 の歴史の断絶として受け入れる。リリースの判定には Phase 71 の Bundle を使う。
 - 2026-11-23: Phase 70 の後の CI で、macOS は 72 件の失敗と 9 件のエラー（`realpath: ... Operation not permitted` → `SANDBOX_UNAVAILABLE`）、Ubuntu は 1 件の失敗（`/opt` の確認）。どちらも、Phase 70 の準備で検証スクリプトがマトリクスの Python を使うようになって表に出た（docs/contracts/phase71.md の 1.1 節）。

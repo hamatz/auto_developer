@@ -369,6 +369,13 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - `commit-step` は、これまでどおり「検証した Tree SHA と一致するツリー」だけをコミットする。コミットの直前に求めた Tree SHA のツリーを、そのままコミットする（`read-tree` してからコミットするなど）。コミットしたツリーと検証したツリーの照合（一致しなければ致命的な誤りとして止める）は変えない。
   - 検証した後に作業ツリーに加わったファイルを、コミットに含めない挙動は変えない（`tests/test_nightly_orchestrator.py` の `commit_task must NOT restage unverified files` の検査）。
   - 隔離（`rollback-step` と失敗時の隔離）が、退避のためにステージする挙動は変えない。
+- [ ] **GATE-10 機密のファイルをコミットしない（INV-5）**: 次の3点を変える。
+  - `auto-dev init` と `auto-dev teams init` は、CORE-11 の行に加えて、`.gitignore` に `.env`、`.env.*`、`!.env.example` を追記する（既にある行は重複させない。CORE-11 と同じ規則）。
+  - `verify-step` と `commit-step`（`run` / `teams run` の経路を含む）は、コミットするツリーに、チェックポイントから追加または変更された次のファイルが含まれる場合、`SECRET_FILE_IN_COMMIT:` とそのパスを出して拒否する。`.gitignore` に加えるよう案内も出す。
+    - ファイル名が `.env` または `.env.*`（`.env.example`, `.env.sample`, `.env.template` を除く）
+    - 鍵ファイル（`*.key`, `*.pem`, `*.pkcs12`, `*.pfx`）と、SSH の鍵の名前（`id_rsa`, `id_ed25519`, `id_ecdsa`）
+  - 拒否のときの扱い: `verify-step` は検証の失敗（終了コード 1）とし、Evidence を発行しない。`commit-step` は終了コード 4 とし、HEAD・計画ファイル・Evidence を変えない。`run` の経路では、そのタスクの失敗として隔離する（隔離ブランチには、INV-5 のとおり機密を入れない）。
+  - 名前に `secret` / `token` / `credential` を含むことだけを理由に拒否しない（GATE-8 と同じ）。チェックポイントの時点で既に追跡されていて、変更されていないファイルは対象にしない。
 - [ ] **DX-9 チェックポイントの記録**: `verify-step --checkpoint` に `HEAD` などの参照名を渡した場合も、Evidence の記録・査読の記録・イベントには、解決したコミットの SHA（40 桁）を記録する。解決できない参照は、これまでどおり拒否する。
 - [ ] **REL-5 公開前の清掃**: 追跡しているファイルに、開発者のローカルの絶対パス（`/Users/<名前>/...` や `/home/<名前>/...` のうち、例示用の名前でないもの）を含めない。
   - `scripts/run_pilot04_recovery_experiment.py` と `tests/test_pilot04_recovery_e2e.py` のパスは、環境変数で渡す形にし、指定がなければスキップする（テストのスキップの理由を表示する）。

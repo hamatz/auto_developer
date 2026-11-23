@@ -32,14 +32,15 @@ Phase 70 の準備で、`scripts/verify_local.sh` がテストを動かす Pytho
 | 1 | SBX-7 | macOS で、シンボリックリンクの Python でも候補テストを起動できる | 修正（CI の macOS・python.org の Python） |
 | 2 | SBX-8 | Linux の `/opt` の確認から、Python の置き場所を除く | 修正（CI の Ubuntu。テストのみ） |
 | 3 | GATE-9 | `verify-step` で本物のインデックスを変えない | 修正（機密の誤コミットの防止） |
-| 4 | DX-9 | チェックポイントを SHA で記録する | 修正 |
-| 5 | REL-5 | 追跡しているファイルからローカルの絶対パスを除き、検査する | 公開前の清掃 |
-| 6 | DX-4 | `docs/cli.md` を argparse から生成し、ずれを検査する | 新規 |
-| 7 | DX-3 | `examples/two-teams/` | 新規 |
-| 8 | DX-1 | README のクイックスタートをテストする | 新規 |
-| 9 | REL-2 | バージョン 0.9.0、CHANGELOG、リリースノート | リリース |
+| 4 | GATE-10 | `.gitignore` に `.env` を加え、`.env`・鍵ファイルのコミットを拒否する | 修正（機密の誤コミットの防止。BACKLOG IDEA-014） |
+| 5 | DX-9 | チェックポイントを SHA で記録する | 修正 |
+| 6 | REL-5 | 追跡しているファイルからローカルの絶対パスを除き、検査する | 公開前の清掃 |
+| 7 | DX-4 | `docs/cli.md` を argparse から生成し、ずれを検査する | 新規 |
+| 8 | DX-3 | `examples/two-teams/` | 新規 |
+| 9 | DX-1 | README のクイックスタートをテストする | 新規 |
+| 10 | REL-2 | バージョン 0.9.0、CHANGELOG、リリースノート | リリース |
 
-順序の理由: CI を最初に緑に戻す（1・2）。README が `docs/cli.md` と `examples/two-teams/` を案内するので、DX-4・DX-3 を DX-1 より先にする。バージョンの変更は最後にする。
+順序の理由: CI を最初に緑に戻す（1・2）。機密の誤コミットの防止（3・4）は、GATE-10 が GATE-9 の一時的なインデックスで求めたツリーを検査するので、この順にする。README が `docs/cli.md` と `examples/two-teams/` を案内するので、DX-4・DX-3 を DX-1 より先にする。バージョンの変更は最後にする。
 
 ## 3. 影響分析
 
@@ -78,25 +79,37 @@ Phase 70 の準備で、`scripts/verify_local.sh` がテストを動かす Pytho
 - **注意が要る箇所**: `git status --porcelain` を解析している箇所が 25 か所ある（`multi_team.py` 7、`guard.py` 6 など）。これまで `verify-step` の後は新しいファイルが `A ` と表示されていたが、GATE-9 の後は `?? ` のままになる。境界の検査（`boundary.py`）や未追跡ファイルの扱いで、`A ` を前提にしている箇所がないか確かめる。
 - **新しいテスト**: `verify-step` の前後で `git status --porcelain` が同じこと。gitignore していない `.env` が `verify-step` でステージされないこと。`commit-step` の後の HEAD のツリーが検証したツリーと一致すること。
 
-### 3.4 DX-9（ステップ 4）
+### 3.3.1 GATE-10（ステップ 4）（2026-11-23 追加。BACKLOG IDEA-014）
+
+- **起きていること**: `auto-dev init` の `.gitignore` の行（CORE-11）に `.env` がない。gitignore していない `.env` は、`commit-step` が作業ツリーごとコミットするときに一緒にコミットされる。`sanitize_staged_changes`（`guard.py` 499 行目付近）は内容の規則でしか除外しないので、`PASSWORD=...` のような `.env` は通る。GATE-9 で `verify-step` のステージは直るが、コミットの内容は変わらない。
+- **指紋**: `cli.py` の `DEFAULT_GITIGNORE_ENTRIES`（156 行目付近）、`guard.py` の `commit_task` と、GATE-8 の名前の規則（`evidence.py` の `redact_canonical_diff` が使う規則）。
+- **名前の規則は GATE-8 と揃える**: 拒否するのは `.env` / `.env.*`（`.env.example`・`.env.sample`・`.env.template` を除く）、鍵ファイル、SSH の鍵の名前だけ。`secret` / `token` / `credential` を名前に含むだけのファイルは拒否しない。このリポジトリが追跡している `.env.example` は対象外になる。
+- **守るべき既存テスト（変更しない）**:
+  - `tests/test_init_gitignore.py`: CORE-11 の行が1回ずつ入ることを、期待する行ごとに数えている。行を足しても通る。全体の一致を確かめているのは、既存の内容を保つ場合（174〜198 行目付近）だけで、そこは `.gitignore` がもともとある場合の確認である。**足した行のせいで一致しなくなる場合は、止まって報告する。**
+  - `tests/test_nightly_orchestrator.py` 1217 行目付近、`tests/test_recovery.py` 1202 行目付近: 隔離に `.env` や鍵を入れない。
+  - `tests/test_multi_team_foundation.py` 305〜420 行目付近: `.env` のある worktree を消さない（`.env` を gitignore した場合を含む）。
+  - `tests/test_teams_prepare_status_cleanup.py`: 追跡している `.env.example` を足す準備がある（`!.env.example` で追跡できる）。
+- **Red の作り方**: 一時リポジトリで `init` し、`.gitignore` から `.env` の行を消した状態で `.env` を作り、`verify-step` → `review-input` → `record-review` → `commit-step` を通すと、`.env` がコミットされる。
+
+### 3.4 DX-9（ステップ 5）
 
 - **指紋**: `verify-step` の `--checkpoint`（`cli.py` 649 行目付近）、Evidence の `checkpoint`、査読の記録の `checkpoint`、イベントの `checkpoint`。
 - `"checkpoint": "HEAD"` を期待している既存テストはない。参照名を渡すテストは、記録の値が SHA になっても、比較していなければ影響しない。
 
-### 3.5 REL-5（ステップ 5）
+### 3.5 REL-5（ステップ 6）
 
 - **変更する既存テスト**: `tests/test_pilot04_recovery_e2e.py`（18 行目の `ZIP_PATH`）。環境変数（例: `AUTO_DEV_PILOT04_ZIP`）で渡し、指定がなければ `skipTest` する。アサーションは変えない。
 - `scripts/run_pilot04_recovery_experiment.py` の 19〜21 行目も、環境変数か引数で渡す形にする。
 - **検査のテスト**: `git ls-files` の全ファイルを読み、`/Users/<名前>/` と `/home/<名前>/` のうち、例示用の名前（`runner`, `user`, `alice`, `bob`, `<名前>` など）でないものがあれば失敗する。今の時点で該当するのは上の2ファイルだけ（`git grep` で確認済み）。
 
-### 3.6 DX-4・DX-3・DX-1（ステップ 6〜8）
+### 3.6 DX-4・DX-3・DX-1（ステップ 7〜9）
 
 - 既存のテストで、リポジトリの README を読むものはない（`README.md` を書くテストは、一時リポジトリの中のものだけ）。README の書き直しは既存テストに影響しない。
 - DX-1 の実行の対象は、README の中の `<!-- readme-test: run -->` の直後のコードブロックだけとした（SPEC DX-1）。README の書き手（人間）が、テストされる手順を明示する。
 - DX-3 のサンプルは、`examples/` の下に `teams.json` と `scripts/verify_local.sh` を置く。保護ファイルの検査は、リポジトリの直下の `teams.json` と `scripts/verify_local.sh` だけを対象にしている（パスの先頭一致）ので、`examples/two-teams/teams.json` は保護ファイルにならない。**`verify_local.sh` の保護ファイルの検査の正規表現（`^(\.github/|SPEC\.md|scripts/verify_local\.sh|tests/immunity/|teams\.json$)`）は先頭一致なので、`examples/two-teams/SPEC.md` なども対象外**である。ただし `examples/two-teams/tests/immunity/` は置かない（紛らわしいため）。
 - DX-3 のサンプルの中の `scripts/verify_local.sh` は、DX-5 の雛形と同じ Python の選び方にする。
 
-### 3.7 REL-2（ステップ 9）
+### 3.7 REL-2（ステップ 10）
 
 - **変更する既存テスト**: `tests/test_version_consistency.py` の期待値（`0.8.0` → `0.9.0`、`## [0.8.0]` → `## [0.9.0]`、`docs/releases/v0.8.0.md` → `v0.9.0.md`）。
 - `tests/test_bundler.py` の `v0.8.0` の案内（949〜992 行目付近）は、v0.8 以前の Bundle の形式についての案内なので変えない。
@@ -105,6 +118,7 @@ Phase 70 の準備で、`scripts/verify_local.sh` がテストを動かす Pytho
 
 - CI の macOS を一時的に `/usr/bin/python3` に戻して緑にすることはしない（不具合が隠れる）。
 - GATE-9（`verify-step` のインデックス）を Phase 71 の要件に入れる。
+- GATE-10（`.env` の誤コミットの防止、BACKLOG IDEA-014）を Phase 71 の要件に入れる。
 - Phase 70 の Bundle の INVALID（タスク 3 の SPEC の食い違い）は受け入れ、記録に残す。
 
 ## 5. 人間が行うこと
@@ -112,7 +126,7 @@ Phase 70 の準備で、`scripts/verify_local.sh` がテストを動かす Pytho
 - 準備のコミット: SPEC.md、PLAN.md、README.md、README.en.md、BACKLOG.md、LESSONS.md、この契約書。
 - 準備のコミットの前に: Phase 70 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase70/` に退かせる。
 - ステップ 1・2 の後: CI（macOS / Ubuntu × 3.10 / 3.12）が通ることを確かめる。
-- ステップ 9 の後: Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト、CI、査読の記録と Checker の出力の突き合わせ、Bundle の検証（VERIFIED になること）、独立監査、CONTRIBUTING.md、`v0.9.0` のタグ。
+- ステップ 10 の後: Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト、CI、査読の記録と Checker の出力の突き合わせ、Bundle の検証（VERIFIED になること）、独立監査、CONTRIBUTING.md、`v0.9.0` のタグ。
 
 ## 6. 影響分析の手順メモ（Phase 70 からの改善）
 

@@ -60,7 +60,7 @@ Files created:
 | `PLAN.md` | Task list (`- [ ] 1. ...` under `## ステップ`) | Human |
 | `scripts/verify_local.sh` | Verification script. Passes only with exit code 0 | Human (the agent cannot change it) |
 | `tests/immunity/` | Regression tests for past failures | Human (the agent cannot change it) |
-| `.gitignore` | Lines that ignore generated files such as `.dev/` and `logs/` are appended | Automatic |
+| `.gitignore` | Lines that ignore generated files such as `.dev/` and `logs/`, and `.env`, are appended | Automatic |
 
 Replace the second half of `scripts/verify_local.sh` with your project's test command. Verification fails if there are no tests at all, so that it can never pass trivially. `auto-dev pre-flight` shows whether the working tree is clean and what the next task is.
 
