@@ -1115,6 +1115,21 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     elif args.subcommand == "verify-step":
+        raw_chk = args.checkpoint or "HEAD"
+        rev_proc = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{raw_chk}^{{commit}}"],
+            cwd=work_dir,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if rev_proc.returncode != 0 or not rev_proc.stdout.strip():
+            print(
+                f"ERROR: Cannot resolve checkpoint ref '{raw_chk}' to a commit SHA.",
+                file=sys.stderr,
+            )
+            return 1
+        args.checkpoint = rev_proc.stdout.strip()
         team_ctx, ctx_err = _resolve_cli_team_context(
             work_dir,
             ref=args.checkpoint or "HEAD",
@@ -1271,7 +1286,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     elif args.subcommand == "commit-step":
-        chk_ref = args.checkpoint or "HEAD"
+        raw_chk = args.checkpoint or "HEAD"
+        rev_proc = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{raw_chk}^{{commit}}"],
+            cwd=work_dir,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if rev_proc.returncode != 0 or not rev_proc.stdout.strip():
+            print(
+                f"ERROR: Cannot resolve checkpoint ref '{raw_chk}' to a commit SHA.",
+                file=sys.stderr,
+            )
+            return 1
+        chk_ref = rev_proc.stdout.strip()
+        args.checkpoint = chk_ref
         team_ctx, ctx_err = _resolve_cli_team_context(
             work_dir,
             ref=chk_ref,
