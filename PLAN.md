@@ -72,6 +72,7 @@
   - `tests/test_commit_gate_boundary.py`, `tests/test_dx7_model_families.py`, `tests/test_metrics.py`, `tests/test_nightly_orchestrator.py`, `tests/test_rpt7_team_report.py`, `tests/test_team27_no_changes.py`, `tests/test_team_context_and_protection.py`, `tests/test_teams_cli_e2e.py`, `tests/test_teams_integrate.py`, `tests/test_teams_report_and_brief.py`, `tests/test_teams_report_pending_decisions.py`, `tests/test_teams_run_and_recover.py`
 - ステップ 4（BDL-4）: `tests/test_bundler.py` 908 行目付近と `tests/test_dx6_demo.py` 160 行目付近の `format_version` の期待値を、2 から 3 に変えてよい。また、`tests/test_bundler.py` 977 行目付近の将来バージョンを `3` から `4` に変えてよい。
   - さらに、合成レコードを使って `verify_bundle` を通す既存テスト（`tests/test_bundler.py`, `tests/test_multi_team_foundation.py`, `tests/test_audit_provenance_and_release.py`, `tests/test_independent_audit_runner.py`, `tests/test_multi_team.py`, `tests/test_rpt6_report_bundle_order.py`, `tests/test_teams_integrate.py`, `tests/test_integration_gate.py` の `_create_team_work_and_bundle`）の準備に、`tests/review_test_helpers.py` の共通ヘルパー（製品コードを使わず `hashlib` で SHA-256 を計算し、`DECISION: APPROVE` 行を含む査読 3 ファイルと `checker.review` を用意する）を足してよい。アサーションは変えない。
+  - さらに、次の 5 ファイル（`tests/test_nightly_orchestrator.py`, `tests/test_post_verify_boundary.py`, `tests/test_commit_gate_boundary.py`, `tests/test_multi_team.py`, `tests/test_rpt6_report_bundle_order.py`）で、承認を返すテスト用モックの出力末尾に `\nDECISION: APPROVE` を足すことを許可する（拒否するモックとアサーションは変えない）。
 - ステップ 11（GATE-8）: 既存テストは変更しない。
 - ステップ 6（DX-8）: `tests/test_dx6_demo.py` の `VERIFIED` の部分一致による確認（85, 176 行目付近）を完全な一致の確認に変えてよい。あわせて、デモの Checker の振る舞いの変更（独自に拒否しない）に合わせて、テストの期待を変えてよい。
 - ステップ 7（RPT-8）: `tests/test_rpt7_team_report.py` のうち、`base_unchanged: True` を前提にした準備（199, 276, 355 行目付近）と、記録のないモデル名をジョブの設定から補うことを前提にしたアサーションを、新しい規則（「不明」「記録なし」）に合わせて変えてよい。
@@ -84,7 +85,7 @@
 - [x] 1. サンドボックスの起動の上限と失敗の分類: `RLIMIT_NPROC` をスレッド単位で数えて決める。起動の確認を実際の実行と同じ資源の上限で行う。サンドボックスの機構の起動の失敗を `NO_TESTS_RAN` ではなく `SANDBOX_UNAVAILABLE`（機構のエラーと対処を表示）とする（Red: 同じユーザーのスレッドを数百本立てた状態で、`test_red_verifier.py` が CI と同じく失敗する）（SBX-6）
 - [x] 2. `auto-dev review-input`（正規の差分の書き出し）と、Checker の出力ファイルから判定を読み取り、差分・SPEC の切り出しを照合して記録する `record-review`。旧来の `--decision` だけの呼び出しは終了コード 2。`commit-step` はまだ変えない（Red-First）（GATE-5）
 - [x] 3. （H1 の後）`commit-step` が、最新の検証に対応する査読の記録・判定・出力ファイルのハッシュ・モデル・正規の差分を照合する。`checker.review` を Evidence の記録に残す（Red: H1 で置いた `test_immunity_review_evidence.py`）（GATE-6）
-- [ ] 4. `run` / `teams run` / `demo` の経路の査読の証跡（GATE-7）と、Bundle への査読の証跡の収録・`verify-bundle` での照合・`format_version` 3（BDL-4）。査読の証跡がない記録（GATE-6 より前にコミットした Phase 70 のタスク 1・2 など）は `excluded_records` に `NO_REVIEW_EVIDENCE` で記録し、結果を INTEGRITY_ONLY とする（Red-First）
+- [x] 4. `run` / `teams run` / `demo` の経路の査読の証跡（GATE-7）と、Bundle への査読の証跡の収録・`verify-bundle` での照合・`format_version` 3（BDL-4）。査読の証跡がない記録（GATE-6 より前にコミットした Phase 70 のタスク 1・2 など）は `excluded_records` に `NO_REVIEW_EVIDENCE` で記録し、結果を INTEGRITY_ONLY とする（Red-First）
 - [ ] 5. 失敗ログの先頭に `Failure Phase:` と `Reason:` を書く（Red-First）（RCV-5）
 - [ ] 6. デモの修正: Checker は独自に拒否しない。隔離の原因が `PROTECTED_FILES` であることを確かめる。`verify-bundle --json` の `status` の完全な一致。段階ごとの失敗のテスト（Red-First）（DX-8）
 - [ ] 7. チームのジョブのレポートの修正: 基点が未変更であることは確認できたときだけ表示し、それ以外は「不明」。モデル名は記録からだけ読み、なければ「記録なし」。単一チームの集計を 1de845d の時点に戻す。`./` の接頭辞の扱い（Red-First）（RPT-8）
