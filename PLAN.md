@@ -94,10 +94,10 @@
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [ ] Phase 70 の準備コミット: SPEC.md（Phase 69 の要件を 4 章へ移し、欠陥のある4件に注記。INV-10 を追加。5.1 に Phase 70、5.2 に Phase 71 の要件）、PLAN.md、LESSONS.md、BACKLOG.md、docs/contracts/phase70.md、docs/contracts/phase70/immunity/（免疫テストの案）。
-- [ ] Phase 70 の準備コミットと同時に: このリポジトリの `scripts/verify_local.sh` で、テストを動かす Python を `/usr/bin/python3` の優先から、環境変数 `PYTHON` → PATH の `python3` に変える（DX-5 の雛形と同じ規則。CI の Ubuntu では、マトリクスで指定した 3.10 / 3.12 ではなく OS の Python 3.12 でテストが走っていた）。保護ファイルなので人間が行う。
+- [x] Phase 70 の準備コミット: SPEC.md（Phase 69 の要件を 4 章へ移し、欠陥のある4件に注記。INV-10 を追加。5.1 に Phase 70、5.2 に Phase 71 の要件）、PLAN.md、LESSONS.md、BACKLOG.md、docs/contracts/phase70.md、docs/contracts/phase70/immunity/（免疫テストの案）。
+- [x] Phase 70 の準備コミットと同時に: このリポジトリの `scripts/verify_local.sh` で、テストを動かす Python を `/usr/bin/python3` の優先から、環境変数 `PYTHON` → PATH の `python3` に変える（DX-5 の雛形と同じ規則。CI の Ubuntu では、マトリクスで指定した 3.10 / 3.12 ではなく OS の Python 3.12 でテストが走っていた）。保護ファイルなので人間が行う。
 - [ ] ステップ 1 の完了後: CI の Ubuntu が通ることを確かめる。
-- [ ] **H1（ステップ 2 の完了後、ステップ 3 の前）**: docs/contracts/phase70/immunity/ の3つを tests/immunity/ に置いてコミットする。
+- [x] **H1（ステップ 2 の完了後、ステップ 3 の前）**: docs/contracts/phase70/immunity/ の3つを tests/immunity/ に置いてコミットする。
   - `test_immunity_checker_policy.py` と `test_immunity_metrics_non_interference.py` は置き換え、`test_immunity_review_evidence.py` は新規に置く。
   - 置き換えた2つは通ること、新しい1つは `commit-step` の照合の部分が Red になることを確かめる。
   - Maker は、このチェックが付くまでステップ 3 に着手しない。
