@@ -3804,7 +3804,9 @@ def _read_team_plan_from_bundle(bundle_path: Path, plan_rel: str) -> str:
     """保全済み Bundle の source_snapshot.tar から計画ファイル内容を読み込む。"""
     if not bundle_path.is_file() or not zipfile.is_zipfile(bundle_path):
         return ""
-    norm_rel = plan_rel.replace("\\", "/").lstrip("./")
+    norm_rel = plan_rel.replace("\\", "/")
+    while norm_rel.startswith("./"):
+        norm_rel = norm_rel[2:]
     try:
         with zipfile.ZipFile(bundle_path, "r") as zf:
             if "source_snapshot.tar" not in zf.namelist():
@@ -3908,18 +3910,6 @@ def _collect_team_task_details(
         if isinstance(quarantined_task, dict)
         else ""
     )
-    q_checker_model = (
-        str(quarantined_task.get("checker_model") or "").strip()
-        if isinstance(quarantined_task, dict)
-        else ""
-    )
-    q_maker_model = (
-        str(quarantined_task.get("maker_model") or "").strip()
-        if isinstance(quarantined_task, dict)
-        else ""
-    )
-    job_checker_model = str((job_rec or {}).get("checker_model") or "").strip()
-    job_maker_model = str((job_rec or {}).get("maker_model") or "").strip()
 
     def _build_entry(task_id: str, title: str, task_status: str) -> dict[str, Any]:
         rec = records_by_task.get(task_id)
@@ -3948,29 +3938,11 @@ def _collect_team_task_details(
                 checker_decision = str(
                     ev.get("decision") or ev.get("checker_decision") or ""
                 ).strip()
-            if not checker_model and ev.get("checker_model"):
-                checker_model = str(ev["checker_model"]).strip()
-            if not maker_model and ev.get("maker_model"):
-                maker_model = str(ev["maker_model"]).strip()
             if not commit_sha and ev.get("commit") and str(ev.get("commit")) != "unknown":
                 commit_sha = str(ev["commit"]).strip()
 
-        if task_status == "FAILED" and q_task_id == task_id:
-            if not checker_decision and q_phase == "CHECKER_REJECT":
-                checker_decision = "REJECT"
-            if not checker_model and q_checker_model:
-                checker_model = q_checker_model
-            if not maker_model and q_maker_model:
-                maker_model = q_maker_model
-
-        if team_status != "NO_CHANGES" and (
-            task_status in ("COMPLETED", "FAILED")
-            or checker_decision in ("APPROVE", "REJECT")
-        ):
-            if not checker_model and job_checker_model:
-                checker_model = job_checker_model
-            if not maker_model and job_maker_model:
-                maker_model = job_maker_model
+        if task_status == "FAILED" and q_task_id == task_id and not checker_decision and q_phase == "CHECKER_REJECT":
+            checker_decision = "REJECT"
 
         return {
             "task_id": task_id,
@@ -3978,8 +3950,8 @@ def _collect_team_task_details(
             "status": task_status,
             "commit": commit_sha,
             "checker_decision": checker_decision or "N/A",
-            "checker_model": checker_model or "N/A",
-            "maker_model": maker_model or "N/A",
+            "checker_model": checker_model or "記録なし",
+            "maker_model": maker_model or "記録なし",
         }
 
     out: list[dict[str, Any]] = []
@@ -4044,7 +4016,6 @@ def get_multi_team_report_summary(
     raw_base_commit = (
         (str(job_rec["base_commit"]) if job_rec and job_rec.get("base_commit") else "")
         or (str(int_state.base_commit) if int_state and int_state.base_commit else "")
-        or base_head
     )
     base_commit = raw_base_commit
     if raw_base_commit and not re.fullmatch(r"[0-9a-fA-F]{40}", raw_base_commit):
@@ -4283,10 +4254,11 @@ def get_multi_team_report_summary(
                 f"ジョブを破棄してやり直す場合: `auto-dev teams cleanup --job-id {resolved_job_id} --force`"
             )
 
+    base_unchanged: bool | None
     if base_head and base_commit:
         base_unchanged = (base_head == base_commit) and (not rc_merged or rc_commit == base_commit)
     else:
-        base_unchanged = not rc_merged
+        base_unchanged = None
 
     return {
         "job_id": resolved_job_id,

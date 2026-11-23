@@ -167,7 +167,7 @@ class MorningReporter:
             base_commit = str(
                 mt_dict.get("base_commit") or initial_checkpoint or checkpoint or "N/A"
             )
-            base_unchanged = bool(mt_dict.get("base_unchanged", True))
+            base_unchanged = mt_dict.get("base_unchanged")
             rc_tag = mt_dict.get("rc_tag")
             rc_commit = mt_dict.get("rc_commit")
             all_no_changes = bool(mt_dict.get("all_no_changes"))
@@ -181,12 +181,14 @@ class MorningReporter:
             else:
                 status_lines.append("| **RC コミット** | 未発行 (Not Created) |")
 
-            if base_unchanged:
+            if base_unchanged is True:
                 base_state_str = f"`{base_ref}` は未変更 (unchanged)"
-            else:
+            elif base_unchanged is False:
                 base_head = str(mt_dict.get("base_head") or "")
                 head_suffix = f" (HEAD: `{base_head}`)" if base_head else ""
                 base_state_str = f"`{base_ref}` に取り込み済み / 更新あり{head_suffix}"
+            else:
+                base_state_str = f"`{base_ref}` の状態は不明 (unknown)"
             status_lines.append(f"| **基点ブランチ ({base_ref}) の状態** | {base_state_str} |")
         elif initial_checkpoint and final_commit:
             status_lines.extend(
@@ -416,8 +418,13 @@ class MorningReporter:
                 "なし (全チーム NO_CHANGES)" if all_no_changes else "未発行 (Not Created)"
             )
             base_ref = multi_team_data.get("base_ref") or "main"
-            base_unchanged = bool(multi_team_data.get("base_unchanged", True))
-            base_note = "未変更 (unchanged)" if base_unchanged else "更新あり (modified)"
+            base_unchanged = multi_team_data.get("base_unchanged")
+            if base_unchanged is True:
+                base_note = "未変更 (unchanged)"
+            elif base_unchanged is False:
+                base_note = "更新あり (modified)"
+            else:
+                base_note = "不明 (unknown)"
             lines.extend(
                 [
                     "",
@@ -728,8 +735,13 @@ class MorningReporter:
                 "なし (全チーム NO_CHANGES)" if all_no_changes else "未発行 (Not Created)"
             )
             base_ref = multi_team_data.get("base_ref") or "main"
-            base_unchanged = bool(multi_team_data.get("base_unchanged", True))
-            base_state_str = "未変更 (unchanged)" if base_unchanged else "更新あり (modified)"
+            base_unchanged = multi_team_data.get("base_unchanged")
+            if base_unchanged is True:
+                base_state_str = "未変更 (unchanged)"
+            elif base_unchanged is False:
+                base_state_str = "更新あり (modified)"
+            else:
+                base_state_str = "不明 (unknown)"
             lines.extend(
                 [
                     "------------------------------------------------------------",
@@ -1124,7 +1136,7 @@ class MorningReporter:
             mt_total = sum(int(t.get("total_tasks", 0)) for t in mt_teams)
             mt_done = sum(int(t.get("completed_tasks", 0)) for t in mt_teams)
             mt_failed = sum(int(t.get("failed_tasks", 0)) for t in mt_teams)
-            if mt_teams:
+            if mt_total > 0 and succeeded_count == 0:
                 total_tasks = mt_total
                 succeeded_count = mt_done
             mt_state = str(multi_team_data.get("job_state") or "")

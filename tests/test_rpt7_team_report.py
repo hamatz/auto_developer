@@ -309,8 +309,8 @@ class TestRpt7TeamReportUnit(unittest.TestCase):
                                     "status": "PENDING",
                                     "commit": "",
                                     "checker_decision": "N/A",
-                                    "checker_model": "N/A",
-                                    "maker_model": "N/A",
+                                    "checker_model": "記録なし",
+                                    "maker_model": "記録なし",
                                 }
                             ],
                         }
@@ -322,7 +322,7 @@ class TestRpt7TeamReportUnit(unittest.TestCase):
         )
         content = report_path.read_text(encoding="utf-8")
         self.assertIn("NO_CHANGES", content)
-        self.assertIn("N/A", content)
+        self.assertIn("記録なし", content)
         self.assertIn("未変更", content)
         self.assertNotIn("最新コミット (HEAD)", content)
 
