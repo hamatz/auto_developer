@@ -52,7 +52,8 @@ v0.9.0 is the first release aimed at people other than the authors. It makes mul
 
 ### Known issues
 
-- `SECRET_FILE_IN_COMMIT` checks file names from `git diff --name-only` without `-z`, so a secret file whose name contains non-ASCII characters may not be detected.
+- `SECRET_FILE_IN_COMMIT` reads file names without `-z`, so a secret file whose name contains non-ASCII characters may not be detected. It also ignores type changes, so a tracked `.env` symlink replaced by a regular file is not detected (BACKLOG AUD-1004, AUD-1005).
+- The independent release audit covered the changes from the start of Phase 70 (`7ea39c0`); the full diff since v0.8.0 was too large for a single audit.
 - A few timing-dependent tests can fail on heavily loaded machines.
 
 ---
