@@ -20,6 +20,29 @@ from sandbox_test_helpers import require_platform_sandbox
 from auto_developer.verifier import RedTestVerifier, RedVerificationResult
 
 
+def _find_unallowed_opt_entries(opt_root: Path, py_roots: set[Path]) -> list[Path]:
+    """Return entries under /opt that are neither Python prefixes nor their ancestors (SBX-8)."""
+    if not opt_root.exists():
+        return []
+    unallowed: list[Path] = []
+    dirs_to_check = [opt_root]
+    while dirs_to_check:
+        current = dirs_to_check.pop(0)
+        try:
+            children = sorted(current.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            resolved_child = child.resolve()
+            if any(resolved_child == r or resolved_child.is_relative_to(r) for r in py_roots):
+                continue
+            if any(r.is_relative_to(resolved_child) for r in py_roots):
+                dirs_to_check.append(child)
+                continue
+            unallowed.append(child)
+    return unallowed
+
+
 class TestLinuxBwrapIsolation(unittest.TestCase):
     """SBX-5: Linux の bwrap サンドボックス内で機密・非許可パス・ホーム・元リポジトリが読めないことを実実行で検証する。"""
 
@@ -170,17 +193,51 @@ class ReadUnallowedTmpPathTest(unittest.TestCase):
             res_tmp = self.verifier.verify_candidate_test(code_tmp)
             self._assert_read_blocked(res_tmp, forbidden_secrets=[unallowed_secret])
 
-        opt_path = Path("/opt")
-        if opt_path.exists():
-            code_opt = """import os, unittest
+    def test_bwrap_blocks_reading_unallowed_opt_paths(self) -> None:
+        """SBX-8: Linux bwrap 内で Python 置き場とその親ディレクトリ以外の /opt 配下が読めないこと。"""
+        self._require_linux_bwrap()
+
+        py_roots = {Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()}
+        unallowed_opt = _find_unallowed_opt_entries(Path("/opt"), py_roots)
+        if not unallowed_opt:
+            self.skipTest("No unallowed entries under /opt outside Python prefix paths")
+
+        target = unallowed_opt[0]
+        if target.is_dir():
+            access_expr = f"os.listdir({str(target)!r})"
+        else:
+            access_expr = f"Path({str(target)!r}).read_bytes()"
+
+        code_opt = f"""import os, unittest
+from pathlib import Path
 
 class ReadUnallowedOptTest(unittest.TestCase):
     def test_read_opt(self):
-        entries = os.listdir("/opt")
-        self.assertEqual(len(entries), 0)
+        data = {access_expr}
+        self.assertEqual(len(data), 0)
 """
-            res_opt = self.verifier.verify_candidate_test(code_opt)
-            self._assert_read_blocked(res_opt)
+        res_opt = self.verifier.verify_candidate_test(code_opt)
+        self._assert_read_blocked(res_opt)
+
+    def test_find_unallowed_opt_entries_excludes_python_prefixes_and_ancestors(self) -> None:
+        """SBX-8: /opt フィルタが Python プレフィックスとその親ディレクトリを除き、他の /opt エントリを検出すること。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_opt = Path(tmp) / "opt"
+            py_prefix = fake_opt / "hostedtoolcache" / "Python" / "3.12.5" / "x64"
+            (py_prefix / "bin").mkdir(parents=True)
+            other_tool = fake_opt / "hostedtoolcache" / "node"
+            other_tool.mkdir(parents=True)
+            other_vendor = fake_opt / "google"
+            other_vendor.mkdir(parents=True)
+
+            py_roots = {py_prefix.resolve()}
+            found = _find_unallowed_opt_entries(fake_opt, py_roots)
+            self.assertEqual(found, [other_vendor, other_tool])
+
+            # 他のエントリがなければ空になること（スキップ条件）
+            other_vendor.rmdir()
+            other_tool.rmdir()
+            self.assertEqual(_find_unallowed_opt_entries(fake_opt, py_roots), [])
 
     def test_bwrap_blocks_reading_home_directory_and_ssh(self) -> None:
         """SBX-5: Linux bwrap 内でホームディレクトリおよび ~/.ssh が読めず、機密値が漏洩しないこと。"""
