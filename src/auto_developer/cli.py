@@ -739,6 +739,12 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser = subparsers.add_parser("status", help="Show repository and task status snapshot")
     status_parser.add_argument("--json", action="store_true", help="Output status snapshot in JSON format")
 
+    # Subcommand: dashboard
+    dashboard_parser = subparsers.add_parser("dashboard", help="Generate self-contained HTML status dashboard")
+    dashboard_parser.add_argument(
+        "--out", type=Path, default=None, help="Output HTML file path (default: .dev/dashboard.html)"
+    )
+
     # Subcommand: teams
     teams_parser = subparsers.add_parser("teams", help="Multi-team execution commands")
     teams_subparsers = teams_parser.add_subparsers(
@@ -918,6 +924,13 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(snapshot, ensure_ascii=False, indent=2))
         else:
             print(format_status_text(snapshot))
+        return 0
+
+    if args.subcommand == "dashboard":
+        from auto_developer.dashboard import write_dashboard
+
+        out_file = write_dashboard(work_dir, out_path=args.out, plan_path=args.plan)
+        print(f"DASHBOARD WRITTEN: {out_file}")
         return 0
 
     if args.subcommand == "teams":

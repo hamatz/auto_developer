@@ -162,6 +162,12 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | --- | --- | --- | --- |
 | `--json` | No | `False` | Output status snapshot in JSON format |
 
+### `auto-dev dashboard`
+
+| Argument / Option | Required | Default | Description |
+| --- | --- | --- | --- |
+| `--out OUT` | No | - | Output HTML file path (default: .dev/dashboard.html) |
+
 ### `auto-dev teams`
 
 #### `auto-dev teams init`
