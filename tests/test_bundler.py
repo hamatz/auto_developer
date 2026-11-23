@@ -63,6 +63,9 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "1")
 
         # .dev/job_state.json
         dev_dir = self.repo / ".dev"
@@ -144,6 +147,9 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "1")
 
         bundler = EvidenceBundler(repo_dir=self.repo)
         out_zip = bundler.create_bundle(dest_path=self.repo / "valid_bundle.zip")
@@ -183,6 +189,9 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "1")
 
         bundler = EvidenceBundler(repo_dir=self.repo)
         out_zip = bundler.create_bundle(dest_path=self.repo / "dict_commit_bundle.zip")
@@ -219,8 +228,8 @@ class TestEvidenceBundler(unittest.TestCase):
         self.assertEqual(result.status, "INVALID")
         self.assertTrue(any("Hash mismatch" in err for err in result.errors))
 
-    def test_bundle_collects_evidence_records_from_all_locations(self):
-        # archive ディレクトリと .dev/evidence ディレクトリのレコード収集
+    def test_bundle_reads_records_only_from_evidence_store_location(self):
+        # BDL-5: EvidenceStore の保存先 (records/) のみから収集し、archive/ や .dev/evidence/ は読まない
         archive_dir = self.repo / ".git" / "nightly_evidence" / "archive"
         archive_dir.mkdir(parents=True, exist_ok=True)
         (archive_dir / "task_2.json").write_text(
@@ -248,6 +257,10 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "2")
+        ensure_synthetic_review_evidence(self.repo, "3")
 
         bundler = EvidenceBundler(repo_dir=self.repo)
         out_zip = bundler.create_bundle(dest_path=self.repo / "all_locations.zip")
@@ -255,8 +268,8 @@ class TestEvidenceBundler(unittest.TestCase):
         with zipfile.ZipFile(out_zip, "r") as zf:
             namelist = zf.namelist()
             self.assertIn("evidence/task_1.json", namelist)
-            self.assertIn("evidence/task_2.json", namelist)
-            self.assertIn("evidence/task_3.json", namelist)
+            self.assertNotIn("evidence/task_2.json", namelist)
+            self.assertNotIn("evidence/task_3.json", namelist)
 
     def test_verify_bundle_three_way_audit(self):
         # 1. 証跡ありで完全合格 -> VERIFIED
@@ -280,6 +293,9 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "1")
 
         bundler = EvidenceBundler(repo_dir=self.repo)
         valid_zip = bundler.create_bundle(dest_path=self.repo / "valid_audit.zip")
@@ -311,6 +327,9 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "1", checker_output="Bad logic\nDECISION: REJECT\n")
         rejected_zip = bundler.create_bundle(dest_path=self.repo / "rejected.zip")
         res_rejected = bundler.verify_bundle(rejected_zip)
         self.assertEqual(res_rejected.status, "INVALID")
@@ -332,6 +351,9 @@ class TestEvidenceBundler(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "synthetic")
 
         bundler = EvidenceBundler(repo_dir=self.repo)
         synth_zip = bundler.create_bundle(dest_path=self.repo / "synthetic_bundle.zip")
@@ -880,6 +902,406 @@ class TestEvidenceBundler(unittest.TestCase):
         self.assertFalse(any(e.startswith("RELEASE_BLOCKED:") for e in res.errors))
         self.assertTrue(res.is_valid)
         self.assertEqual(res.status, "VERIFIED")
+
+    def _rewrite_manifest(self, base_zip: Path, out_zip: Path, mutator) -> None:
+        """ZIP内の bundle_manifest.json だけを書き換えて新しい ZIP を作成するヘルパー。"""
+        with zipfile.ZipFile(base_zip, "r") as zf, zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as out_zf:
+            for name in zf.namelist():
+                if name == "bundle_manifest.json":
+                    manifest = json.loads(zf.read(name).decode("utf-8"))
+                    mutator(manifest)
+                    out_zf.writestr(name, json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
+                else:
+                    out_zf.writestr(name, zf.read(name))
+
+    def test_rel_1_bundle_records_format_version_and_tool_version(self):
+        """REL-1: bundle_manifest.json に format_version=2 (int) と tool_version (__version__) が記録されること。"""
+        import auto_developer
+        from auto_developer.cli import VERSION
+
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        out_zip = bundler.create_bundle(dest_path=self.repo / "rel1_bundle.zip")
+
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+
+        self.assertIn("format_version", manifest)
+        self.assertIs(type(manifest["format_version"]), int)
+        self.assertEqual(manifest["format_version"], 3)
+        self.assertEqual(manifest.get("tool_version"), auto_developer.__version__)
+        self.assertEqual(manifest.get("tool_version"), VERSION)
+
+    def test_rel_1_verify_bundle_rejects_missing_format_version_with_cli_exit_1(self):
+        """REL-1: format_version がない v0.8 以前の Bundle を verify_bundle / CLI verify-bundle が拒否し終了コード 1 を返すこと。"""
+        import io
+
+        from auto_developer.cli import main
+
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        base_zip = bundler.create_bundle(dest_path=self.repo / "rel1_base.zip")
+        legacy_zip = self.repo / "rel1_legacy_no_fv.zip"
+        self._rewrite_manifest(base_zip, legacy_zip, lambda m: m.pop("format_version", None))
+
+        res = bundler.verify_bundle(legacy_zip)
+        self.assertFalse(res.is_valid)
+        self.assertEqual(res.status, "INVALID")
+        self.assertTrue(
+            any("v0.8" in err and "v0.8.0" in err for err in res.errors),
+            f"Expected v0.8.0 guidance message in errors, got: {res.errors}",
+        )
+
+        # CLI verify-bundle (text & --json) returns exit code 1
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = captured
+            exit_code = main(["--work-dir", str(self.repo), "verify-bundle", str(legacy_zip)])
+        finally:
+            sys.stdout = old_stdout
+        self.assertEqual(exit_code, 1)
+        self.assertIn("v0.8.0", captured.getvalue())
+
+        captured_json = io.StringIO()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = captured_json
+            exit_code_json = main(["--work-dir", str(self.repo), "verify-bundle", str(legacy_zip), "--json"])
+        finally:
+            sys.stdout = old_stdout
+        self.assertEqual(exit_code_json, 1)
+        parsed = json.loads(captured_json.getvalue())
+        self.assertFalse(parsed["is_valid"])
+        self.assertEqual(parsed["status"], "INVALID")
+        self.assertTrue(any("v0.8.0" in err for err in parsed["errors"]))
+
+    def test_rel_1_verify_bundle_rejects_old_or_invalid_format_versions(self):
+        """REL-1: format_version が 2 未満または整数以外の不正値、および未対応バージョンの Bundle を拒否すること。"""
+        from auto_developer.cli import main
+
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        base_zip = bundler.create_bundle(dest_path=self.repo / "rel1_base_invalid.zip")
+
+        for idx, bad_fv in enumerate([1, 0, -1, None, "2", 2.0, True]):
+            bad_zip = self.repo / f"rel1_bad_fv_{idx}.zip"
+            self._rewrite_manifest(base_zip, bad_zip, lambda m, v=bad_fv: m.__setitem__("format_version", v))
+            res = bundler.verify_bundle(bad_zip)
+            self.assertFalse(res.is_valid, f"format_version={bad_fv!r} must be rejected")
+            self.assertEqual(res.status, "INVALID", f"format_version={bad_fv!r} must be INVALID")
+            self.assertTrue(
+                any("v0.8" in err and "v0.8.0" in err for err in res.errors),
+                f"Expected v0.8.0 guidance for format_version={bad_fv!r}, got: {res.errors}",
+            )
+            if bad_fv == 1:
+                self.assertEqual(main(["--work-dir", str(self.repo), "verify-bundle", str(bad_zip)]), 1)
+
+        # 未対応の将来バージョン (4) も拒否すること
+        future_zip = self.repo / "rel1_future_fv.zip"
+        self._rewrite_manifest(base_zip, future_zip, lambda m: m.__setitem__("format_version", 4))
+        res_future = bundler.verify_bundle(future_zip)
+        self.assertFalse(res_future.is_valid)
+        self.assertEqual(res_future.status, "INVALID")
+        self.assertTrue(any("format_version" in err for err in res_future.errors))
+
+        # 証跡なし (v0.8 なら INTEGRITY_ONLY -> exit 2) の旧形式 Bundle でも exit 1 (INVALID) で拒否すること
+        import shutil
+        shutil.rmtree(self.repo / ".git" / "nightly_evidence" / "records")
+        no_ev_zip = self.repo / "rel1_no_ev_base.zip"
+        bundler.create_bundle(dest_path=no_ev_zip)
+        no_ev_legacy_zip = self.repo / "rel1_no_ev_legacy.zip"
+        self._rewrite_manifest(no_ev_zip, no_ev_legacy_zip, lambda m: m.pop("format_version", None))
+        self.assertEqual(main(["--work-dir", str(self.repo), "verify-bundle", str(no_ev_legacy_zip)]), 1)
+
+    def test_bdl_3_bundle_selects_only_completed_plan_tasks_and_records_excluded(self):
+        """BDL-3: 対象 PLAN.md（CORE-10 範囲）の - [x] タスクの記録のみを Bundle に入れ、対象外を excluded_records に記録すること。"""
+        import hashlib
+
+        (self.repo / "PLAN.md").write_text(
+            "# PLAN.md\n\n"
+            "<!--\n"
+            "## ステップ\n"
+            "- [x] 90. Commented task\n"
+            "-->\n\n"
+            "## ステップ\n"
+            "- [x] 1. Completed task\n"
+            "- [ ] 2. Pending task\n"
+            "- [ ] 3. Failed task **[FAILED]**\n\n"
+            "## 別の節\n"
+            "- [x] 91. Out-of-scope section task\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "PLAN.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: update plan [refs: 1]"], cwd=self.repo, check=True)
+
+        head_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        head_tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        spec_hash = hashlib.sha256((self.repo / "SPEC.md").read_bytes()).hexdigest()
+
+        records_dir = self.repo / ".git" / "nightly_evidence" / "records"
+        records_dir.mkdir(parents=True, exist_ok=True)
+        # 1: 現在の完了タスク（正しい SPEC hash & tree）
+        (records_dir / "task_1.json").write_text(
+            json.dumps({
+                "task_id": "1",
+                "checkpoint": "chk1",
+                "commit": {"sha": head_commit, "tree_sha": head_tree},
+                "tree_sha": head_tree,
+                "spec_sha": spec_hash,
+                "checker": {"decision": "APPROVE", "reason": "ok"},
+                "status": "COMPLETED",
+            }),
+            encoding="utf-8",
+        )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "1")
+        # 2, 3, 8 (前フェーズ残骸), 90 (コメント内), 91 (別節): 古い SPEC hash を持つ対象外レコード
+        stale_spec_hash = "0" * 64
+        for stale_id in ["2", "3", "8", "90", "91"]:
+            (records_dir / f"task_{stale_id}.json").write_text(
+                json.dumps({
+                    "task_id": stale_id,
+                    "checkpoint": "old_chk",
+                    "commit": {"sha": head_commit, "tree_sha": head_tree},
+                    "tree_sha": head_tree,
+                    "spec_sha": stale_spec_hash,
+                    "checker": {"decision": "APPROVE", "reason": "stale"},
+                    "status": "COMPLETED",
+                }),
+                encoding="utf-8",
+            )
+
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        out_zip = bundler.create_bundle(dest_path=self.repo / "bdl3_bundle.zip")
+
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            namelist = zf.namelist()
+            self.assertIn("evidence/task_1.json", namelist)
+            for stale_id in ["2", "3", "8", "90", "91"]:
+                self.assertNotIn(f"evidence/task_{stale_id}.json", namelist)
+
+            manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+            self.assertEqual([t["task_id"] for t in manifest["tasks"]], ["1"])
+            self.assertIn("excluded_records", manifest)
+            excluded_by_id = {e["task_id"]: e for e in manifest["excluded_records"]}
+            self.assertEqual(set(excluded_by_id.keys()), {"2", "3", "8", "90", "91"})
+            for tid, entry in excluded_by_id.items():
+                self.assertTrue(entry.get("reason"), f"Missing reason for excluded task {tid}")
+
+        # 対象外レコードが除外された結果、verify_bundle は VERIFIED になること
+        v_res = bundler.verify_bundle(out_zip)
+        self.assertTrue(v_res.is_valid, f"Expected VERIFIED, errors={v_res.errors}")
+        self.assertEqual(v_res.status, "VERIFIED")
+
+        # BDL-2 検査は弱めない: 古い SPEC hash のレコードを ZIP と manifest に再混入したら INVALID になること
+        tampered_zip = self.repo / "bdl3_reinjected.zip"
+        stale_rec_bytes = (records_dir / "task_8.json").read_bytes()
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            extracted = {name: zf.read(name) for name in zf.namelist()}
+        extracted["evidence/task_8.json"] = stale_rec_bytes
+        m_obj = json.loads(extracted["bundle_manifest.json"].decode("utf-8"))
+        m_obj["tasks"].append({
+            "task_id": "8",
+            "commit": head_commit,
+            "tree_sha": head_tree,
+            "spec_sha": stale_spec_hash,
+            "checker": {"decision": "APPROVE", "reason": "stale"},
+            "checker_decision": "APPROVE",
+            "status": "COMPLETED",
+        })
+        m_obj["file_hashes"] = {
+            name: hashlib.sha256(data).hexdigest()
+            for name, data in extracted.items()
+            if name != "bundle_manifest.json"
+        }
+        extracted["bundle_manifest.json"] = json.dumps(m_obj, ensure_ascii=False, indent=2).encode("utf-8")
+        with zipfile.ZipFile(tampered_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for name, data in extracted.items():
+                zf.writestr(name, data)
+
+        reinjected_res = bundler.verify_bundle(tampered_zip)
+        self.assertFalse(reinjected_res.is_valid)
+        self.assertEqual(reinjected_res.status, "INVALID")
+
+    def test_bdl_3_bundle_fallback_when_no_readable_tasks_or_missing_plan(self):
+        """BDL-3: 計画ファイルにタスクとして読める行がない場合や計画ファイルがない場合は、従来どおり全記録を対象にすること。"""
+        records_dir = self.repo / ".git" / "nightly_evidence" / "records"
+        (records_dir / "task_2.json").write_text(
+            json.dumps({
+                "task_id": "2",
+                "checkpoint": "chk2",
+                "tree_sha": "tree2",
+                "spec_sha": "spec2",
+                "checker": {"decision": "APPROVE"},
+                "status": "COMPLETED",
+            }),
+            encoding="utf-8",
+        )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo, "2")
+
+        # Case 1: 番号なしの行のみ（parse_plan が空）
+        bundler = EvidenceBundler(repo_dir=self.repo)
+        zip_unparsed = bundler.create_bundle(dest_path=self.repo / "fallback_unparsed.zip")
+        with zipfile.ZipFile(zip_unparsed, "r") as zf:
+            self.assertIn("evidence/task_1.json", zf.namelist())
+            self.assertIn("evidence/task_2.json", zf.namelist())
+            manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+            self.assertEqual(manifest.get("excluded_records"), [])
+
+        # Case 2: 計画ファイル自体が存在しない
+        (self.repo / "PLAN.md").unlink()
+        zip_missing = bundler.create_bundle(dest_path=self.repo / "fallback_missing.zip")
+        with zipfile.ZipFile(zip_missing, "r") as zf:
+            self.assertIn("evidence/task_1.json", zf.namelist())
+            self.assertIn("evidence/task_2.json", zf.namelist())
+            manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+            self.assertEqual(manifest.get("excluded_records"), [])
+
+    def test_bdl_3_team_worktree_uses_team_plan_and_excludes_other_records(self):
+        """BDL-3: チーム worktree ではそのチームの計画ファイルを参照し、対象外・親リポジトリ由来の記録を除外すること。"""
+        import hashlib
+
+        from auto_developer.cli import main
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("# SPEC\n- BDL-3\n", encoding="utf-8")
+            # ルート PLAN.md には task 9 が完了、task 1 は未完了とする
+            (repo / "PLAN.md").write_text(
+                "# Root PLAN\n\n## ステップ\n- [ ] 1. Root pending\n- [x] 9. Root done\n",
+                encoding="utf-8",
+            )
+            (repo / "plans").mkdir(parents=True, exist_ok=True)
+            (repo / "plans" / "core.md").write_text(
+                "# PLAN (core)\n\n## ステップ\n- [ ] 1. Core task 1\n- [ ] 2. Core task 2\n",
+                encoding="utf-8",
+            )
+            (repo / "plans" / "ui.md").write_text(
+                "# PLAN (ui)\n\n## ステップ\n- [ ] 1. UI task 1\n",
+                encoding="utf-8",
+            )
+            (repo / "src" / "core").mkdir(parents=True, exist_ok=True)
+            (repo / "src" / "ui").mkdir(parents=True, exist_ok=True)
+            (repo / "src" / "core" / "app.py").write_text("X = 1\n", encoding="utf-8")
+            (repo / "src" / "ui" / "view.py").write_text("Y = 1\n", encoding="utf-8")
+            (repo / "scripts").mkdir(parents=True, exist_ok=True)
+            verify_sh = repo / "scripts" / "verify_local.sh"
+            verify_sh.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            verify_sh.chmod(0o755)
+            (repo / "teams.json").write_text(
+                json.dumps({
+                    "version": 1,
+                    "project": "demo",
+                    "base": {"ref": "main", "require_clean": True},
+                    "teams": [
+                        {"id": "core", "plan": "plans/core.md", "owns": ["src/core/**"], "depends_on": []},
+                        {"id": "ui", "plan": "plans/ui.md", "owns": ["src/ui/**"], "depends_on": []},
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            # 親リポジトリに別フェーズの残骸 task_8.json と task_9.json を配置
+            main_records = repo / ".git" / "nightly_evidence" / "records"
+            main_records.mkdir(parents=True, exist_ok=True)
+            for rid in ["8", "9"]:
+                (main_records / f"task_{rid}.json").write_text(
+                    json.dumps({
+                        "task_id": rid,
+                        "commit": {"sha": "a" * 40, "tree_sha": "b" * 40},
+                        "tree_sha": "b" * 40,
+                        "spec_sha": "c" * 64,
+                        "checker": {"decision": "APPROVE"},
+                        "status": "COMPLETED",
+                    }),
+                    encoding="utf-8",
+                )
+
+            self.assertEqual(main(["--work-dir", str(repo), "teams", "prepare", "--job-id", "job-bdl3"]), 0)
+            core_wt = repo / ".dev" / "worktrees" / "core"
+
+            # core worktree で task 1 のみ完了コミットし、.dev/evidence に task_1 と未完了 task_2 を配置
+            (core_wt / "plans" / "core.md").write_text(
+                "# PLAN (core)\n\n## ステップ\n- [x] 1. Core task 1\n- [ ] 2. Core task 2\n",
+                encoding="utf-8",
+            )
+            (core_wt / "src" / "core" / "app.py").write_text("X = 2\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=core_wt, check=True)
+            subprocess.run(["git", "commit", "-m", "core task 1 [refs: 1]"], cwd=core_wt, check=True)
+
+            wt_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=core_wt, capture_output=True, text=True, check=True
+            ).stdout.strip()
+            wt_tree = subprocess.run(
+                ["git", "rev-parse", "HEAD^{tree}"], cwd=core_wt, capture_output=True, text=True, check=True
+            ).stdout.strip()
+            wt_spec = hashlib.sha256((core_wt / "SPEC.md").read_bytes()).hexdigest()
+
+            wt_ev = core_wt / ".dev" / "evidence"
+            wt_ev.mkdir(parents=True, exist_ok=True)
+            (wt_ev / "task_1.json").write_text(
+                json.dumps({
+                    "task_id": "1",
+                    "commit": {"sha": wt_head, "tree_sha": wt_tree},
+                    "tree_sha": wt_tree,
+                    "spec_sha": wt_spec,
+                    "checker": {"decision": "APPROVE", "reason": "ok"},
+                    "status": "COMPLETED",
+                }),
+                encoding="utf-8",
+            )
+            from review_test_helpers import ensure_synthetic_review_evidence
+
+            ensure_synthetic_review_evidence(core_wt, "1")
+            (wt_ev / "task_2.json").write_text(
+                json.dumps({
+                    "task_id": "2",
+                    "commit": {"sha": wt_head, "tree_sha": wt_tree},
+                    "tree_sha": wt_tree,
+                    "spec_sha": "d" * 64,
+                    "checker": {"decision": "APPROVE", "reason": "stale"},
+                    "status": "COMPLETED",
+                }),
+                encoding="utf-8",
+            )
+
+            out_zip = core_wt / "core_bundle.zip"
+            self.assertEqual(main(["--work-dir", str(core_wt), "bundle", "--out", str(out_zip)]), 0)
+
+            with zipfile.ZipFile(out_zip, "r") as zf:
+                names = zf.namelist()
+                self.assertIn("evidence/task_1.json", names)
+                self.assertNotIn("evidence/task_2.json", names)
+                self.assertNotIn("evidence/task_8.json", names)
+                self.assertNotIn("evidence/task_9.json", names)
+                manifest = json.loads(zf.read("bundle_manifest.json").decode("utf-8"))
+                self.assertEqual([t["task_id"] for t in manifest["tasks"]], ["1"])
+                excluded_ids = {e["task_id"] for e in manifest.get("excluded_records", [])}
+                self.assertEqual(excluded_ids, {"2"})
+
+                # 同梱された NIGHTLY_REPORT.md も core の計画に基づくこと
+                report_text = zf.read("NIGHTLY_REPORT.md").decode("utf-8")
+                self.assertIn("`task-1`", report_text)
+                self.assertNotIn("`task-2`", report_text)
+                self.assertNotIn("`task-8`", report_text)
+                self.assertNotIn("`task-9`", report_text)
+
+            v_res = EvidenceBundler(repo_dir=core_wt).verify_bundle(out_zip)
+            self.assertTrue(v_res.is_valid, f"Expected VERIFIED, errors={v_res.errors}")
+            self.assertEqual(v_res.status, "VERIFIED")
+
 
 
 

@@ -59,11 +59,16 @@ def _glob_to_regex(pattern: str) -> re.Pattern[str]:
     return re.compile("".join(res))
 
 
-def _match_path(path_str: str, pattern: str) -> bool:
+def match_path(path_str: str, pattern: str) -> bool:
     """パス文字列が glob パターンにマッチするか先頭から厳格判定する。"""
     normalized_path = path_str.replace("\\", "/").strip().lstrip("/")
     regex = _glob_to_regex(pattern)
     return bool(regex.match(normalized_path))
+
+
+def _match_path(path_str: str, pattern: str) -> bool:
+    """後方互換用の内部エイリアス。"""
+    return match_path(path_str, pattern)
 
 
 class BoundaryGuard:

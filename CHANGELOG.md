@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.0] - 2026-11-23
+
+### Highlights
+
+v0.9.0 is the first release aimed at people other than the authors. It makes multi-team execution usable from the CLI and the agent skills, makes the Checker's review machine-verifiable, and rewrites the specification and the README so that a new user can get started with `pip install` and `auto-dev demo`. It is a deliberate break in history: the SPEC, LESSONS and README were rewritten, and evidence bundles from earlier versions are not accepted.
+
+### Breaking changes
+
+- **Evidence bundles**: `bundle_manifest.json` now has `format_version: 3`, and each task in a bundle carries copies of its review inputs and output. `verify-bundle` rejects bundles with `format_version` lower than 3, with a message pointing to the version that can verify them (v0.8.0 for older bundles).
+- **Review recording**: `auto-dev record-review` now requires `--checker-output`, `--diff-file` and `--spec-file`. The decision is read from the Checker's output file, not from `--decision`. The old form with only `--decision` is rejected with exit code 2.
+- **Commit gate**: `auto-dev commit-step` refuses to commit unless a review is recorded for the latest verification, the recorded decision is APPROVE, the Checker's output file is unchanged since it was recorded, the models match, and the current diff matches the reviewed diff (exit code 3 or 4).
+- **Model names are required with external commands**: `run` / `teams run` with `--maker-cmd` / `--checker-cmd` but without model names is rejected with exit code 2 (`--mock` is unchanged).
+- **Secret files are refused at verification and commit**: `verify-step` (exit 1) and `commit-step` (exit 4) refuse added or modified `.env` / `.env.*` (except `.env.example`, `.env.sample`, `.env.template`), key files (`*.key`, `*.pem`, `*.pkcs12`, `*.pfx`) and SSH key files, with `SECRET_FILE_IN_COMMIT:`. Add them to `.gitignore`.
+- **Plan parsing**: tasks are read only from the `## ステップ` section when it exists, and lines inside HTML comments are ignored.
+- **Specification and IDs**: `SPEC.md` was rewritten with area-based IDs (`CORE-`, `GATE-`, `TEAM-`, ...). The previous specification and its feature IDs are frozen in `docs/history/`.
+- **Tag format**: tags now use `v0.9.0` (previously `v.0.8.0`).
+
+### Added
+
+- **Multi-team execution from the CLI and skills**: `teams init`, `teams prepare`, `teams status`, `teams run`, `teams integrate`, `teams cleanup` and `teams recover`. Each team works in its own Git worktree and branch (`team/<id>`). Integration verifies each team's evidence, merges the teams one by one, verifies again, and creates an `integration/<job_id>` branch and an `rc/<job_id>` tag; main is never changed. Work that touches files outside a team's `owns` is quarantined. Teams with no commits are reported as `NO_CHANGES`. `/nightly-setup` and `/nightly-run` support the team path.
+- **Machine-verifiable review**: `auto-dev review-input` writes a canonical diff, and `record-review` binds the decision to the Checker's output, the diff and a verbatim excerpt of `SPEC.md` by SHA-256. The `run` / `teams run` / `demo` paths record the same evidence. Rejected reviews in the `run` path are kept under `reviews/rejected/<job_id>/`.
+- **`auto-dev demo`**: a self-contained demonstration in a temporary repository (two successful tasks, a quarantined change to a protected file, `brief`, and a verified bundle). `--keep` keeps the directory.
+- **Model families**: `--maker-family`, `--checker-family` and `--auditor-family` declare a model's family explicitly; a declaration that contradicts the built-in detection is refused. Built-in detection now covers `mistral`, `llama`, `qwen` and `deepseek`.
+- **Failure logs** start with `Failure Phase:` and `Reason:`.
+- **`examples/two-teams/`**, a small two-team project, and **`docs/cli.md`**, a command reference generated from the CLI definition (`scripts/gen_cli_reference.py`).
+- **README** rewritten in Japanese (`README.md`) and English (`README.en.md`). The commands in the README are executed by the test suite.
+
+### Changed
+
+- `auto-dev init` and `teams init` append Auto Developer's generated files, common Python caches and `.env` / `.env.*` / `!.env.example` to `.gitignore`, without duplicating existing lines.
+- `verify-step` computes the tree SHA with a temporary index and no longer stages files in your real Git index. `commit-step` commits exactly the verified tree.
+- `verify-step --checkpoint HEAD` (or any ref) records the resolved commit SHA.
+- `auto-dev run` writes the report before creating the bundle.
+- Bundles and reports read evidence records only from the location `EvidenceStore` writes to, and include only tasks completed in the target plan; others are listed in `excluded_records`. Records without review evidence are excluded as `NO_REVIEW_EVIDENCE`, and the result is `INTEGRITY_ONLY` instead of `VERIFIED`.
+- The canonical diff given to the Checker replaces lines that match secret patterns and omits the contents of `.env*` and key files.
+- The `verify_local.sh` template picks Python from `$PYTHON`, then `python3` on `PATH`, and adds `src/` to `PYTHONPATH` when present.
+
+### Fixed
+
+- **macOS**: candidate tests failed to start with `SANDBOX_UNAVAILABLE` when the Python executable was a symbolic link into `/Library/Frameworks` (python.org installer, GitHub Actions `setup-python`).
+- **Linux**: `bwrap` failed with `Resource temporarily unavailable` on machines with many threads, because `RLIMIT_NPROC` was computed from the process count. Sandbox start-up failures are now reported as `SANDBOX_UNAVAILABLE` instead of `NO_TESTS_RAN`. The sandbox availability check now actually starts the sandbox, with the same limits as real runs.
+- Several issues in the team report and `brief` (base-branch status, model names) and in `teams cleanup`.
+
+### Known issues
+
+- `SECRET_FILE_IN_COMMIT` checks file names from `git diff --name-only` without `-z`, so a secret file whose name contains non-ASCII characters may not be detected.
+- A few timing-dependent tests can fail on heavily loaded machines.
+
+---
+
 ## [0.8.0] - 2026-11-19
 
 ### Major Milestone: Autonomous Governance, Multi-LLM Review Enforcement, Outcome Metrics, and Autonomous Reporting (Phases 63 - 65)

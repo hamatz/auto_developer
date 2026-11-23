@@ -92,9 +92,9 @@ class TestOrchestratorBoundary(unittest.TestCase):
         )
         self.assertEqual(status.stdout.strip(), "")
 
-        # チーム専用の隔離ブランチ（quarantine/team-ui-...）が作成されていること
+        # チーム専用の隔離ブランチ（quarantine/<job_id>/team-ui/...）が作成されていること
         branch_res = subprocess.run(
-            ["git", "branch", "--list", "quarantine/team-ui-*"],
+            ["git", "branch", "--list", "quarantine/*/team-ui/*"],
             cwd=self.repo_dir,
             check=True,
             capture_output=True,

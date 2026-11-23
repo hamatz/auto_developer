@@ -292,6 +292,9 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo_dir, "1")
 
         audit_file = evidence_dir / "audit_stage.json"
         audit_file.write_text(
@@ -445,6 +448,9 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
             }),
             encoding="utf-8",
         )
+        from review_test_helpers import ensure_synthetic_review_evidence
+
+        ensure_synthetic_review_evidence(self.repo_dir, "1")
 
         # MOCK モードの audit_stage.json
         audit_file = evidence_dir / "audit_stage.json"

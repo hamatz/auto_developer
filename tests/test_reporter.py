@@ -123,8 +123,8 @@ class TestMorningReporterEvidenceVerification(unittest.TestCase):
         self.assertNotIn("git push origin", content)
         self.assertIn("git log", content)
 
-    def test_write_report_locates_evidence_in_archive_and_aligns_tree_sha(self):
-        """DD.4 / P2: archive 配下の証跡レコードを検出し、Git 実態の Tree SHA と厳密整合することの実証。"""
+    def test_write_report_ignores_archive_directory(self):
+        """BDL-5: archive 配下の証跡レコードは読まず UNVERIFIED (No Evidence Record) となること。"""
         # テスト用コミット作成
         test_file = self.repo / "test_dd4.txt"
         test_file.write_text("dd4 verification", encoding="utf-8")
@@ -175,8 +175,8 @@ class TestMorningReporterEvidenceVerification(unittest.TestCase):
         )
 
         content = report_path.read_text(encoding="utf-8")
-        self.assertIn(f"`{tree_sha[:7]}`", content)
-        self.assertIn("APPROVE (Verified)", content)
+        self.assertNotIn(f"`{tree_sha[:7]}`", content)
+        self.assertIn("UNVERIFIED (No Evidence Record)", content)
 
     def test_feature_www_5_audit_counts_split(self):
         """機能WWW.5: 監査ステージの結果として、登録（DISPATCHED）・Backlog 送り（BACKLOGGED）・エスカレーション（ESCALATED）の件数を分けて表示すること。"""
@@ -508,6 +508,215 @@ class TestStandaloneReportGeneration(unittest.TestCase):
         reporter.generate_standalone_report(report_path=report_p, repo_dir=self.repo)
         content = report_p.read_text(encoding="utf-8")
         self.assertIn("| **要確認・隔離** | **1** 件 |", content)
+
+    def test_bdl_3_standalone_report_selects_only_completed_tasks_and_ignores_stale_records(self):
+        """BDL-3: スタンドアロンレポートは対象計画の - [x] タスクのみを対象とし、未完了・範囲外・前フェーズ残骸の記録を含めないこと。"""
+        (self.repo / "PLAN.md").write_text(
+            "# PLAN\n\n"
+            "<!--\n- [x] 90. Commented\n-->\n\n"
+            "## ステップ\n"
+            "- [x] 1. Done task\n"
+            "- [ ] 2. Pending task\n\n"
+            "## 別の節\n"
+            "- [x] 91. Out of scope\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "PLAN.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "task 1 [refs: 1]"], cwd=self.repo, check=True)
+        head_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        head_tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        for tid in ["1", "2", "8", "90", "91"]:
+            (self.records_dir / f"task_{tid}.json").write_text(
+                json.dumps({
+                    "task_id": tid,
+                    "tree_sha": head_tree,
+                    "status": "COMPLETED",
+                    "checker": {"decision": "APPROVE", "reason": "ok"},
+                    "commit": {"tree_sha": head_tree, "sha": head_commit},
+                }),
+                encoding="utf-8",
+            )
+
+        reporter = MorningReporter(repo_dir=self.repo)
+        report_p = self.repo / "NIGHTLY_REPORT.md"
+        reporter.generate_standalone_report(report_path=report_p, repo_dir=self.repo)
+        content = report_p.read_text(encoding="utf-8")
+
+        self.assertIn("`task-1`", content)
+        self.assertIn("APPROVE (Verified)", content)
+        for excluded_id in ["2", "8", "90", "91"]:
+            self.assertNotIn(f"`task-{excluded_id}`", content)
+
+    def test_bdl_3_standalone_report_fallback_when_plan_has_no_readable_tasks(self):
+        """BDL-3: 計画ファイルにタスクとして読める行がない場合は、従来どおり全記録を対象にすること。"""
+        (self.repo / "PLAN.md").write_text("# PLAN\n- [x] Unnumbered task\n", encoding="utf-8")
+        subprocess.run(["git", "add", "PLAN.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "unnumbered"], cwd=self.repo, check=True)
+        head_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        head_tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        (self.records_dir / "task_1.json").write_text(
+            json.dumps({
+                "task_id": "1",
+                "tree_sha": head_tree,
+                "status": "COMPLETED",
+                "checker": {"decision": "APPROVE", "reason": "ok"},
+                "commit": {"tree_sha": head_tree, "sha": head_commit},
+            }),
+            encoding="utf-8",
+        )
+
+        reporter = MorningReporter(repo_dir=self.repo)
+        report_p = self.repo / "NIGHTLY_REPORT.md"
+        reporter.generate_standalone_report(report_path=report_p, repo_dir=self.repo)
+        content = report_p.read_text(encoding="utf-8")
+        self.assertIn("`task-1`", content)
+        self.assertIn("APPROVE (Verified)", content)
+
+    def test_bdl_3_write_report_filters_uncompleted_or_stale_tasks_when_plan_present(self):
+        """BDL-3: write_report も計画ファイルにタスクがある場合は完了タスクのみを対象にすること。"""
+        (self.repo / "PLAN.md").write_text(
+            "# PLAN\n\n## ステップ\n- [x] 1. Done task\n- [ ] 2. Pending task\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "PLAN.md"], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "plan"], cwd=self.repo, check=True)
+        head_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        head_tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        for tid in ["1", "2", "8"]:
+            (self.records_dir / f"task_{tid}.json").write_text(
+                json.dumps({
+                    "task_id": tid,
+                    "tree_sha": head_tree,
+                    "status": "COMPLETED",
+                    "checker": {"decision": "APPROVE", "reason": "ok"},
+                    "commit": {"tree_sha": head_tree, "sha": head_commit},
+                }),
+                encoding="utf-8",
+            )
+
+        reporter = MorningReporter(repo_dir=self.repo)
+        report_p = self.repo / "NIGHTLY_REPORT.md"
+        reporter.write_report(
+            report_p,
+            {
+                "status": "COMPLETED",
+                "total_tasks": 2,
+                "succeeded_count": 1,
+                "quarantined_count": 0,
+                "checkpoint": head_commit,
+                "completed_tasks": [
+                    {"task_id": "1", "title": "Done task", "commit": head_commit},
+                    {"task_id": "2", "title": "Pending task", "commit": head_commit},
+                    {"task_id": "8", "title": "Stale task", "commit": head_commit},
+                ],
+            },
+        )
+        content = report_p.read_text(encoding="utf-8")
+        self.assertIn("`task-1`", content)
+        self.assertNotIn("`task-2`", content)
+        self.assertNotIn("`task-8`", content)
+
+    def test_bdl_3_team_worktree_report_uses_team_plan(self):
+        """BDL-3: チーム worktree で auto-dev report / generate_standalone_report を呼ぶとチームの計画ファイルと証拠が使われること。"""
+        from auto_developer.cli import main
+
+        with tempfile.TemporaryDirectory() as td:
+            repo = Path(td)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+
+            (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
+            (repo / "SPEC.md").write_text("# SPEC\n- BDL-3\n", encoding="utf-8")
+            (repo / "PLAN.md").write_text(
+                "# Root PLAN\n\n## ステップ\n- [ ] 1. Root pending\n- [x] 9. Root done\n",
+                encoding="utf-8",
+            )
+            (repo / "plans").mkdir(parents=True, exist_ok=True)
+            (repo / "plans" / "core.md").write_text(
+                "# PLAN (core)\n\n## ステップ\n- [ ] 1. Core task\n",
+                encoding="utf-8",
+            )
+            (repo / "src" / "core").mkdir(parents=True, exist_ok=True)
+            (repo / "src" / "core" / "app.py").write_text("X = 1\n", encoding="utf-8")
+            (repo / "teams.json").write_text(
+                json.dumps({
+                    "version": 1,
+                    "project": "demo",
+                    "base": {"ref": "main", "require_clean": True},
+                    "teams": [
+                        {"id": "core", "plan": "plans/core.md", "owns": ["src/core/**"], "depends_on": []},
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+            main_records = repo / ".git" / "nightly_evidence" / "records"
+            main_records.mkdir(parents=True, exist_ok=True)
+            (main_records / "task_9.json").write_text(
+                json.dumps({
+                    "task_id": "9",
+                    "commit": {"sha": "a" * 40, "tree_sha": "b" * 40},
+                    "tree_sha": "b" * 40,
+                    "checker": {"decision": "APPROVE"},
+                    "status": "COMPLETED",
+                }),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(main(["--work-dir", str(repo), "teams", "prepare", "--job-id", "job-rpt-bdl3"]), 0)
+            core_wt = repo / ".dev" / "worktrees" / "core"
+            (core_wt / "plans" / "core.md").write_text(
+                "# PLAN (core)\n\n## ステップ\n- [x] 1. Core task\n",
+                encoding="utf-8",
+            )
+            (core_wt / "src" / "core" / "app.py").write_text("X = 2\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=core_wt, check=True)
+            subprocess.run(["git", "commit", "-m", "core task 1 [refs: 1]"], cwd=core_wt, check=True)
+
+            wt_head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=core_wt, capture_output=True, text=True, check=True
+            ).stdout.strip()
+            wt_tree = subprocess.run(
+                ["git", "rev-parse", "HEAD^{tree}"], cwd=core_wt, capture_output=True, text=True, check=True
+            ).stdout.strip()
+            wt_ev = core_wt / ".dev" / "evidence"
+            wt_ev.mkdir(parents=True, exist_ok=True)
+            (wt_ev / "task_1.json").write_text(
+                json.dumps({
+                    "task_id": "1",
+                    "commit": {"sha": wt_head, "tree_sha": wt_tree},
+                    "tree_sha": wt_tree,
+                    "status": "COMPLETED",
+                    "checker": {"decision": "APPROVE", "reason": "ok"},
+                }),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(main(["--work-dir", str(core_wt), "report"]), 0)
+            content = (core_wt / "NIGHTLY_REPORT.md").read_text(encoding="utf-8")
+            self.assertIn("`task-1`", content)
+            self.assertIn("Core task", content)
+            self.assertIn("APPROVE (Verified)", content)
+            self.assertNotIn("`task-9`", content)
+
 
 
 if __name__ == "__main__":

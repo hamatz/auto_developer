@@ -117,22 +117,26 @@ class GitGuard:
         re.compile(r"^SPEC\.md$"),
         re.compile(r"^scripts/verify_local\.sh$"),
         re.compile(r"^tests/immunity/"),
+        re.compile(r"^teams\.json$"),
     )
     BASE_PROTECTED_PATTERNS = (
         re.compile(r"^\.github/"),
         re.compile(r"^SPEC\.md$"),
         re.compile(r"^scripts/verify_local\.sh$"),
+        re.compile(r"^teams\.json$"),
     )
     IMMUNITY_PATTERN = re.compile(r"^tests/immunity/")
     VALID_IMMUNITY_FILE_PATTERN = re.compile(r"^tests/immunity/test_[a-zA-Z0-9_\-]+\.py$")
 
     def __init__(self, repo_dir: Path | None = None) -> None:
         self.repo_dir = repo_dir or Path.cwd()
+        self._last_working_tree_sha: str | None = None
 
-    def _run_git(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+    def _run_git(self, args: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git"] + args,
             cwd=self.repo_dir,
+            env=env,
             capture_output=True,
             text=True,
             check=True,
@@ -152,10 +156,18 @@ class GitGuard:
         return proc.stdout.strip()
 
     def get_working_tree_sha(self) -> str:
-        """現在の作業ツリーのステージ済み Git Tree SHA を取得する (git write-tree)。"""
-        self._run_git(["add", "-A"])
-        proc = self._run_git(["write-tree"])
-        return proc.stdout.strip()
+        """現在の作業ツリーの Git Tree SHA を一時インデックス (GIT_INDEX_FILE) で取得する (GATE-9)。"""
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_index = Path(tmp_dir) / "index"
+            env = {**os.environ, "GIT_INDEX_FILE": str(temp_index)}
+            self._run_git(["add", "-A"], env=env)
+            proc = self._run_git(["write-tree"], env=env)
+            tree_sha = proc.stdout.strip()
+        self._last_working_tree_sha = tree_sha
+        return tree_sha
 
     def get_commit_tree_sha(self, commit_ref: str = "HEAD") -> str:
         """指定したコミットの Git Tree SHA を取得する (git rev-parse <ref>^{tree})。"""
@@ -300,6 +312,45 @@ print(json.dumps(data))
             return False
         return validate_test_ast(target)
 
+    def get_modified_protected_files(
+        self, checkpoint: str, allow_immunity_additions: bool = False
+    ) -> list[str]:
+        """チェックポイント以降に変更・追加された保護ファイルのパス一覧を返す。"""
+        files_to_check: set[str] = set()
+        proc_diff = self._run_git(["diff", "--name-only", checkpoint])
+        for line in proc_diff.stdout.splitlines():
+            if line.strip():
+                files_to_check.add(line.strip())
+
+        proc_status = self._run_git(["status", "--porcelain"])
+        for line in proc_status.stdout.splitlines():
+            if not line.strip():
+                continue
+            raw_path = line[3:].strip()
+            if " -> " in raw_path:
+                for p in raw_path.split(" -> "):
+                    files_to_check.add(p.strip().strip('"'))
+            else:
+                files_to_check.add(raw_path.strip('"'))
+
+        patterns = self.BASE_PROTECTED_PATTERNS if allow_immunity_additions else self.PROTECTED_PATTERNS
+        matched = [
+            fp for fp in sorted(files_to_check) if any(pat.search(fp) for pat in patterns)
+        ]
+        if allow_immunity_additions:
+            for fp in sorted(files_to_check):
+                if fp.startswith("tests/immunity/") and fp not in matched:
+                    p_obj = self.repo_dir / fp
+                    if not (
+                        p_obj.exists()
+                        and not p_obj.is_symlink()
+                        and p_obj.is_file()
+                        and p_obj.name.startswith("test_")
+                        and p_obj.name.endswith(".py")
+                    ):
+                        matched.append(fp)
+        return matched
+
     def check_protected_files_untouched(
         self, checkpoint: str, allow_immunity_additions: bool = False
     ) -> bool:
@@ -407,10 +458,14 @@ print(json.dumps(data))
 
         return True
 
-    def commit_task(self, task: Task) -> str:
-        """タスクの変更をアトミックにコミットする。すでにステージ済みのIndexから直接コミットを作成する。"""
+    def commit_task(self, task: Task, tree_sha: str | None = None) -> str:
+        """タスクの変更をアトミックにコミットする。指定または直前に求めた Tree SHA を read-tree してコミットする (GATE-9)。"""
+        target_tree = tree_sha or self._last_working_tree_sha
+        if target_tree:
+            self._run_git(["read-tree", target_tree])
         msg = f"feat: {task.title} [refs: {task.task_id}]"
         self._run_git(["commit", "-m", msg])
+        self._last_working_tree_sha = None
         return self.get_current_checkpoint()
 
     def get_current_branch(self) -> str:
@@ -436,6 +491,34 @@ print(json.dumps(data))
         re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # gitleaks:allow
         re.compile(r"(api[_-]?key|secret[_-]?key|private[_-]?key|auth[_-]?token)\s*[:=]\s*['\"][a-zA-Z0-9_\-]{16,}['\"]", re.IGNORECASE),  # gitleaks:allow
     )
+
+    SECRET_ENV_ALLOWLIST = frozenset({".env.example", ".env.sample", ".env.template"})
+    SECRET_KEY_EXTENSIONS = (".key", ".pem", ".pkcs12", ".pfx")
+    SECRET_SSH_FILENAMES = frozenset({"id_rsa", "id_ed25519", "id_ecdsa"})
+
+    @classmethod
+    def is_forbidden_commit_secret_path(cls, rel_path: str) -> bool:
+        """GATE-10: コミット対象として拒否すべき機密ファイル名か判定する。"""
+        base = Path(rel_path).name
+        if base == ".env" or base.startswith(".env."):
+            return base not in cls.SECRET_ENV_ALLOWLIST
+        lower = base.lower()
+        if lower.endswith(cls.SECRET_KEY_EXTENSIONS):
+            return True
+        return lower in cls.SECRET_SSH_FILENAMES
+
+    def find_secret_files_in_tree(self, checkpoint: str, tree_sha: str) -> list[str]:
+        """GATE-10: チェックポイントから tree_sha にかけて追加・変更された機密ファイル一覧を返す。"""
+        proc = self._run_git([
+            "-c", "diff.renames=false",
+            "diff-tree", "-r", "--name-only", "--diff-filter=AM",
+            f"{checkpoint}^{{tree}}", tree_sha,
+        ])
+        return [
+            line.strip()
+            for line in proc.stdout.splitlines()
+            if line.strip() and self.is_forbidden_commit_secret_path(line.strip())
+        ]
 
     @classmethod
     def is_secret_file(cls, filename: str) -> bool:
@@ -550,6 +633,7 @@ print(json.dumps(data))
 
         clean_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", task_id)
         clean_team = re.sub(r"[^a-zA-Z0-9_\-]", "_", team_id) if team_id else ""
+        clean_job = re.sub(r"[^a-zA-Z0-9_\-]", "_", job_id) if job_id else ""
         team_prefix = f"{clean_team}-" if clean_team else ""
         timestamp = int(time.time())
 
@@ -564,7 +648,19 @@ print(json.dumps(data))
             self.create_quarantine_snapshot(task_id=f"{team_prefix}{task_id}", checkpoint=checkpoint, job_id=job_id)
 
             # 2. 隔離ブランチへの安全なステージとコミット (追跡済みファイルのみ add -u でステージし、シークレット検査を実施)
-            quarantine_branch = f"quarantine/{team_prefix}{clean_id}-{timestamp}"
+            if clean_team and clean_job:
+                base_q_branch = f"quarantine/{clean_job}/{clean_team}/{clean_id}-{timestamp}"
+            elif clean_team:
+                base_q_branch = f"quarantine/{clean_team}-{clean_id}-{timestamp}"
+            else:
+                base_q_branch = f"quarantine/{clean_id}-{timestamp}"
+
+            quarantine_branch = base_q_branch
+            counter = 1
+            while self._run_git(["branch", "--list", quarantine_branch]).stdout.strip():
+                quarantine_branch = f"{base_q_branch}-{counter}"
+                counter += 1
+
             self._run_git(["checkout", "-b", quarantine_branch])
             self._run_git(["add", "-u"])
             self.sanitize_staged_changes()

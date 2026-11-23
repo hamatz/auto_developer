@@ -66,6 +66,9 @@ def _create_valid_test_bundle(repo_dir: Path, dest_bundle: Path, team_id: str = 
         checker_info={"decision": "APPROVE", "reason": f"Approval {team_id}"},
         verification_info={"exit_code": 0},
     )
+    from review_test_helpers import ensure_synthetic_review_evidence
+
+    ensure_synthetic_review_evidence(repo_dir, f"task-{team_id}")
     bundler = EvidenceBundler(repo_dir=repo_dir)
     return bundler.create_bundle(dest_path=dest_bundle)
 
@@ -207,7 +210,7 @@ class TestMultiTeamOrchestration(unittest.TestCase):
 
         # 引数の順序が python3 -m auto_developer.cli --work-dir <wt> run であること (run --work-dir は Exit 2 となる)
         expected_cmd_prefix = [
-            "python3",
+            sys.executable,
             "-m",
             "auto_developer.cli",
             "--work-dir",
@@ -440,6 +443,9 @@ class TestMultiTeamOrchestration(unittest.TestCase):
                     checker_info={"decision": "APPROVE", "reason": f"Audit approved {team_id}"},
                     verification_info={"exit_code": 0},
                 )
+                from review_test_helpers import ensure_synthetic_review_evidence
+
+                ensure_synthetic_review_evidence(wt_path, f"task-{team_id}")
 
                 bundles_dir = wt_path / ".dev" / "bundles"
                 bundles_dir.mkdir(parents=True, exist_ok=True)
@@ -585,6 +591,9 @@ class TestMultiTeamOrchestration(unittest.TestCase):
                     checker_info={"decision": "APPROVE", "reason": f"Approval {team_id}"},
                     verification_info={"exit_code": 0},
                 )
+                from review_test_helpers import ensure_synthetic_review_evidence
+
+                ensure_synthetic_review_evidence(wt_path, f"task-{team_id}")
                 bundles_dir = wt_path / ".dev" / "bundles"
                 bundles_dir.mkdir(parents=True, exist_ok=True)
                 raw_bundle = bundles_dir / f"bundle_{team_id}.zip"
@@ -687,12 +696,30 @@ class TestMultiTeamOrchestration(unittest.TestCase):
                 teams=[
                     TeamWorkerSpec(
                         team_id="team-core",
-                        extra_args=["--maker-cmd", core_maker_cmd, "--checker-cmd", core_checker_cmd],
+                        extra_args=[
+                            "--maker-cmd",
+                            core_maker_cmd,
+                            "--checker-cmd",
+                            core_checker_cmd,
+                            "--maker-model",
+                            "gemini-3.8-flash",
+                            "--checker-model",
+                            "claude-opus-5-5-medium",
+                        ],
                         env=worker_env,
                     ),
                     TeamWorkerSpec(
                         team_id="team-ui",
-                        extra_args=["--maker-cmd", ui_maker_cmd, "--checker-cmd", ui_checker_cmd],
+                        extra_args=[
+                            "--maker-cmd",
+                            ui_maker_cmd,
+                            "--checker-cmd",
+                            ui_checker_cmd,
+                            "--maker-model",
+                            "gemini-3.8-flash",
+                            "--checker-model",
+                            "claude-opus-5-5-medium",
+                        ],
                         env=worker_env,
                     ),
                 ],
@@ -1217,6 +1244,9 @@ class TestMultiTeamOrchestration(unittest.TestCase):
                 checker_info={"decision": "APPROVE", "reason": "ok"},
                 verification_info={"exit_code": 0},
             )
+            from review_test_helpers import ensure_synthetic_review_evidence
+
+            ensure_synthetic_review_evidence(wt_path, f"task-{team_id}")
 
             bundles_dir = wt_path / ".dev" / "bundles"
             bundles_dir.mkdir(parents=True, exist_ok=True)
@@ -1841,6 +1871,7 @@ class TestMultiTeamOrchestration(unittest.TestCase):
         # 親プロセス役のスクリプトを作成
         # 親は worker1 (sleep 60) を起動し、worker2 の成果物を用意して registry に保存後、自らを SIGKILL する
         src_path = str(Path(__file__).resolve().parents[1] / "src")
+        tests_path = str(Path(__file__).resolve().parent)
         repo_dir_str = str(self.repo_dir)
         parent_script = self.repo_dir / "simulated_parent.py"
         parent_script.write_text(f"""
@@ -1848,6 +1879,8 @@ import sys, os, time, signal, subprocess
 from pathlib import Path
 if {src_path!r} not in sys.path:
     sys.path.insert(0, {src_path!r})
+if {tests_path!r} not in sys.path:
+    sys.path.insert(0, {tests_path!r})
 from auto_developer.multi_team import WorkerRegistry, WorkerRegistration, get_process_start_identifier
 
 repo_dir = Path({repo_dir_str!r})
@@ -1888,6 +1921,8 @@ ev_store.archive_record(
     checker_info={{"decision": "APPROVE", "reason": "Approval team-done"}},
     verification_info={{"exit_code": 0}},
 )
+from review_test_helpers import ensure_synthetic_review_evidence
+ensure_synthetic_review_evidence(repo_dir, "task-team-done")
 bundler = EvidenceBundler(repo_dir=repo_dir)
 bundler.create_bundle(dest_path=wt2_bundles / "bundle_team-done.zip")
 

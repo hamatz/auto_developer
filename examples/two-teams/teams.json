@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "project": "two-teams-calculator",
+  "teams": [
+    {
+      "id": "core",
+      "owns": [
+        "src/calc/**",
+        "tests/test_core.py",
+        "plans/core.md"
+      ],
+      "plan": "plans/core.md",
+      "depends_on": []
+    },
+    {
+      "id": "cli",
+      "owns": [
+        "src/cli.py",
+        "tests/test_cli.py",
+        "plans/cli.md"
+      ],
+      "plan": "plans/cli.md",
+      "depends_on": []
+    }
+  ]
+}

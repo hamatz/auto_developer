@@ -1,11 +1,40 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
 from auto_developer.models import Task
+
+_CHECKER_DECISION_LINE_RE = re.compile(r"^\s*(?:DECISION:\s*)?(APPROVE|REJECT)\s*$", re.IGNORECASE)
+
+
+def parse_checker_decision(output: str) -> str | None:
+    """GATE-5 / CORE-6: 出力全体が1つの JSON なら decision を使い、そうでなければ判定行のみから一意な判定を読み取る。"""
+    import json
+
+    stripped = output.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            data = json.loads(stripped)
+            if isinstance(data, dict) and "decision" in data:
+                dec = str(data["decision"]).strip().upper()
+                if dec in ("APPROVE", "REJECT"):
+                    return dec
+                return None
+        except json.JSONDecodeError:
+            pass
+
+    decisions: set[str] = set()
+    for line in output.splitlines():
+        m = _CHECKER_DECISION_LINE_RE.match(line)
+        if m:
+            decisions.add(m.group(1).upper())
+    if len(decisions) == 1:
+        return next(iter(decisions))
+    return None
 
 
 class RunnerAdapter(ABC):
@@ -28,12 +57,19 @@ class MockRunnerAdapter(RunnerAdapter):
         maker_exit_code: int = 0,
         maker_output: str = "Mock Maker executed successfully",
         checker_approve: bool = True,
-        checker_reason: str = "Mock Checker approved",
+        checker_reason: str | None = None,
     ) -> None:
         self.maker_exit_code = maker_exit_code
         self.maker_output = maker_output
         self.checker_approve = checker_approve
-        self.checker_reason = checker_reason
+        if checker_reason is None:
+            self.checker_reason = (
+                "Mock Checker approved\nDECISION: APPROVE"
+                if checker_approve
+                else "Mock Checker rejected\nDECISION: REJECT"
+            )
+        else:
+            self.checker_reason = checker_reason
         self.maker_calls: list[tuple[Task, dict[str, Any]]] = []
         self.checker_calls: list[tuple[Task, str, str]] = []
 
@@ -54,10 +90,13 @@ class CommandRunnerAdapter(RunnerAdapter):
         maker_cmd_template: str = "",
         checker_cmd_template: str = "",
         timeout_sec: int = 600,
+        cwd: Path | None = None,
     ) -> None:
         self.maker_cmd_template = maker_cmd_template
         self.checker_cmd_template = checker_cmd_template
         self.timeout_sec = timeout_sec
+        self.cwd = cwd
+        self.last_checker_output = ""
 
     def run_maker(self, task: Task, context: dict[str, Any]) -> tuple[int, str]:
         if not self.maker_cmd_template:
@@ -105,6 +144,7 @@ class CommandRunnerAdapter(RunnerAdapter):
             try:
                 proc = subprocess.run(
                     ["bash", "-c", cmd_str],
+                    cwd=self.cwd,
                     input=lessons_text,
                     env=env,
                     capture_output=True,
@@ -129,6 +169,7 @@ class CommandRunnerAdapter(RunnerAdapter):
         try:
             proc = subprocess.run(
                 ["bash", "-c", cmd_str],
+                cwd=self.cwd,
                 input=f"--- DIFF ---\n{diff}\n--- SPEC ---\n{spec_content}",
                 capture_output=True,
                 text=True,
@@ -136,35 +177,25 @@ class CommandRunnerAdapter(RunnerAdapter):
                 timeout=self.timeout_sec,
             )
             output = proc.stdout + "\n" + proc.stderr
+            self.last_checker_output = output
             if proc.returncode != 0:
                 return False, f"Checker process failed with exit {proc.returncode}:\n{output}"
 
-            # 1. 構造化 JSON パースを試行
-            import json
-            import re
-            json_match = re.search(r"\{.*\}", output, re.DOTALL)
-            if json_match:
-                try:
-                    data = json.loads(json_match.group(0))
-                    if isinstance(data, dict) and "decision" in data:
-                        dec = str(data["decision"]).strip().upper()
-                        findings = data.get("findings", [])
-                        findings_str = f" | Findings: {findings}" if findings else ""
-                        return dec == "APPROVE", f"Structured JSON: {dec}{findings_str}"
-                except json.JSONDecodeError:
-                    pass
+            parsed_dec = parse_checker_decision(output)
+            if parsed_dec is not None:
+                import json
 
-            # 2. テキスト判定 (Fail-Closed: 行単位判定行の一意性を要求)
-            pattern = re.compile(r"^\s*(?:DECISION:\s*)?(APPROVE|REJECT)\s*$", re.IGNORECASE)
-            decisions = set()
-            for line in output.splitlines():
-                m = pattern.match(line)
-                if m:
-                    decisions.add(m.group(1).upper())
-
-            if len(decisions) == 1:
-                dec = next(iter(decisions))
-                return dec == "APPROVE", output.strip()
+                stripped = output.strip()
+                if stripped.startswith("{") and stripped.endswith("}"):
+                    try:
+                        data = json.loads(stripped)
+                        if isinstance(data, dict) and "decision" in data:
+                            findings = data.get("findings", [])
+                            findings_str = f" | Findings: {findings}" if findings else ""
+                            return parsed_dec == "APPROVE", f"Structured JSON: {parsed_dec}{findings_str}"
+                    except json.JSONDecodeError:
+                        pass
+                return parsed_dec == "APPROVE", stripped
             return False, output.strip()
         except subprocess.TimeoutExpired:
             return False, f"Checker timed out after {self.timeout_sec}s"

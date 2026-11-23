@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from auto_developer.bundler import EvidenceBundler
 from auto_developer.dispatcher import TaskDispatcher
 from auto_developer.evidence import EvidenceStore
 from auto_developer.guard import GitGuard
+from auto_developer.manifest import ManifestValidationError, resolve_team_context
 from auto_developer.models import JobState, Task
 from auto_developer.reporter import MorningReporter
 from auto_developer.runner import MockRunnerAdapter, RunnerAdapter
@@ -44,6 +46,9 @@ class NightlyOrchestrator:
         fallback_models: list[str] | None = None,
         enable_audit_stage: bool = False,
         audit_baseline_commit: str | None = None,
+        maker_family: str | None = None,
+        checker_family: str | None = None,
+        auditor_family: str | None = None,
     ) -> None:
         self.repo_dir = repo_dir or Path.cwd()
         self.plan_path = plan_path or (self.repo_dir / "PLAN.md")
@@ -57,8 +62,14 @@ class NightlyOrchestrator:
         self.resume = resume
         self.team_id = team_id
         self.owns_patterns = owns_patterns
+        self._explicit_plan_path = plan_path
+        self._explicit_team_id = team_id
+        self._explicit_owns_patterns = owns_patterns
         self.maker_model = maker_model
         self.checker_model = checker_model
+        self.maker_family = maker_family
+        self.checker_family = checker_family
+        self.auditor_family = auditor_family
         self.allow_same_model_override = allow_same_model_override
         self.auditor_runner = auditor_runner
         self.auditor_model = auditor_model
@@ -74,20 +85,50 @@ class NightlyOrchestrator:
         self.evidence_store = EvidenceStore(repo_dir=self.repo_dir)
 
     def run(self) -> int:
-        if self.maker_model and self.checker_model:
-            from auto_developer.audit import verify_model_independence
+        try:
+            team_ctx = resolve_team_context(
+                repo_dir=self.repo_dir,
+                ref="HEAD",
+                explicit_team_id=self._explicit_team_id,
+                explicit_owns=self._explicit_owns_patterns,
+                explicit_plan=self._explicit_plan_path,
+                allow_explicit_without_manifest=True,
+            )
+        except ManifestValidationError as err:
+            print(f"TEAMS_CONFIG_ERROR: {err}", file=sys.stderr)
+            return 2
+        if team_ctx is not None:
+            self.team_id = team_ctx.team_id or None
+            self.plan_path = team_ctx.plan_path
+            self.owns_patterns = team_ctx.owns_patterns or None
 
+        from auto_developer.audit import resolve_model_family, verify_model_independence
+
+        for fam_label, fam_model, fam_val in (
+            ("maker_family", self.maker_model, self.maker_family),
+            ("checker_family", self.checker_model, self.checker_family),
+            ("auditor_family", self.auditor_model, self.auditor_family),
+        ):
+            if fam_val is not None:
+                try:
+                    resolve_model_family(fam_model or "", fam_val)
+                except ValueError as err:
+                    print(f"PRE-FLIGHT MODEL POLICY ERROR ({fam_label}): {err}", file=sys.stderr)
+                    return 2
+
+        if self.maker_model and self.checker_model:
             ok, reason = verify_model_independence(
                 self.maker_model,
                 self.checker_model,
                 self.allow_same_model_override,
+                maker_family=self.maker_family,
+                auditor_family=self.checker_family,
             )
             if not ok:
                 print(f"PRE-FLIGHT MODEL POLICY ERROR: {reason}", file=sys.stderr)
                 return 2
 
         if self.enable_audit_stage:
-            from auto_developer.audit import verify_model_independence
             from auto_developer.runner import MockRunnerAdapter
 
             if (
@@ -106,6 +147,8 @@ class NightlyOrchestrator:
                     self.maker_model,
                     self.auditor_model,
                     self.allow_same_model_override,
+                    maker_family=self.maker_family,
+                    auditor_family=self.auditor_family,
                 )
                 if not ok:
                     print(f"PRE-FLIGHT AUDIT POLICY ERROR: {reason}", file=sys.stderr)
@@ -150,6 +193,116 @@ class NightlyOrchestrator:
             print(f"LOCK ERROR: Could not open lock file {lock_file}: {e}", file=sys.stderr)
             return 2
 
+    def _record_gate7_review(
+        self,
+        *,
+        task_id: str,
+        evidence: dict[str, Any],
+        decision: str,
+        checker_output_text: str,
+        diff_bytes: bytes,
+        spec_text: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """GATE-7: Checker 起動時の入出力3ファイルを GATE-5 と同じ形式で Evidence 保存先へ記録する。"""
+        with tempfile.TemporaryDirectory() as review_tmp:
+            tmp_dir = Path(review_tmp)
+            out_p = tmp_dir / "checker_output.txt"
+            diff_p = tmp_dir / "diff.patch"
+            spec_p = tmp_dir / "spec_excerpt.md"
+            out_p.write_text(checker_output_text, encoding="utf-8")
+            diff_p.write_bytes(diff_bytes)
+            spec_p.write_text(spec_text, encoding="utf-8")
+            c_fam_rec, c_src_rec = ("unknown", "inferred")
+            m_fam_rec, m_src_rec = ("unknown", "inferred")
+            if self.checker_model or self.maker_model:
+                from auto_developer.audit import resolve_model_family
+
+                if self.checker_model:
+                    c_fam_rec, c_src_rec = resolve_model_family(self.checker_model, self.checker_family)
+                if self.maker_model:
+                    m_fam_rec, m_src_rec = resolve_model_family(self.maker_model, self.maker_family)
+            return self.evidence_store.record_review(
+                task_id=task_id,
+                evidence=evidence,
+                decision=decision,
+                checker_output_path=out_p,
+                diff_path=diff_p,
+                spec_path=spec_p,
+                maker_model=self.maker_model or "",
+                maker_family=m_fam_rec,
+                maker_family_source=m_src_rec,
+                checker_model=self.checker_model or "",
+                checker_family=c_fam_rec,
+                checker_family_source=c_src_rec,
+                reason=reason,
+            )
+
+    def _save_rejected_gate7_review(
+        self,
+        *,
+        job_id: str,
+        task_id: str,
+        decision: str,
+        checker_output_text: str,
+        diff_bytes: bytes,
+        spec_text: str,
+        reason: str,
+    ) -> None:
+        """GATE-7: 不承認時の査読入出力3ファイルと GATE-5 形式の記録を上書きせず保存する（失敗・隔離結果を変えない）。"""
+        import hashlib
+
+        try:
+            base_dir = self.evidence_store.evidence_dir / "reviews" / "rejected" / job_id / f"task_{task_id}"
+            idx = 1
+            while (base_dir / f"attempt_{idx}").exists():
+                idx += 1
+            attempt_dir = base_dir / f"attempt_{idx}"
+            attempt_dir.mkdir(parents=True, exist_ok=False)
+
+            out_p = attempt_dir / "checker_output.txt"
+            diff_p = attempt_dir / "diff.patch"
+            spec_p = attempt_dir / "spec_excerpt.md"
+            out_p.write_text(checker_output_text, encoding="utf-8")
+            diff_p.write_bytes(diff_bytes)
+            spec_p.write_text(spec_text, encoding="utf-8")
+
+            c_fam, c_src = ("unknown", "inferred")
+            m_fam, m_src = ("unknown", "inferred")
+            if self.checker_model or self.maker_model:
+                from auto_developer.audit import resolve_model_family
+
+                if self.checker_model:
+                    c_fam, c_src = resolve_model_family(self.checker_model, self.checker_family)
+                if self.maker_model:
+                    m_fam, m_src = resolve_model_family(self.maker_model, self.maker_family)
+
+            record = {
+                "task_id": str(task_id),
+                "evidence_token": "",
+                "decision": decision,
+                "checker_output_path": str(out_p),
+                "checker_output_sha256": hashlib.sha256(out_p.read_bytes()).hexdigest(),
+                "diff_path": str(diff_p),
+                "diff_sha256": hashlib.sha256(diff_p.read_bytes()).hexdigest(),
+                "spec_path": str(spec_p),
+                "spec_sha256": hashlib.sha256(spec_p.read_bytes()).hexdigest(),
+                "maker_model": self.maker_model or "",
+                "maker_family": m_fam,
+                "maker_family_source": m_src,
+                "checker_model": self.checker_model or "",
+                "checker_family": c_fam,
+                "checker_family_source": c_src,
+                "reason": reason,
+                "recorded_at": time.time(),
+            }
+            (attempt_dir / "review.json").write_text(
+                json.dumps(record, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"Warning: Failed to save rejected review artifacts: {e}", file=sys.stderr)
+
     def _run_loop(self) -> int:
 
         # 1. JobState の初期化または再開
@@ -187,12 +340,20 @@ class NightlyOrchestrator:
             if job_state.checkpoint_hash and not self.dry_run:
                 print(f"Resetting uncommitted work back to checkpoint {job_state.checkpoint_hash} for safe resume...")
                 self.git_guard.quarantine_and_restore(
-                    job_state.checkpoint_hash, task_id=job_state.current_task_id or "interrupted"
+                    job_state.checkpoint_hash,
+                    task_id=job_state.current_task_id or "interrupted",
+                    job_id=job_state.job_id,
+                    team_id=self.team_id or "",
                 )
                 if not job_state.base_branch:
                     job_state.base_branch = self.git_guard.get_current_branch()
         else:
-            job_id = f"job-{int(time.time())}"
+            resolved_team_job_id: str | None = None
+            if self.team_id:
+                from auto_developer.multi_team import resolve_active_team_job_id
+
+                resolved_team_job_id = resolve_active_team_job_id(self.repo_dir, team_id=self.team_id)
+            job_id = resolved_team_job_id or f"job-{int(time.time())}"
             current_branch = self.git_guard.get_current_branch()
             job_state = JobState(job_id=job_id, status="RUNNING", base_branch=current_branch)
             if not self.dry_run:
@@ -213,6 +374,47 @@ class NightlyOrchestrator:
 
         print(f"=== Starting Autonomous Orchestrator (Job: {job_state.job_id}, Total Tasks: {total_tasks}, Dry-Run: {self.dry_run}) ===")
 
+        try:
+            return self._execute_tasks_and_finalize(
+                job_state=job_state,
+                initial_checkpoint=initial_checkpoint,
+                tasks=tasks,
+                total_tasks=total_tasks,
+                succeeded_tasks=succeeded_tasks,
+            )
+        except Exception as exc:
+            if not self.dry_run:
+                try:
+                    current_head = self.git_guard.get_current_checkpoint()
+                except Exception:  # noqa: BLE001
+                    current_head = initial_checkpoint
+                self._write_report_then_create_bundle(
+                    job_id=job_state.job_id,
+                    summary_data={
+                        "status": "FAILED (EXCEPTION)",
+                        "total_tasks": total_tasks,
+                        "succeeded_count": len(succeeded_tasks),
+                        "quarantined_count": 1 if job_state.quarantined_task else 0,
+                        "remaining_count": max(0, total_tasks - len(succeeded_tasks)),
+                        "checkpoint": current_head,
+                        "initial_checkpoint": initial_checkpoint,
+                        "completed_tasks": succeeded_tasks,
+                        "quarantined_task": job_state.quarantined_task,
+                        "executive_summary": f"予期しない例外により実行が中断されました: {type(exc).__name__}: {exc}",
+                    },
+                    failure_context="after unexpected exception",
+                )
+            raise
+
+    def _execute_tasks_and_finalize(
+        self,
+        *,
+        job_state: JobState,
+        initial_checkpoint: str,
+        tasks: list[Task],
+        total_tasks: int,
+        succeeded_tasks: list[dict[str, Any]],
+    ) -> int:
         while True:
             task = self.dispatcher.get_next_pending_task(tasks)
             if not task:
@@ -297,6 +499,14 @@ class NightlyOrchestrator:
             if not self.git_guard.check_protected_files_untouched(
                 checkpoint, allow_immunity_additions=allow_immunity
             ):
+                violated_files = self.git_guard.get_modified_protected_files(
+                    checkpoint, allow_immunity_additions=allow_immunity
+                )
+                reason_msg = (
+                    f"Protected file modification detected: {', '.join(violated_files)}"
+                    if violated_files
+                    else "Protected file modification detected"
+                )
                 print(f"  CIRCUIT BREAKER: Protected file modified in task {task.task_id}!", file=sys.stderr)
                 return self._handle_failure(
                     task,
@@ -304,8 +514,8 @@ class NightlyOrchestrator:
                     total_tasks,
                     succeeded_tasks,
                     job_state,
-                    "INVARIANT_BREACH",
-                    "Protected file modification detected",
+                    "PROTECTED_FILES",
+                    reason_msg,
                     attempt_1_log=maker_out,
                 )
 
@@ -350,9 +560,7 @@ class NightlyOrchestrator:
 
             # Phase C: 決定論的検証 & 再試行 (Verification Gate)
             print(f"  [Phase C: Verifier] Running {self.verify_script}...")
-            code, out = self.verifier.run_verification(
-                self.verify_script, timeout_sec=self.timeout_sec, cwd=self.repo_dir
-            )
+            code, out = self._run_verification_with_boundary(checkpoint)
             last_out_lines = [l.strip() for l in out.strip().splitlines() if l.strip()]
             task_attempts.append({
                 "attempt": 1,
@@ -442,9 +650,7 @@ class NightlyOrchestrator:
                     )
 
                 self.dispatcher.mark_task_status(self.plan_path, task, status="completed")
-                code, out = self.verifier.run_verification(
-                    self.verify_script, timeout_sec=self.timeout_sec, cwd=self.repo_dir
-                )
+                code, out = self._run_verification_with_boundary(checkpoint)
                 last_out_lines2 = [l.strip() for l in out.strip().splitlines() if l.strip()]
                 task_attempts.append({
                     "attempt": 2,
@@ -473,30 +679,61 @@ class NightlyOrchestrator:
             print("  [Phase D: Checker] Running independent review...")
             job_state.transition_phase("CHECKER")
             job_state.save(self.state_path)
-            diff_proc = self.git_guard._run_git(["diff", checkpoint])
-            diff_text = diff_proc.stdout
 
-            # 未追跡の新規作成ファイルも Checker への差分に含める
-            status_proc = self.git_guard._run_git(["status", "--porcelain"])
-            untracked_diffs: list[str] = []
-            for line in status_proc.stdout.splitlines():
-                if line.startswith("?? "):
-                    u_path = line[3:].strip().strip('"')
-                    full_p = self.repo_dir / u_path
-                    if full_p.is_file():
-                        try:
-                            content = full_p.read_text(encoding="utf-8")
-                            untracked_diffs.append(f"--- /dev/null\n+++ b/{u_path}\n@@ -0,0 +1 @@\n{content}")
-                        except (OSError, UnicodeDecodeError):
-                            pass
+            # GATE-7: 正規の差分を算出し、Checker に渡す
+            from auto_developer.evidence import compute_canonical_diff
+            from auto_developer.runner import CommandRunnerAdapter, parse_checker_decision
 
-            if untracked_diffs:
-                diff_text = (diff_text + "\n" + "\n".join(untracked_diffs)).strip()
+            canonical_diff_bytes = compute_canonical_diff(self.repo_dir, checkpoint)
+            diff_text = canonical_diff_bytes.decode("utf-8", errors="replace")
 
             spec_text = self.spec_path.read_text(encoding="utf-8") if self.spec_path.exists() else ""
+            reviewed_tree_sha = self.git_guard.get_working_tree_sha()
+            secret_files = self.git_guard.find_secret_files_in_tree(checkpoint, reviewed_tree_sha)
+            if secret_files:
+                secret_msg = (
+                    f"SECRET_FILE_IN_COMMIT: {', '.join(secret_files)} — remove or add to .gitignore before committing."
+                )
+                print(f"  {secret_msg}", file=sys.stderr)
+                return self._handle_failure(
+                    task,
+                    checkpoint,
+                    total_tasks,
+                    succeeded_tasks,
+                    job_state,
+                    "SECRET_FILE_IN_COMMIT",
+                    secret_msg,
+                    attempt_1_log=attempt_1_log,
+                    attempt_2_log=attempt_2_log,
+                    attempts=task_attempts,
+                )
+            reviewed_spec_sha = self.git_guard.get_spec_sha(self.spec_path)
+            if isinstance(self.runner_adapter, CommandRunnerAdapter):
+                self.runner_adapter.last_checker_output = ""
             approved, checker_reason = self.runner_adapter.run_checker(task, diff=diff_text, spec_content=spec_text)
-            if not approved:
-                print(f"  Checker REJECTED task {task.task_id}: {checker_reason}", file=sys.stderr)
+            raw_checker_output = (
+                self.runner_adapter.last_checker_output
+                if isinstance(self.runner_adapter, CommandRunnerAdapter)
+                and self.runner_adapter.last_checker_output
+                else checker_reason
+            )
+            parsed_dec = parse_checker_decision(raw_checker_output)
+            if not approved or parsed_dec != "APPROVE":
+                reject_reason = checker_reason
+                if approved and parsed_dec != "APPROVE":
+                    reject_reason = (
+                        f"CHECKER_POLICY_VIOLATION: Checker output lacks unique DECISION: APPROVE line\n{checker_reason}"
+                    )
+                self._save_rejected_gate7_review(
+                    job_id=job_state.job_id,
+                    task_id=task.task_id,
+                    decision=parsed_dec or "UNKNOWN",
+                    checker_output_text=raw_checker_output,
+                    diff_bytes=canonical_diff_bytes,
+                    spec_text=spec_text,
+                    reason=reject_reason,
+                )
+                print(f"  Checker REJECTED task {task.task_id}: {reject_reason}", file=sys.stderr)
                 return self._handle_failure(
                     task,
                     checkpoint,
@@ -516,6 +753,24 @@ class NightlyOrchestrator:
 
             # 1. すでに検証・査読を通過した作業ツリー全体の Tree SHA と SPEC SHA を取得
             final_tree_sha = self.git_guard.get_working_tree_sha()
+            secret_files_final = self.git_guard.find_secret_files_in_tree(checkpoint, final_tree_sha)
+            if secret_files_final:
+                secret_msg = (
+                    f"SECRET_FILE_IN_COMMIT: {', '.join(secret_files_final)} — remove or add to .gitignore before committing."
+                )
+                print(f"  {secret_msg}", file=sys.stderr)
+                return self._handle_failure(
+                    task,
+                    checkpoint,
+                    total_tasks,
+                    succeeded_tasks,
+                    job_state,
+                    "SECRET_FILE_IN_COMMIT",
+                    secret_msg,
+                    attempt_1_log=attempt_1_log,
+                    attempt_2_log=attempt_2_log,
+                    attempts=task_attempts,
+                )
             spec_sha = self.git_guard.get_spec_sha(self.spec_path)
 
             # 2. 検証済みツリーに対する証跡を発行
@@ -526,7 +781,7 @@ class NightlyOrchestrator:
             }
             if red_green_proof:
                 verification_meta["red_green_proof"] = red_green_proof
-            self.evidence_store.issue_evidence(
+            issued_ev = self.evidence_store.issue_evidence(
                 task.task_id,
                 checkpoint,
                 tree_sha=final_tree_sha,
@@ -537,12 +792,57 @@ class NightlyOrchestrator:
                     "attempts": task_attempts,
                 },
             )
-
-            # 3. 証跡の検証と消費（ツリー整合性照合）
             final_violations = self._check_boundary(checkpoint)
             if final_violations:
-                print(f"  BOUNDARY ERROR: Unauthorized files detected at commit gate: {final_violations}", file=sys.stderr)
-                return 3
+                err_msg = f"BOUNDARY ERROR: Unauthorized files detected at commit gate: {final_violations}"
+                print(f"  {err_msg}", file=sys.stderr)
+                if attempt_2_log:
+                    first_log = attempt_1_log
+                    second_log = f"{attempt_2_log}\n\n[Phase E: Commit Gate]\n{err_msg}"
+                else:
+                    first_log = f"{attempt_1_log}\n\n[Phase E: Commit Gate]\n{err_msg}".strip()
+                    second_log = ""
+                return self._handle_failure(
+                    task,
+                    checkpoint,
+                    total_tasks,
+                    succeeded_tasks,
+                    job_state,
+                    "BOUNDARY_VIOLATION",
+                    err_msg,
+                    attempt_1_log=first_log,
+                    attempt_2_log=second_log,
+                    attempts=task_attempts,
+                )
+            if issued_ev.get("tree_sha") != reviewed_tree_sha or issued_ev.get("spec_sha") != reviewed_spec_sha:
+                err_msg = (
+                    f"Tree/SPEC SHA changed between Checker review ({reviewed_tree_sha[:8]}/{reviewed_spec_sha[:8]}) "
+                    f"and Evidence issuance ({final_tree_sha[:8]}/{spec_sha[:8]})"
+                )
+                print(f"  EVIDENCE ERROR: {err_msg}", file=sys.stderr)
+                return self._handle_failure(
+                    task,
+                    checkpoint,
+                    total_tasks,
+                    succeeded_tasks,
+                    job_state,
+                    "EVIDENCE_ERROR",
+                    err_msg,
+                    attempt_1_log=attempt_1_log,
+                    attempt_2_log=attempt_2_log,
+                    attempts=task_attempts,
+                )
+            review_rec = self._record_gate7_review(
+                task_id=task.task_id,
+                evidence=issued_ev,
+                decision=parsed_dec,
+                checker_output_text=raw_checker_output,
+                diff_bytes=canonical_diff_bytes,
+                spec_text=spec_text,
+                reason=checker_reason,
+            )
+
+            # 3. 証跡の検証と消費（ツリー整合性照合）
 
             current_tree = self.git_guard.get_working_tree_sha()
             current_spec = self.git_guard.get_spec_sha(self.spec_path)
@@ -552,22 +852,79 @@ class NightlyOrchestrator:
                 expected_tree_sha=current_tree,
                 expected_spec_sha=current_spec,
             ):
-                print(f"  EVIDENCE ERROR: Could not verify evidence for task {task.task_id}", file=sys.stderr)
+                err_msg = f"Could not verify evidence for task {task.task_id}"
+                print(f"  EVIDENCE ERROR: {err_msg}", file=sys.stderr)
+                self._write_report_then_create_bundle(
+                    job_id=job_state.job_id,
+                    summary_data={
+                        "status": "FAILED (EVIDENCE_ERROR)",
+                        "total_tasks": total_tasks,
+                        "succeeded_count": len(succeeded_tasks),
+                        "quarantined_count": 0,
+                        "remaining_count": max(0, total_tasks - len(succeeded_tasks)),
+                        "checkpoint": checkpoint,
+                        "initial_checkpoint": initial_checkpoint,
+                        "completed_tasks": succeeded_tasks,
+                        "executive_summary": f"Evidence 検証エラーにより停止しました: {err_msg}",
+                    },
+                    failure_context="after evidence verification error",
+                )
                 return 3
 
             # 4. コミット実行（固定されたインデックスから直接コミット）
-            commit_hash = self.git_guard.commit_task(task)
+            commit_hash = self.git_guard.commit_task(task, tree_sha=current_tree)
 
             # 5. コミットされた Git Commit の Tree SHA と Evidence Tree SHA の完全一致を検証
             committed_tree_sha = self.git_guard.get_commit_tree_sha(commit_hash)
             if committed_tree_sha != final_tree_sha:
+                err_msg = f"Committed tree {committed_tree_sha} does not match verified tree {final_tree_sha}"
                 print(
-                    f"  FATAL INVARIANT BREACH: Committed tree {committed_tree_sha} does not match verified tree {final_tree_sha}!",
+                    f"  FATAL INVARIANT BREACH: {err_msg}!",
                     file=sys.stderr,
+                )
+                self._write_report_then_create_bundle(
+                    job_id=job_state.job_id,
+                    summary_data={
+                        "status": "FAILED (INVARIANT_BREACH)",
+                        "total_tasks": total_tasks,
+                        "succeeded_count": len(succeeded_tasks),
+                        "quarantined_count": 0,
+                        "remaining_count": max(0, total_tasks - len(succeeded_tasks)),
+                        "checkpoint": checkpoint,
+                        "initial_checkpoint": initial_checkpoint,
+                        "completed_tasks": succeeded_tasks,
+                        "executive_summary": f"致命的不変条件違反により停止しました: {err_msg}",
+                    },
+                    failure_context="after commit tree mismatch",
                 )
                 return 3
 
-            # 6. 永続監査レコード（Evidence Record）の保存 (機能N / P1-1, 機能U)
+            # 6. 永続監査レコード（Evidence Record）の保存 (機能N / P1-1, 機能U, GATE-7)
+            checker_info: dict[str, Any] = {
+                "decision": "APPROVE",
+                "reason": checker_reason,
+                "review": {
+                    "output_sha256": review_rec["checker_output_sha256"],
+                    "diff_sha256": review_rec["diff_sha256"],
+                    "spec_sha256": review_rec["spec_sha256"],
+                    "recorded_at": review_rec["recorded_at"],
+                    "decision_source": "checker_output",
+                },
+            }
+            if self.checker_model or self.maker_model:
+                from auto_developer.audit import resolve_model_family
+
+                if self.checker_model:
+                    c_fam, c_src = resolve_model_family(self.checker_model, self.checker_family)
+                    checker_info["model"] = self.checker_model
+                    checker_info["family"] = c_fam
+                    checker_info["family_source"] = c_src
+                if self.maker_model:
+                    m_fam, m_src = resolve_model_family(self.maker_model, self.maker_family)
+                    checker_info["maker_model"] = self.maker_model
+                    checker_info["maker_family"] = m_fam
+                    checker_info["maker_family_source"] = m_src
+
             self.evidence_store.archive_record(
                 task_id=task.task_id,
                 status="COMPLETED",
@@ -578,10 +935,7 @@ class NightlyOrchestrator:
                     "tree_sha": committed_tree_sha,
                     "tree_verified": True,
                 },
-                checker_info={
-                    "decision": "APPROVE",
-                    "reason": checker_reason,
-                },
+                checker_info=checker_info,
                 verification_info=verification_meta,
                 attempts=task_attempts,
             )
@@ -634,17 +988,9 @@ class NightlyOrchestrator:
                 print(f"\n[Independent Audit Stage] Running repository audit against baseline {base_c[:7]}...")
                 audit_stage_result = self.run_audit_stage(baseline_commit=base_c, target_commit=current_head)
 
-            bundle_rel_path = None
-            try:
-                bundler = EvidenceBundler(repo_dir=self.repo_dir)
-                b_path = bundler.create_bundle(job_id=job_state.job_id)
-                bundle_rel_path = str(b_path.resolve().relative_to(self.repo_dir.resolve()))
-            except (OSError, subprocess.SubprocessError) as e:
-                print(f"Warning: Failed to create evidence bundle: {e}", file=sys.stderr)
-
-            self.reporter.write_report(
-                self.report_path,
-                {
+            self._write_report_then_create_bundle(
+                job_id=job_state.job_id,
+                summary_data={
                     "status": "COMPLETED",
                     "total_tasks": total_tasks,
                     "succeeded_count": len(succeeded_tasks),
@@ -657,7 +1003,6 @@ class NightlyOrchestrator:
                     "executive_summary": exec_summary,
                     "run_command": run_cmd,
                     "verify_command": verify_cmd,
-                    "bundle_path": bundle_rel_path,
                     "audit_stage": audit_stage_result,
                 },
             )
@@ -684,6 +1029,8 @@ class NightlyOrchestrator:
                 model_name=self.auditor_model or "claude-opus-5.5",
                 fallback_models=self.fallback_models,
                 maker_model=self.maker_model,
+                maker_family=self.maker_family,
+                auditor_family=self.auditor_family,
             )
 
         if not auditor:
@@ -835,6 +1182,16 @@ class NightlyOrchestrator:
                 output_tokens = audit_metadata.get("output_tokens")
 
             from auto_developer.metrics import MetricsLog
+            event_extra: dict[str, Any] = {}
+            if audit_metadata.get("auditor_family") is not None:
+                event_extra["auditor_family"] = audit_metadata.get("auditor_family")
+            if audit_metadata.get("auditor_family_source") is not None:
+                event_extra["auditor_family_source"] = audit_metadata.get("auditor_family_source")
+            if audit_metadata.get("maker_family") is not None:
+                event_extra["maker_family"] = audit_metadata.get("maker_family")
+            if audit_metadata.get("maker_family_source") is not None:
+                event_extra["maker_family_source"] = audit_metadata.get("maker_family_source")
+
             MetricsLog(repo_dir=self.repo_dir, plan_path=self.plan_path).record_event(
                 "audit_stage",
                 status=status,
@@ -846,9 +1203,29 @@ class NightlyOrchestrator:
                 rejected=len(screen_res.get("rejected", [])),
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                **event_extra,
             )
         except Exception as ex:  # noqa: BLE001
             print(f"METRICS_WARNING: Failed to record audit_stage event: {ex}", file=sys.stderr)
+
+    def _run_verification_with_boundary(self, checkpoint: str) -> tuple[int, str]:
+        """検証スクリプトを実行し、成功時は Evidence 発行前に担当範囲を再検査する。"""
+        code, out = self.verifier.run_verification(
+            self.verify_script, timeout_sec=self.timeout_sec, cwd=self.repo_dir
+        )
+        if code != 0:
+            return code, out
+        post_violations = self._check_boundary(checkpoint)
+        if post_violations:
+            msg = (
+                "BOUNDARY VIOLATION after verification: Unauthorized modifications outside team owns: "
+                f"{post_violations}\n"
+                "検証で生成されたファイルなら .gitignore に追加してください。"
+            )
+            print(f"  {msg}", file=sys.stderr)
+            combined = f"{out}\n{msg}".strip() if out.strip() else msg
+            return 1, combined
+        return 0, out
 
     def _check_boundary(self, checkpoint: str) -> list[str]:
         """チーム所有スコープ（owns）が指定されている場合、領空侵犯を検査し違反ファイルリストを返す。"""
@@ -861,6 +1238,48 @@ class NightlyOrchestrator:
         )
         res = guard.inspect_changes()
         return res.violations
+
+    def _resolve_bundle_paths(self, job_id: str) -> tuple[Path, str]:
+        """Bundle の出力先絶対パスとリポジトリからの相対パスを決定する (RPT-6)。"""
+        bundle_dest_path = self.repo_dir / ".dev" / "bundles" / f"bundle_{job_id}.zip"
+        try:
+            bundle_rel_path = str(bundle_dest_path.resolve().relative_to(self.repo_dir.resolve()))
+        except ValueError:
+            bundle_rel_path = str(bundle_dest_path)
+        return bundle_dest_path, bundle_rel_path
+
+    def _write_report_then_create_bundle(
+        self,
+        *,
+        job_id: str,
+        summary_data: dict[str, Any],
+        failure_context: str = "",
+    ) -> None:
+        """Bundle 出力先を先に決め、そのパスを含むレポートを書いてから Bundle を作成する (RPT-6)。"""
+        bundle_dest_path, bundle_rel_path = self._resolve_bundle_paths(job_id)
+        report_payload = dict(summary_data)
+        report_payload["bundle_path"] = bundle_rel_path
+
+        try:
+            self.reporter.write_report(
+                self.report_path,
+                report_payload,
+                plan_path=self.plan_path,
+            )
+        except Exception as e:  # noqa: BLE001
+            ctx = f" {failure_context}" if failure_context else ""
+            print(
+                f"Warning: Failed to write report{ctx}: {e}; skipping evidence bundle creation",
+                file=sys.stderr,
+            )
+            return
+
+        try:
+            bundler = EvidenceBundler(repo_dir=self.repo_dir, plan_path=self.plan_path)
+            bundler.create_bundle(dest_path=bundle_dest_path, job_id=job_id)
+        except Exception as e:  # noqa: BLE001
+            ctx = f" {failure_context}" if failure_context else ""
+            print(f"Warning: Failed to create evidence bundle{ctx}: {e}", file=sys.stderr)
 
     def _handle_failure(
         self,
@@ -894,12 +1313,14 @@ class NightlyOrchestrator:
                 "title": task.title,
                 "checkpoint": checkpoint,
                 "quarantined_branch": quarantine_branch,
+                "failure_phase": phase,
+                "reason": reason,
                 "attempt_1_log": attempt_1_log or reason,
                 "attempt_2_log": attempt_2_log or "(none)",
                 "attempts": attempts or [],
             },
         )
-        quarantined_info = {
+        quarantined_info: dict[str, Any] = {
             "task_id": task.task_id,
             "phase": phase,
             "quarantined_branch": quarantine_branch,
@@ -907,20 +1328,16 @@ class NightlyOrchestrator:
             "root_cause_summary": reason[:300],
             "attempts": attempts or [],
         }
+        if self.checker_model:
+            quarantined_info["checker_model"] = self.checker_model
+        if self.maker_model:
+            quarantined_info["maker_model"] = self.maker_model
         job_state.quarantined_task = quarantined_info
         job_state.save(self.state_path)
 
-        bundle_rel_path = None
-        try:
-            bundler = EvidenceBundler(repo_dir=self.repo_dir)
-            b_path = bundler.create_bundle(job_id=job_state.job_id)
-            bundle_rel_path = str(b_path.resolve().relative_to(self.repo_dir.resolve()))
-        except (OSError, subprocess.SubprocessError) as e:
-            print(f"Warning: Failed to create evidence bundle during failure quarantine: {e}", file=sys.stderr)
-
-        self.reporter.write_report(
-            self.report_path,
-            {
+        self._write_report_then_create_bundle(
+            job_id=job_state.job_id,
+            summary_data={
                 "status": "STOPPED (FAIL-FAST)",
                 "total_tasks": total_tasks,
                 "succeeded_count": len(succeeded_tasks),
@@ -929,7 +1346,7 @@ class NightlyOrchestrator:
                 "checkpoint": checkpoint,
                 "completed_tasks": succeeded_tasks,
                 "quarantined_task": quarantined_info,
-                "bundle_path": bundle_rel_path,
             },
+            failure_context="during failure quarantine",
         )
         return 1

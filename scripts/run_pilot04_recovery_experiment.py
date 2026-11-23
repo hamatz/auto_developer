@@ -16,9 +16,12 @@ import tarfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SOURCE_RESULTS_DIR = Path("/Users/hamatsumakoto/Documents/develop/pilot04/pilot04_results")
-WORK_DIR = Path("/Users/hamatsumakoto/Documents/develop/pilot04/pilot04_recovered_execution")
-OUTPUT_ZIP = Path("/Users/hamatsumakoto/Documents/develop/pilot04/pilot04_results_recovered.zip")
+_SRC_ENV = os.environ.get("PILOT04_SOURCE_RESULTS_DIR", "").strip()
+_WORK_ENV = os.environ.get("PILOT04_WORK_DIR", "").strip()
+_OUT_ENV = os.environ.get("PILOT04_OUTPUT_ZIP", "").strip()
+SOURCE_RESULTS_DIR: Path | None = Path(_SRC_ENV) if _SRC_ENV else None
+WORK_DIR: Path | None = Path(_WORK_ENV) if _WORK_ENV else None
+OUTPUT_ZIP: Path | None = Path(_OUT_ENV) if _OUT_ENV else None
 
 SECRET_CONTENT_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
@@ -183,6 +186,12 @@ def verify_scenario(scenario_name: str, src_path: Path, dest_dir: Path) -> dict:
 
 
 def main() -> None:
+    if SOURCE_RESULTS_DIR is None or WORK_DIR is None or OUTPUT_ZIP is None:
+        print(
+            "PILOT04_SOURCE_RESULTS_DIR, PILOT04_WORK_DIR, and PILOT04_OUTPUT_ZIP must be set.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     if WORK_DIR.exists():
         shutil.rmtree(WORK_DIR)
     WORK_DIR.mkdir(parents=True, exist_ok=True)

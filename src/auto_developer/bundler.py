@@ -11,16 +11,36 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+BUNDLE_FORMAT_VERSION = 3
+
+
+def _get_tool_version() -> str:
+    """パッケージのバージョン文字列を循環参照なしで取得する。"""
+    import auto_developer
+
+    version = getattr(auto_developer, "__version__", None)
+    if isinstance(version, str) and version:
+        return version
+    from auto_developer.cli import VERSION
+
+    return VERSION
+
 
 def find_release_blockers(plan_text: str) -> list[str]:
     """未完了の - [ ] 行のうち (Severity: P0 または (Severity: P1 を含む行、および - ESCALATED 行を返す (WWW.3)。"""
+    from auto_developer.dispatcher import (
+        extract_plan_scope_lines,
+        strip_html_comments_preserving_lines,
+    )
+
     blockers: list[str] = []
-    for line in plan_text.splitlines():
+    for _, line in extract_plan_scope_lines(plan_text):
         stripped = line.strip()
-        if stripped.startswith("- [ ]"):
-            if "(Severity: P0" in line or "(Severity: P1" in line:
-                blockers.append(stripped)
-        elif stripped.startswith("- ESCALATED"):
+        if stripped.startswith("- [ ]") and ("(Severity: P0" in line or "(Severity: P1" in line):
+            blockers.append(stripped)
+    for line in strip_html_comments_preserving_lines(plan_text).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- ESCALATED"):
             blockers.append(stripped)
     return blockers
 
@@ -73,8 +93,9 @@ class EvidenceBundler:
         re.compile(r"(^|/)Thumbs\.db$", re.IGNORECASE),
     )
 
-    def __init__(self, repo_dir: Path | None = None) -> None:
+    def __init__(self, repo_dir: Path | None = None, plan_path: Path | None = None) -> None:
         self.repo_dir = (repo_dir or Path.cwd()).resolve()
+        self.plan_path = plan_path
 
     def is_sanitized_out(self, rel_path: str) -> bool:
         """指定パスが機密ファイルまたはノイズファイルとして除外対象かを判定する。"""
@@ -103,6 +124,7 @@ class EvidenceBundler:
         self,
         dest_path: Path | None = None,
         job_id: str | None = None,
+        plan_path: Path | None = None,
     ) -> Path:
         """現在の作業リポジトリから機密を除外し、完全な監査証跡を含む ZIP バンドルを生成する。"""
         # 1. Git 情報の取得
@@ -176,39 +198,28 @@ class EvidenceBundler:
                 except (subprocess.CalledProcessError, OSError):
                     pass
 
-            # (C) Evidence records 収集
-            candidate_dirs: list[Path] = [
-                self.repo_dir / ".git" / "nightly_evidence" / "records",
-                self.repo_dir / ".git" / "nightly_evidence" / "archive",
-                self.repo_dir / ".git" / "nightly_evidence",
-                self.repo_dir / ".dev" / "evidence" / "records",
-                self.repo_dir / ".dev" / "evidence",
-            ]
+            # (C) Evidence records 収集 (BDL-5: EvidenceStore と同じ単一関数で解決)
+            from auto_developer.evidence import resolve_evidence_records_dir
 
-            # Git common-dir (worktree 対応) の解決
-            try:
-                c_res = subprocess.run(
-                    ["git", "rev-parse", "--git-common-dir"],
-                    cwd=self.repo_dir,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if c_res.returncode == 0 and c_res.stdout.strip():
-                    common_p = Path(c_res.stdout.strip())
-                    if not common_p.is_absolute():
-                        common_p = (self.repo_dir / common_p).resolve()
-                    candidate_dirs.extend([
-                        common_p / "nightly_evidence" / "records",
-                        common_p / "nightly_evidence" / "archive",
-                        common_p / "nightly_evidence",
-                    ])
-            except OSError:
-                pass
+            candidate_dirs: list[Path] = [resolve_evidence_records_dir(self.repo_dir)]
+
+            from auto_developer.dispatcher import get_plan_task_states, resolve_target_plan_path
+            from auto_developer.evidence import EvidenceStore
+
+            evidence_store = EvidenceStore(repo_dir=self.repo_dir)
+
+            target_plan_path = resolve_target_plan_path(
+                self.repo_dir,
+                plan_path if plan_path is not None else self.plan_path,
+            )
+            has_plan_tasks, completed_task_ids, pending_task_ids, failed_task_ids = (
+                get_plan_task_states(target_plan_path)
+            )
 
             tasks_manifest: list[dict[str, Any]] = []
+            excluded_records: list[dict[str, str]] = []
             audit_stage_manifest: dict[str, Any] | None = None
-            collected_rec_names: set[str] = set()
+            seen_rec_names: set[str] = set()
 
             for rec_dir in candidate_dirs:
                 if not rec_dir.exists() or not rec_dir.is_dir():
@@ -216,13 +227,57 @@ class EvidenceBundler:
                 # task_*.json および audit_*.json を収集 (SSS.4, TTT.2)
                 for pat in ["task_*.json", "audit_*.json"]:
                     for rec_file in sorted(rec_dir.glob(pat)):
-                        if rec_file.name in collected_rec_names:
+                        if rec_file.name in seen_rec_names:
                             continue
                         if self.is_sanitized_out(rec_file.name):
                             continue
                         try:
                             data = json.loads(rec_file.read_text(encoding="utf-8"))
+                            seen_rec_names.add(rec_file.name)
                             if rec_file.name.startswith("task_"):
+                                rec_task_id = (
+                                    str(data.get("task_id", "")).strip()
+                                    or rec_file.stem.removeprefix("task_")
+                                )
+                                if has_plan_tasks and rec_task_id not in completed_task_ids:
+                                    if rec_task_id in failed_task_ids:
+                                        excl_reason = "task is not completed in target plan (failed)"
+                                    elif rec_task_id in pending_task_ids:
+                                        excl_reason = "task is not completed in target plan (pending)"
+                                    else:
+                                        excl_reason = "task is not in target plan"
+                                    excluded_records.append({
+                                        "task_id": rec_task_id,
+                                        "reason": excl_reason,
+                                    })
+                                    continue
+
+                                checker_obj = data.get("checker", {})
+                                review_meta = (
+                                    checker_obj.get("review")
+                                    if isinstance(checker_obj, dict)
+                                    else None
+                                )
+                                reviews_task_dir = evidence_store.evidence_dir / "reviews" / f"task_{rec_task_id}"
+                                rev_out = reviews_task_dir / "checker_output.txt"
+                                rev_diff = reviews_task_dir / "diff.patch"
+                                rev_spec = reviews_task_dir / "spec_excerpt.md"
+                                if (
+                                    not isinstance(review_meta, dict)
+                                    or not rev_out.is_file()
+                                    or not rev_diff.is_file()
+                                    or not rev_spec.is_file()
+                                ):
+                                    excluded_records.append({
+                                        "task_id": rec_task_id,
+                                        "reason": "NO_REVIEW_EVIDENCE",
+                                    })
+                                    continue
+
+                                items_to_zip.append((rev_out, f"evidence/reviews/task_{rec_task_id}/checker_output.txt"))
+                                items_to_zip.append((rev_diff, f"evidence/reviews/task_{rec_task_id}/diff.patch"))
+                                items_to_zip.append((rev_spec, f"evidence/reviews/task_{rec_task_id}/spec_excerpt.md"))
+
                                 commit_val = data.get("commit", "")
                                 if isinstance(commit_val, dict):
                                     commit_str = str(
@@ -249,7 +304,6 @@ class EvidenceBundler:
                                 audit_stage_manifest = data
 
                             items_to_zip.append((rec_file, f"evidence/{rec_file.name}"))
-                            collected_rec_names.add(rec_file.name)
                         except (json.JSONDecodeError, OSError):
                             pass
 
@@ -306,11 +360,14 @@ class EvidenceBundler:
 
             manifest_data: dict[str, Any] = {
                 "bundle_version": "1.0",
+                "format_version": BUNDLE_FORMAT_VERSION,
+                "tool_version": _get_tool_version(),
                 "generated_at": time.time(),
                 "job_id": actual_job_id,
                 "head_commit": head_commit,
                 "head_tree_sha": head_tree,
                 "tasks": tasks_manifest,
+                "excluded_records": excluded_records,
                 "file_hashes": file_hashes,
                 "backlog_count": backlog_count,
             }
@@ -373,8 +430,39 @@ class EvidenceBundler:
                 result.errors.append(f"Failed to parse bundle_manifest.json: {e}")
                 return result
 
+            if not isinstance(manifest_data, dict):
+                result.errors.append("bundle_manifest.json must contain a JSON object")
+                return result
+
             result.job_id = str(manifest_data.get("job_id", ""))
             result.head_commit = str(manifest_data.get("head_commit", ""))
+
+            format_version = manifest_data.get("format_version")
+            if isinstance(format_version, bool) or not isinstance(format_version, int):
+                result.errors.append(
+                    "Unsupported bundle format (format_version missing or invalid): "
+                    "v0.8 以前の形式です。v0.8.0 の auto-dev で検証してください。"
+                )
+                return result
+            if format_version < BUNDLE_FORMAT_VERSION:
+                if format_version < 2:
+                    result.errors.append(
+                        f"Unsupported bundle format_version={format_version}: "
+                        "v0.8 以前の形式です。v0.8.0 の auto-dev で検証してください。"
+                    )
+                else:
+                    result.errors.append(
+                        f"Unsupported bundle format_version={format_version}: "
+                        "v0.9 開発版までの形式です。v0.9 系の auto-dev で検証してください。"
+                    )
+                return result
+            if format_version > BUNDLE_FORMAT_VERSION:
+                result.errors.append(
+                    f"Unsupported bundle format_version={format_version}: "
+                    f"expected format_version={BUNDLE_FORMAT_VERSION}."
+                )
+                return result
+
             result.tasks = list(manifest_data.get("tasks", []))
             file_hashes: dict[str, str] = manifest_data.get("file_hashes", {})
             result.file_hashes = file_hashes
@@ -653,6 +741,43 @@ class EvidenceBundler:
                                 f"Task {task_id} has invalid Checker decision: {decision} (expected APPROVE)"
                             )
 
+                        # BDL-4: 査読の証跡（checker.review、3ファイルのSHA-256、出力ファイルのCORE-6判定）を検証
+                        review_meta = checker.get("review") if isinstance(checker, dict) else None
+                        if not isinstance(review_meta, dict):
+                            result.errors.append(
+                                f"Task {task_id} is missing checker.review metadata"
+                            )
+                        else:
+                            from auto_developer.runner import parse_checker_decision
+
+                            rev_dir = evidence_dir / "reviews" / f"task_{task_id}"
+                            rev_files = {
+                                "output_sha256": rev_dir / "checker_output.txt",
+                                "diff_sha256": rev_dir / "diff.patch",
+                                "spec_sha256": rev_dir / "spec_excerpt.md",
+                            }
+                            for sha_key, f_path in rev_files.items():
+                                expected_sha = str(review_meta.get(sha_key, "")).strip()
+                                if not f_path.is_file():
+                                    result.errors.append(
+                                        f"Task {task_id} missing bundled review file: {f_path.name}"
+                                    )
+                                elif not expected_sha or self._calc_sha256(f_path) != expected_sha:
+                                    result.errors.append(
+                                        f"Task {task_id} review file hash mismatch for {f_path.name}"
+                                    )
+                            out_file = rev_files["output_sha256"]
+                            if out_file.is_file():
+                                try:
+                                    out_txt = out_file.read_text(encoding="utf-8")
+                                except OSError:
+                                    out_txt = ""
+                                parsed_out_dec = parse_checker_decision(out_txt)
+                                if parsed_out_dec != "APPROVE":
+                                    result.errors.append(
+                                        f"Task {task_id} bundled checker_output.txt decision is not APPROVE (got {parsed_out_dec})"
+                                    )
+
                         # Status の検証
                         if status != "COMPLETED":
                             result.errors.append(
@@ -814,15 +939,27 @@ class EvidenceBundler:
                 except (json.JSONDecodeError, OSError) as e:
                     result.warnings.append(f"Failed to parse evidence/audit_stage.json: {e}")
 
+        excluded_list = manifest_data.get("excluded_records", []) if isinstance(manifest_data, dict) else []
+        no_review_ids = [
+            str(e.get("task_id", "")).strip()
+            for e in excluded_list
+            if isinstance(e, dict) and e.get("reason") == "NO_REVIEW_EVIDENCE"
+        ]
+        if no_review_ids:
+            result.warnings.append(
+                f"NO_REVIEW_EVIDENCE: Tasks excluded due to missing review evidence: {', '.join(no_review_ids)}"
+            )
+
         if result.errors:
             result.status = "INVALID"
             result.is_valid = False
-        elif approved_records_count == 0 or len(result.tasks) == 0:
+        elif approved_records_count == 0 or len(result.tasks) == 0 or no_review_ids:
             result.status = "INTEGRITY_ONLY"
             result.is_valid = False
-            result.warnings.append(
-                "Audit rejected: No verified Evidence Records found in bundle (Integrity preserved, but approval cannot be proven)"
-            )
+            if approved_records_count == 0 or len(result.tasks) == 0:
+                result.warnings.append(
+                    "Audit rejected: No verified Evidence Records found in bundle (Integrity preserved, but approval cannot be proven)"
+                )
         else:
             result.status = "VERIFIED"
             result.is_valid = True

@@ -21,7 +21,7 @@ VALID_STATUSES: frozenset[str] = frozenset(
 
 
 def detect_model_family(model_name: str) -> str:
-    """モデル識別子から大分類ファミリ（gemini, claude, openai, mock等）を推定する。"""
+    """モデル識別子から大分類ファミリ（gemini, claude, openai, mistral, llama, qwen, deepseek, mock等）を推定する。"""
     if not model_name:
         return "unknown"
     name = model_name.strip().lower()
@@ -33,7 +33,53 @@ def detect_model_family(model_name: str) -> str:
         return "claude"
     if any(k in name for k in ("gpt", "o1", "o3", "o4", "openai")):
         return "openai"
+    if "mistral" in name:
+        return "mistral"
+    if "llama" in name:
+        return "llama"
+    if "qwen" in name:
+        return "qwen"
+    if "deepseek" in name:
+        return "deepseek"
     return "unknown"
+
+
+def resolve_model_family(
+    model_name: str,
+    explicit_family: str | None = None,
+) -> tuple[str, str]:
+    """モデル識別子と明示系統から (family, family_source) を解決・検証する (DX-7)。"""
+    inferred = detect_model_family(model_name)
+    if explicit_family is None:
+        return inferred, "inferred"
+    if not isinstance(explicit_family, str):
+        raise TypeError("explicit model family must be a string")
+    norm = explicit_family.strip().lower()
+    if not norm:
+        raise ValueError("explicit model family cannot be empty or whitespace")
+    if norm == "unknown":
+        raise ValueError("explicit model family cannot be 'unknown'")
+    if inferred != "unknown" and norm != inferred:
+        model_label = model_name.strip() if isinstance(model_name, str) else ""
+        raise ValueError(
+            f"explicit family '{norm}' conflicts with built-in detected family '{inferred}' "
+            f"for model '{model_label}'"
+        )
+    return norm, "explicit"
+
+
+def resolve_model_family_safe(
+    model_name: str,
+    explicit_family: str | None = None,
+) -> tuple[str, str, str | None]:
+    """resolve_model_family の非送出ラッパー。(family, family_source, error_msg) を返す。"""
+    try:
+        fam, src = resolve_model_family(model_name, explicit_family)
+        return fam, src, None
+    except (ValueError, TypeError) as err:
+        fallback_fam = detect_model_family(model_name)
+        fallback_src = "explicit" if explicit_family is not None else "inferred"
+        return fallback_fam, fallback_src, str(err)
 
 
 def verify_model_independence(
@@ -41,8 +87,10 @@ def verify_model_independence(
     auditor_model: str,
     allow_same_model_override: bool = False,
     strict: bool = True,
+    maker_family: str | None = None,
+    auditor_family: str | None = None,
 ) -> tuple[bool, str]:
-    """MakerモデルとAuditor/Checkerモデルの独立性を検証する (AGENTS.md Rule 6 / EEE.1 / FFF.3)。"""
+    """MakerモデルとAuditor/Checkerモデルの独立性を検証する (AGENTS.md Rule 6 / EEE.1 / FFF.3 / DX-7)。"""
     if not maker_model or not maker_model.strip():
         return False, "INDEPENDENT_AUDIT_VIOLATION: maker_model cannot be empty or whitespace"
     if not auditor_model or not auditor_model.strip():
@@ -50,6 +98,12 @@ def verify_model_independence(
 
     m_norm = maker_model.strip()
     a_norm = auditor_model.strip()
+
+    try:
+        m_fam, _ = resolve_model_family(m_norm, maker_family)
+        a_fam, _ = resolve_model_family(a_norm, auditor_family)
+    except (ValueError, TypeError) as err:
+        return False, f"INDEPENDENT_AUDIT_VIOLATION: {err}"
 
     if allow_same_model_override:
         return True, f"Override enabled: Maker='{m_norm}', Auditor='{a_norm}'"
@@ -60,9 +114,6 @@ def verify_model_independence(
             "AGENTS.md Rule 6 forbids self-audit by the identical model."
         )
         return False, msg
-
-    m_fam = detect_model_family(m_norm)
-    a_fam = detect_model_family(a_norm)
 
     if strict and (m_fam == "unknown" or a_fam == "unknown"):
         msg = (
@@ -93,12 +144,16 @@ class AuditConfig:
     auditor_model: str
     allow_same_model_override: bool = False
     baseline_commit: str | None = None
+    maker_family: str | None = None
+    auditor_family: str | None = None
 
     def validate(self) -> bool:
         ok, reason = verify_model_independence(
             self.maker_model,
             self.auditor_model,
             self.allow_same_model_override,
+            maker_family=self.maker_family,
+            auditor_family=self.auditor_family,
         )
         if not ok:
             raise ValueError(reason)
@@ -265,6 +320,8 @@ class IndependentAuditRunner:
         fallback_models: list[str] | None = None,
         allow_emergency_fallback: bool = False,
         maker_model: str | None = None,
+        maker_family: str | None = None,
+        auditor_family: str | None = None,
     ) -> None:
         self.auditor_cmd_template = auditor_cmd_template
         self.model_name = model_name
@@ -274,6 +331,8 @@ class IndependentAuditRunner:
         self.fallback_models = list(fallback_models or [])
         self.allow_emergency_fallback = allow_emergency_fallback
         self.maker_model = maker_model or (config.maker_model if config else "gemini-3.8-flash")
+        self.maker_family = maker_family if maker_family is not None else (config.maker_family if config else None)
+        self.auditor_family = auditor_family if auditor_family is not None else (config.auditor_family if config else None)
         self.audit_runner = AuditRunner()
         self.last_run_metadata: dict[str, Any] | None = None
         self._last_envelope_metadata: dict[str, Any] | None = None
@@ -632,15 +691,26 @@ class IndependentAuditRunner:
                 )
 
         maker_m = self.config.maker_model if self.config else self.maker_model
+        maker_fam_override = self.config.maker_family if self.config else self.maker_family
+        auditor_fam_override = self.config.auditor_family if self.config else self.auditor_family
+        try:
+            resolved_maker_fam, resolved_maker_fam_src = resolve_model_family(maker_m, maker_fam_override)
+            resolve_model_family(self.model_name, auditor_fam_override)
+        except ValueError as err:
+            raise ValueError(f"INDEPENDENT_AUDIT_VIOLATION: {err}") from err
+
         candidate_models = [self.model_name] + [m for m in self.fallback_models if m != self.model_name]
 
         # SSS.3: モデル独立性を満たす候補のみを選別（同系統モデルの混入・バイパスを排除）
         independent_candidates: list[str] = []
         for cand in candidate_models:
+            cand_family = auditor_fam_override if cand == self.model_name else None
             ok, _ = verify_model_independence(
                 maker_model=maker_m,
                 auditor_model=cand,
                 strict=True,
+                maker_family=maker_fam_override,
+                auditor_family=cand_family,
             )
             if ok:
                 independent_candidates.append(cand)
@@ -708,12 +778,18 @@ class IndependentAuditRunner:
                 execution_id = envelope_meta.get("execution_id") or f"exec-{raw_response_hash[:16]}"
                 provider_req_id = envelope_meta.get("provider_request_id") or execution_id
                 mode = envelope_meta.get("mode") or ("MOCK" if str(execution_id).startswith("mock_") else "LIVE")
+                cand_fam_override = auditor_fam_override if candidate == self.model_name else None
+                resolved_auditor_fam, resolved_auditor_fam_src = resolve_model_family(
+                    candidate, cand_fam_override
+                )
 
                 self.last_run_metadata = {
                     "mode": mode,
                     "provider": provider,
                     "provider_request_id": provider_req_id,
                     "auditor_model": candidate,
+                    "auditor_family": resolved_auditor_fam,
+                    "auditor_family_source": resolved_auditor_fam_src,
                     "resolved_model": envelope_meta.get("resolved_model") or candidate,
                     "execution_id": execution_id,
                     "status": envelope_meta.get("status") or "COMPLETED",
@@ -721,6 +797,8 @@ class IndependentAuditRunner:
                     "fallback_occurred": is_fallback,
                     "fallback_from": self.model_name if is_fallback else None,
                     "maker_model": maker_m,
+                    "maker_family": resolved_maker_fam,
+                    "maker_family_source": resolved_maker_fam_src,
                     "independence_verified": True,
                     "raw_prompt_hash": raw_prompt_hash,
                     "raw_response_hash": raw_response_hash,

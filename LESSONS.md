@@ -28,9 +28,65 @@ v0.9.0 で、v0.8.0 までの 40 件超の教訓を、今も効いている原�
 
 ## 恒久教訓インデックス
 
+### [2026-11-23] 検査が「どの環境で」動いたかを確かめないと、試したつもりの環境を試していない (Verify What You Claim To Test)
+- Context: `scripts/verify_local.sh`、`.github/workflows`（REL-3 の CI マトリクス: macOS / Ubuntu × Python 3.10 / 3.12）、`src/auto_developer/verifier.py` のサンドボックスの設定。
+- Trap: 検証スクリプトが `/usr/bin/python3` を優先していたため、CI はマトリクスの Python ではなく、macOS では Xcode の Python 3.9、Ubuntu では OS の Python 3.12 でテストを動かしていた。CI は緑だったが、python.org や setup-python のシンボリックリンクの Python では macOS のサンドボックスが起動できない欠陥（SBX-7）と、`/opt` の下の Python を前提にしないテスト（SBX-8）を見逃していた。Phase 70 の準備で Python の選び方を直したとたん、両方が表に出た。
+- Rule: 検査のログに、実際に使った環境（Python のパスと版、OS、サンドボックスの機構）を必ず出し、マトリクスで指定したものと一致することを確かめる。利用者が使いそうな入手経路（python.org、Homebrew、pyenv、setup-python）の違いは、パスの形の違いとして、テストの前提から外さない。
+- Rung: 検査（検証スクリプトの `Using Python:` の表示、CI のマトリクス）、作り（SBX-7）
+- Immunity Test: Phase 71 で追加（SBX-7、SBX-8）
+- Proof: 2026-11-23、Phase 70 の後の CI で、macOS は 72 件の失敗と 9 件のエラー、Ubuntu は 1 件の失敗を確認した（docs/contracts/phase71.md の 1.1 節）。
+
+### [2026-11-23] 影響分析は、テストが内部の形にどう依存しているかまで探さないと漏れる (Hidden Coupling In Tests)
+- Context: Phase 70（SBX-6、BDL-4、GATE-7、BDL-5）、`PLAN.md` の「既存テスト変更の理由」、`docs/contracts/phase70.md`。
+- Trap: 要件の指紋（関数名・コマンド名）だけを検索したため、判定の目印をモックで作るテスト、キャッシュの呼び出し回数を確かめるテスト、範囲の広すぎるモック、Evidence の記録を合成するテストを見落とし、既存テストの承認のために 10 回近く止まった。あわせて、`verify-step` が本物のインデックスにステージする副作用で、承認の記録のコミットに実装が混ざった。
+- Rule: 判定・形式・キャッシュを変える要件では、その判定が読む目印や出力の形、記録の形式、呼び出し回数を、テストの中で作ったり確かめたりしている箇所まで検索して数える（docs/contracts/phase71.md の 6 章）。手順書に書くコマンドは、本物のインデックスや作業ツリーを変えるかどうかを確かめてから書く。
+- Rung: 検査（契約書の影響分析の手順）、作り（GATE-9）。将来は Spec Compiler（BACKLOG IDEA-008）で機械化する。
+- Immunity Test: なし（手順の教訓）。GATE-9 は Phase 71 で追加。
+- Proof: Phase 70 の止まった記録（PLAN.md の承認の記録のコミット 8 件と f51e971）。
+
+### [2026-11-22] 前提の確認を、本番と違う条件で行うと、確認は通るのに本番だけが失敗する (Probe Under Production Conditions)
+- Context: `src/auto_developer/verifier.py` の `_compute_nproc_limit` / `_apply_resource_limits` / `_probe_sandbox_backend`（SBX-3）、CI の Ubuntu 24.04。
+- Trap: 候補テストを bwrap で起動する前に、`RLIMIT_NPROC` を「同じユーザーのプロセス数 + 50」に設定していた。しかし Linux の `RLIMIT_NPROC` はスレッドを数えるため、スレッドの多いプロセスがあるランナーでは bwrap が `Creating new namespace failed: Resource temporarily unavailable` で起動できず、CI の Ubuntu だけで29件が失敗した。SBX-3 の起動の確認は、この上限をかけずに最小の引数で bwrap を起動していたので通っていた。起動の失敗は `NO_TESTS_RAN` と誤って分類され、原因がわからなかった。手元の Linux は同じユーザーのスレッドが少なかったので、全件が通った。
+- Rule: 前提の確認（起動できるか、使えるか）は、本番の実行と同じ条件（引数・資源の上限・環境変数）で行う。制限をかけるときは、その制限が実際に数える量（`RLIMIT_NPROC` ならスレッド）で現在の値を測る。下位の機構（bwrap など）の失敗は、上位の判定（テストが0件 など）に紛れさせず、機構の失敗として、元のエラーの出力とともに報告する。環境の差で再現しない失敗は、差を1つずつ作って再現させる（今回は、同じユーザーのスレッドを数百本立てて再現した）。
+- Rung: 作り（SBX-6）、検査（スレッドを立てた状態の再現テスト、CI の Ubuntu）
+- Immunity Test: Phase 70 で追加（SBX-6）
+- Proof: 2026-11-22 に、手元の Linux で同じユーザーのスレッドを 300 本（プロセスは 11 個）立てた状態で `test_red_verifier.py` の2件を実行し、CI と同じ2つのエラー（`NO_TESTS_RAN`、`bwrap: Creating new namespace failed`）が出ることを確認した。スレッドを立てなければ通る。
+
+### [2026-11-22] 自己申告の査読は、見逃しを後から検出できない (Self-Reported Review Cannot Be Audited)
+- Context: ad-team-trial のシナリオ2（CLI-3、`src/cli/main.py`）、`record-review` / `commit-step`、`skills/nightly-run/SKILL.md`。
+- Trap: Maker が `OPERATORS` に組み込みの `pow` を足しただけの実装をし、Checker（claude-sonnet-5-5）が APPROVE した。この実装では、`10 ** 400` や `0 ** -1` で例外が外に出て、SPEC の CLI-2「例外を外に出さない」に反する。テストは通っていた。シナリオ1を含む全5件の査読の理由は同じ型の文で、Checker に渡した入力と、Checker の出力のファイルは残っていなかった。そのため、Checker が差分を読んで判断したのか、まとめ役のエージェントが記録だけを書いたのかを、後から区別できない。追加した要件（CLI-3）が1行だけで、異常系の扱いを書いていなかったことも見逃しを招いた。 再発（同日、Phase 69 の完了後の確認）: このリポジトリ自身でも、Phase 67〜69 の査読の記録と Checker の出力ファイルを時刻で突き合わせると、REJECT の出力のまま APPROVE としてコミットされたものが4件（b7af7f2, 86eeea9, e5fa287, 84a0043）あった。原因は、バックグラウンドで起動した Checker の完了通知が2回届き（1回目が APPROVE、数秒後の2回目が REJECT）、オーケストレーターのエージェントが1回目の通知だけを見て、出力ファイルを読まずに記録・コミットしたこと。`auto-dev` は判定を文字列の引数で受け取っていたため、止められなかった。`verify-bundle` も、この状態の Bundle を VERIFIED と判定する。
+- Rule: Checker に渡した入力（SPEC の該当節、差分）と Checker の出力はファイルに保存し、記録からたどれるようにする。最終的には、`record-review` でそれらのハッシュを記録し、Bundle に入れる。Checker には、異常系・境界値の扱いを、差分とテストの両方で確かめるよう明示的に求める。要件を足すときは、既存の一般的な規則（例外を外に出さない など）が新しい機能にどう当てはまるかを書く。 通知やログの要約ではなく、成果物（出力ファイル）を正とする。判定は `auto-dev` が出力ファイルから読み取り、記録した後に出力が書き換わっていないことを、確定の直前に確かめる（INV-10）。フェーズの確認では、査読の記録と出力ファイルの突き合わせを常に行う。
+- Rung: 道具（PLAN.md の作業手順で、Checker の入出力を保存し、異常系の確認を求める）。将来は作り（BACKLOG IDEA-007: 入出力のハッシュを記録・Bundle に収録） → Phase 70 で作り・関門へ（GATE-5〜7、BDL-4。免疫テスト `test_immunity_review_evidence.py`）
+- Immunity Test: なし（手順。IDEA-007 を実装した時点でテストを追加する） → Phase 70 の H1 で `tests/immunity/test_immunity_review_evidence.py` を配置する
+- Proof: 2026-11-22 に、ad-team-trial の `team/cli` で `10 ** 400` / `0 ** -1` を実行し、例外が外に出ることを確認した。
+
+### [2026-11-21] テストの期待値に OS 固有の挙動を書くと、他の OS では製品の欠陥と区別できなくなる (Assert Properties, Not OS Mechanisms)
+- Context: `tests/test_red_verifier.py`、`tests/test_independent_audit_runner.py`、`tests/test_live_claude_audit.py`、`src/auto_developer/verifier.py`（`_get_sandbox_backend`）。
+- Trap: Linux で失敗し続けた3件は、製品の欠陥ではなく、テストが macOS の手段を前提にしていたことが原因だった。改ざんを仕込む部分で `chflags` を無条件に呼んでいた。機密の読み取りの拒否を `PermissionError` で確かめていたが、bwrap はパスそのものを見せないので `FileNotFoundError` になる。原因がわかるまでの3フェーズの間、「環境依存」として放置されていた。さらに、サンドボックスがないと気づかれないままモックに切り替わるテストがあった。また、サンドボックスが使えるかを実行ファイルの有無だけで判定していたため、AppArmor の制限で bwrap が起動できない Ubuntu では、対処のわからないエラーになった。 同じ原則の3例目として、Phase 68 では mypy が `sys.platform` の分岐を実行中の OS の側しか解析しないため、Mac では通る型エラーが Linux の CI で初めて見つかった（`verifier.py:1560`）。対策として、検証スクリプトで `mypy --platform linux` と `--platform darwin` の両方を実行する。
+- Rule: テストの期待値は、守るべき性質（機密の値が出力に現れない、Red として受理されない）で書き、OS 固有の手段（例外の種類、専用のコマンド）で書かない。OS 固有の手段を使うときは、存在を確かめてから使う。ある OS で実際に実行して確かめている性質は、他の対応 OS でも実際に実行して確かめる。サンドボックスのような前提条件は、存在ではなく実際に動くかで判定する。CI ではスキップやモックへの切り替えを許さない。「環境依存」の失敗を放置しない。原因を調べて、テストの欠陥か製品の欠陥かを確定する。
+- Rung: 検査（OS に依存しない期待値 SBX-4、対称な実行テスト SBX-5）、作り（実働の判定 SBX-3）、関門（CI のマトリクスと `AUTO_DEV_REQUIRE_SANDBOX=1`、REL-3）
+- Immunity Test: Phase 68 で追加（SBX-4, SBX-5）
+- Proof: 2026-11-21 に、何もしない `chflags` を PATH に置くと Linux でも2件が通ることを確認した。また、bwrap の中で親リポジトリの `.env` を読むと `FileNotFoundError` になることも確認した。
+
+### [2026-11-21] タスク番号だけで管理した記録が、次のフェーズに漏れて Bundle を壊した (Phase-Scoped State)
+- Context: `.git/nightly_evidence/records/task_<id>.json`、`src/auto_developer/bundler.py`（記録の収集）。
+- Trap: Evidence の記録はタスク番号だけをキーにしていた。Phase 66（8タスク）の次の Phase 67（7タスク）で、1〜7は上書きされたが、Phase 66 の task 8 が残った。古い SPEC のハッシュを持つその記録が Bundle に入り、`verify-bundle` が INVALID になった。以前は、フェーズの準備で人間が記録を手で退避していた（`archive/phase64/`）。しかし手順として書かれておらず、今回の準備から抜けた。
+- Rule: 複数のフェーズや計画にまたがって残る状態は、「どの計画のものか」で絞り込む。人間の暗黙の手順に頼らない。Bundle やレポートに入れる記録は、対象の計画で完了したタスクのものに限る。暫定の手順は、仕組みにするまで PLAN.md の「人間が行うこと」に明記する。
+- Rung: 作り（記録の選択 BDL-3）
+- Immunity Test: Phase 68 で追加（BDL-3）
+- Proof: 2026-11-21 に task 8 の記録を `archive/phase66/` へ移して Bundle を作り直し、VERIFIED になることを確認した。
+
+### [2026-11-21] E2E テストが雛形を使わず、特定の環境でしか実行されていなかったため、利用者の経路の欠陥を見逃した (E2E Must Use Shipped Templates, Real Environments)
+- Context: Phase 66（TEAM-10〜19）。`tests/test_teams_cli_e2e.py`、`cli.py` の `init` / `teams init` の雛形、`orchestrator.py` のコミット直前の担当範囲検査、`worktree.py` の削除時の保全判定。
+- Trap: Phase 66 の受入テストは全件 Green だったが、雛形をそのまま使って Linux で `teams run` を実行すると、両チームが失敗した。原因は4つあった。(1) テストの副産物 `__pycache__` が担当範囲の違反と判定された（雛形の `.gitignore` に含まれていなかった）。(2) コミット直前に違反を見つけても隔離せず、ステージ済みの変更と Evidence を残したまま終了していた。(3) 成功したジョブの `teams cleanup` が、ワーカーの生成物を保全対象とみなして必ず失敗した。(4) 雛形のコメント内の記法例がタスクとして読まれた。いずれも、テストがコメントを削った計画ファイルを使い、バイトコードを書かない環境で動き、実際に実行した後の `cleanup` を通していなかったため検出されなかった。E2E のコードには、(4) を回避するための注記まで書かれていた。
+- Rule: E2E 受入テストは、出荷する雛形をそのまま使い、利用者の一連の操作（初期化 → 実行 → 片付け → 次の実行）を最後まで通す。テストのサブプロセスでは、結果を左右する環境変数（`PYTHONDONTWRITEBYTECODE` など）を明示的に揃える。テストを書く途中で製品の欠陥を回避した場合は、回避で済ませずに欠陥として報告する（PLAN.md の「止まっていること」に書いて止まる）。
+- Rung: 検査（雛形を使う受入テスト TEAM-24、Linux の CI REL-3）、AGENTS.md Rule 4（回避ではなく報告する）
+- Immunity Test: Phase 67 で追加（TEAM-24）
+- Proof: 2026-11-21 に、雛形と `__pycache__` が生成される環境の組み合わせで、4つの欠陥すべてを再現した。Linux では、既存の E2E テスト2件が同じ理由で失敗した。
+
 ### [2026-11-20] 「実装済み」と書いた機能が利用者の経路から使えず、README の手順も実際の挙動とずれていた (Documented ≠ Reachable)
 - Context: v0.9.0 準備。README.md、`src/auto_developer/multi_team.py` / `manifest.py`、`cli.py`。
-- Trap: マルチチーム実行はライブラリとして実装・テスト済みだった。しかし `TeamManifest` と `MultiTeamOrchestrator` がつながっておらず、CLI からもスキルからも呼べなかった。全チームが同じ PLAN.md を更新するので、つないだとしても統合時に必ずコンフリクトする構造だった。README にも、実際の挙動と違う記述が残っていた。「`--maker-cmd` 未指定時は MockRunner で動作」と書いてあったが、実際は終了コード 2 になる。Checker を指定しない隔離体験の手順も、そのままでは起動できなかった。
+- Trap: マルチチーム実行はライブラリとして実装・テスト済みだった。しかし `TeamManifest` と `MultiTeamOrchestrator` がつながっておらず、CLI からもスキルからも呼べなかった。全チームが同じ PLAN.md を更新するので、つないだとしても統合時に必ずコンフリクトする構造だった。README にも、実際の挙動と違う記述が残っていた。「`--maker-cmd` 未指定時は MockRunner で動作」と書いてあったが、実際は終了コード 2 になる。Checker を指定しない隔離体験の手順も、そのままでは起動できなかった。 再発（2026-11-22）: README のクイックスタートを試すと、`auto-dev init` の直後の `run --mock` は必ず失敗した（mock の Maker は何も変更しない）。シェルの1行コマンドで試すには、実際には使っていないモデル名を書く必要があった。さらに、対応しているモデルの系統が3社だけで、それ以外のモデルでは `run` も `commit-step` も通らなかった。
 - Rule: 「実装済み」は、利用者が使う経路（CLI・スキル）から E2E テストで動かせたときにだけ名乗る。README に書く手順は、テストでそのまま実行する。単体テストが通っていることは、利用者が使える根拠にならない。
 - Rung: 検査（README クイックスタートの実行テスト DX-1、2 チーム E2E テスト TEAM-19）
 - Immunity Test: v0.9.0 で追加（`tests/test_quickstart.py`, `tests/test_teams_cli_e2e.py` を予定）

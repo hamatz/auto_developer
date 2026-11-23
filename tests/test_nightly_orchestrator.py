@@ -297,6 +297,13 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertIn("VERIFICATION PASSED", proc_verify.stdout)
 
             # 3. 証跡発行後は commit-step が成功し、証跡が消費されること
+            from review_test_helpers import record_test_review
+
+            rr_ok = record_test_review(
+                repo_dir, "1", checker_model="claude-opus-5.5", plan_path=plan_file
+            )
+            self.assertEqual(rr_ok.returncode, 0, rr_ok.stderr)
+
             proc_commit_success = subprocess.run(
                 [
                     sys.executable,
@@ -451,7 +458,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
                 def run_checker(self, task: Task, diff: str, spec_content: str):
                     if "feature.py" in diff:
-                        return True, "APPROVE: feature.py correctly implemented"
+                        return True, "APPROVE: feature.py correctly implemented\nDECISION: APPROVE"
                     return False, "REJECT: feature.py missing"
 
             state_file = repo_dir / ".dev" / "job_state.json"
@@ -759,6 +766,10 @@ class TestNightlyOrchestrator(unittest.TestCase):
                     maker_code,
                     "--checker-cmd",
                     checker_code,
+                    "--maker-model",
+                    "gemini-3.8-flash",
+                    "--checker-model",
+                    "claude-opus-5-5-medium",
                 ],
                 cwd=ext_app,
                 capture_output=True,
@@ -917,6 +928,11 @@ class TestNightlyOrchestrator(unittest.TestCase):
             )
             self.assertEqual(proc_verify.returncode, 0, f"verify-step should pass:\n{proc_verify.stdout}\n{proc_verify.stderr}")
             self.assertIn("VERIFICATION PASSED", proc_verify.stdout)
+
+            from review_test_helpers import record_test_review
+
+            rr_ok = record_test_review(repo, "1", checker_model="claude-opus-5.5")
+            self.assertEqual(rr_ok.returncode, 0, rr_ok.stderr)
 
             # 検証通過後に、未検証の改ざんコードを混入させる！
             (repo / "tampered_payload.py").write_text("print('malicious backdoor')", encoding="utf-8")
@@ -1892,6 +1908,16 @@ class TestNightlyOrchestrator(unittest.TestCase):
             self.assertEqual(proc_verify.returncode, 0, f"verify-step failed: {proc_verify.stderr}")
 
             # 3. auto-dev commit-step を Checker 情報付きで実行
+            from review_test_helpers import record_test_review
+
+            rr_ok = record_test_review(
+                repo,
+                "1",
+                checker_model="claude-opus-5.5",
+                reason="Reviewed diff and verified 0-regression against SPEC.md",
+            )
+            self.assertEqual(rr_ok.returncode, 0, rr_ok.stderr)
+
             proc_commit = subprocess.run(
                 [
                     sys.executable,
@@ -2118,7 +2144,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
                     return 0, f"maker attempt {len(self.maker_calls)}"
 
                 def run_checker(self, task, diff, spec_content):
-                    return True, "APPROVE: looks good"
+                    return True, "APPROVE: looks good\nDECISION: APPROVE"
 
             runner = RetryMakerRunner()
             orchestrator = NightlyOrchestrator(
