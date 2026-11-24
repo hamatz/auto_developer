@@ -38,4 +38,4 @@ When the user runs `/nightly-setup`:
    - Drafting tasks in `PLAN.md` (or in each `plans/<team_id>.md` and adjusting `owns` in `teams.json` for multi-team mode),
    - Approving requirements in `SPEC.md`,
    - Optionally enabling the live auto-updating HTML dashboard (`auto-dev dashboard --enable`, or passing `--dashboard` to `auto-dev run` / `auto-dev teams run`; opens `.dev/dashboard.html` in a browser), and
-   - Ensuring `scripts/verify_local.sh` runs real project checks (not a no-op), then committing the setup files so the Git working tree is clean before `/nightly-run`.
+   - Ensuring `scripts/verify_local.sh` runs real project checks (not a no-op; optionally add `# auto-dev: verify-timeout=<SEC>` within the first 20 lines if verification takes longer than the default 300s), then committing the setup files so the Git working tree is clean before `/nightly-run`.

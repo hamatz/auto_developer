@@ -34,6 +34,7 @@ from auto_developer.integration_gate import (
 )
 from auto_developer.manifest import ManifestValidationError, TeamManifest, load_teams_manifest
 from auto_developer.models import JobState
+from auto_developer.verifier import resolve_verify_timeout
 from auto_developer.worktree import SECRET_PATTERNS, WorktreeError, WorktreeInfo, WorktreeManager
 
 logger = logging.getLogger(__name__)
@@ -1237,7 +1238,8 @@ class MultiTeamOrchestrator:
         team_results: dict[str, TeamExecutionResult],
         verify_script: Path | None = None,
         resume: bool = False,
-        timeout_sec: int = 300,
+        timeout_sec: int | None = None,
+        timeout_source: str | None = None,
     ) -> MultiTeamResult:
         """全ワーカーの実行結果を収集・照合し、IntegrationGate へ安全に引き渡す。"""
         # LL.1, LL.2: 統合および Worktree 削除前に各チームの Evidence Bundle を退避保全
@@ -1294,6 +1296,7 @@ class MultiTeamOrchestrator:
             verify_script=verify_script or config.integration_verify_script,
             timeout_sec=timeout_sec,
             resume=resume,
+            timeout_source=timeout_source,
         )
 
         rc_tag = str(int_result.details.get("rc_tag")) if int_result.details.get("rc_tag") else None
@@ -2921,10 +2924,15 @@ def integrate_teams_job(
     repo_dir: Path,
     job_id: str,
     verify_script: Path | None = None,
-    timeout_sec: int = 300,
+    timeout_sec: int | None = None,
 ) -> tuple[dict[str, Any] | None, int, str]:
     """TEAM-14: 完了・クリーン確認、Bundle 生成/保全、IntegrationGate 実行を行う。"""
     resolved_repo = repo_dir.resolve()
+    effective_verify_script = verify_script or (resolved_repo / "scripts" / "verify_local.sh")
+    try:
+        resolve_verify_timeout(timeout_sec, effective_verify_script)
+    except ValueError as err:
+        return None, 2, f"TEAMS_INTEGRATE_ERROR: {err}"
     if not VALID_JOB_ID_PATTERN.match(job_id):
         return (
             None,
@@ -3172,6 +3180,7 @@ def integrate_teams_job(
         team_results=team_results,
         verify_script=verify_script,
         timeout_sec=timeout_sec,
+        timeout_source=(f"--timeout option ({timeout_sec}s)" if timeout_sec is not None else None),
     )
 
     if not multi_res.success:
@@ -3351,7 +3360,7 @@ def run_teams_job(
     checker_family: str | None = None,
     is_mock: bool = False,
     worker_timeout: float = 21600.0,
-    verify_timeout: int = 300,
+    verify_timeout: int | None = None,
     verify_script: Path | None = None,
     spec_path: Path | None = None,
     dashboard: bool = False,
@@ -3360,6 +3369,12 @@ def run_teams_job(
     resolved_repo = repo_dir.resolve()
     if worker_timeout <= 0:
         return None, 2, "TEAMS_RUN_ERROR: --worker-timeout must be a positive number."
+
+    effective_verify_script = verify_script or (resolved_repo / "scripts" / "verify_local.sh")
+    try:
+        resolve_verify_timeout(verify_timeout, effective_verify_script)
+    except ValueError as err:
+        return None, 2, f"TEAMS_RUN_ERROR: {err}"
 
     if not is_mock and (not maker_cmd or not checker_cmd):
         return (
@@ -3494,7 +3509,7 @@ def run_teams_job(
                 cmd.extend(["--checker-model", resolved_checker_model])
             if checker_family is not None:
                 cmd.extend(["--checker-family", checker_family])
-            if verify_timeout > 0:
+            if verify_timeout is not None:
                 cmd.extend(["--timeout", str(verify_timeout)])
             return cmd
 

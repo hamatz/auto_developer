@@ -49,7 +49,7 @@ from auto_developer.runner import (
     RunnerAdapter,
     parse_checker_decision,
 )
-from auto_developer.verifier import DeterministicVerifier
+from auto_developer.verifier import DeterministicVerifier, resolve_verify_timeout
 
 VERSION = "0.9.0"
 
@@ -576,7 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="Simulate execution without modifying git or state"
     )
     parser.add_argument(
-        "--timeout", type=int, default=300, help="Max verification timeout in seconds"
+        "--timeout", type=int, default=None, help="Max verification timeout in seconds (default: 300)"
     )
     parser.add_argument(
         "--resume", action="store_true", help="Resume interrupted job from state file"
@@ -652,7 +652,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicit ownership glob pattern(s) for team execution (repeatable or comma-separated)",
     )
     run_parser.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS, help="Simulate execution without modifying git or state")
-    run_parser.add_argument("--timeout", type=int, default=None, help="Max verification timeout in seconds")
+    run_parser.add_argument("--timeout", type=int, default=argparse.SUPPRESS, help="Max verification timeout in seconds")
     run_parser.add_argument("--resume", action="store_true", default=argparse.SUPPRESS, help="Resume interrupted job from state file")
     run_parser.add_argument("--mock", action="store_true", default=argparse.SUPPRESS, help="Run with simulated mock agents (for testing only)")
     run_parser.add_argument("--maker-cmd", type=str, default=argparse.SUPPRESS, help="Command template to execute Maker")
@@ -689,6 +689,12 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser = subparsers.add_parser("verify-step", help="Check protected files and run verify script")
     verify_parser.add_argument("--checkpoint", type=str, required=True, help="Checkpoint commit hash")
     verify_parser.add_argument("--task-id", type=str, default="default", help="Task ID being verified")
+    verify_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="Max verification timeout in seconds",
+    )
 
     # Subcommand: commit-step
     commit_parser = subparsers.add_parser("commit-step", help="Commit current task and mark [x] in PLAN.md")
@@ -1317,6 +1323,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: Task {args.task_id} not found in {effective_plan_path}", file=sys.stderr)
             return 1
 
+        try:
+            verify_timeout, verify_timeout_source = resolve_verify_timeout(args.timeout, verify_script)
+        except ValueError as timeout_err:
+            print(f"CONFIG ERROR: {timeout_err}", file=sys.stderr)
+            return 2
+
         original_plan_content = effective_plan_path.read_text(encoding="utf-8")
         # 検証対象の最終ツリーに PLAN.md の完了反映を含める
         dispatcher.mark_task_status(effective_plan_path, target, status="completed")
@@ -1364,7 +1376,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 11
 
         code, out = verifier.run_verification(
-            verify_script, timeout_sec=args.timeout, cwd=work_dir
+            verify_script,
+            timeout_sec=verify_timeout,
+            cwd=work_dir,
+            timeout_source=verify_timeout_source,
         )
         duration_sec = round(time.time() - start_time, 2)
         attempt = metrics.count_verify_attempts(args.task_id, args.checkpoint, phase=phase) + 1
@@ -2320,7 +2335,11 @@ def main(argv: list[str] | None = None) -> int:
     audit_baseline = getattr(args, "audit_baseline", None)
     dry_run = bool(getattr(args, "dry_run", False))
     resume = bool(getattr(args, "resume", False))
-    timeout = getattr(args, "timeout", None) or 300
+    try:
+        timeout, timeout_source = resolve_verify_timeout(getattr(args, "timeout", None), verify_script)
+    except ValueError as timeout_err:
+        print(f"CONFIG ERROR: {timeout_err}", file=sys.stderr)
+        return 2
 
     if enable_audit and not is_mock and not auditor_cmd:
         print(
@@ -2383,6 +2402,7 @@ def main(argv: list[str] | None = None) -> int:
         runner_adapter=runner,
         dry_run=dry_run,
         timeout_sec=timeout,
+        timeout_source=timeout_source,
         resume=resume,
         team_id=resolved_team_id,
         owns_patterns=resolved_owns,

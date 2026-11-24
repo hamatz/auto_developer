@@ -68,7 +68,7 @@
 - [x] 3. `review-input` と `record-review` は、最新の Evidence の Tree SHA が今の作業ツリーと一致しなければ終了コード 3（Red: 検証の後に作業ツリーを変えても `review-input` が通る）（GATE-13）
 - [x] 4. `record-review` は、同じ検証に対して判定の決まった査読を1回だけ記録する（2回目は終了コード 4）。判定の決まらない出力も履歴に残す（Red: REJECT の記録の後に、同じ検証に APPROVE を記録できる）（GATE-13）
 - [x] 5. `review-input` がイベント `review_input` を書く。`status` が `REVIEW_NOT_RECORDED` を `attention[]` に入れる。`/nightly-run` のスキルに「1回の入力に Checker は1回、出力は必ず記録する」を書く（Red-First）（GATE-13）
-- [ ] 6. 検証の制限時間: `verify-step --timeout`、検証スクリプトの `# auto-dev: verify-timeout=<SEC>` の行、既定 300 秒の順で決める（`run`・`teams run` も同じ）。打ち切りのときに出所と延ばし方を示す。スキルに書く。`docs/cli.md` を作り直す（Red-First）（DX-13）
+- [x] 6. 検証の制限時間: `verify-step --timeout`、検証スクリプトの `# auto-dev: verify-timeout=<SEC>` の行、既定 300 秒の順で決める（`run`・`teams run` も同じ）。打ち切りのときに出所と延ばし方を示す。スキルに書く。`docs/cli.md` を作り直す（Red-First）（DX-13）
 - [ ] 7. 隔離のあと、スナップショットにだけある新しいファイルの一覧と取り出すコマンドを表示し、失敗ログにも書く（Red: 新しいテストファイルを作ったタスクの `rollback-step` が、そのファイルを示さない）（RCV-6）
 - [ ] 8. `scripts/check_doc_commands.py`: README とスキルの `auto-dev` のコマンドを、CLI の引数定義と突き合わせる（Red-First）（DX-14）
 

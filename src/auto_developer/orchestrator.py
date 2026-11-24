@@ -17,7 +17,7 @@ from auto_developer.manifest import ManifestValidationError, resolve_team_contex
 from auto_developer.models import JobState, Task
 from auto_developer.reporter import MorningReporter
 from auto_developer.runner import MockRunnerAdapter, RunnerAdapter
-from auto_developer.verifier import DeterministicVerifier
+from auto_developer.verifier import DeterministicVerifier, resolve_verify_timeout
 
 
 class NightlyOrchestrator:
@@ -33,7 +33,8 @@ class NightlyOrchestrator:
         state_path: Path | None = None,
         runner_adapter: RunnerAdapter | None = None,
         dry_run: bool = False,
-        timeout_sec: int = 300,
+        timeout_sec: int | None = None,
+        timeout_source: str | None = None,
         resume: bool = False,
         team_id: str | None = None,
         owns_patterns: list[str] | None = None,
@@ -58,7 +59,13 @@ class NightlyOrchestrator:
         self.state_path = state_path or (self.repo_dir / ".dev" / "job_state.json")
         self.runner_adapter = runner_adapter or MockRunnerAdapter()
         self.dry_run = dry_run
-        self.timeout_sec = timeout_sec
+        if timeout_sec is None:
+            resolved_timeout, resolved_source = resolve_verify_timeout(None, self.verify_script)
+            self.timeout_sec = resolved_timeout
+            self.timeout_source = timeout_source or resolved_source
+        else:
+            self.timeout_sec = timeout_sec
+            self.timeout_source = timeout_source or f"configured ({timeout_sec}s)"
         self.resume = resume
         self.team_id = team_id
         self.owns_patterns = owns_patterns
@@ -1370,7 +1377,10 @@ class NightlyOrchestrator:
     def _run_verification_with_boundary(self, checkpoint: str) -> tuple[int, str]:
         """検証スクリプトを実行し、成功時は Evidence 発行前に担当範囲を再検査する。"""
         code, out = self.verifier.run_verification(
-            self.verify_script, timeout_sec=self.timeout_sec, cwd=self.repo_dir
+            self.verify_script,
+            timeout_sec=self.timeout_sec,
+            cwd=self.repo_dir,
+            timeout_source=self.timeout_source,
         )
         if code != 0:
             return code, out
