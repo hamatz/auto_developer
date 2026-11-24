@@ -39,6 +39,7 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | Argument / Option | Required | Default | Description |
 | --- | --- | --- | --- |
 | `--keep` | No | `False` | Keep the temporary demo directory after completion and print its path |
+| `--teams` | No | `False` | Run a 2-team concurrent demo with retry, RC tag integration, and dashboard output |
 
 ### `auto-dev run`
 

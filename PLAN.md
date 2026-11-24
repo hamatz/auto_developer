@@ -67,7 +67,7 @@
 - [x] 5. スナップショットに `timeline[]`（行数つき）と `backlog` と始まり・終わりの時刻を加え、`schema` を `auto-dev-status/2` にする（Red-First）（STAT-5）
 - [x] 6. `auto-dev dashboard` を、見本 docs/designs/dashboard-prototype.html と同じ構成・動きの再生できる HTML にする（単一チームの形、空の時系列、10 分を超える空白の圧縮を含む）（Red-First）（STAT-6）
 - [x] 7. `auto-dev dashboard --enable / --disable`（`.dev/dashboard.json`）、`run` / `teams run` の `--dashboard`、イベントを書くたびの作り直し（失敗は警告だけ）、`/nightly-run` と `/nightly-setup` のスキルの選択肢。`docs/cli.md` を作り直す（Red-First）（STAT-7）
-- [ ] 8. `auto-dev demo --teams [--keep]`: デモ用の Maker と Checker で2チームを並行して実行し（一方のタスクで検証に一度失敗して2回目で直る）、統合して RC タグを作り、ダッシュボードの場所を表示する。`docs/cli.md` を作り直す（Red-First）（DX-10）
+- [x] 8. `auto-dev demo --teams [--keep]`: デモ用の Maker と Checker で2チームを並行して実行し（一方のタスクで検証に一度失敗して2回目で直る）、統合して RC タグを作り、ダッシュボードの場所を表示する。`docs/cli.md` を作り直す（Red-First）（DX-10）
 - [ ] 9. `scripts/record_dashboard.py`: ダッシュボードを再生して GIF に書き出す開発用のスクリプト。必要なライブラリがなければ、入れ方を表示して終了コード 2（Red-First）（DX-11）
 
 ## 止まっていること・判断待ち

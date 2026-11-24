@@ -609,6 +609,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Keep the temporary demo directory after completion and print its path",
     )
+    demo_parser.add_argument(
+        "--teams",
+        action="store_true",
+        help="Run a 2-team concurrent demo with retry, RC tag integration, and dashboard output",
+    )
 
     # Subcommand: run
     run_parser = subparsers.add_parser("run", help="Run autonomous sequential execution loop")
@@ -928,7 +933,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.subcommand == "demo":
-        return run_demo(keep=bool(args.keep))
+        return run_demo(keep=bool(args.keep), teams=bool(args.teams))
 
     work_dir = args.work_dir.resolve()
     plan_path = args.plan or (work_dir / "PLAN.md")
