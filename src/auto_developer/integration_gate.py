@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ from typing import Any
 
 from auto_developer.bundler import EvidenceBundler
 from auto_developer.guard import GitGuard
+from auto_developer.metrics import MetricsLog
 from auto_developer.verifier import DeterministicVerifier
 from auto_developer.worktree import WorktreeError, WorktreeManager
 
@@ -166,6 +168,15 @@ class IntegrationGate:
         if self.fault_hook is not None:
             self.fault_hook(checkpoint, kwargs)
 
+    def _metrics(self) -> MetricsLog:
+        return MetricsLog(repo_dir=self.repo_dir)
+
+    def _record_event(self, event: str, **kwargs: Any) -> None:
+        try:
+            self._metrics().record_event(event, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            print(f"METRICS_WARNING: Failed to record metrics event '{event}': {e}", file=sys.stderr)
+
     def audit_team_inputs(
         self, inputs: list[TeamIntegrationInput]
     ) -> tuple[bool, dict[str, Any], list[str]]:
@@ -263,6 +274,7 @@ class IntegrationGate:
         verified_commits: dict[str, str] | None = None,
         original_branch: str | None = None,
         target_dir: Path | None = None,
+        job_id: str | None = None,
     ) -> tuple[bool, str | None, list[str]]:
         """統合ブランチ上で各チームのコミットを順次マージする。
 
@@ -291,6 +303,7 @@ class IntegrationGate:
 
             # P0-1: マージ親 (HEAD^2) の検証
             p2_proc = self._run_git(["rev-parse", "HEAD^2"], check=False, cwd=run_dir)
+            merged_commit = commit_target
             if p2_proc.returncode == 0:
                 actual_p2 = p2_proc.stdout.strip()
                 target_hash_proc = self._run_git(["rev-parse", commit_target], check=False, cwd=run_dir)
@@ -305,6 +318,16 @@ class IntegrationGate:
                     )
                     errors.append(err)
                     return False, team_id, errors
+                merged_commit = expected_p2
+            else:
+                target_hash_proc = self._run_git(["rev-parse", commit_target], check=False, cwd=run_dir)
+                if target_hash_proc.returncode == 0 and target_hash_proc.stdout.strip():
+                    merged_commit = target_hash_proc.stdout.strip()
+
+            merge_kwargs: dict[str, Any] = {"team": team_id, "commit": merged_commit}
+            if job_id is not None:
+                merge_kwargs["job_id"] = job_id
+            self._record_event("integration_merge", **merge_kwargs)
 
             # DD.3: 障害注入チェックポイント
             self._trigger_fault("after_merge", team_id=team_id)
@@ -409,12 +432,22 @@ class IntegrationGate:
             integration_branch=integration_branch,
         )
         job_state.save(self.jobs_dir)
+        failed_recorded = False
+
+        def _record_failed(reason: str) -> None:
+            nonlocal failed_recorded
+            if not failed_recorded:
+                failed_recorded = True
+                self._record_event("integration_failed", job_id=job_id, reason=reason)
+
+        self._record_event("integration_start", job_id=job_id)
 
         audit_ok, audits, audit_errors = self.audit_team_inputs(inputs)
         if not audit_ok:
             job_state.state = "FAILED"
             job_state.details["errors"] = audit_errors
             job_state.save(self.jobs_dir)
+            _record_failed("; ".join(audit_errors) if audit_errors else "AUDIT_FAILED")
             return IntegrationResult(
                 success=False,
                 status="AUDIT_FAILED",
@@ -437,6 +470,7 @@ class IntegrationGate:
             job_state.state = "FAILED"
             job_state.details["error"] = f"Integration branch '{integration_branch}' already exists."
             job_state.save(self.jobs_dir)
+            _record_failed(f"Integration branch '{integration_branch}' already exists.")
             return IntegrationResult(
                 success=False,
                 status="BRANCH_ALREADY_EXISTS",
@@ -494,8 +528,12 @@ class IntegrationGate:
                 verified_commits=verified_commits,
                 original_branch=original_branch,
                 target_dir=target_dir,
+                job_id=job_id,
             )
             if not merge_ok:
+                _record_failed(
+                    "; ".join(merge_errors) if merge_errors else f"Merge conflict for team '{conflict_team}'"
+                )
                 tree_chk = self._run_git(["status", "--porcelain"], check=False, cwd=target_dir)
                 recovery_ok = (tree_chk.returncode == 0 and not tree_chk.stdout.strip())
 
@@ -563,7 +601,14 @@ class IntegrationGate:
                 timeout_sec=timeout_sec,
                 target_dir=target_dir,
             )
+            self._record_event(
+                "integration_reverify",
+                job_id=job_id,
+                result="PASSED" if verify_ok else "FAILED",
+                exit_code=code,
+            )
             if not verify_ok:
+                _record_failed(f"Post-integration verification failed (Exit {code})")
                 # Worktree を先に削除してから隔離ブランチへリネーム
                 cleanup_status, cleanup_error = _cleanup_worktree()
                 timestamp = int(time.time())
@@ -612,6 +657,9 @@ class IntegrationGate:
                     job_state.state = "FAILED"
                     job_state.details["error"] = f"RC tag '{rc_tag}' collision."
                     job_state.save(self.jobs_dir)
+                    _record_failed(
+                        f"RC tag '{rc_tag}' already exists pointing to different commit {existing_commit}."
+                    )
                     res = IntegrationResult(
                         success=False,
                         status="RC_TAG_IMMUTABLE_BREACH",
@@ -627,6 +675,8 @@ class IntegrationGate:
                     return _attach_cleanup_info(res)
             else:
                 self._run_git(["tag", rc_tag, rc_commit], check=True)
+
+            self._record_event("rc_tag", job_id=job_id, tag=rc_tag, commit=rc_commit)
 
             self._trigger_fault("after_rc_tag", rc_tag=rc_tag, rc_commit=rc_commit)
 
@@ -652,6 +702,7 @@ class IntegrationGate:
             job_state.state = "FAILED"
             job_state.details["error"] = str(e)
             job_state.save(self.jobs_dir)
+            _record_failed(str(e))
             res = IntegrationResult(
                 success=False,
                 status="ERROR",
