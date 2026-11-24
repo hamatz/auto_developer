@@ -205,6 +205,25 @@ class TestDx10DemoTeamsCommand(unittest.TestCase):
                 dash_html = expected_dash.read_text(encoding="utf-8")
                 self.assertIn("auto-dev-status/2", dash_html)
                 self.assertIn(rc_tag, dash_html)
+                snap_m = re.search(
+                    r'<script[^>]*id="snapshot"[^>]*>(.*?)</script>',
+                    dash_html,
+                    re.DOTALL,
+                )
+                self.assertIsNotNone(snap_m, "Embedded snapshot JSON missing in demo dashboard")
+                assert snap_m is not None
+                embedded = json.loads(snap_m.group(1))
+                dash_events = embedded.get("events", [])
+                self.assertGreaterEqual(len(dash_events), 2)
+                self.assertGreaterEqual(
+                    float(embedded.get("duration", 0.0)),
+                    float(max(0, len(dash_events) - 1)),
+                )
+                for idx in range(1, len(dash_events)):
+                    self.assertGreaterEqual(
+                        float(dash_events[idx]["t"]) - float(dash_events[idx - 1]["t"]),
+                        1.0,
+                    )
             finally:
                 if kept_dir is not None and kept_dir.exists():
                     shutil.rmtree(kept_dir, ignore_errors=True)

@@ -19,6 +19,7 @@ DASHBOARD_CONFIG_REL = Path(".dev") / "dashboard.json"
 
 _GAP_THRESHOLD_SEC = 600.0
 _COMPRESSED_GAP_SEC = 3.0
+_MIN_EVENT_GAP_SEC = 1.0
 _TEAM_SCOPED_EVENTS = frozenset({
     "task_start",
     "verify_step",
@@ -79,6 +80,22 @@ def _event_source(ev_name: str) -> str:
     return "evidence"
 
 
+def _sort_timeline_events(timeline_raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sort timeline events chronologically while preserving file/input order on ties."""
+    keyed: list[tuple[float, int, dict[str, Any]]] = []
+    last_ts = float("-inf")
+    for idx, ev in enumerate(timeline_raw):
+        ts_val = _parse_ts_seconds(ev)
+        if ts_val is not None:
+            last_ts = ts_val
+            sort_ts = ts_val
+        else:
+            sort_ts = last_ts
+        keyed.append((sort_ts, idx, ev))
+    keyed.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in keyed]
+
+
 def _build_replay_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Normalize an auto-dev-status/2 snapshot into the STAT-6 replay payload."""
     repo = snapshot.get("repo") or {}
@@ -86,7 +103,7 @@ def _build_replay_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     backlog = snapshot.get("backlog") or {}
     teams_block = snapshot.get("teams")
     attention_raw = snapshot.get("attention") or []
-    timeline_raw = snapshot.get("timeline") or []
+    timeline_raw = _sort_timeline_events(list(snapshot.get("timeline") or []))
 
     base_ref = str(repo.get("branch") or "main")
     head_full = str(repo.get("head") or "")
@@ -176,19 +193,22 @@ def _build_replay_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
 
     for ev in timeline_raw:
         real_t = _parse_ts_seconds(ev)
-        if prev_real_t is not None and real_t is not None:
-            delta = max(0.0, real_t - prev_real_t)
-            if delta > _GAP_THRESHOLD_SEC:
-                gap_start = replay_t
-                replay_t += _COMPRESSED_GAP_SEC
-                gaps_out.append({
-                    "t0": round(gap_start, 3),
-                    "t1": round(replay_t, 3),
-                    "real_gap": round(delta, 1),
-                    "label": _format_gap_label(delta),
-                })
+        if events_out:
+            if prev_real_t is not None and real_t is not None:
+                delta = max(0.0, real_t - prev_real_t)
+                if delta > _GAP_THRESHOLD_SEC:
+                    gap_start = replay_t
+                    replay_t += _COMPRESSED_GAP_SEC
+                    gaps_out.append({
+                        "t0": round(gap_start, 3),
+                        "t1": round(replay_t, 3),
+                        "real_gap": round(delta, 1),
+                        "label": _format_gap_label(delta),
+                    })
+                else:
+                    replay_t += max(_MIN_EVENT_GAP_SEC, delta)
             else:
-                replay_t += delta
+                replay_t += _MIN_EVENT_GAP_SEC
         if real_t is not None:
             prev_real_t = real_t
 
