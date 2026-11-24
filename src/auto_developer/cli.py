@@ -277,6 +277,32 @@ def _compute_canonical_diff(work_dir: Path, checkpoint: str) -> bytes:
     return compute_canonical_diff(work_dir, checkpoint)
 
 
+def _verify_evidence_matches_working_tree(work_dir: Path, evidence: dict[str, Any]) -> bool:
+    """GATE-13: Evidence の Tree SHA が現在の作業ツリーと一致するか検証する。"""
+    expected_tree_sha = str(evidence.get("tree_sha", "")).strip()
+    if not expected_tree_sha:
+        print(
+            "EVIDENCE_ERROR: Verification evidence has no tree_sha. Run `auto-dev verify-step` first.",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        current_tree_sha = GitGuard(repo_dir=work_dir).get_working_tree_sha()
+    except (subprocess.CalledProcessError, OSError) as e:
+        print(
+            f"EVIDENCE_ERROR: Failed to compute working tree SHA: {e}. Run `auto-dev verify-step` first.",
+            file=sys.stderr,
+        )
+        return False
+    if current_tree_sha != expected_tree_sha:
+        print(
+            "EVIDENCE_ERROR: Working tree has changed since verification. Run `auto-dev verify-step` first.",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def _resolve_cli_team_context(
     work_dir: Path,
     *,
@@ -1836,6 +1862,8 @@ def main(argv: list[str] | None = None) -> int:
         if not checkpoint:
             print(f"EVIDENCE_ERROR: Evidence for task {args.task_id} has no checkpoint", file=sys.stderr)
             return 3
+        if not _verify_evidence_matches_working_tree(work_dir, review_evidence):
+            return 3
         try:
             diff_bytes = _compute_canonical_diff(work_dir, checkpoint)
         except subprocess.CalledProcessError as e:
@@ -1884,6 +1912,8 @@ def main(argv: list[str] | None = None) -> int:
         target_evidence = evidence_store.get_evidence(args.task_id)
         if target_evidence is None:
             print(f"EVIDENCE_ERROR: No valid verification evidence for task {args.task_id}", file=sys.stderr)
+            return 3
+        if not _verify_evidence_matches_working_tree(work_dir, target_evidence):
             return 3
 
         checker_output_path: Path = args.checker_output
