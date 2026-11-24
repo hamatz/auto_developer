@@ -262,6 +262,7 @@ def _collect_teams_snapshot(
                 "kind": "TEAM_QUARANTINE",
                 "severity": "HIGH",
                 "task_id": None,
+                "quarantine_branch": qb,
                 "message": f"Team '{tid}' quarantine branch: {qb}",
             })
 
@@ -520,7 +521,16 @@ def _collect_timeline(
             "additions": additions,
             "deletions": deletions,
         }
-        for opt_key in ("tag", "reason", "exit_code", "job_id", "model", "checker_model", "maker_model"):
+        for opt_key in (
+            "tag",
+            "reason",
+            "exit_code",
+            "job_id",
+            "model",
+            "checker_model",
+            "maker_model",
+            "quarantine_branch",
+        ):
             if opt_key in ev and ev[opt_key] is not None:
                 entry[opt_key] = ev[opt_key]
         timeline.append(entry)
@@ -697,6 +707,7 @@ def collect_status_snapshot(
             "kind": "QUARANTINE_BRANCH",
             "severity": "HIGH",
             "task_id": None,
+            "quarantine_branch": q_br,
             "message": f"Quarantine branch present: {q_br}",
         })
 
@@ -740,6 +751,20 @@ def collect_status_snapshot(
         teams_info=teams_info,
         backlog=backlog,
     )
+
+    timeline_quarantines = {
+        str(ev["quarantine_branch"]).strip()
+        for ev in timeline
+        if ev.get("event") == "rollback_step" and ev.get("quarantine_branch")
+    }
+    for item in attention:
+        if item.get("kind") in ("QUARANTINE_BRANCH", "TEAM_QUARANTINE"):
+            q_br = str(item.get("quarantine_branch") or "").strip()
+            in_timeline = bool(q_br and q_br in timeline_quarantines)
+            item["scope"] = "current" if in_timeline else "previous"
+            suffix = " (current timeline)" if in_timeline else " (previous run)"
+            if not str(item.get("message") or "").endswith(suffix):
+                item["message"] = f"{item.get('message', '')}{suffix}"
 
     return {
         "schema": STATUS_SCHEMA,
