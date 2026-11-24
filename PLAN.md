@@ -64,7 +64,7 @@
 - [x] 2. `record-review` が、記録のたびに写しと記録を `reviews/task_<id>/history/<連番>/` に残す（上書きしない。最新の記録と Bundle の中身は変えない）（Red-First）（GATE-12）
 - [x] 3. `run` / `teams run` の経路で `verify_step` / `checker_review` / `commit_step` / `rollback_step` を書く。`task_start` を加える（`run` は Maker の起動の直前、低レベルの経路は `pre-flight`）。worktree のイベントにチームの ID を入れる（Red: `teams run` の後に `events.jsonl` がない）（STAT-4）
 - [x] 4. 統合のイベント（`integration_start` / `integration_merge` / `integration_reverify` / `rc_tag` / `integration_failed`）を書く（Red-First）（STAT-4）
-- [ ] 5. スナップショットに `timeline[]`（行数つき）と `backlog` と始まり・終わりの時刻を加え、`schema` を `auto-dev-status/2` にする（Red-First）（STAT-5）
+- [x] 5. スナップショットに `timeline[]`（行数つき）と `backlog` と始まり・終わりの時刻を加え、`schema` を `auto-dev-status/2` にする（Red-First）（STAT-5）
 - [ ] 6. `auto-dev dashboard` を、見本 docs/designs/dashboard-prototype.html と同じ構成・動きの再生できる HTML にする（単一チームの形、空の時系列、10 分を超える空白の圧縮を含む）（Red-First）（STAT-6）
 - [ ] 7. `auto-dev dashboard --enable / --disable`（`.dev/dashboard.json`）、`run` / `teams run` の `--dashboard`、イベントを書くたびの作り直し（失敗は警告だけ）、`/nightly-run` と `/nightly-setup` のスキルの選択肢。`docs/cli.md` を作り直す（Red-First）（STAT-7）
 - [ ] 8. `auto-dev demo --teams [--keep]`: デモ用の Maker と Checker で2チームを並行して実行し（一方のタスクで検証に一度失敗して2回目で直る）、統合して RC タグを作り、ダッシュボードの場所を表示する。`docs/cli.md` を作り直す（Red-First）（DX-10）

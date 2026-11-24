@@ -66,7 +66,7 @@ class TestStat1StatusSingle(unittest.TestCase):
             self.assertEqual(rc, 0)
             data = json.loads(out.getvalue())
 
-            self.assertEqual(data["schema"], "auto-dev-status/1")
+            self.assertEqual(data["schema"], "auto-dev-status/2")
             self.assertEqual(data["repo"]["head"], head_sha)
             self.assertEqual(data["repo"]["branch"], "main")
             self.assertEqual(len(data["plan"]["tasks"]), 3)

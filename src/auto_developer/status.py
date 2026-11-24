@@ -14,8 +14,16 @@ from auto_developer.dispatcher import TaskDispatcher, strip_html_comments_preser
 from auto_developer.evidence import EvidenceStore, resolve_evidence_records_dir
 from auto_developer.metrics import MetricsLog
 
-STATUS_SCHEMA = "auto-dev-status/1"
+STATUS_SCHEMA = "auto-dev-status/2"
 _TASK_EVENTS = frozenset({"verify_step", "checker_review", "commit_step", "rollback_step"})
+_INTEGRATION_EVENTS = frozenset({
+    "integration_start",
+    "integration_merge",
+    "integration_reverify",
+    "rc_tag",
+    "integration_failed",
+})
+_TIMELINE_EVENTS = _TASK_EVENTS | {"task_start"} | _INTEGRATION_EVENTS
 _BLOCKED_HEADING_RE = re.compile(r"^#{1,6}\s+.*(?:止まっていること|判断待ち|Blocked|Waiting)", re.IGNORECASE)
 _ANY_HEADING_RE = re.compile(r"^#{1,6}\s+")
 _REFS_RE = re.compile(r"\[refs:\s*([^\]]+)\]")
@@ -274,6 +282,254 @@ def _collect_teams_snapshot(
     }
 
 
+def _parse_event_ts(ev: dict[str, Any]) -> tuple[float, str | None]:
+    raw_ts = ev.get("ts")
+    if isinstance(raw_ts, (int, float)) and not isinstance(raw_ts, bool):
+        ts_num = float(raw_ts)
+        return ts_num, datetime.fromtimestamp(ts_num, tz=timezone.utc).isoformat()
+    raw_iso = ev.get("timestamp")
+    if isinstance(raw_iso, str) and raw_iso.strip():
+        try:
+            dt = datetime.fromisoformat(raw_iso.strip())
+            return dt.timestamp(), raw_iso.strip()
+        except ValueError:
+            return 0.0, raw_iso.strip()
+    return 0.0, None
+
+
+def _compute_commit_numstat(
+    repo_dir: Path,
+    commit_sha: str,
+    cache: dict[str, tuple[int | None, int | None]],
+) -> tuple[int | None, int | None]:
+    """Compute (additions, deletions) for a non-merge commit via `git show --numstat`."""
+    if commit_sha in cache:
+        return cache[commit_sha]
+
+    ok_p, parents_out, _ = _run_git_text(repo_dir, ["show", "-s", "--format=%P", commit_sha])
+    if not ok_p:
+        cache[commit_sha] = (None, None)
+        return (None, None)
+    # Merge commits (2+ parents) are not counted.
+    if len(parents_out.split()) > 1:
+        cache[commit_sha] = (None, None)
+        return (None, None)
+
+    ok_stat, stat_out, _ = _run_git_text(repo_dir, ["show", "--numstat", "--format=", commit_sha])
+    if not ok_stat:
+        cache[commit_sha] = (None, None)
+        return (None, None)
+
+    additions = 0
+    deletions = 0
+    has_numeric = False
+    for line in stat_out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        add_s, del_s = parts[0].strip(), parts[1].strip()
+        if add_s.isdigit():
+            additions += int(add_s)
+            has_numeric = True
+        if del_s.isdigit():
+            deletions += int(del_s)
+            has_numeric = True
+
+    result = (additions, deletions) if has_numeric else (None, None)
+    cache[commit_sha] = result
+    return result
+
+
+def _read_team_plan_tasks(
+    repo_dir: Path,
+    team: dict[str, Any],
+    dispatcher: TaskDispatcher,
+) -> list[dict[str, str]]:
+    tid = str(team.get("team_id") or "")
+    wt_path = Path(str(team.get("worktree_path") or ""))
+    wt_exists = bool(team.get("worktree_exists")) and wt_path.is_dir()
+    plan_rel = str(team.get("plan") or f"plans/{tid}.md")
+    branch = str(team.get("branch") or f"team/{tid}")
+    branch_exists = bool(team.get("branch_exists"))
+
+    content = ""
+    wt_plan = wt_path / plan_rel
+    if wt_exists and wt_plan.is_file():
+        try:
+            content = wt_plan.read_text(encoding="utf-8")
+        except OSError:
+            content = ""
+    elif branch_exists:
+        ok, out, _ = _run_git_text(repo_dir, ["show", f"{branch}:{plan_rel}"])
+        if ok:
+            content = out
+    if not content and (repo_dir / plan_rel).is_file():
+        try:
+            content = (repo_dir / plan_rel).read_text(encoding="utf-8")
+        except OSError:
+            content = ""
+
+    tasks = dispatcher.parse_plan_text(content) if content else []
+    return [
+        {
+            "task_id": t.task_id,
+            "title": t.title,
+            "status": "failed" if t.is_failed else ("completed" if t.is_completed else "pending"),
+        }
+        for t in tasks
+    ]
+
+
+def _build_backlog(
+    repo_dir: Path,
+    tasks_raw: list[Any],
+    teams_info: dict[str, Any] | None,
+    dispatcher: TaskDispatcher,
+) -> dict[str, list[dict[str, str]]]:
+    if isinstance(teams_info, dict):
+        backlog: dict[str, list[dict[str, str]]] = {}
+        for tm in teams_info.get("teams") or []:
+            tid = str(tm.get("team_id") or "").strip()
+            if tid:
+                backlog[tid] = _read_team_plan_tasks(repo_dir, tm, dispatcher)
+        return backlog
+
+    return {
+        "plan": [
+            {
+                "task_id": t.task_id,
+                "title": t.title,
+                "status": "failed" if t.is_failed else ("completed" if t.is_completed else "pending"),
+            }
+            for t in tasks_raw
+        ]
+    }
+
+
+def _collect_timeline(
+    repo_dir: Path,
+    all_main_events: list[dict[str, Any]],
+    current_phase: str,
+    plan_task_ids: set[str],
+    teams_info: dict[str, Any] | None,
+    backlog: dict[str, list[dict[str, str]]],
+) -> tuple[list[dict[str, Any]], str | None, str | None]:
+    """Build chronologically ordered STAT-4 timeline scoped to the latest job or current plan."""
+    candidates: list[tuple[float, int, dict[str, Any]]] = []
+    seq = 0
+
+    if isinstance(teams_info, dict):
+        latest_job_id = teams_info.get("job_id")
+        team_ids = {
+            str(tm.get("team_id"))
+            for tm in (teams_info.get("teams") or [])
+            if tm.get("team_id")
+        }
+        for ev in all_main_events:
+            ev_name = str(ev.get("event") or "")
+            if ev_name not in _TIMELINE_EVENTS:
+                continue
+            if not latest_job_id or ev.get("job_id") != latest_job_id:
+                continue
+            if ev_name not in _INTEGRATION_EVENTS and ev.get("team") not in team_ids:
+                continue
+            ts_num, _ = _parse_event_ts(ev)
+            candidates.append((ts_num, seq, ev))
+            seq += 1
+
+        for tm in teams_info.get("teams") or []:
+            tid = str(tm.get("team_id") or "").strip()
+            if not tid:
+                continue
+            wt_path = Path(str(tm.get("worktree_path") or ""))
+            if not wt_path.is_dir():
+                continue
+            team_task_ids = {t["task_id"] for t in backlog.get(tid, [])}
+            wt_events = MetricsLog(repo_dir=wt_path, team_id=tid).read_all_events()
+            for ev in wt_events:
+                ev_name = str(ev.get("event") or "")
+                if ev_name not in _TIMELINE_EVENTS or ev_name in _INTEGRATION_EVENTS:
+                    continue
+                ev_tid = ev.get("task_id")
+                if team_task_ids and ev_tid is not None and str(ev_tid) not in team_task_ids:
+                    continue
+                normalized_ev = ev if ev.get("team") else {**ev, "team": tid}
+                ts_num, _ = _parse_event_ts(normalized_ev)
+                candidates.append((ts_num, seq, normalized_ev))
+                seq += 1
+    else:
+        for ev in all_main_events:
+            ev_name = str(ev.get("event") or "")
+            if ev_name not in _TIMELINE_EVENTS or ev_name in _INTEGRATION_EVENTS:
+                continue
+            ev_tid = str(ev.get("task_id") or "").strip()
+            if not ev_tid or ev_tid not in plan_task_ids:
+                continue
+            ev_phase = ev.get("phase")
+            if current_phase != "unknown" and ev_phase and ev_phase != "unknown" and ev_phase != current_phase:
+                continue
+            ts_num, _ = _parse_event_ts(ev)
+            candidates.append((ts_num, seq, ev))
+            seq += 1
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+
+    numstat_cache: dict[str, tuple[int | None, int | None]] = {}
+    seen_events: set[tuple[Any, ...]] = set()
+    timeline: list[dict[str, Any]] = []
+
+    for _, _, ev in candidates:
+        ev_name = str(ev.get("event") or "")
+        team_val = str(ev["team"]) if ev.get("team") else None
+        task_val = str(ev["task_id"]) if ev.get("task_id") is not None else None
+        commit_raw = ev.get("commit")
+        commit_sha = str(commit_raw).strip() if commit_raw else None
+
+        dedup_key = (
+            ev_name,
+            team_val,
+            task_val,
+            ev.get("ts"),
+            ev.get("timestamp"),
+            ev.get("attempt"),
+            ev.get("result"),
+            ev.get("decision"),
+            commit_sha,
+            ev.get("tag"),
+        )
+        if dedup_key in seen_events:
+            continue
+        seen_events.add(dedup_key)
+
+        _, iso_ts = _parse_event_ts(ev)
+        if commit_sha:
+            additions, deletions = _compute_commit_numstat(repo_dir, commit_sha, numstat_cache)
+        else:
+            additions, deletions = (None, None)
+
+        entry: dict[str, Any] = {
+            "ts": ev.get("ts"),
+            "timestamp": iso_ts,
+            "event": ev_name,
+            "team": team_val,
+            "task_id": task_val,
+            "attempt": ev.get("attempt"),
+            "result": ev.get("result"),
+            "decision": ev.get("decision"),
+            "commit": commit_sha,
+            "additions": additions,
+            "deletions": deletions,
+        }
+        for opt_key in ("tag", "reason", "exit_code", "job_id", "model", "checker_model", "maker_model"):
+            if opt_key in ev and ev[opt_key] is not None:
+                entry[opt_key] = ev[opt_key]
+        timeline.append(entry)
+
+    timeline_start = next((e["timestamp"] for e in timeline if e.get("timestamp") is not None), None)
+    timeline_end = next((e["timestamp"] for e in reversed(timeline) if e.get("timestamp") is not None), None)
+    return timeline, timeline_start, timeline_end
+
+
 def collect_status_snapshot(
     repo_dir: Path,
     plan_path: Path | None = None,
@@ -470,6 +726,18 @@ def collect_status_snapshot(
                 "message": outdated_msg,
             })
 
+    plan_task_ids = {t.task_id for t in tasks_raw}
+    current_phase = metrics.get_current_phase()
+    backlog = _build_backlog(resolved_repo, tasks_raw, teams_info, dispatcher)
+    timeline, timeline_start, timeline_end = _collect_timeline(
+        repo_dir=resolved_repo,
+        all_main_events=all_events,
+        current_phase=current_phase,
+        plan_task_ids=plan_task_ids,
+        teams_info=teams_info,
+        backlog=backlog,
+    )
+
     return {
         "schema": STATUS_SCHEMA,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -490,6 +758,10 @@ def collect_status_snapshot(
         "audit": audit_info,
         "teams": teams_info,
         "attention": attention,
+        "timeline": timeline,
+        "timeline_start": timeline_start,
+        "timeline_end": timeline_end,
+        "backlog": backlog,
     }
 
 
