@@ -45,6 +45,59 @@ def find_release_blockers(plan_text: str) -> list[str]:
     return blockers
 
 
+def check_audit_diff_status(
+    repo_dir: Path,
+    target_commit: str | None,
+    head_sha: str | None,
+) -> tuple[str, str]:
+    """verify-bundle と status で共有する AUDIT_OUTDATED 判定ロジック。
+
+    Returns:
+        (status, message)
+        status は "OK" | "OUTDATED" | "INVALID_TARGET_COMMIT" | "MISSING_REPO" | "DIFF_FAILED" のいずれか。
+    """
+    target_c = str(target_commit).strip() if target_commit else ""
+    if not target_c or not re.fullmatch(r"[0-9a-fA-F]{40}", target_c) or target_c == "0" * 40:
+        return (
+            "INVALID_TARGET_COMMIT",
+            f"AUDIT_TARGET_COMMIT_INVALID: Live audit record lacks a valid 40-hex target_commit SHA binding (got '{target_c}').",
+        )
+    if not head_sha or not repo_dir.exists():
+        return (
+            "MISSING_REPO",
+            "AUDIT_VERIFICATION_FAILED: Cannot verify audit diff because repository HEAD or clone directory is missing.",
+        )
+    if target_c == head_sha:
+        return "OK", ""
+
+    diff_res = subprocess.run(
+        ["git", "diff", "--no-renames", "--name-only", target_c, head_sha],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if diff_res.returncode != 0:
+        return (
+            "DIFF_FAILED",
+            f"AUDIT_DIFF_FAILED: git diff failed between target commit '{target_c[:7]}' and HEAD '{head_sha[:7]}': {diff_res.stderr.strip()}",
+        )
+
+    modified_files = [f.strip() for f in diff_res.stdout.splitlines() if f.strip()]
+    unverified_code = [
+        f
+        for f in modified_files
+        if f.startswith(("src/", "scripts/")) or (f.endswith(".py") and not f.startswith("tests/"))
+    ]
+    if unverified_code:
+        msg = (
+            f"AUDIT_OUTDATED: Implementation code was modified after audit target commit '{target_c[:7]}' without re-audit. "
+            f"Unverified modified files: {unverified_code}"
+        )
+        return ("OUTDATED", msg)
+    return "OK", ""
+
+
 @dataclass
 class BundleVerificationResult:
     is_valid: bool
@@ -890,46 +943,16 @@ class EvidenceBundler:
                             # VVV.3 / Sol氏 Phase 61 考察: ポスト監査差分検査 (Post-Audit Diff Integrity)
                             # 監査対象コミット以降にプロダクトコード（src/**, scripts/** 等）が変更されていないかを検証
                             target_commit = audit_meta.get("target_commit") or audit_stage_data.get("target_commit")
-                            target_c = str(target_commit).strip() if target_commit else ""
-                            if not target_c or not re.fullmatch(r"[0-9a-fA-F]{40}", target_c) or target_c == "0" * 40:
-                                result.audit_stage_verified = False
-                                result.warnings.append(
-                                    f"AUDIT_TARGET_COMMIT_INVALID: Live audit record lacks a valid 40-hex target_commit SHA binding (got '{target_c}')."
-                                )
-                            elif not actual_head_commit or not clone_dir.exists():
-                                result.audit_stage_verified = False
-                                result.warnings.append(
-                                    "AUDIT_VERIFICATION_FAILED: Cannot verify audit diff because repository HEAD or clone directory is missing."
-                                )
-                            elif target_c == actual_head_commit:
+                            diff_status, diff_msg = check_audit_diff_status(
+                                clone_dir,
+                                str(target_commit) if target_commit is not None else None,
+                                actual_head_commit,
+                            )
+                            if diff_status == "OK":
                                 result.audit_stage_verified = True
                             else:
-                                diff_res = subprocess.run(
-                                    ["git", "diff", "--no-renames", "--name-only", target_c, actual_head_commit],
-                                    cwd=clone_dir,
-                                    capture_output=True,
-                                    text=True,
-                                    check=False,
-                                )
-                                if diff_res.returncode != 0:
-                                    result.audit_stage_verified = False
-                                    result.warnings.append(
-                                        f"AUDIT_DIFF_FAILED: git diff failed between target commit '{target_c[:7]}' and HEAD '{actual_head_commit[:7]}': {diff_res.stderr.strip()}"
-                                    )
-                                else:
-                                    modified_files = [f.strip() for f in diff_res.stdout.splitlines() if f.strip()]
-                                    unverified_code = [
-                                        f for f in modified_files
-                                        if f.startswith(("src/", "scripts/")) or (f.endswith(".py") and not f.startswith("tests/"))
-                                    ]
-                                    if unverified_code:
-                                        result.audit_stage_verified = False
-                                        result.warnings.append(
-                                            f"AUDIT_OUTDATED: Implementation code was modified after audit target commit '{target_c[:7]}' without re-audit. "
-                                            f"Unverified modified files: {unverified_code}"
-                                        )
-                                    else:
-                                        result.audit_stage_verified = True
+                                result.audit_stage_verified = False
+                                result.warnings.append(diff_msg)
                         else:
                             result.audit_stage_verified = False
                             result.warnings.append(

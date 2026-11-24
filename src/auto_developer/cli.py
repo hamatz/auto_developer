@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -608,6 +609,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Keep the temporary demo directory after completion and print its path",
     )
+    demo_parser.add_argument(
+        "--teams",
+        action="store_true",
+        help="Run a 2-team concurrent demo with retry, RC tag integration, and dashboard output",
+    )
 
     # Subcommand: run
     run_parser = subparsers.add_parser("run", help="Run autonomous sequential execution loop")
@@ -635,6 +641,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--auditor-family", type=str, default=argparse.SUPPRESS, help="Explicit model family for Independent Auditor")
     run_parser.add_argument("--auditor-fallback-models", type=str, default=argparse.SUPPRESS, help="Comma-separated fallback models for independent auditor")
     run_parser.add_argument("--audit-baseline", type=str, default=argparse.SUPPRESS, help="Baseline commit hash for independent audit comparison")
+    run_parser.add_argument(
+        "--dashboard",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Auto-update HTML dashboard on each event during this run",
+    )
 
     # Subcommand: brief
     subparsers.add_parser("brief", help="Display morning brief of recent execution")
@@ -733,6 +745,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Output verification result in JSON format",
+    )
+
+    # Subcommand: status
+    status_parser = subparsers.add_parser("status", help="Show repository and task status snapshot")
+    status_parser.add_argument("--json", action="store_true", help="Output status snapshot in JSON format")
+
+    # Subcommand: dashboard
+    dashboard_parser = subparsers.add_parser("dashboard", help="Generate self-contained HTML status dashboard")
+    dashboard_parser.add_argument(
+        "--out", type=Path, default=None, help="Output HTML file path (default: .dev/dashboard.html)"
+    )
+    dashboard_parser.add_argument(
+        "--watch",
+        nargs="?",
+        const=5,
+        default=None,
+        type=int,
+        metavar="SECONDS",
+        help="Regenerate dashboard HTML every N seconds (default: 5) until Ctrl-C",
+    )
+    dashboard_parser.add_argument(
+        "--enable",
+        action="store_true",
+        help="Enable automatic dashboard regeneration on STAT-4 events (.dev/dashboard.json)",
+    )
+    dashboard_parser.add_argument(
+        "--disable",
+        action="store_true",
+        help="Disable automatic dashboard regeneration (.dev/dashboard.json)",
     )
 
     # Subcommand: teams
@@ -862,6 +903,12 @@ def build_parser() -> argparse.ArgumentParser:
     teams_run_parser.add_argument(
         "--json", action="store_true", help="Output run result in JSON format"
     )
+    teams_run_parser.add_argument(
+        "--dashboard",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Auto-update HTML dashboard on each event during this run",
+    )
     teams_recover_parser = teams_subparsers.add_parser(
         "recover", help="Recover interrupted multi-team job (orphaned workers/bundles/integration)"
     )
@@ -886,7 +933,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.subcommand == "demo":
-        return run_demo(keep=bool(args.keep))
+        return run_demo(keep=bool(args.keep), teams=bool(args.teams))
 
     work_dir = args.work_dir.resolve()
     plan_path = args.plan or (work_dir / "PLAN.md")
@@ -906,6 +953,70 @@ def main(argv: list[str] | None = None) -> int:
         return init_project(work_dir)
 
     # Subcommand: teams
+    if args.subcommand == "status":
+        from auto_developer.status import collect_status_snapshot, format_status_text
+
+        snapshot = collect_status_snapshot(work_dir, plan_path=args.plan)
+        if args.json:
+            print(json.dumps(snapshot, ensure_ascii=False, indent=2))
+        else:
+            print(format_status_text(snapshot))
+        return 0
+
+    if args.subcommand == "dashboard":
+        from auto_developer.dashboard import (
+            DEFAULT_DASHBOARD_REFRESH_SECONDS,
+            resolve_dashboard_output_path,
+            resolve_main_repo_dir,
+            save_dashboard_config,
+            watch_dashboard,
+            write_dashboard,
+        )
+
+        if args.enable and args.disable:
+            print("ERROR: --enable and --disable cannot be used together.", file=sys.stderr)
+            return 2
+        if args.watch is not None and (args.enable or args.disable):
+            print("ERROR: --watch cannot be combined with --enable or --disable.", file=sys.stderr)
+            return 2
+        if args.enable:
+            cfg_path = save_dashboard_config(work_dir, enabled=True, out_path=args.out)
+            main_repo = resolve_main_repo_dir(work_dir)
+            resolved_out = (
+                (work_dir.resolve() / args.out).resolve()
+                if args.out is not None and not args.out.is_absolute()
+                else (args.out.resolve() if args.out is not None else resolve_dashboard_output_path(main_repo))
+            )
+            print(f"DASHBOARD AUTO-UPDATE ENABLED: {cfg_path}")
+            try:
+                out_file = write_dashboard(
+                    main_repo,
+                    out_path=resolved_out,
+                    plan_path=args.plan,
+                    refresh_seconds=DEFAULT_DASHBOARD_REFRESH_SECONDS,
+                )
+                print(f"DASHBOARD WRITTEN: {out_file}")
+            except Exception as e:  # noqa: BLE001
+                print(f"DASHBOARD_WARNING: Failed to write initial dashboard: {e}", file=sys.stderr)
+            return 0
+        if args.disable:
+            cfg_path = save_dashboard_config(work_dir, enabled=False)
+            print(f"DASHBOARD AUTO-UPDATE DISABLED: {cfg_path}")
+            return 0
+        if args.watch is not None:
+            if args.watch < 1:
+                print("ERROR: --watch interval must be >= 1 second.", file=sys.stderr)
+                return 2
+            return watch_dashboard(
+                work_dir,
+                out_path=args.out,
+                plan_path=args.plan,
+                interval_sec=args.watch,
+            )
+        out_file = write_dashboard(work_dir, out_path=args.out, plan_path=args.plan)
+        print(f"DASHBOARD WRITTEN: {out_file}")
+        return 0
+
     if args.subcommand == "teams":
         if args.teams_subcommand == "init":
             if args.teams is not None:
@@ -991,6 +1102,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.teams_subcommand == "run":
             teams_is_mock = bool(getattr(args, "mock", False))
+            teams_dashboard = bool(getattr(args, "dashboard", False))
             teams_maker_cmd = getattr(args, "maker_cmd", "")
             teams_checker_cmd = getattr(args, "checker_cmd", "")
             teams_maker_family = getattr(args, "maker_family", None)
@@ -1010,6 +1122,7 @@ def main(argv: list[str] | None = None) -> int:
                     verify_timeout=args.timeout,
                     verify_script=args.verify_script,
                     spec_path=args.spec,
+                    dashboard=teams_dashboard,
                 )
             else:
                 teams_maker_model, teams_checker_model, _, teams_model_err = _resolve_cli_run_models(
@@ -1043,6 +1156,7 @@ def main(argv: list[str] | None = None) -> int:
                     verify_timeout=args.timeout,
                     verify_script=args.verify_script,
                     spec_path=args.spec,
+                    dashboard=teams_dashboard,
                 )
             if run_code != 2:
                 _refresh_team_report_best_effort(
@@ -1119,6 +1233,24 @@ def main(argv: list[str] | None = None) -> int:
             result["team_id"] = team_ctx.team_id
             result["plan"] = team_ctx.plan_rel_path
             result["owns"] = team_ctx.owns_patterns
+        if next_task is not None:
+            try:
+                metrics = MetricsLog(
+                    repo_dir=work_dir,
+                    plan_path=effective_plan_path,
+                    team_id=team_ctx.team_id if team_ctx else None,
+                )
+                pf_phase = metrics.get_current_phase()
+                pf_attempt = metrics.count_verify_attempts(next_task.task_id, checkpoint, phase=pf_phase) + 1
+                metrics.record_event(
+                    "task_start",
+                    task_id=next_task.task_id,
+                    checkpoint=checkpoint,
+                    attempt=pf_attempt,
+                    phase=pf_phase,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"METRICS_WARNING: Failed to record task_start event: {e}", file=sys.stderr)
         print(json.dumps(result, ensure_ascii=False))
         return 0
 
@@ -1146,7 +1278,11 @@ def main(argv: list[str] | None = None) -> int:
         if ctx_err != 0:
             return ctx_err
         effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
-        metrics = MetricsLog(repo_dir=work_dir, plan_path=effective_plan_path)
+        metrics = MetricsLog(
+            repo_dir=work_dir,
+            plan_path=effective_plan_path,
+            team_id=team_ctx.team_id if team_ctx else None,
+        )
         start_time = time.time()
         phase = metrics.get_current_phase()
         tasks = dispatcher.parse_plan(effective_plan_path)
@@ -1318,7 +1454,11 @@ def main(argv: list[str] | None = None) -> int:
         if ctx_err != 0:
             return ctx_err
         effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
-        metrics = MetricsLog(repo_dir=work_dir, plan_path=effective_plan_path)
+        metrics = MetricsLog(
+            repo_dir=work_dir,
+            plan_path=effective_plan_path,
+            team_id=team_ctx.team_id if team_ctx else None,
+        )
         tasks = dispatcher.parse_plan(effective_plan_path)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
         if not target:
@@ -1630,7 +1770,11 @@ def main(argv: list[str] | None = None) -> int:
         if ctx_err != 0:
             return ctx_err
         effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
-        metrics = MetricsLog(repo_dir=work_dir, plan_path=effective_plan_path)
+        metrics = MetricsLog(
+            repo_dir=work_dir,
+            plan_path=effective_plan_path,
+            team_id=team_ctx.team_id if team_ctx else None,
+        )
         tasks = dispatcher.parse_plan(effective_plan_path)
         target = next((t for t in tasks if t.task_id == args.task_id), None)
         task_id = target.task_id if target else args.task_id
@@ -1815,7 +1959,11 @@ def main(argv: list[str] | None = None) -> int:
             reason=args.reason or "",
         )
 
-        metrics = MetricsLog(repo_dir=work_dir, plan_path=effective_plan_path)
+        metrics = MetricsLog(
+            repo_dir=work_dir,
+            plan_path=effective_plan_path,
+            team_id=team_ctx.team_id if team_ctx else None,
+        )
         metrics.record_event(
             "checker_review",
             task_id=args.task_id,
@@ -2181,7 +2329,21 @@ def main(argv: list[str] | None = None) -> int:
         fallback_models=fallback_models,
         audit_baseline_commit=audit_baseline,
     )
-    return orchestrator.run()
+    use_dashboard = bool(getattr(args, "dashboard", False)) and not dry_run
+    prev_dash_env = os.environ.get("AUTO_DEV_DASHBOARD")
+    if use_dashboard:
+        from auto_developer.metrics import try_update_dashboard
+
+        os.environ["AUTO_DEV_DASHBOARD"] = "1"
+        try_update_dashboard(work_dir, plan_path=effective_run_plan_path)
+    try:
+        return orchestrator.run()
+    finally:
+        if use_dashboard:
+            if prev_dash_env is None:
+                os.environ.pop("AUTO_DEV_DASHBOARD", None)
+            else:
+                os.environ["AUTO_DEV_DASHBOARD"] = prev_dash_env
 
 
 if __name__ == "__main__":

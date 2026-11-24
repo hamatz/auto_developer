@@ -508,16 +508,17 @@ print(json.dumps(data))
         return lower in cls.SECRET_SSH_FILENAMES
 
     def find_secret_files_in_tree(self, checkpoint: str, tree_sha: str) -> list[str]:
-        """GATE-10: チェックポイントから tree_sha にかけて追加・変更された機密ファイル一覧を返す。"""
+        """GATE-10/11: チェックポイントから tree_sha にかけて追加・変更・種類変更された機密ファイル一覧を返す。"""
         proc = self._run_git([
             "-c", "diff.renames=false",
-            "diff-tree", "-r", "--name-only", "--diff-filter=AM",
+            "-c", "core.quotePath=false",
+            "diff-tree", "-r", "-z", "--name-only", "--diff-filter=AMT",
             f"{checkpoint}^{{tree}}", tree_sha,
         ])
         return [
-            line.strip()
-            for line in proc.stdout.splitlines()
-            if line.strip() and self.is_forbidden_commit_secret_path(line.strip())
+            entry
+            for entry in proc.stdout.split("\0")
+            if entry and self.is_forbidden_commit_secret_path(entry)
         ]
 
     @classmethod

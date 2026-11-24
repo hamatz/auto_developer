@@ -83,7 +83,7 @@ def compute_canonical_diff(work_dir: Path, checkpoint: str) -> bytes:
             capture_output=True,
         )
         proc = subprocess.run(
-            ["git", "diff", "--cached", "--no-color", "--no-ext-diff", "--no-renames", checkpoint],
+            ["git", "-c", "core.quotePath=false", "diff", "--cached", "--no-color", "--no-ext-diff", "--no-renames", checkpoint],
             cwd=work_dir,
             env=env,
             check=True,
@@ -364,6 +364,30 @@ class EvidenceStore:
         }
         review_path = reviews_dir / f"task_{task_id}.json"
         review_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # GATE-12: 記録のたびに 3 ファイルの写しと記録を history/<連番>/ にも残し、上書きしない
+        history_base = copies_dir / "history"
+        history_base.mkdir(parents=True, exist_ok=True)
+        seq = 1
+        while (history_base / str(seq)).exists():
+            seq += 1
+        hist_dir = history_base / str(seq)
+        hist_dir.mkdir(parents=True, exist_ok=False)
+        hist_out = hist_dir / "checker_output.txt"
+        hist_diff = hist_dir / "diff.patch"
+        hist_spec = hist_dir / "spec_excerpt.md"
+        shutil.copyfile(out_copy, hist_out)
+        shutil.copyfile(diff_copy, hist_diff)
+        shutil.copyfile(spec_copy, hist_spec)
+        hist_record = dict(record)
+        hist_record["copies"] = {
+            "checker_output": str(hist_out),
+            "diff": str(hist_diff),
+            "spec": str(hist_spec),
+        }
+        (hist_dir / "review.json").write_text(
+            json.dumps(hist_record, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         return record
 
     def get_review_record(self, task_id: str) -> dict[str, Any] | None:

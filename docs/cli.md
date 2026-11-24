@@ -39,6 +39,7 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | Argument / Option | Required | Default | Description |
 | --- | --- | --- | --- |
 | `--keep` | No | `False` | Keep the temporary demo directory after completion and print its path |
+| `--teams` | No | `False` | Run a 2-team concurrent demo with retry, RC tag integration, and dashboard output |
 
 ### `auto-dev run`
 
@@ -63,6 +64,7 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | `--auditor-family AUDITOR_FAMILY` | No | - | Explicit model family for Independent Auditor |
 | `--auditor-fallback-models AUDITOR_FALLBACK_MODELS` | No | - | Comma-separated fallback models for independent auditor |
 | `--audit-baseline AUDIT_BASELINE` | No | - | Baseline commit hash for independent audit comparison |
+| `--dashboard` | No | - | Auto-update HTML dashboard on each event during this run |
 
 ### `auto-dev brief`
 
@@ -156,6 +158,21 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | `bundle_path` | Yes | - | Path to bundle ZIP file |
 | `--json` | No | `False` | Output verification result in JSON format |
 
+### `auto-dev status`
+
+| Argument / Option | Required | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | No | `False` | Output status snapshot in JSON format |
+
+### `auto-dev dashboard`
+
+| Argument / Option | Required | Default | Description |
+| --- | --- | --- | --- |
+| `--out OUT` | No | - | Output HTML file path (default: .dev/dashboard.html) |
+| `--watch SECONDS` | No | - | Regenerate dashboard HTML every N seconds (default: 5) until Ctrl-C |
+| `--enable` | No | `False` | Enable automatic dashboard regeneration on STAT-4 events (.dev/dashboard.json) |
+| `--disable` | No | `False` | Disable automatic dashboard regeneration (.dev/dashboard.json) |
+
 ### `auto-dev teams`
 
 #### `auto-dev teams init`
@@ -209,6 +226,7 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | `--verify-script VERIFY_SCRIPT` | No | - | Path to verification script |
 | `--spec SPEC` | No | - | Path to SPEC.md |
 | `--json` | No | `False` | Output run result in JSON format |
+| `--dashboard` | No | - | Auto-update HTML dashboard on each event during this run |
 
 #### `auto-dev teams recover`
 
