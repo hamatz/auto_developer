@@ -583,9 +583,13 @@ def collect_status_snapshot(
     # Metrics events
     metrics = MetricsLog(repo_dir=resolved_repo, plan_path=effective_plan)
     all_events = metrics.read_all_events()
+    current_phase = metrics.get_current_phase()
     events_by_task: dict[str, list[dict[str, Any]]] = {}
     for ev in all_events:
         if ev.get("event") not in _TASK_EVENTS:
+            continue
+        ev_phase = ev.get("phase")
+        if current_phase != "unknown" and ev_phase and ev_phase != "unknown" and ev_phase != current_phase:
             continue
         tid = str(ev.get("task_id", "")).strip()
         if not tid:
@@ -727,7 +731,6 @@ def collect_status_snapshot(
             })
 
     plan_task_ids = {t.task_id for t in tasks_raw}
-    current_phase = metrics.get_current_phase()
     backlog = _build_backlog(resolved_repo, tasks_raw, teams_info, dispatcher)
     timeline, timeline_start, timeline_end = _collect_timeline(
         repo_dir=resolved_repo,
