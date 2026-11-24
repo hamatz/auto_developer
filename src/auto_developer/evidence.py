@@ -416,6 +416,36 @@ class EvidenceStore:
             and existing.get("evidence_issued_at") == evidence.get("issued_at")
         )
 
+    def count_review_history_for_evidence(self, task_id: str, evidence: dict[str, Any]) -> int:
+        """指定 Evidence に対する GATE-12 査読履歴（判定の決まらない出力を含む）の件数を返す。"""
+        import json
+
+        history_base = self.evidence_dir / "reviews" / f"task_{task_id}" / "history"
+        if not history_base.is_dir():
+            return 0
+        target_token = str(evidence.get("token", "")).strip()
+        target_issued_at = evidence.get("issued_at")
+        count = 0
+        for p in sorted(history_base.iterdir()):
+            if not p.is_dir():
+                continue
+            review_file = p / "review.json"
+            if not review_file.is_file():
+                continue
+            try:
+                rec = json.loads(review_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(rec, dict):
+                continue
+            rec_token = str(rec.get("evidence_token", "")).strip()
+            if target_token and rec_token:
+                if rec_token == target_token:
+                    count += 1
+            elif target_issued_at is not None and rec.get("evidence_issued_at") == target_issued_at:
+                count += 1
+        return count
+
     def get_review_record(self, task_id: str) -> dict[str, Any] | None:
         """指定タスクの査読記録を取得する。"""
         import json

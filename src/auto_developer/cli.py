@@ -1873,6 +1873,22 @@ def main(argv: list[str] | None = None) -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         diff_out = out_dir / "diff.patch"
         diff_out.write_bytes(diff_bytes)
+
+        diff_sha256 = hashlib.sha256(diff_bytes).hexdigest()
+        effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
+        metrics = MetricsLog(
+            repo_dir=work_dir,
+            plan_path=effective_plan_path,
+            team_id=team_ctx.team_id if team_ctx else None,
+        )
+        metrics.record_event(
+            "review_input",
+            task_id=args.task_id,
+            checkpoint=checkpoint,
+            diff_sha256=diff_sha256,
+            evidence_issued_at=review_evidence.get("issued_at"),
+        )
+
         print(f"REVIEW_INPUT_WRITTEN: {diff_out}")
         return 0
 
