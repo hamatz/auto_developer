@@ -7,6 +7,12 @@ Phase 63 ステップ 1 で再発した（Checker = `pro` = Gemini 2.5 Pro）。
 Phase 70（GATE-5 / GATE-6）で、判定は自己申告ではなく Checker の出力ファイルから読み取るようになった。
 そのため各テストは、`review-input` → Checker の出力 → `record-review` を経てから commit-step を呼ぶ。
 アサーションは Phase 64 のものをすべて保っている。
+
+Phase 74（GATE-13）で、同じ検証に対して判定の決まった査読は1回しか記録できなくなった。
+それまでこのテストは、拒否の後に同じ検証へ APPROVE を記録し直してコミットできることを確かめていたが、
+それは「REJECT の後に、検証をやり直さずに査読だけをやり直して APPROVE を記録する」抜け道そのものだった。
+拒否の後は、Evidence が消費されていないこと（`review-input` が通る）と、記録し直しが拒否されることを確かめ、
+検証からやり直せばコミットできることを確かめる形にした（人間が変更、2026-11-25）。
 """
 
 from __future__ import annotations
@@ -47,11 +53,7 @@ class TestImmunityCheckerPolicyAtCommitStep(unittest.TestCase):
         self.checkpoint = self._head()
 
         (self.repo / "app.py").write_text("def ok():\n    return True\n", encoding="utf-8")
-        res = self._orch(
-            "--verify-script", str(self.verify),
-            "verify-step", "--checkpoint", self.checkpoint, "--task-id", "1",
-        )
-        self.assertEqual(res.returncode, 0, f"verify-step failed: {res.stderr}")
+        self._verify()
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -67,7 +69,16 @@ class TestImmunityCheckerPolicyAtCommitStep(unittest.TestCase):
             cwd=self.repo, capture_output=True, text=True, check=False, timeout=120,
         )
 
-    def _review(self, decision: str, checker_model: str, maker_model: str = "gemini-3.8-flash") -> None:
+    def _verify(self) -> None:
+        res = self._orch(
+            "--verify-script", str(self.verify),
+            "verify-step", "--checkpoint", self.checkpoint, "--task-id", "1",
+        )
+        self.assertEqual(res.returncode, 0, f"verify-step failed: {res.stderr}")
+
+    def _review(
+        self, decision: str, checker_model: str, maker_model: str = "gemini-3.8-flash", expect_rc: int = 0
+    ) -> subprocess.CompletedProcess[str]:
         """Checker の出力ファイルから判定を記録する（GATE-5）。"""
         res = self._orch("review-input", "--task-id", "1", "--out-dir", str(self.io))
         self.assertEqual(res.returncode, 0, f"review-input failed: {res.stderr}")
@@ -81,7 +92,8 @@ class TestImmunityCheckerPolicyAtCommitStep(unittest.TestCase):
             "--spec-file", str(spec_file),
             "--maker-model", maker_model, "--checker-model", checker_model,
         )
-        self.assertEqual(rec.returncode, 0, f"record-review failed: {rec.stderr}")
+        self.assertEqual(rec.returncode, expect_rc, f"record-review: stdout={rec.stdout!r} stderr={rec.stderr!r}")
+        return rec
 
     def _commit(self, *extra: str) -> subprocess.CompletedProcess[str]:
         return self._orch(
@@ -94,7 +106,13 @@ class TestImmunityCheckerPolicyAtCommitStep(unittest.TestCase):
         self.assertIn("CHECKER_POLICY_VIOLATION", res.stderr)
         self.assertNotIn("COMMITTED", res.stdout)
         self.assertEqual(self._head(), self.checkpoint, "HEAD must not move on policy violation")
-        # Evidence は消費されていない: 正しい査読と引数で再実行すればコミットできる
+        # Evidence は消費されていない: review-input は、有効で今の作業ツリーと一致する Evidence がなければ終了コード 3（GATE-5、GATE-13）
+        # 同じ検証に対して査読を記録し直すことはできない（GATE-13）
+        rerec = self._review("APPROVE", "claude-opus-5-5-medium", expect_rc=4)
+        self.assertIn("CHECKER_POLICY_VIOLATION", rerec.stderr)
+        self.assertEqual(self._head(), self.checkpoint, "HEAD must not move on re-record attempt")
+        # 検証からやり直せば、正しい査読と引数でコミットできる
+        self._verify()
         self._review("APPROVE", "claude-opus-5-5-medium")
         ok = self._commit(
             "--maker-model", "gemini-3.8-flash",
