@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# auto-dev: verify-timeout=1200
+# （検証の制限時間。macOS で全体のテストに約 8 分かかるため。DX-13 で auto-dev が読む）
 set -euo pipefail
 
 echo "=== [1/4] Checking protected file invariants (tracked & untracked) ==="
