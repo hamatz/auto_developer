@@ -63,6 +63,7 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | `--auditor-family AUDITOR_FAMILY` | No | - | Explicit model family for Independent Auditor |
 | `--auditor-fallback-models AUDITOR_FALLBACK_MODELS` | No | - | Comma-separated fallback models for independent auditor |
 | `--audit-baseline AUDIT_BASELINE` | No | - | Baseline commit hash for independent audit comparison |
+| `--dashboard` | No | - | Auto-update HTML dashboard on each event during this run |
 
 ### `auto-dev brief`
 
@@ -168,6 +169,8 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | --- | --- | --- | --- |
 | `--out OUT` | No | - | Output HTML file path (default: .dev/dashboard.html) |
 | `--watch SECONDS` | No | - | Regenerate dashboard HTML every N seconds (default: 5) until Ctrl-C |
+| `--enable` | No | `False` | Enable automatic dashboard regeneration on STAT-4 events (.dev/dashboard.json) |
+| `--disable` | No | `False` | Disable automatic dashboard regeneration (.dev/dashboard.json) |
 
 ### `auto-dev teams`
 
@@ -222,6 +225,7 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | `--verify-script VERIFY_SCRIPT` | No | - | Path to verification script |
 | `--spec SPEC` | No | - | Path to SPEC.md |
 | `--json` | No | `False` | Output run result in JSON format |
+| `--dashboard` | No | - | Auto-update HTML dashboard on each event during this run |
 
 #### `auto-dev teams recover`
 

@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import html
 import json
+import os
+import subprocess
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from auto_developer.status import STATUS_SCHEMA, collect_status_snapshot
+
+DEFAULT_DASHBOARD_REFRESH_SECONDS = 5
+DASHBOARD_CONFIG_REL = Path(".dev") / "dashboard.json"
 
 _GAP_THRESHOLD_SEC = 600.0
 _COMPRESSED_GAP_SEC = 3.0
@@ -299,11 +305,15 @@ def render_dashboard_html(
             "</div>"
         )
 
+    is_live = refresh_seconds is not None and refresh_seconds > 0
     meta_refresh = (
         f'<meta http-equiv="refresh" content="{int(refresh_seconds)}">'
-        if refresh_seconds is not None and refresh_seconds > 0
+        if is_live and refresh_seconds is not None
         else ""
     )
+    mode_pill_cls = "pill live" if is_live else "pill"
+    mode_pill_label = "LIVE" if is_live else "NIGHT REPLAY"
+    live_js = "true" if is_live else "false"
 
     payload = _build_replay_payload(snapshot)
     attention_raw = snapshot.get("attention") or []
@@ -445,7 +455,7 @@ def render_dashboard_html(
 <header>
   <div class="brand">
     <h1>auto-dev</h1>
-    <span class="pill" id="mode-pill">NIGHT REPLAY</span>
+    <span class="{mode_pill_cls}" id="mode-pill">{mode_pill_label}</span>
     <span class="pill" id="job-pill">{job_pill}</span>
   </div>
   <div class="counters">
@@ -853,8 +863,11 @@ def render_dashboard_html(
   document.getElementById('btn-restart').onclick = () => {{ playing = false; playBtn.textContent = '▶ Play'; document.getElementById('packets').innerHTML = ''; seek(0, false); }};
   document.querySelectorAll('[data-speed]').forEach(b => b.onclick = () => {{ speed = +b.dataset.speed; document.querySelectorAll('[data-speed]').forEach(x => x.classList.toggle('on', x === b)); }});
   scrub.oninput = () => seek((scrub.value / 1000) * S.duration, false);
+  const LIVE = {live_js};
   const params = new URLSearchParams(location.search);
-  if (params.has('t')) seek(+params.get('t'), false); else seek(0, false);
+  if (params.has('t')) seek(+params.get('t'), false);
+  else if (LIVE) seek(S.duration, false);
+  else seek(0, false);
   if (params.has('autoplay')) playBtn.click();
 }})();
 </script>
@@ -863,19 +876,123 @@ def render_dashboard_html(
 """
 
 
+def resolve_main_repo_dir(repo_dir: Path) -> Path:
+    """Resolve the main repository root even when called from inside a git worktree."""
+    resolved = repo_dir.resolve()
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=resolved,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            common_dir = Path(proc.stdout.strip())
+            if not common_dir.is_absolute():
+                common_dir = (resolved / common_dir).resolve()
+            else:
+                common_dir = common_dir.resolve()
+            if common_dir.name == ".git":
+                return common_dir.parent
+    except OSError:
+        return resolved
+    return resolved
+
+
+def resolve_dashboard_output_path(main_repo: Path, out_raw: str | Path | None = None) -> Path:
+    """Resolve the dashboard HTML output path relative to main_repo."""
+    if out_raw:
+        p = Path(out_raw)
+        return p if p.is_absolute() else (main_repo / p)
+    return main_repo / ".dev" / "dashboard.html"
+
+
+def load_dashboard_config(repo_dir: Path) -> dict[str, Any]:
+    """Load per-repository .dev/dashboard.json from the main repository."""
+    main_repo = resolve_main_repo_dir(repo_dir)
+    cfg_path = main_repo / DASHBOARD_CONFIG_REL
+    if not cfg_path.is_file():
+        return {}
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_dashboard_config(
+    repo_dir: Path,
+    *,
+    enabled: bool,
+    out_path: Path | None = None,
+) -> Path:
+    """Persist per-repository dashboard auto-update settings in .dev/dashboard.json."""
+    resolved_work = repo_dir.resolve()
+    main_repo = resolve_main_repo_dir(resolved_work)
+    cfg_path = main_repo / DASHBOARD_CONFIG_REL
+    existing = load_dashboard_config(main_repo)
+
+    out_value: str | None
+    if out_path is not None:
+        resolved_out = out_path.resolve() if out_path.is_absolute() else (resolved_work / out_path).resolve()
+        out_value = str(resolved_out)
+    elif enabled:
+        out_value = str(main_repo / ".dev" / "dashboard.html")
+    else:
+        existing_out = existing.get("out")
+        out_value = str(existing_out) if isinstance(existing_out, str) and existing_out else None
+
+    payload: dict[str, Any] = {"enabled": enabled}
+    if out_value is not None:
+        payload["out"] = out_value
+
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return cfg_path
+
+
+def is_dashboard_auto_enabled(repo_dir: Path) -> tuple[bool, Path | None]:
+    """Return (enabled, output_path) checking ephemeral env var first, then .dev/dashboard.json."""
+    env_flag = os.environ.get("AUTO_DEV_DASHBOARD", "").strip()
+    if env_flag == "0":
+        return False, None
+    main_repo = resolve_main_repo_dir(repo_dir)
+    cfg = load_dashboard_config(main_repo)
+    raw_out = cfg.get("out")
+    cfg_out = str(raw_out) if isinstance(raw_out, str) and raw_out.strip() else None
+    if env_flag == "1":
+        env_out = os.environ.get("AUTO_DEV_DASHBOARD_OUT", "").strip() or None
+        return True, resolve_dashboard_output_path(main_repo, env_out or cfg_out)
+    if cfg.get("enabled") is True:
+        return True, resolve_dashboard_output_path(main_repo, cfg_out)
+    return False, None
+
+
 def write_dashboard(
     repo_dir: Path,
     out_path: Path | None = None,
     plan_path: Path | None = None,
     refresh_seconds: int | None = None,
 ) -> Path:
-    """Collect STAT-5 snapshot and write self-contained replayable HTML dashboard."""
-    resolved_repo = repo_dir.resolve()
+    """Collect STAT-5 snapshot and write self-contained replayable HTML dashboard atomically."""
+    resolved_repo = resolve_main_repo_dir(repo_dir)
     target = out_path or (resolved_repo / ".dev" / "dashboard.html")
     snapshot = collect_status_snapshot(resolved_repo, plan_path=plan_path)
     html_text = render_dashboard_html(snapshot, refresh_seconds=refresh_seconds)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(html_text, encoding="utf-8")
+    fd, tmp_name = tempfile.mkstemp(prefix=".dashboard_", suffix=".tmp", dir=str(target.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(html_text)
+        os.replace(tmp_path, target)
+    except BaseException:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return target
 
 

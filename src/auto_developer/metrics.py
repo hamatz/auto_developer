@@ -12,6 +12,54 @@ from typing import Any
 
 from auto_developer.dispatcher import extract_plan_scope_lines, strip_html_comments_preserving_lines
 
+STAT4_EVENTS = frozenset({
+    "task_start",
+    "verify_step",
+    "checker_review",
+    "commit_step",
+    "rollback_step",
+    "integration_start",
+    "integration_merge",
+    "integration_reverify",
+    "rc_tag",
+    "integration_failed",
+})
+_warned_dashboard_repos: set[Path] = set()
+
+
+def try_update_dashboard(repo_dir: Path, *, plan_path: Path | None = None) -> bool:
+    """STAT-7: 自動更新が有効ならダッシュボード HTML を再生成する。失敗時はリポジトリごとに1回だけ警告し False を返す。"""
+    main_repo = repo_dir.resolve()
+    try:
+        from auto_developer.dashboard import (
+            DEFAULT_DASHBOARD_REFRESH_SECONDS,
+            is_dashboard_auto_enabled,
+            resolve_main_repo_dir,
+            write_dashboard,
+        )
+
+        main_repo = resolve_main_repo_dir(repo_dir)
+        enabled, out_path = is_dashboard_auto_enabled(main_repo)
+        if not enabled:
+            return True
+        effective_plan_path = (
+            plan_path
+            if plan_path is not None and main_repo == repo_dir.resolve()
+            else None
+        )
+        write_dashboard(
+            main_repo,
+            out_path=out_path,
+            plan_path=effective_plan_path,
+            refresh_seconds=DEFAULT_DASHBOARD_REFRESH_SECONDS,
+        )
+        return True
+    except Exception as e:  # noqa: BLE001
+        if main_repo not in _warned_dashboard_repos:
+            _warned_dashboard_repos.add(main_repo)
+            print(f"DASHBOARD_WARNING: Failed to update dashboard: {e}", file=sys.stderr)
+        return False
+
 
 class MetricsLog:
     """決定論的パイプラインの各段階におけるイベントログを記録する (機能XXX.3)。"""
@@ -130,6 +178,10 @@ class MetricsLog:
             print(f"METRICS_WARNING: Failed to count verify attempts: {e}", file=sys.stderr)
             return 0
 
+    def _maybe_update_dashboard(self) -> None:
+        """STAT-7: 自動更新が有効ならダッシュボード HTML を再生成する。失敗時は1回だけ警告を出す。"""
+        try_update_dashboard(self.repo_dir, plan_path=self.plan_path)
+
     def record_event(self, event: str, **kwargs: Any) -> bool:
         """イベントを1行のJSONで追記する。書き込み失敗時も例外を上げず警告のみを出力する (非干渉)。"""
         try:
@@ -148,6 +200,8 @@ class MetricsLog:
             self.events_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.events_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            if event in STAT4_EVENTS:
+                self._maybe_update_dashboard()
             return True
         except Exception as e:  # noqa: BLE001
             print(f"METRICS_WARNING: Failed to record metrics event '{event}': {e}", file=sys.stderr)

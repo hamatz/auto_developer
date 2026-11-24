@@ -3354,6 +3354,7 @@ def run_teams_job(
     verify_timeout: int = 300,
     verify_script: Path | None = None,
     spec_path: Path | None = None,
+    dashboard: bool = False,
 ) -> tuple[dict[str, Any] | None, int, str]:
     """TEAM-15: prepare → 全チーム並行実行 → integrate を一括実行する。"""
     resolved_repo = repo_dir.resolve()
@@ -3438,117 +3439,142 @@ def run_teams_job(
         job_rec["updated_at"] = time.time()
         _save_team_job_record(resolved_repo, job_rec)
 
-    worker_env = _build_worker_pythonpath_env()
-    config = MultiTeamConfig(
-        job_id=effective_job_id,
-        teams=[
-            TeamWorkerSpec(
-                team_id=team.id,
-                base_branch=manifest.base_ref,
-                env=dict(worker_env),
-            )
-            for team in manifest.teams
-        ],
-        base_branch=manifest.base_ref,
-        integration_verify_script=verify_script,
-    )
+    from auto_developer.dashboard import is_dashboard_auto_enabled
+    from auto_developer.metrics import try_update_dashboard
 
-    def build_worker_cmd(_team_id: str, wt_path: Path) -> list[str]:
-        cmd = [sys.executable, "-m", "auto_developer.cli", "--work-dir", str(wt_path)]
-        if spec_path is not None:
-            cmd.extend(["--spec", str(spec_path.resolve())])
-        if verify_script is not None:
-            cmd.extend(["--verify-script", str(verify_script.resolve())])
-        cmd.append("run")
-        if is_mock:
-            cmd.append("--mock")
-        if maker_cmd:
-            cmd.extend(["--maker-cmd", maker_cmd])
-        if checker_cmd:
-            cmd.extend(["--checker-cmd", checker_cmd])
-        if resolved_maker_model:
-            cmd.extend(["--maker-model", resolved_maker_model])
-        if maker_family is not None:
-            cmd.extend(["--maker-family", maker_family])
-        if resolved_checker_model:
-            cmd.extend(["--checker-model", resolved_checker_model])
-        if checker_family is not None:
-            cmd.extend(["--checker-family", checker_family])
-        if verify_timeout > 0:
-            cmd.extend(["--timeout", str(verify_timeout)])
-        return cmd
-
-    orchestrator = MultiTeamOrchestrator(repo_dir=resolved_repo)
+    prev_dash_env = os.environ.get("AUTO_DEV_DASHBOARD")
+    dash_enabled_in_cfg, _ = is_dashboard_auto_enabled(resolved_repo)
+    dashboard_active = dashboard or dash_enabled_in_cfg
+    dash_suppressed = False
     try:
-        team_results = orchestrator.run_workers(
-            config,
-            worker_cmd_factory=build_worker_cmd,
-            timeout_sec=worker_timeout,
+        if dashboard_active:
+            if dashboard:
+                os.environ["AUTO_DEV_DASHBOARD"] = "1"
+            if not try_update_dashboard(resolved_repo):
+                dash_suppressed = True
+                os.environ["AUTO_DEV_DASHBOARD"] = "0"
+
+        worker_env = _build_worker_pythonpath_env()
+        if dash_suppressed:
+            worker_env["AUTO_DEV_DASHBOARD"] = "0"
+        elif dashboard:
+            worker_env["AUTO_DEV_DASHBOARD"] = "1"
+        config = MultiTeamConfig(
+            job_id=effective_job_id,
+            teams=[
+                TeamWorkerSpec(
+                    team_id=team.id,
+                    base_branch=manifest.base_ref,
+                    env=dict(worker_env),
+                )
+                for team in manifest.teams
+            ],
+            base_branch=manifest.base_ref,
+            integration_verify_script=verify_script,
         )
-    except BaseException:
-        orchestrator.terminate_all_workers()
-        raise
 
-    failed_teams = [
-        team.id
-        for team in manifest.teams
-        if team.id not in team_results or not team_results[team.id].success
-    ]
+        def build_worker_cmd(_team_id: str, wt_path: Path) -> list[str]:
+            cmd = [sys.executable, "-m", "auto_developer.cli", "--work-dir", str(wt_path)]
+            if spec_path is not None:
+                cmd.extend(["--spec", str(spec_path.resolve())])
+            if verify_script is not None:
+                cmd.extend(["--verify-script", str(verify_script.resolve())])
+            cmd.append("run")
+            if is_mock:
+                cmd.append("--mock")
+            if maker_cmd:
+                cmd.extend(["--maker-cmd", maker_cmd])
+            if checker_cmd:
+                cmd.extend(["--checker-cmd", checker_cmd])
+            if resolved_maker_model:
+                cmd.extend(["--maker-model", resolved_maker_model])
+            if maker_family is not None:
+                cmd.extend(["--maker-family", maker_family])
+            if resolved_checker_model:
+                cmd.extend(["--checker-model", resolved_checker_model])
+            if checker_family is not None:
+                cmd.extend(["--checker-family", checker_family])
+            if verify_timeout > 0:
+                cmd.extend(["--timeout", str(verify_timeout)])
+            return cmd
 
-    worker_summary = {
-        team.id: {
-            "success": bool(team_results[team.id].success) if team.id in team_results else False,
-            "status": team_results[team.id].status if team.id in team_results else "NO_RESULT",
-            "branch": team_results[team.id].branch if team.id in team_results else f"team/{team.id}",
-            "head_commit": team_results[team.id].head_commit if team.id in team_results else None,
-            "error": (
-                str(team_results[team.id].details.get("error"))
-                if team.id in team_results and team_results[team.id].details.get("error")
-                else None
-            ),
+        orchestrator = MultiTeamOrchestrator(repo_dir=resolved_repo)
+        try:
+            team_results = orchestrator.run_workers(
+                config,
+                worker_cmd_factory=build_worker_cmd,
+                timeout_sec=worker_timeout,
+            )
+        except BaseException:
+            orchestrator.terminate_all_workers()
+            raise
+
+        failed_teams = [
+            team.id
+            for team in manifest.teams
+            if team.id not in team_results or not team_results[team.id].success
+        ]
+
+        worker_summary = {
+            team.id: {
+                "success": bool(team_results[team.id].success) if team.id in team_results else False,
+                "status": team_results[team.id].status if team.id in team_results else "NO_RESULT",
+                "branch": team_results[team.id].branch if team.id in team_results else f"team/{team.id}",
+                "head_commit": team_results[team.id].head_commit if team.id in team_results else None,
+                "error": (
+                    str(team_results[team.id].details.get("error"))
+                    if team.id in team_results and team_results[team.id].details.get("error")
+                    else None
+                ),
+            }
+            for team in manifest.teams
         }
-        for team in manifest.teams
-    }
 
-    job_rec = _load_team_job_record(resolved_repo, effective_job_id)
-    if job_rec is not None:
-        job_rec["worker_results"] = worker_summary
-        job_rec["updated_at"] = time.time()
+        job_rec = _load_team_job_record(resolved_repo, effective_job_id)
+        if job_rec is not None:
+            job_rec["worker_results"] = worker_summary
+            job_rec["updated_at"] = time.time()
+            if failed_teams:
+                job_rec["status"] = "WORKER_FAILED"
+                job_rec["failed_teams"] = failed_teams
+            _save_team_job_record(resolved_repo, job_rec)
+
         if failed_teams:
-            job_rec["status"] = "WORKER_FAILED"
-            job_rec["failed_teams"] = failed_teams
-        _save_team_job_record(resolved_repo, job_rec)
+            return (
+                None,
+                1,
+                _format_worker_failure_message(
+                    effective_job_id,
+                    manifest,
+                    team_results,
+                    failed_teams,
+                    wt_paths,
+                ),
+            )
 
-    if failed_teams:
-        return (
-            None,
-            1,
-            _format_worker_failure_message(
-                effective_job_id,
-                manifest,
-                team_results,
-                failed_teams,
-                wt_paths,
-            ),
+        int_payload, int_code, int_err = integrate_teams_job(
+            resolved_repo,
+            job_id=effective_job_id,
+            verify_script=verify_script,
+            timeout_sec=verify_timeout,
         )
+        if int_payload is None:
+            return None, int_code, int_err
 
-    int_payload, int_code, int_err = integrate_teams_job(
-        resolved_repo,
-        job_id=effective_job_id,
-        verify_script=verify_script,
-        timeout_sec=verify_timeout,
-    )
-    if int_payload is None:
-        return None, int_code, int_err
+        no_changes_set = set(int_payload.get("no_changes_teams") or [])
+        for tid in no_changes_set:
+            if tid in worker_summary and worker_summary[tid].get("success"):
+                worker_summary[tid]["status"] = "NO_CHANGES"
 
-    no_changes_set = set(int_payload.get("no_changes_teams") or [])
-    for tid in no_changes_set:
-        if tid in worker_summary and worker_summary[tid].get("success"):
-            worker_summary[tid]["status"] = "NO_CHANGES"
-
-    run_payload = dict(int_payload)
-    run_payload["worker_results"] = worker_summary
-    return run_payload, 0, ""
+        run_payload = dict(int_payload)
+        run_payload["worker_results"] = worker_summary
+        return run_payload, 0, ""
+    finally:
+        if dashboard or dash_suppressed:
+            if prev_dash_env is None:
+                os.environ.pop("AUTO_DEV_DASHBOARD", None)
+            else:
+                os.environ["AUTO_DEV_DASHBOARD"] = prev_dash_env
 
 
 def format_teams_run_text(payload: dict[str, Any]) -> str:

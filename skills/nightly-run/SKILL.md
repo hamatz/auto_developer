@@ -17,6 +17,9 @@ Before starting, check whether `teams.json` exists at the workspace root:
   auto-dev teams run --maker-cmd "<cmd>" --checker-cmd "<cmd>" --maker-model <maker_model> --checker-model <checker_model>
   ```
   (`teams run` handles `prepare`, concurrent workers with `--worker-timeout` [default 21600s], and `integrate`; if any team fails, it stops without integrating.)
+- **Live Dashboard Option (Optional)**: Before starting, you may offer the user a live auto-updating HTML dashboard:
+  - Run `auto-dev dashboard --enable` (or pass `--dashboard` to `auto-dev run` / `auto-dev teams run` for that run only).
+  - Tell the user the path to open in their browser (default `.dev/dashboard.html`). The page auto-reloads and displays the latest `LIVE` state on every event. To disable persistent auto-updates later, run `auto-dev dashboard --disable`.
 
 ---
 

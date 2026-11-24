@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -635,6 +636,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--auditor-family", type=str, default=argparse.SUPPRESS, help="Explicit model family for Independent Auditor")
     run_parser.add_argument("--auditor-fallback-models", type=str, default=argparse.SUPPRESS, help="Comma-separated fallback models for independent auditor")
     run_parser.add_argument("--audit-baseline", type=str, default=argparse.SUPPRESS, help="Baseline commit hash for independent audit comparison")
+    run_parser.add_argument(
+        "--dashboard",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Auto-update HTML dashboard on each event during this run",
+    )
 
     # Subcommand: brief
     subparsers.add_parser("brief", help="Display morning brief of recent execution")
@@ -752,6 +759,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         metavar="SECONDS",
         help="Regenerate dashboard HTML every N seconds (default: 5) until Ctrl-C",
+    )
+    dashboard_parser.add_argument(
+        "--enable",
+        action="store_true",
+        help="Enable automatic dashboard regeneration on STAT-4 events (.dev/dashboard.json)",
+    )
+    dashboard_parser.add_argument(
+        "--disable",
+        action="store_true",
+        help="Disable automatic dashboard regeneration (.dev/dashboard.json)",
     )
 
     # Subcommand: teams
@@ -881,6 +898,12 @@ def build_parser() -> argparse.ArgumentParser:
     teams_run_parser.add_argument(
         "--json", action="store_true", help="Output run result in JSON format"
     )
+    teams_run_parser.add_argument(
+        "--dashboard",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Auto-update HTML dashboard on each event during this run",
+    )
     teams_recover_parser = teams_subparsers.add_parser(
         "recover", help="Recover interrupted multi-team job (orphaned workers/bundles/integration)"
     )
@@ -936,8 +959,45 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.subcommand == "dashboard":
-        from auto_developer.dashboard import watch_dashboard, write_dashboard
+        from auto_developer.dashboard import (
+            DEFAULT_DASHBOARD_REFRESH_SECONDS,
+            resolve_dashboard_output_path,
+            resolve_main_repo_dir,
+            save_dashboard_config,
+            watch_dashboard,
+            write_dashboard,
+        )
 
+        if args.enable and args.disable:
+            print("ERROR: --enable and --disable cannot be used together.", file=sys.stderr)
+            return 2
+        if args.watch is not None and (args.enable or args.disable):
+            print("ERROR: --watch cannot be combined with --enable or --disable.", file=sys.stderr)
+            return 2
+        if args.enable:
+            cfg_path = save_dashboard_config(work_dir, enabled=True, out_path=args.out)
+            main_repo = resolve_main_repo_dir(work_dir)
+            resolved_out = (
+                (work_dir.resolve() / args.out).resolve()
+                if args.out is not None and not args.out.is_absolute()
+                else (args.out.resolve() if args.out is not None else resolve_dashboard_output_path(main_repo))
+            )
+            print(f"DASHBOARD AUTO-UPDATE ENABLED: {cfg_path}")
+            try:
+                out_file = write_dashboard(
+                    main_repo,
+                    out_path=resolved_out,
+                    plan_path=args.plan,
+                    refresh_seconds=DEFAULT_DASHBOARD_REFRESH_SECONDS,
+                )
+                print(f"DASHBOARD WRITTEN: {out_file}")
+            except Exception as e:  # noqa: BLE001
+                print(f"DASHBOARD_WARNING: Failed to write initial dashboard: {e}", file=sys.stderr)
+            return 0
+        if args.disable:
+            cfg_path = save_dashboard_config(work_dir, enabled=False)
+            print(f"DASHBOARD AUTO-UPDATE DISABLED: {cfg_path}")
+            return 0
         if args.watch is not None:
             if args.watch < 1:
                 print("ERROR: --watch interval must be >= 1 second.", file=sys.stderr)
@@ -1037,6 +1097,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.teams_subcommand == "run":
             teams_is_mock = bool(getattr(args, "mock", False))
+            teams_dashboard = bool(getattr(args, "dashboard", False))
             teams_maker_cmd = getattr(args, "maker_cmd", "")
             teams_checker_cmd = getattr(args, "checker_cmd", "")
             teams_maker_family = getattr(args, "maker_family", None)
@@ -1056,6 +1117,7 @@ def main(argv: list[str] | None = None) -> int:
                     verify_timeout=args.timeout,
                     verify_script=args.verify_script,
                     spec_path=args.spec,
+                    dashboard=teams_dashboard,
                 )
             else:
                 teams_maker_model, teams_checker_model, _, teams_model_err = _resolve_cli_run_models(
@@ -1089,6 +1151,7 @@ def main(argv: list[str] | None = None) -> int:
                     verify_timeout=args.timeout,
                     verify_script=args.verify_script,
                     spec_path=args.spec,
+                    dashboard=teams_dashboard,
                 )
             if run_code != 2:
                 _refresh_team_report_best_effort(
@@ -2261,7 +2324,21 @@ def main(argv: list[str] | None = None) -> int:
         fallback_models=fallback_models,
         audit_baseline_commit=audit_baseline,
     )
-    return orchestrator.run()
+    use_dashboard = bool(getattr(args, "dashboard", False)) and not dry_run
+    prev_dash_env = os.environ.get("AUTO_DEV_DASHBOARD")
+    if use_dashboard:
+        from auto_developer.metrics import try_update_dashboard
+
+        os.environ["AUTO_DEV_DASHBOARD"] = "1"
+        try_update_dashboard(work_dir, plan_path=effective_run_plan_path)
+    try:
+        return orchestrator.run()
+    finally:
+        if use_dashboard:
+            if prev_dash_env is None:
+                os.environ.pop("AUTO_DEV_DASHBOARD", None)
+            else:
+                os.environ["AUTO_DEV_DASHBOARD"] = prev_dash_env
 
 
 if __name__ == "__main__":
