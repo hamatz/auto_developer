@@ -1915,6 +1915,13 @@ def main(argv: list[str] | None = None) -> int:
             return 3
         if not _verify_evidence_matches_working_tree(work_dir, target_evidence):
             return 3
+        if evidence_store.has_decided_review_for_evidence(args.task_id, target_evidence):
+            print(
+                f"CHECKER_POLICY_VIOLATION: Review already recorded for task {args.task_id} "
+                "on the current verification evidence; re-run verify-step before recording another review",
+                file=sys.stderr,
+            )
+            return 4
 
         checker_output_path: Path = args.checker_output
         if not checker_output_path.is_file():
@@ -1930,14 +1937,7 @@ def main(argv: list[str] | None = None) -> int:
             return 4
 
         dec = parse_checker_decision(output_text)
-        if dec is None:
-            print(
-                "CHECKER_POLICY_VIOLATION: Checker output must contain exactly one DECISION line (APPROVE or REJECT)",
-                file=sys.stderr,
-            )
-            return 4
-
-        if args.decision is not None:
+        if dec is not None and args.decision is not None:
             declared = args.decision.strip().upper()
             if declared != dec:
                 print(
@@ -1969,6 +1969,28 @@ def main(argv: list[str] | None = None) -> int:
         if not spec_excerpt.strip() or spec_excerpt not in full_spec:
             print(
                 "CHECKER_POLICY_VIOLATION: --spec-file must be a non-empty contiguous excerpt of SPEC.md",
+                file=sys.stderr,
+            )
+            return 4
+
+        if dec is None:
+            evidence_store.record_review(
+                task_id=args.task_id,
+                evidence=target_evidence,
+                decision="",
+                checker_output_path=checker_output_path,
+                diff_path=diff_file,
+                spec_path=spec_excerpt_file,
+                maker_model=args.maker_model,
+                maker_family=maker_fam,
+                maker_family_source=maker_fam_source,
+                checker_model=args.checker_model,
+                checker_family=checker_fam,
+                checker_family_source=checker_fam_source,
+                reason=args.reason or "",
+            )
+            print(
+                "CHECKER_POLICY_VIOLATION: Checker output must contain exactly one DECISION line (APPROVE or REJECT)",
                 file=sys.stderr,
             )
             return 4
