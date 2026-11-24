@@ -14,7 +14,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 には tomllib がない（CI は 3.12 で確かめる）
+    tomllib = None  # type: ignore[assignment]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / "scripts" / "record_dashboard.py"
@@ -41,6 +44,7 @@ class TestDX11RecordDashboard(unittest.TestCase):
     def test_script_exists(self) -> None:
         self.assertTrue(SCRIPT_PATH.is_file(), f"Missing script: {SCRIPT_PATH}")
 
+    @unittest.skipIf(tomllib is None, "tomllib requires Python 3.11+")
     def test_pyproject_has_no_new_runtime_dependencies(self) -> None:
         data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         deps = data.get("project", {}).get("dependencies", [])
