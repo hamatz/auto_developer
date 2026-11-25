@@ -10,7 +10,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - [x] は実装済みでテストがあるもの、[ ] は未実装（現在のフェーズの対象）を表す。
 - 新しいフェーズの要件は「## 5. 次のリリースで追加する要件」に書き、リリース後に 4 章の該当領域へ移す。
   開発の経緯（なぜそうしたか）はここに書かず、LESSONS.md・CHANGELOG.md・git 履歴に残す。
-- Checker への入力は、現在のフェーズの節を機械的に切り出した原文とする（要約しない）。例（Phase 75）:
+- Checker への入力は、現在のフェーズの節を機械的に切り出した原文とする（要約しない）。例（Phase 76）:
     awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_current.md
 - この SPEC は Elephant（人間と設計セッション）が書き、人間が承認する。Maker は変更できない（保護ファイル）。
 -->
@@ -161,6 +161,13 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - 原因（`Reason:`。保護ファイルの違反なら、そのファイルの一覧）
 - [x] **RCV-6 隔離の案内**: 隔離（RCV-1。`rollback-step`、`run`、`teams run` の経路）のあと、隔離ブランチにはなくスナップショットにだけある新しいファイル（隔離の直前に `git ls-files --others --exclude-standard` で求めた、Git が追跡しておらず `.gitignore` でも無視されていないファイル。機密を除く。INV-5）の一覧と、それを取り出すコマンド（`tar xzf <スナップショット> <パス>...`）を表示し、失敗ログ（RCV-5）にも書く。該当するファイルがない場合は、その旨を1行で示す。今の出力の1行目（`rollback-step` の `ROLLED BACK TO ...`）は変えない。
   - 一覧と案内を求める処理が失敗しても、本線の復元（RCV-1）は最後まで行い、一覧を作れなかったことと理由を1行で示す。
+- [x] **RCV-7 隔離で消えるファイルをなくす（INV-3）**: 隔離（RCV-1。`rollback-step`、`run`、`teams run` の経路）を、次のように変える。
+  - 隔離の前に、Git が追跡しておらず `.gitignore` でも無視されていないファイル（`git ls-files --others --exclude-standard`）のうち、機密の規則（INV-5。名前と中身）でスナップショットから除外されるものを求める。
+  - それらのファイルは、`git clean` の前に `git hash-object -w` で Git のオブジェクトとして書く。隔離ブランチ・スナップショット・Bundle には入れない（INV-5 は変えない）。スナップショットの照合用の一覧（manifest）に、パスとオブジェクトの SHA を記録する（中身は書かない）。
+  - 保全の段階で失敗した場合（残すべきファイルを決めるための `git ls-files --others --exclude-standard`、機密の判定のためのファイルの読み取り、`git hash-object -w` のどれかの失敗。オブジェクトを1つでも書けなかった場合を含む）は、隔離ブランチの作成・本線の復元・`git clean` のどれも行わず、作業ツリーをそのままにして終了コード 1 とし、書けなかったファイルと理由を示す（INV-3: 退避が終わる前に消さない）。
+  - RCV-6 の案内を直す。「スナップショットにだけある新しいファイル」の一覧と `tar xzf` のコマンドには、実際にスナップショットに入ったファイルだけを並べる。Git のオブジェクトとして残したファイルは、別の見出しで、ファイルごとに `git cat-file -p <SHA> > <パス>` の形の取り出し方を示す。失敗ログ（RCV-5）にも同じものを書く。ファイルの中身は表示しない。
+  - 今の出力の1行目（`rollback-step` の `ROLLED BACK TO ...`）と、失敗ログの先頭の2行（RCV-5）は変えない。
+  - 保全が終わった後の、RCV-6 の一覧と案内を作る処理の失敗は、RCV-6 のとおり、一覧を作れなかったことを示して本線の復元を最後まで行う。
 
 ### 4.4 RPT — レポートと計測
 
@@ -413,6 +420,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - 終了コード 0 のときは、確かめたコマンドの数を示す。対象のファイルが1つもない場合は終了コード 1 とする。
   - トップレベルのサブコマンドのうち、`README.md` に一度も出てこないものを、参考として一覧する（終了コードには影響しない）。
   - テストで、今のリポジトリのドキュメントが通ること、存在しないサブコマンドやオプションを書いた一時ファイルでは終了コード 1 になることを確かめる。
+- [x] **DX-15 トップレベルのオプションの省略形**: CLI のトップレベルの `ArgumentParser` は、オプションの省略形（前方一致。例: `--work` を `--work-dir` とみなす）を受け付けない（`allow_abbrev=False`）。トップレベルのオプション（`--checker-cmd` など）と、サブコマンドのオプション（`compile --check` など）が前方一致でぶつからないようにするため。サブコマンドの側の省略形は変えない。
 
 ### 4.11 STAT — 状態の表示
 
@@ -470,22 +478,9 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - `attention[]` の隔離ブランチの項目で、今の時系列の中の隔離（`rollback_step` のイベントに記録された隔離ブランチ）と、それより前の隔離を区別して示す。上部の要約の隔離の数が、今の時系列の中の隔離の数であることを、カーソルを合わせたときの説明で示す。
   - 見た目（文字の重なり）は人間が目で確かめる。テストでは、payload と HTML に、印の文字・説明・区別の情報が入っていることを確かめる。JavaScript を実行するテストは求めない。
 
-## 5. 次のリリース（v0.10.0）で追加する要件
+### 4.12 CMP — Spec Compiler
 
-<!-- v0.10.0 の目的: Auto Developer を「良い SPEC を書ける人」以外にも使えるようにする（Spec Compiler とダッシュボード）。
-     全体の方針は docs/contracts/v0.10-draft.md、Phase 75 の影響分析と設計の判断は docs/contracts/phase75.md を参照。
-     Phase 75 は、隔離で消えるファイルの修正（IDEA-026）と、Spec Compiler の土台（中間表現の形式、設計書の見出しの読み取り、決定的な点検）。
-     下書きの出力（CMP-5）、スキル `/nightly-compile`（CMP-6）、追跡（CMP-7）、影響分析（CMP-4）、ダッシュボードに計画の構造を重ねる（STAT-3）は Phase 76 で加える。 -->
-
-### 5.1 Phase 75 — 隔離の修正と Spec Compiler の土台
-
-- [ ] **RCV-7 隔離で消えるファイルをなくす（INV-3）**: 隔離（RCV-1。`rollback-step`、`run`、`teams run` の経路）を、次のように変える。
-  - 隔離の前に、Git が追跡しておらず `.gitignore` でも無視されていないファイル（`git ls-files --others --exclude-standard`）のうち、機密の規則（INV-5。名前と中身）でスナップショットから除外されるものを求める。
-  - それらのファイルは、`git clean` の前に `git hash-object -w` で Git のオブジェクトとして書く。隔離ブランチ・スナップショット・Bundle には入れない（INV-5 は変えない）。スナップショットの照合用の一覧（manifest）に、パスとオブジェクトの SHA を記録する（中身は書かない）。
-  - オブジェクトを1つでも書けなかった場合は、隔離ブランチの作成・本線の復元・`git clean` のどれも行わず、作業ツリーをそのままにして終了コード 1 とし、書けなかったファイルと理由を示す（INV-3: 退避が終わる前に消さない）。
-  - RCV-6 の案内を直す。「スナップショットにだけある新しいファイル」の一覧と `tar xzf` のコマンドには、実際にスナップショットに入ったファイルだけを並べる。Git のオブジェクトとして残したファイルは、別の見出しで、ファイルごとに `git cat-file -p <SHA> > <パス>` の形の取り出し方を示す。失敗ログ（RCV-5）にも同じものを書く。ファイルの中身は表示しない。
-  - 今の出力の1行目（`rollback-step` の `ROLLED BACK TO ...`）と、失敗ログの先頭の2行（RCV-5）は変えない。
-- [ ] **CMP-1 中間表現（IR）と形式の検査**: `auto-dev compile --check <IR の JSON> [--json]` を加える。IR は、設計書を Auto Developer の SPEC と PLAN に移すための中間の形で、形式は次のとおり（`schema` は `"auto-dev-ir/1"`）。
+- [x] **CMP-1 中間表現（IR）と形式の検査**: `auto-dev compile --check <IR の JSON> [--json]` を加える。IR は、設計書を Auto Developer の SPEC と PLAN に移すための中間の形で、形式は次のとおり（`schema` は `"auto-dev-ir/1"`）。
   - 最上位: `schema`（必須）、`source`（必須。1件以上。`{path, sha256}`。`sha256` はファイル全体のバイト列）、`purpose`、`terms[]`、`requirements[]`（必須。1件以上）、`acceptance[]`、`out_of_scope[]`、`decisions[]`、`steps[]`、`teams[]`、`verification`、`alternatives[]`、`open_questions[]`。
   - `requirements[]`: `id`（`^[A-Z]+-[0-9]+$`。IR の中で重ならない）、`statement`（空でない文字列）、`kind`（`"new"` または `"modify"`）、`acceptance`（`acceptance[]` の `id` の一覧）、`source`（元の場所）、`fingerprints`（任意。文字列の一覧）。
   - `acceptance[]`: `id`（`^AC-[0-9]+$`。重ならない）、`given`・`when`・`then`（文字列）、`observable`（観測できる結果。文字列の一覧）、`source`。
@@ -496,24 +491,67 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - 元の場所の検査（ERROR）: `path` のファイルがあること、行の範囲がファイルの中にあること、`sha256` がその範囲と一致すること（設計書が後で変わったら検出する）。最上位の `source` の `sha256` がファイル全体と一致しない場合は WARN とする（範囲ごとの一致を優先する）。
   - 終了コード: ERROR がなければ 0（WARN だけなら 0）、ERROR があれば 1、IR のファイルが読めない・JSON でない・`schema` が `"auto-dev-ir/1"` でない場合は 2。結果は、1行に1件、`ERROR|WARN <点検の ID> <IR の中の場所>: <説明>` の形で示す。`--json` では `{"schema": "auto-dev-compile-check/1", "errors": [...], "warnings": [...]}` を出す（各件は `rule`・`location`・`message`）。形式の検査の点検の ID は `F-1` とする。
   - INV-12: `compile` は、どのファイルも作成・変更しない（標準出力だけ）。
-- [ ] **CMP-2 設計書の見出しの読み取り**: `auto-dev compile --outline <設計書の markdown> [--json]` を加える。設計書の見出しを、IR の要素に対応づけて示す。LLM が IR の下書きを作るときの足場と、元の場所の行番号の基準にする。
+- [x] **CMP-2 設計書の見出しの読み取り**: `auto-dev compile --outline <設計書の markdown> [--json]` を加える。設計書の見出しを、IR の要素に対応づけて示す。LLM が IR の下書きを作るときの足場と、元の場所の行番号の基準にする。
   - 対応（見出しの文字列の先頭で判定する。大文字と小文字は区別しない。先頭の番号（`1.` など）は除いて比べる）: `Overview` と `The Problem` → `purpose`、`Glossary` または `用語定義` → `terms`、`Goals` → `requirements`、`Non-Goals` → `out_of_scope`、`Architectural Decisions` → `decisions`、`Critical User Journeys` または `CUJ` → `acceptance`、`Technical Plan` と `Detailed Implementation Plan` → `steps`、`Verification Plan` → `verification`、`Alternatives Considered` → `alternatives`。見出しの後ろの括弧書き（`(Resolved Questions)` など）は無視する。
   - コードブロック（`` ``` `` と `~~~` の囲み）の中の `#` で始まる行は、見出しとして扱わない。
   - 各見出しについて、レベル、行の範囲（その見出しの行から、同じかより上のレベルの次の見出しの前の行まで）、範囲の SHA-256（CMP-1 と同じ求め方）、対応する IR の要素（なければ `null`）を示す。
   - `Goals`、`Critical User Journeys`、`Verification Plan` と、`Technical Plan` か `Detailed Implementation Plan` のどちらか、が見つからない場合は、それを「足りない節」として示し、終了コード 1 とする。そろっていれば 0。ファイルが読めない場合は 2。
   - `--json` では `{"schema": "auto-dev-outline/1", "source": {path, sha256}, "sections": [...], "missing": [...]}` を出す。INV-12: どのファイルも作成・変更しない。
-- [ ] **CMP-3 決定的な点検**: `compile --check` に、次の点検を加える。CLI で確信できるものだけを判定し、確信できない場合を ERROR にしない（意味の判断は、Phase 76 のスキルの査読に回す）。
+- [x] **CMP-3 決定的な点検**: `compile --check` に、次の点検を加える。CLI で確信できるものだけを判定し、確信できない場合を ERROR にしない（意味の判断は、Phase 76 のスキルの査読に回す）。
   - **L-1（ERROR）**: どの要件にも、`acceptance` が1件以上あり、参照する受入条件のどれにも `observable` が1件以上ある。
   - **L-5（ERROR）**: 判断の `forbids` の語句が、要件の `statement` か、受入条件の `given`・`when`・`then` に、そのまま現れる場合は、判断と要件の食い違いとして、両方の場所を示す（大文字と小文字は区別する）。
   - **L-6（WARN）**: `--spec <SPEC.md>`（省略時は作業ディレクトリの `SPEC.md`。なければこの点検は行わない）の 4 章に同じ ID の要件があるのに `kind` が `"modify"` でない場合、または `kind` が `"modify"` なのに 4 章にその ID がない場合。
   - **L-7（ERROR）**: `teams[]` が1件以上ある場合に、2つのチームの `owns` が同じステップのファイルに当てはまる（`teams.json` の担当範囲の検査と同じ当てはめ方）、または、どのチームの `owns` にも当てはまらないステップのファイルがある。
   - **L-8（WARN）**: どの要件にもつながらないステップ、どのステップにもつながらない要件。
   - **L-9（ERROR）**: `open_questions[]` が空でない、または、要件の `statement`・受入条件の各項目・ステップの `title` に、未決の目印（`TBD`、`TODO`、`要検討`、`未定`）が含まれる。
-- [ ] **CMP-8 実物の設計書での確認**: `docs/designs/autonomous_pipeline_orchestrator.md` を入力にしたテストを置く。
+- [x] **CMP-8 実物の設計書での確認**: `docs/designs/autonomous_pipeline_orchestrator.md` を入力にしたテストを置く。
   - `compile --outline` が、Overview・Glossary（`用語定義`）・The Problem・Goals・Non-Goals・Architectural Decisions・CUJs・Technical Plan・Alternatives Considered・Detailed Implementation Plan・Verification Plan を対応づけ、`NIGHTLY_REPORT.md` のテンプレートのコードブロックの中の `#` の行を見出しとして扱わないこと。足りない節がなく、終了コード 0 になること。
   - この設計書から作った IR をテストの資料（`tests/fixtures/compile/` の下）として置く。元の場所は、設計書の実際の行と SHA-256 を指すこと。
   - その IR に対して `compile --check` が、Decision 4（隔離ブランチへの退避。`git reset --hard` と `git clean -fd` による破壊的なロールバックを廃止する）と、Goals の Fail-Fast の要件・CUJ 2 の受入条件（どちらも `git reset --hard` / `git clean -fd` を使うと書いている）の食い違いを、L-5 の ERROR として報告し、終了コード 1 になること。
   - 食い違いを直した IR（同じ資料の別のファイル）では、終了コード 0 になること。
+
+## 5. 次のリリース（v0.10.0）で追加する要件
+
+<!-- v0.10.0 の目的: Auto Developer を「良い SPEC を書ける人」以外にも使えるようにする（Spec Compiler とダッシュボード）。
+     全体の方針は docs/contracts/v0.10-draft.md、Phase 76 の影響分析と設計の判断は docs/contracts/phase76.md を参照。
+     Phase 76 は、Spec Compiler の下書きの出力（CMP-5）とスキル `/nightly-compile`（CMP-6）。
+     影響分析（CMP-4）と、ダッシュボードに計画の構造を重ねる表示（STAT-3）、承認した IR の保護は Phase 77 で加える。 -->
+
+### 5.1 Phase 76 — Spec Compiler の下書きの出力とスキル
+
+- [ ] **CMP-5 下書きの出力**: `auto-dev compile --emit <IR> [--out-dir DIR] [--lang ja|en] [--force]` を加える。IR から、人間が SPEC・PLAN・`teams.json`・契約書に写すための下書きを作る。
+  - **前提の点検**: 書き出す前に、`--check` と同じ点検（`--spec` の扱いも同じ）を行う。ERROR が1件でもあれば、何も書かずに点検の結果を示し、終了コード 1 とする。IR が読めない場合などは、`--check` と同じく終了コード 2 とする。
+  - **出力先（INV-12）**: 既定は `<作業ディレクトリ>/.dev/compile/<IR のファイル名から拡張子を除いたもの>/`。`--out-dir` は、`<作業ディレクトリ>/.dev/compile/` の下（シンボリックリンクを解決した後のパスで判定する）でなければ、何も書かずに終了コード 2 とする。出力先にファイルがある場合は、`--force` がなければ何も書かずに終了コード 2 とする。`--force` のときは、このコマンドが作る名前のファイルだけを書き直し、ほかのファイルは消さない。出力先の外のファイル（SPEC.md・PLAN.md・`teams.json`・保護ファイルを含む）は、作成・変更・削除しない。
+  - **決定的な出力**: 同じ IR と同じオプションからは、同じバイト列を出す。時刻など、実行ごとに変わる値を入れない。
+  - **共通の見出し**: Markdown のファイルの先頭に、「Spec Compiler の下書きであること。人間が読んで承認し、人間が SPEC.md・PLAN.md に写してコミットすること（INV-12）。元の IR のファイル名と SHA-256」を書く（HTML のコメントではなく、読める文として）。
+  - **`--lang`**: 下書きの見出しや決まった文言の言語（既定は `ja`）。IR の中の文（要件の文など）は、IR のとおりに写し、翻訳しない。
+  - 書き出したファイルの一覧を表示し、終了コード 0 とする。
+  - 書き出すファイル: `ir.json`（入力の IR と同じバイト列）、`check.json`（`--check --json` と同じ内容）、`spec_section.md`、`plan.md`、`contract.md`、`acceptance_tests.md`。IR の `teams[]` が1件以上ある場合は、`teams.json` と `plans/<チームの id>.md` も。各ファイルの中身は、CMP-9〜CMP-12 による。
+- [ ] **CMP-9 SPEC の節の下書き**（`spec_section.md`）:
+  - `### 5.1 （フェーズの名前）` の見出しの下に、要件を IR の順に `- [ ] **<id>**: <statement>` の形で並べる。`kind` が `"modify"` の要件は、`id` の後に「（修正）」（`en` では `(modify)`）を付ける。
+  - 各要件の下に、参照する受入条件を1件ずつ、Given・When・Then・観測できる結果（`observable`）とともに字下げして書く。
+  - 各要件の直後に、元の場所を `<!-- source: <path>:L<開始>-L<終了> sha256:<SHA-256> -->` の1行で書く（追跡のため。CMP-7 の一部）。
+  - `out_of_scope[]` があれば、「スコープ外（SPEC の 6 章に写す）」の見出しの下に並べる。
+- [ ] **CMP-10 PLAN の下書き**（`plan.md`、`teams.json`、`plans/<id>.md`）:
+  - `## ステップ` の見出しの下に、ステップを `- [ ] <n>. <title>（<要件の id をカンマで区切る>）` の形で並べる。各ステップの下に、対象のファイルを字下げして書く。この形は、既存の計画ファイルの読み取り（`- [ ] <番号>.`）で読めること。
+  - `## 既存テスト変更の理由` の見出しの下に、ステップごとに「（影響分析の後に、人間が書く。既定は「既存テストは変更しない」）」の行と、決まった3行（「このフェーズで前のステップが作ったテストの資料は、後のステップの検査に合わせて直してよい（アサーションは変えない）」「免疫テスト（`tests/immunity/**`）は変更しない」「CLI を変えたステップでは `docs/cli.md` を作り直す」）を書く。
+  - `teams[]` がある場合: `teams.json` は、既存の `teams.json` と同じ形（`version` は 1、`project` は IR のファイル名から拡張子を除いたもの、各チームの `id`・`owns`・`plan`（`plans/<id>.md`）・`depends_on`（空））で、既存の `teams.json` の読み込み（`load_teams_manifest`）で読めること。`plans/<id>.md` には、ステップの対象のファイルがすべてそのチームの `owns` に当てはまる（L-7 と同じ当てはめ方）ステップだけを、上の形で並べる。複数のチームにまたがるステップは、どのチームの計画にも入れず、契約書の「人間が判断すること」に挙げる。
+- [ ] **CMP-11 契約書の下書き**（`contract.md`）: 次の節をこの順に置く。
+  - 目的（`purpose` の文と元の場所）。
+  - 人間が判断すること: `--check` の WARN のすべて、複数のチームにまたがるステップ、「影響分析（既存のテストとドキュメントへの影響）は、Phase 77 で自動化するまで人間が書く」の1行。WARN がなくても、この節は省かない。
+  - 要件の一覧: ID・種別（新規／修正）・要件の文・受入条件の ID・元の場所の表。
+  - 判断（`decisions[]`）: 判断の文、禁じる語句（`forbids`）、元の場所。不変条件の候補として示す。
+  - 検討した代案（`alternatives[]`）。
+  - 元の文書: IR の `source[]` のパスと SHA-256。
+- [ ] **CMP-12 受入テストの案**（`acceptance_tests.md`）: 受入条件ごとに、ID を見出しにして、Given・When・Then・観測できる結果、その受入条件を参照する要件の ID、元の場所を書く。テストのコードは書かない。
+- [ ] **CMP-6 スキル `/nightly-compile`**: `skills/nightly-compile/SKILL.md` を置き、`plugin.json` の `suggestedPrompts` に `/nightly-compile` を加える。スキルは、エージェントに次の流れを指示する。
+  - **入力**: EGM の設計書（`docs/designs/*.md`）。または文書群（`goal.md`、`architecture.md`、`decision.md`、`todo.md` など）。文書群の場合は、v0.10-draft の 5.2 の対応で1つの設計書の形に組み立てて `.dev/compile/<name>.design.md` に置き、足りない節（受入条件にあたる CUJ、Verification Plan など）は推測で埋めず、人間に聞く。
+  - **見出しの確認**: `auto-dev compile --outline <設計書>` を実行する。終了コード 1（足りない節がある）なら、止まって人間に聞く。
+  - **IR の下書き**: `.dev/compile/<name>.ir.json` に、IR（`auto-dev-ir/1`）を書く。要件・受入条件・判断の文は、設計書の文に沿って書き、要約で意味を変えない。すべての要素に元の場所を付け、行の範囲は `--outline` の出力を基準にする。判断が禁じる操作は `forbids` に書く。はっきりしない点は推測で埋めず、`open_questions` に書く。
+  - **点検**: `auto-dev compile --check` を、ERROR がなくなるまで実行して直す。要件や元の場所を消して ERROR を消さない。`open_questions` による ERROR（L-9）は、人間に聞いて解消する。
+  - **独立した査読**: Maker（IR を書いたモデル）と別の系統のモデルに、設計書・IR・点検の結果だけを渡して査読させる。確かめること: 設計書の Goals・CUJ・Decisions がすべて IR にあること、要件の文が設計書の意味を変えていないこと、「A または B」の場合分け（L-2）、同じ対象への「行う」と「行わない」（L-3）、定義のない用語（L-4）。査読の出力は `.dev/compile/<name>.review.txt` に置き、最後に `DECISION: APPROVE` か `DECISION: REJECT` を書かせる。REJECT なら IR を直して点検からやり直す。REJECT が2回続いたら止まって人間に渡す。文書群から組み立てた場合は、この査読を省かない。
+  - **書き出しと引き渡し**: `auto-dev compile --emit` を実行し、`contract.md` の場所と、「人間が判断すること」の項目を人間に伝える。SPEC.md・PLAN.md・`teams.json` は書き換えない（INV-12）。写してコミットするのは人間である。
+  - スキルに書いた `auto-dev` のコマンドは、`scripts/check_doc_commands.py`（DX-14）を通ること。
 
 ## 6. スコープ外
 
