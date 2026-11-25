@@ -11,10 +11,33 @@ from typing import Any, Literal, TypeGuard
 
 IR_SCHEMA_VERSION = "auto-dev-ir/1"
 CHECK_OUTPUT_SCHEMA_VERSION = "auto-dev-compile-check/1"
+OUTLINE_OUTPUT_SCHEMA_VERSION = "auto-dev-outline/1"
 
 REQ_ID_RE = re.compile(r"^[A-Z]+-[0-9]+$")
 AC_ID_RE = re.compile(r"^AC-[0-9]+$")
 DECISION_ID_RE = re.compile(r"^D-[0-9]+$")
+
+_HEADING_IR_MAP: tuple[tuple[str, str], ...] = (
+    ("detailed implementation plan", "steps"),
+    ("architectural decisions", "decisions"),
+    ("alternatives considered", "alternatives"),
+    ("critical user journeys", "acceptance"),
+    ("verification plan", "verification"),
+    ("technical plan", "steps"),
+    ("the problem", "purpose"),
+    ("non-goals", "out_of_scope"),
+    ("overview", "purpose"),
+    ("glossary", "terms"),
+    ("用語定義", "terms"),
+    ("goals", "requirements"),
+    ("cuj", "acceptance"),
+)
+
+_TRAILING_PAREN_RE = re.compile(r"(?:\s*(?:\([^)]*\)|（[^）]*）))+\s*$")
+_LEADING_NUM_RE = re.compile(r"^\s*\d+(?:\.\d+)*[.)]?\s+")
+_FENCE_OPEN_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
+_FENCE_CLOSE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*$")
+_ATX_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*)$")
 
 
 @dataclass(frozen=True)
@@ -633,3 +656,151 @@ def check_ir_file(
     }
     exit_code = 1 if errors else 0
     return exit_code, payload, all_issues
+
+
+def _map_heading_to_ir(title: str) -> str | None:
+    """Map a markdown heading title to an IR element name using CMP-2 rules."""
+    cleaned = _TRAILING_PAREN_RE.sub("", title).strip()
+    cleaned = _LEADING_NUM_RE.sub("", cleaned).strip()
+    lowered = cleaned.lower()
+    for prefix, ir_element in _HEADING_IR_MAP:
+        if lowered.startswith(prefix):
+            return ir_element
+    return None
+
+
+def _extract_headings(text_lines: list[str]) -> list[tuple[int, int, str]]:
+    """Extract (1-based line_no, level, title) outside fenced code blocks."""
+    headings: list[tuple[int, int, str]] = []
+    fence_char: str | None = None
+    fence_len = 0
+
+    for line_no, raw_line in enumerate(text_lines, start=1):
+        stripped = raw_line.rstrip("\r\n")
+        if fence_char is not None:
+            close_match = _FENCE_CLOSE_RE.match(stripped)
+            if close_match:
+                marker = close_match.group(1)
+                if marker[0] == fence_char and len(marker) >= fence_len:
+                    fence_char = None
+                    fence_len = 0
+            continue
+
+        open_match = _FENCE_OPEN_RE.match(stripped)
+        if open_match:
+            marker = open_match.group(1)
+            info = open_match.group(2)
+            if not (marker[0] == "`" and "`" in info):
+                fence_char = marker[0]
+                fence_len = len(marker)
+                continue
+
+        heading_match = _ATX_HEADING_RE.match(stripped)
+        if heading_match:
+            level = len(heading_match.group(1))
+            title = re.sub(r"\s+#+\s*$", "", heading_match.group(2).strip()).strip()
+            if title:
+                headings.append((line_no, level, title))
+
+    return headings
+
+
+def outline_design_file(
+    doc_path: Path,
+    work_dir: Path | None = None,
+) -> tuple[int, dict[str, Any], str | None]:
+    """Parse headings from a design markdown file and map them to IR elements.
+
+    Returns (exit_code, json_payload, error_message).
+    Exit codes: 0 = all required sections found, 1 = missing required sections, 2 = unreadable.
+    """
+    resolved_root = (work_dir or Path.cwd()).resolve()
+    try:
+        resolved_doc = doc_path.resolve()
+        display_path = (
+            resolved_doc.relative_to(resolved_root).as_posix()
+            if resolved_doc.is_relative_to(resolved_root)
+            else str(doc_path)
+        )
+    except (OSError, RuntimeError):
+        display_path = str(doc_path)
+
+    try:
+        if not doc_path.exists():
+            raise FileNotFoundError(f"design file not found: {doc_path}")
+        if not doc_path.is_file():
+            raise IsADirectoryError(f"design path is not a regular file: {doc_path}")
+        raw_bytes = doc_path.read_bytes()
+        byte_lines = raw_bytes.splitlines(keepends=True)
+        text_lines = [bl.decode("utf-8") for bl in byte_lines]
+    except (OSError, UnicodeDecodeError) as exc:
+        err = f"failed to read design file: {exc}"
+        payload: dict[str, Any] = {
+            "schema": OUTLINE_OUTPUT_SCHEMA_VERSION,
+            "error": err,
+            "source": {"path": display_path, "sha256": None},
+            "sections": [],
+            "missing": [],
+        }
+        return 2, payload, err
+
+    file_sha = hashlib.sha256(raw_bytes).hexdigest()
+    total_lines = len(byte_lines)
+    headings = _extract_headings(text_lines)
+
+    sections: list[dict[str, Any]] = []
+    mapped_elements: set[str] = set()
+    for idx, (start_line, level, title) in enumerate(headings):
+        end_line = total_lines
+        for next_line, next_level, _ in headings[idx + 1 :]:
+            if next_level <= level:
+                end_line = next_line - 1
+                break
+        slice_bytes = b"".join(byte_lines[start_line - 1 : end_line])
+        section_sha = hashlib.sha256(slice_bytes).hexdigest()
+        ir_element = _map_heading_to_ir(title)
+        if ir_element is not None:
+            mapped_elements.add(ir_element)
+        sections.append(
+            {
+                "level": level,
+                "title": title,
+                "ir_element": ir_element,
+                "lines": [start_line, end_line],
+                "sha256": section_sha,
+            }
+        )
+
+    missing: list[str] = []
+    if "requirements" not in mapped_elements:
+        missing.append("Goals")
+    if "acceptance" not in mapped_elements:
+        missing.append("Critical User Journeys")
+    if "verification" not in mapped_elements:
+        missing.append("Verification Plan")
+    if "steps" not in mapped_elements:
+        missing.append("Technical Plan / Detailed Implementation Plan")
+
+    payload = {
+        "schema": OUTLINE_OUTPUT_SCHEMA_VERSION,
+        "source": {"path": display_path, "sha256": file_sha},
+        "sections": sections,
+        "missing": missing,
+    }
+    exit_code = 1 if missing else 0
+    return exit_code, payload, None
+
+
+def format_outline_text(payload: dict[str, Any]) -> list[str]:
+    """Format outline payload as human-readable lines."""
+    src = payload.get("source", {})
+    lines = [f"Source: {src.get('path')} (sha256: {src.get('sha256')})"]
+    for sec in payload.get("sections", []):
+        start, end = sec["lines"]
+        target = sec["ir_element"] if sec["ir_element"] is not None else "(unmapped)"
+        lines.append(
+            f"L{start}-L{end} [H{sec['level']}] {sec['title']} -> {target} (sha256: {sec['sha256']})"
+        )
+    for item in payload.get("missing", []):
+        lines.append(f"MISSING: {item}")
+    return lines

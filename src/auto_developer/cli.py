@@ -813,7 +813,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Subcommand: compile
     compile_parser = subparsers.add_parser(
-        "compile", help="Validate auto-dev-ir/1 JSON file (INV-12: read-only)"
+        "compile",
+        help="Validate auto-dev-ir/1 JSON or extract design outline (INV-12: read-only)",
     )
     compile_parser.add_argument(
         "--check",
@@ -821,6 +822,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="IR_JSON",
         help="Validate an auto-dev-ir/1 JSON file",
+    )
+    compile_parser.add_argument(
+        "--outline",
+        type=Path,
+        default=None,
+        metavar="DESIGN_MD",
+        help="Extract heading outline from a design markdown file",
     )
     compile_parser.add_argument(
         "--json",
@@ -988,12 +996,32 @@ def main(argv: list[str] | None = None) -> int:
         return run_demo(keep=bool(args.keep), teams=bool(args.teams))
 
     if args.subcommand == "compile":
-        from auto_developer.compiler import check_ir_file
+        from auto_developer.compiler import (
+            check_ir_file,
+            format_outline_text,
+            outline_design_file,
+        )
 
-        if args.check is None:
-            print("ERROR: --check <IR_JSON> is required.", file=sys.stderr)
+        if args.check is not None and args.outline is not None:
+            print("ERROR: --check and --outline cannot be used together.", file=sys.stderr)
             return 2
+        if args.check is None and args.outline is None:
+            print("ERROR: --check <IR_JSON> or --outline <DESIGN_MD> is required.", file=sys.stderr)
+            return 2
+
         work_dir = args.work_dir.resolve()
+        if args.outline is not None:
+            doc_path = args.outline if args.outline.is_absolute() else (work_dir / args.outline)
+            exit_code, payload, error_msg = outline_design_file(doc_path, work_dir=work_dir)
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            elif error_msg is not None:
+                print(f"ERROR: {error_msg}", file=sys.stderr)
+            else:
+                for line in format_outline_text(payload):
+                    print(line)
+            return exit_code
+
         ir_path = args.check if args.check.is_absolute() else (work_dir / args.check)
         exit_code, payload, issues = check_ir_file(ir_path, work_dir=work_dir)
         if args.json:

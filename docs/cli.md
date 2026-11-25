@@ -179,6 +179,7 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | Argument / Option | Required | Default | Description |
 | --- | --- | --- | --- |
 | `--check IR_JSON` | No | - | Validate an auto-dev-ir/1 JSON file |
+| `--outline DESIGN_MD` | No | - | Extract heading outline from a design markdown file |
 | `--json` | No | `False` | Output compile result in JSON format |
 
 ### `auto-dev teams`
