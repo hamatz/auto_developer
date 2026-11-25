@@ -845,6 +845,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compute CMP-1 source anchor {path, lines, sha256} for a file line range",
     )
     compile_parser.add_argument(
+        "--impact",
+        type=Path,
+        default=None,
+        metavar="IR_JSON",
+        help="Analyze potential repository impact from an auto-dev-ir/1 JSON file (INV-12)",
+    )
+    compile_parser.add_argument(
         "--out-dir",
         type=Path,
         default=None,
@@ -1043,6 +1050,7 @@ def main(argv: list[str] | None = None) -> int:
             format_outline_text,
             outline_design_file,
         )
+        from auto_developer.impact import analyze_ir_impact, format_impact_text
 
         selected_modes = [
             name
@@ -1051,6 +1059,7 @@ def main(argv: list[str] | None = None) -> int:
                 ("--outline", args.outline),
                 ("--emit", args.emit),
                 ("--anchor", args.anchor),
+                ("--impact", args.impact),
             )
             if val is not None
         ]
@@ -1062,12 +1071,27 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if len(selected_modes) == 0:
             print(
-                "ERROR: --check <IR_JSON>, --outline <DESIGN_MD>, --emit <IR_JSON>, or --anchor <PATH:START-END> is required.",
+                "ERROR: --check <IR_JSON>, --outline <DESIGN_MD>, --emit <IR_JSON>, --anchor <PATH:START-END>, or --impact <IR_JSON> is required.",
                 file=sys.stderr,
             )
             return 2
 
         work_dir = args.work_dir.resolve()
+        if args.impact is not None:
+            ir_path = args.impact if args.impact.is_absolute() else (work_dir / args.impact)
+            exit_code, payload, issues, error_msg = analyze_ir_impact(ir_path, work_dir=work_dir)
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            elif error_msg is not None:
+                print(f"ERROR: {error_msg}", file=sys.stderr)
+            elif exit_code != 0:
+                for issue in issues:
+                    print(issue.format_line())
+            else:
+                for line in format_impact_text(payload):
+                    print(line)
+            return exit_code
+
         if args.anchor is not None:
             exit_code, payload, error_msg = anchor_source_range(args.anchor, work_dir=work_dir)
             if args.json:
