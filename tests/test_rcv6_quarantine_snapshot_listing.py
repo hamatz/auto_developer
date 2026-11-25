@@ -117,17 +117,21 @@ class TestRcv6QuarantineSnapshotListing(unittest.TestCase):
             self.assertNotIn(".DS_Store", proc.stdout)
             self.assertNotIn("old.log", proc.stdout)
             self.assertNotIn("__pycache__", proc.stdout)
-            self.assertNotIn(".env", proc.stdout)
-            self.assertNotIn("server.pem", proc.stdout)
-            self.assertNotIn("credentials.json", proc.stdout)
+            # Secret file contents must never appear in stdout
+            self.assertNotIn("super_secret_12345", proc.stdout)
+            self.assertNotIn("BEGIN PRIVATE KEY", proc.stdout)
+            self.assertNotIn('"token": "secret"', proc.stdout)
 
-            # Must show tar xzf command that actually restores both files (including dotfile)
+            # Must show tar xzf command that actually restores both non-secret files (including dotfile)
             tar_lines = [ln for ln in proc.stdout.splitlines() if "tar xzf " in ln]
             self.assertEqual(len(tar_lines), 1, proc.stdout)
             tar_cmd_str = tar_lines[0].split("tar xzf ", 1)[1]
             tar_args = shlex.split(f"tar xzf {tar_cmd_str}")
             self.assertIn("tests/test_new_feature.py", tar_args)
             self.assertIn(".custom/new_cfg.yml", tar_args)
+            self.assertNotIn(".env", tar_args)
+            self.assertNotIn("server.pem", tar_args)
+            self.assertNotIn("credentials.json", tar_args)
 
             # New files were removed by rollback, then restored by running the tar command
             self.assertFalse((repo / "tests" / "test_new_feature.py").exists())
@@ -345,7 +349,7 @@ class TestRcv6QuarantineSnapshotListing(unittest.TestCase):
             self.assertTrue(lines[0].startswith("Snapshot-only new files: unavailable ("))
             self.assertIn("listing exploded", lines[0])
 
-    def test_orchestrator_handle_failure_logs_unavailable_when_git_ls_files_fails(self) -> None:
+    def test_orchestrator_handle_failure_aborts_without_cleaning_when_git_ls_files_fails(self) -> None:
         import io
         from contextlib import redirect_stdout
         from unittest.mock import patch
@@ -390,17 +394,17 @@ class TestRcv6QuarantineSnapshotListing(unittest.TestCase):
 
             self.assertEqual(rc, 1)
             self.assertEqual(orch.git_guard.get_current_branch(), "main")
-            self.assertFalse((repo / "new_test.py").exists())
-            status_lines = [ln for ln in _git(repo, "status", "--porcelain").splitlines() if ln.strip()]
-            self.assertEqual(status_lines, ["?? NIGHTLY_REPORT.md"])
+            self.assertTrue((repo / "new_test.py").exists())
+            self.assertEqual(_git(repo, "branch", "--list", "quarantine/*"), "")
             out = buf.getvalue()
-            self.assertIn("Snapshot-only new files: unavailable (", out)
+            self.assertIn("QUARANTINE ERROR:", out)
+            self.assertIn("ls-files failed", out)
 
             log_path = repo / "logs" / "nightly" / "task_1_failure.log"
             log_lines = log_path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(log_lines[0], "Failure Phase: VERIFY")
-            self.assertEqual(log_lines[1], "Reason: Verification failed")
-            self.assertIn("Snapshot-only new files: unavailable (", "\n".join(log_lines))
+            self.assertTrue(log_lines[1].startswith("Reason: Verification failed"))
+            self.assertIn("ls-files failed", "\n".join(log_lines))
 
     def test_quarantine_and_restore_succeeds_when_existing_manifest_is_corrupt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
