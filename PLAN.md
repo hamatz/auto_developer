@@ -71,16 +71,20 @@
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [ ] Phase 75 の準備コミット: SPEC.md（Phase 74 の要件を 4 章へ移し、RCV-6・DX-14 の文言を直す。INV-12 を加える。5.1 に Phase 75 の要件）、PLAN.md、docs/contracts/phase75.md。
+- [x] Phase 75 の準備コミット: SPEC.md（Phase 74 の要件を 4 章へ移し、RCV-6・DX-14 の文言を直す。INV-12 を加える。5.1 に Phase 75 の要件）、PLAN.md、docs/contracts/phase75.md。
 - [x] 準備のコミットの前に: Phase 74 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase74/` に退かせる。
-- [ ] ステップ 1 の完了後: 一時リポジトリで、偽の秘密鍵の文字列を含む新しいファイルと、無視されていない `.env` を作って `rollback-step` を実行し、案内のコマンドで取り出せることを確かめる。
-- [ ] ステップ 7 の完了後:
+- [x] ステップ 1 の完了後（フェーズの完了後にまとめて確認）: 一時リポジトリで、偽の秘密鍵の文字列を含む新しいファイルと、無視されていない `.env` を作って `rollback-step` を実行し、案内のコマンドで取り出せることを確かめる。
+- [x] ステップ 7 の完了後（CI は push の後に確かめる）:
   - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI（macOS・Ubuntu × Python 3.10・3.12）が通ることを確かめる。
   - 査読の記録（判定の決まらない出力の履歴を含む）と Checker の出力ファイルを突き合わせ、記録されていない出力が0件であることを確かめる。
   - Bundle を作り、`verify-bundle` が VERIFIED になることを確かめる。
   - `compile --outline` を設計書の見本に対して実行し、出力を目で確かめる。
 
 ## 記録
+- 2026-11-25: Phase 75 の完了後の確認。7 ステップすべて完了。ステップ 2 だけ REJECT が2回続いて隔離され、隔離から取り込んでやり直した。ステップ 4〜7 は1回目の査読で APPROVE。保護ファイルの変更なし。査読の記録の突き合わせで、`.dev/checker/review_p75_*.txt` の 11 件すべてが履歴に記録され、`review_input` の回数と履歴の件数も全タスクで一致した。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1066 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）と、`tests/test_red_verifier.py` の `test_reaps_multiple_descendant_processes_on_timeout` の1件（全体の実行の負荷の中でだけ失敗し、単独では3回とも通る。時間に依存するテストで、IDEA-011 と同じ種類）。Bundle は VERIFIED。`check_doc_commands.py` は 106 コマンドで終了コード 0。
+- 2026-11-25: RCV-7 の確認。一時リポジトリで、偽の秘密鍵の文字列を含む新しいファイル、無視されていない `keys/id_rsa`、普通の新しいファイルを作って `rollback-step` を実行した。作業ツリーはきれいになり、前の2つは隔離ブランチにもスナップショットにも入らず、案内の `git cat-file -p` で元の中身を取り出せた（ディレクトリは先に作る必要がある。IDEA-028）。普通のファイルは `tar xzf` で取り出せた。manifest に `git_object_files` が記録され、失敗ログにも同じ案内がある。なお、`init` の `.gitignore` が `.env` を無視するので、`.env` は隔離の対象外（作業ツリーに残る）。
+- 2026-11-25: CMP-2・CMP-3・CMP-8 の確認。`compile --outline` は、設計書の見本の 11 の節を対応づけ、`NIGHTLY_REPORT.md` のテンプレートの `# Nightly Execution Report` などを見出しにしなかった。ただし、テンプレートの中の `## 4. Next Actions for Developer` は見出しとして扱われた。原因は設計書の側にある: テンプレートの外側の `` ```markdown `` の中に `` ```text `` の入れ子があり、CommonMark の規則では、入れ子を閉じる `  ``` ` が外側を閉じてしまう（GitHub での表示も同じになる）。`--outline` は規則どおりに動いており、設計書の書き方の問題を見せた形になった（IDEA-029）。資料の IR で、L-5 の ERROR（Decision 4 と Goals・CUJ 2 の `git reset --hard` / `git clean -fd`）が4件報告され、直した IR では終了コード 0。どちらも作業ツリーを変えなかった（INV-12）。
+- 2026-11-25: フェーズの途中の判断（人間）: (1) RCV-7 で中断の対象にするのは「保全の段階」の失敗（`git ls-files`、機密の判定のための読み取り、`git hash-object -w`）。保全の後の RCV-6 の一覧と案内の失敗は、これまでどおり復元を最後まで行う。ステップ 1 で `tests/test_rcv6_quarantine_snapshot_listing.py` の `git ls-files` の失敗のテストの期待を、これに合わせて変えた。(2) CLI のトップレベルの `ArgumentParser` に `allow_abbrev=False` を付けた。トップレベルの `--checker-*` と `compile --check` が前方一致でぶつかるため。トップレベルのオプションの省略形（例: `--work`）は使えなくなる（リリースの CHANGELOG に載せる）。(3) このフェーズで前のステップが作ったテストの資料（`_make_valid_ir()` など）は、後のステップの検査に合わせて直してよい（アサーションは変えない）。次のフェーズからは、これを最初から「既存テスト変更の理由」に書く。いずれも Phase 76 の準備で SPEC の文言（RCV-7、DX の CLI の規則）に入れる。
 - 2026-11-25: Phase 74 のマージの前の CI で、macOS・Python 3.12 だけ `tests/test_level7_real_loop_e2e.py` の `test_hostile_untracked_tamper_blocked_by_snapshot_and_not_promoted` が失敗した（`TRIVIAL_RED` != `REPO_TAMPER_DETECTED`）。Phase 74 の変更が原因ではない（Phase 73 の終わりの 441a82e でも、このテストを単独で実行すると Linux でも失敗する）。テストの改ざんの仕掛けが、サンドボックスの起動の確認（キャッシュされる）でも働いていた。キャッシュがないとき（単独の実行や、スレッド数が変わって上限の組が変わったとき）は、改ざんが改ざん前のスナップショットより前に起き、検知の対象外になっていた。人間がテストを直した: 改ざんは、改ざん前のスナップショットを取った後にだけ起こす。製品のコードは変えていない。
 - 2026-11-25: Phase 75 の準備。Phase 74 の完了の確認で見つかった IDEA-026（隔離で新しいファイルが消える）を最初のステップ（RCV-7）にし、そのあと Spec Compiler の土台（CMP-1〜3、CMP-8）に入ることを人間が決めた。v0.10-draft の段取りは、ダッシュボードの作り直し（Phase 73）と手直し（Phase 74）が入ったので、2つずつずらした。SPEC の Phase 74 の要件を 4 章へ移すときに、フェーズの途中で決めた解釈（RCV-6 の「新しいファイル」、DX-14 の対象の書き方）を文言に入れ、INV-12 を加えた。
 - 2026-11-25: Phase 74 の完了後の確認。8 ステップすべて完了。ステップ 5・7・8 は REJECT が2回続いて隔離され、隔離から取り込んでやり直した。ステップ 1〜4 は1回目の査読で APPROVE（Phase 73 より小さく切った効果）。保護ファイルを変えたのは人間のコミット（準備、免疫テストの修正 8a99ca2）だけ。査読の記録の突き合わせで、`.dev/checker/review_p74_*.txt` の 15 件すべてが履歴に記録されていた。`review_input` の回数と履歴の件数も、すべてのタスクで一致した（記録されていない査読は0件）。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1002 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）だけ。Bundle は VERIFIED。`scripts/check_doc_commands.py` は 6 ファイルの 106 コマンドを確かめて終了コード 0。
