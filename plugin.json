@@ -9,6 +9,7 @@
   "suggestedPrompts": [
     "/nightly-run",
     "/nightly-setup",
+    "/nightly-compile",
     "/nightly-bundle",
     "/nightly-verify"
   ]
