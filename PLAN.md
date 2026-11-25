@@ -71,16 +71,19 @@
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [ ] Phase 76 の準備コミット: SPEC.md（Phase 75 の要件を 4 章へ移し、4.12 CMP を新設、RCV-7 の文言を直し、DX-15 を加える。5.1 に Phase 76 の要件）、PLAN.md、docs/contracts/phase76.md。
+- [x] Phase 76 の準備コミット: SPEC.md（Phase 75 の要件を 4 章へ移し、4.12 CMP を新設、RCV-7 の文言を直し、DX-15 を加える。5.1 に Phase 76 の要件）、PLAN.md、docs/contracts/phase76.md。
 - [x] 準備のコミットの前に: Phase 75 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase75/` に退かせる。
-- [ ] ステップ 4 の完了後: テストの資料の IR から書き出した下書きを読み、SPEC と PLAN に写せる形かを目で確かめる。
-- [ ] ステップ 5 の完了後:
+- [x] ステップ 4 の完了後（フェーズの完了後にまとめて確認）: テストの資料の IR から書き出した下書きを読み、SPEC と PLAN に写せる形かを目で確かめる。
+- [x] ステップ 5 の完了後（CI は push の後に確かめる）:
   - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI（macOS・Ubuntu × Python 3.10・3.12、gitleaks）が通ることを確かめる。
   - 査読の記録（判定の決まらない出力の履歴を含む）と Checker の出力ファイルを突き合わせ、記録されていない出力が0件であることを確かめる。
   - Bundle を作り、`verify-bundle` が VERIFIED になることを確かめる。
   - 設計書の見本に対して `/nightly-compile` の流れを一度通し、使える形かを確かめる。
 
 ## 記録
+- 2026-11-25: Phase 76 の完了後の確認。5 ステップすべて完了し、隔離は0回。ステップ 1 だけ1回目の査読が REJECT で、ステップ 2〜5 は1回目で APPROVE。保護ファイルの変更なし。査読の記録の突き合わせで、`.dev/checker/review_p76_*.txt` の6件すべてが履歴に記録され、`review_input` の回数と履歴の件数も全タスクで一致した。ステップ 2〜5 には `task_start` のイベントがない（`pre-flight` を呼ばずに進めた。ダッシュボードの backlog は `verify_step` で減るので表示への影響は小さい）。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1094 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）だけ。Bundle は VERIFIED。`check_doc_commands.py` は新しいスキルを含む7ファイル・111 コマンドで終了コード 0。
+- 2026-11-25: 下書きの確認。テストの資料の IR（設計書の見本から作ったもの）で `compile --emit` を実行し、`spec_section.md`・`plan.md`・`contract.md`・`acceptance_tests.md` を読んだ。注意書き、要件と受入条件、元の場所のコメント、`- [ ] <番号>.` の形のステップ、判断の禁じる語句、「人間が判断すること」がそろっていて、SPEC と PLAN に写せる形だった。チームのある IR（チームをまたぐステップを含む）では、`teams.json` が `load_teams_manifest` で読め、またぐステップはチームの計画に入らず、契約書の「人間が判断すること」に挙がった。2回目の `--emit` は `--force` がないので終了コード 2、`.dev/compile/` の外への `--out-dir` も終了コード 2。どちらも作業ツリーを変えなかった（INV-12）。
+- 2026-11-25: スキル `/nightly-compile` の確認で見つかったこと: (1) 要件ごとの元の場所の SHA-256 を、エージェントがどう求めるかが書かれていない（`--outline` が示すのは見出しの範囲の SHA-256 だけ）。`sed -n '<開始>,<終了>p' <ファイル> | shasum -a 256` が CMP-1 の求め方と一致することを確かめた。(2) スキルは出力先を `.dev/compile/<name>/` と書いているが、IR を `<name>.ir.json` にすると、実際は `.dev/compile/<name>.ir/` になり、`teams.json` の `project` も `<name>.ir` になる。(3) スキルが、このリポジトリの中の文書（v0.10-draft の 5.2）を参照している。対応はスキルに書き写してあるが、ほかのリポジトリの利用者には参照先がない。いずれも IDEA-030 に入れた。
 - 2026-11-25: Phase 76 の準備。v0.10-draft の残りを、Phase 76（下書きの出力 CMP-5 とスキル CMP-6）と Phase 77（影響分析 CMP-4 と表示 STAT-3）に分けることを人間が決めた。下書きの言語（v0.10-draft 7 章の5）は、見出しや決まった文言を `--lang`（既定 `ja`）で選び、IR の中の文は翻訳しない、とした。SPEC の Phase 75 の要件を 4 章へ移すときに、RCV-7 の中断の範囲（保全の段階の失敗）を文言に入れ、`allow_abbrev=False` を DX-15 として加えた。CMP-5 の書き出すファイルごとの要件は、ID の形（`[A-Z]+-[0-9]+`）に合わせて CMP-9〜12 とした。
 - 2026-11-25: Phase 75 の後の CI で、macOS・Ubuntu とも gitleaks が `tests/test_rcv7_quarantine_git_object.py`（cc4722d）の偽の秘密鍵の目印2件を `private-key` として検知して失敗した（同じ diff の中の2つの目印の間が、1つの鍵の塊として当てはまった）。本物の鍵ではない。人間が直した: その2件の fingerprint を `.gitleaksignore` に加え、テストの目印を実行時に組み立てる形に変えた（今後の diff に出ないように）。作業手順にも規則を足した。
 - 2026-11-25: Phase 75 の完了後の確認。7 ステップすべて完了。ステップ 2 だけ REJECT が2回続いて隔離され、隔離から取り込んでやり直した。ステップ 4〜7 は1回目の査読で APPROVE。保護ファイルの変更なし。査読の記録の突き合わせで、`.dev/checker/review_p75_*.txt` の 11 件すべてが履歴に記録され、`review_input` の回数と履歴の件数も全タスクで一致した。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1066 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）と、`tests/test_red_verifier.py` の `test_reaps_multiple_descendant_processes_on_timeout` の1件（全体の実行の負荷の中でだけ失敗し、単独では3回とも通る。時間に依存するテストで、IDEA-011 と同じ種類）。Bundle は VERIFIED。`check_doc_commands.py` は 106 コマンドで終了コード 0。
