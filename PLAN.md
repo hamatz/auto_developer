@@ -4,16 +4,16 @@
 現在のタスク進捗と次の一手。会話ログではなく、ここに状態を残す。
 実装エージェントは1回に1ステップだけを担当し、終わったらチェックを付けてコミットする。
 セッションが切れても、SPEC.md・このファイル・git の履歴を読めば作業を再開できる状態に保つ。
-前のフェーズの PLAN は git の履歴で参照する（Phase 74 は fca3875 時点の PLAN.md）。
+前のフェーズの PLAN は git の履歴で参照する（Phase 75 は dae87e5 時点の PLAN.md）。
 -->
 
 ## 現在の目標
-- Phase 75: 隔離の修正と Spec Compiler の土台（SPEC.md 5.1: RCV-7, CMP-1, CMP-2, CMP-3, CMP-8）
-  - 要件ごとの影響分析と設計の判断は docs/contracts/phase75.md を参照する。「既存テスト変更の理由」は、この分析から作っている。
-  - Spec Compiler の全体の方針は docs/contracts/v0.10-draft.md。INV-12: `compile` は、どのファイルも作成・変更しない。
-- スコープ外: 下書きの出力（CMP-5）、スキル `/nightly-compile`（CMP-6）、追跡（CMP-7）、影響分析（CMP-4）、ダッシュボードに計画の構造を重ねる（STAT-3）。いずれも Phase 76。README の更新（リリースのフェーズ）。
+- Phase 76: Spec Compiler の下書きの出力とスキル（SPEC.md 5.1: CMP-5, CMP-9, CMP-10, CMP-11, CMP-12, CMP-6）
+  - 要件ごとの影響分析と設計の判断は docs/contracts/phase76.md を参照する。「既存テスト変更の理由」は、この分析から作っている。
+  - INV-12: `compile` は、`.dev/compile/` の下の下書きのほかに、どのファイルも作成・変更しない。SPEC.md・PLAN.md・`teams.json` は人間が書く。
+- スコープ外: 影響分析（CMP-4）、ダッシュボードに計画の構造を重ねる表示（STAT-3）、承認した IR の保護（いずれも Phase 77）。README の更新（リリースのフェーズ）。
 
-## 作業手順（Phase 75・LESSONS.md に基づく）
+## 作業手順（Phase 76・LESSONS.md に基づく）
 - Maker と Checker は別系統のモデルにする（`commit-step` が終了コード 4 で強制する）。使うモデルを変えたときは、この節と「記録」に書く。
   - Maker: `gemini-4-hydrogen-medium`
   - Checker: `claude-sonnet-5-5`（Anthropic API 利用。環境変数 `ANTHROPIC_API_KEY` を利用）
@@ -21,10 +21,10 @@
 - **Checker の完了の通知だけでは、次に進まない。** Checker のプロセスが終わり、出力ファイルから判定が1つに決まること（GATE-5 の判定の読み取りの規則）を確かめてから記録する。
 - Checker には、指摘は要点だけにして、判定（`DECISION: APPROVE` / `DECISION: REJECT` の行、または出力全体が1つの JSON）を必ず出力の最後に書くよう求める。Checker の出力の上限（`max_tokens`）は 16384 にする（4096 では、考える部分と合わせて出力が途中で切れることがあった）。
 - Checker への入力は、要約・再構成しない。
-  1. SPEC の該当節: `awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_phase75.md`
-  2. 差分: `auto-dev review-input --task-id <n> --out-dir .dev/checker/p75_task<n>`（やり直したときは `_v2` などを付ける）
-  3. Checker の出力: `.dev/checker/review_p75_task<n>.txt` に置く（やり直したときは `_v2` などを付け、上書きしない）。
-- Checker には、SPEC の要件のうち、例外・異常系・境界値の扱いを満たしているかを、差分とテストの両方で確かめるよう求める。点検（CMP-3）のうち、このフェーズで CLI に置かないもの（L-2・L-3・L-4、影響分析 I-1〜I-4）は、REJECT の理由にしないよう伝える（契約書 3.4）。
+  1. SPEC の該当節: `awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_phase76.md`
+  2. 差分: `auto-dev review-input --task-id <n> --out-dir .dev/checker/p76_task<n>`（やり直したときは `_v2` などを付ける）
+  3. Checker の出力: `.dev/checker/review_p76_task<n>.txt` に置く（やり直したときは `_v2` などを付け、上書きしない）。
+- Checker には、SPEC の要件のうち、例外・異常系・境界値の扱いを満たしているかを、差分とテストの両方で確かめるよう求める。`compile --emit` の書き出すファイルは、ステップ 1〜4 で順に加える。まだ後のステップで加える予定のファイルがないことは、REJECT の理由にしないよう伝える（PLAN のステップの一覧を Checker に渡す）。影響分析（CMP-4）と、ダッシュボードの表示（STAT-3）は Phase 77 なので、求めないよう伝える。
 - verify-step の前に `git status --porcelain` を確認し、意図しないファイルがないことを確かめる。実験は `mktemp -d` の中で行う。
 - `--checkpoint` にはコミットの SHA を渡す（`git rev-parse HEAD`）。
 - 査読記録の順序（**この順番を崩さない**）:
@@ -37,7 +37,7 @@
   7. commit-step が終了コード 3 で拒否されたら、verify-step からやり直す。再検証した後も、査読と record-review をやり直す。
   8. commit-step が終了コード 4 で拒否されたら、原因を「止まっていること・判断待ち」に書いて止まる。引数を変えて再実行しない。
 - Checker の判定が2回続けて承認にならなかったら（REJECT、または実行し直しても判定が読み取れない）、INV-4 に従って隔離して止まる。
-- 隔離したときは、`rollback-step` の案内（RCV-6）に従い、隔離ブランチの差分だけでなく、スナップショットにだけある新しいファイルも報告に書く。ステップ 1（RCV-7）の完了後は、Git のオブジェクトとして残したファイルと、その取り出し方も案内される。
+- 隔離したときは、`rollback-step` の案内（RCV-6・RCV-7）に従い、隔離ブランチの差分だけでなく、スナップショットにだけある新しいファイルと、Git のオブジェクトとして残したファイル（取り出し方つき）も報告に書く。
 - 人間の承認を PLAN.md に記録するコミットは、`git commit -m "docs(plan): ..." -- PLAN.md` の形にする。**ステップの途中（verify-step の後、commit-step の前）には PLAN.md を変えない**（Evidence の Tree SHA と合わなくなる）。
 - CLI の引数を変えるステップでは、同じステップで `python scripts/gen_cli_reference.py` を実行して `docs/cli.md` を作り直す（DX-4 のテストが一致を確かめる）。
 - コミットした後に欠陥が見つかった場合は、`git reset` などで正規の経路の外から巻き戻さない。「止まっていること・判断待ち」に書いて止まり、修正は新しいステップとして行う。
@@ -53,35 +53,38 @@
 - Bundle を生成した後に、SPEC.md や追跡ファイルを変更しない。
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-<!-- docs/contracts/phase75.md の 4 章の影響分析から作成。ここに書いていない既存テストは変更しない。 -->
-- ステップ 1（RCV-7）: `tests/test_rcv6_quarantine_snapshot_listing.py` の、`.env`・`server.pem`・`credentials.json` の名前が `rollback-step` の出力に出ないことを確かめる3行（120〜122 行目付近）は、「スナップショットにだけある一覧と `tar xzf` のコマンドに出ないこと」と「ファイルの中身が出力に出ないこと」を確かめる形に変えてよい。機密のファイルが隔離ブランチやスナップショットに入らないことを確かめている既存テストは変更しない。
-- ステップ 2〜7（CMP-1・CMP-2・CMP-3・CMP-8）: 既存テストは変更しない。
+<!-- docs/contracts/phase76.md の 4 章の影響分析から作成。ここに書いていない既存テストは変更しない。 -->
+- このフェーズで前のステップが作ったテストの資料（IR の見本など）は、後のステップの出力に合わせて直してよい。アサーションの趣旨は変えない。
+- ステップ 1〜4（CMP-5・CMP-9〜12）: Phase 75 で作ったテスト（`tests/test_cmp*`）は、`--emit` を加えたことで `compile` の引数の扱いの期待が変わる場合だけ、その期待を変えてよい。それ以外の既存テストは変更しない。
+- ステップ 5（CMP-6）: 既存テストは変更しない。`plugin.json` やスキルを確かめている既存テストが失敗した場合は、止まって報告する。
 - CLI を変えたステップでは `docs/cli.md` を作り直す（既存テストの変更ではない）。
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [x] 1. 隔離で、機密の規則でスナップショットから外れる新しいファイルを Git のオブジェクトとして残し、`git cat-file -p` での取り出し方を案内する。書けなければ何も消さずに終了コード 1。スナップショットにだけある一覧には、実際に入ったファイルだけを並べる（Red: 偽の秘密鍵の文字列を含む新しいファイルが、`rollback-step` で消え、案内の `tar xzf` でも取り出せない）（RCV-7）
-- [x] 2. `auto-dev compile --check <IR>`: IR（`auto-dev-ir/1`）の形式の検査（必須の項目・型・`id` の形と重なり・参照・ステップの連番）、終了コード 0 / 1 / 2、`--json`。どのファイルも書かない。`docs/cli.md` を作り直す（Red-First）（CMP-1）
-- [x] 3. `compile --check` の元の場所の検査: ファイルの有無、行の範囲、範囲の SHA-256（ERROR）、ファイル全体の SHA-256（WARN）（Red-First）（CMP-1）
-- [x] 4. `auto-dev compile --outline <設計書>`: 見出しを IR の要素に対応づけ、行の範囲と SHA-256 を示す。コードブロックの中の `#` を見出しにしない。足りない節があれば終了コード 1。`docs/cli.md` を作り直す（Red-First）（CMP-2）
-- [x] 5. `compile --check` の点検 L-1（受入条件）・L-8（つながらない要件とステップ）・L-9（未決の点）（Red-First）（CMP-3）
-- [x] 6. `compile --check` の点検 L-5（判断の `forbids` との食い違い）・L-6（`--spec` の 4 章との ID の重なり）・L-7（担当範囲）。`docs/cli.md` を作り直す（Red-First）（CMP-3）
-- [x] 7. 実物の設計書 `docs/designs/autonomous_pipeline_orchestrator.md` での確認: `--outline` の対応、テストの資料の IR で L-5 の ERROR（Decision 4 と Goals・CUJ 2）、直した IR で終了コード 0（Red-First）（CMP-8）
+- [x] 1. `auto-dev compile --emit <IR> [--out-dir DIR] [--lang ja|en] [--force]` の骨組み: 前提の点検（ERROR なら何も書かずに終了コード 1）、出力先は `.dev/compile/` の下だけ（外なら終了コード 2）、既存の出力先は `--force` がなければ終了コード 2、決定的な出力、共通の見出し、`ir.json` と `check.json`。`docs/cli.md` を作り直す（Red-First）（CMP-5）
+- [x] 2. `spec_section.md`: 要件と受入条件、`kind` が `modify` の印、元の場所のコメント、スコープ外（Red-First）（CMP-9）
+- [x] 3. `plan.md`（ステップと「既存テスト変更の理由」の骨組み）、チームがある場合の `teams.json`（`load_teams_manifest` で読める）と `plans/<id>.md`（チームをまたぐステップは入れない）（Red-First）（CMP-10）
+- [x] 4. `contract.md`（目的、人間が判断すること、要件の一覧、判断、代案、元の文書）と `acceptance_tests.md`（Red-First）（CMP-11, CMP-12）
+- [x] 5. スキル `skills/nightly-compile/SKILL.md` と `plugin.json` の `/nightly-compile`。スキルのコマンドが `check_doc_commands.py` を通る（Red-First）（CMP-6）
 
 ## 止まっていること・判断待ち
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [x] Phase 75 の準備コミット: SPEC.md（Phase 74 の要件を 4 章へ移し、RCV-6・DX-14 の文言を直す。INV-12 を加える。5.1 に Phase 75 の要件）、PLAN.md、docs/contracts/phase75.md。
-- [x] 準備のコミットの前に: Phase 74 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase74/` に退かせる。
-- [x] ステップ 1 の完了後（フェーズの完了後にまとめて確認）: 一時リポジトリで、偽の秘密鍵の文字列を含む新しいファイルと、無視されていない `.env` を作って `rollback-step` を実行し、案内のコマンドで取り出せることを確かめる。
-- [x] ステップ 7 の完了後（CI は push の後に確かめる）:
-  - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI（macOS・Ubuntu × Python 3.10・3.12）が通ることを確かめる。
+- [x] Phase 76 の準備コミット: SPEC.md（Phase 75 の要件を 4 章へ移し、4.12 CMP を新設、RCV-7 の文言を直し、DX-15 を加える。5.1 に Phase 76 の要件）、PLAN.md、docs/contracts/phase76.md。
+- [x] 準備のコミットの前に: Phase 75 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase75/` に退かせる。
+- [x] ステップ 4 の完了後（フェーズの完了後にまとめて確認）: テストの資料の IR から書き出した下書きを読み、SPEC と PLAN に写せる形かを目で確かめる。
+- [x] ステップ 5 の完了後（CI は push の後に確かめる）:
+  - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI（macOS・Ubuntu × Python 3.10・3.12、gitleaks）が通ることを確かめる。
   - 査読の記録（判定の決まらない出力の履歴を含む）と Checker の出力ファイルを突き合わせ、記録されていない出力が0件であることを確かめる。
   - Bundle を作り、`verify-bundle` が VERIFIED になることを確かめる。
-  - `compile --outline` を設計書の見本に対して実行し、出力を目で確かめる。
+  - 設計書の見本に対して `/nightly-compile` の流れを一度通し、使える形かを確かめる。
 
 ## 記録
+- 2026-11-25: Phase 76 の完了後の確認。5 ステップすべて完了し、隔離は0回。ステップ 1 だけ1回目の査読が REJECT で、ステップ 2〜5 は1回目で APPROVE。保護ファイルの変更なし。査読の記録の突き合わせで、`.dev/checker/review_p76_*.txt` の6件すべてが履歴に記録され、`review_input` の回数と履歴の件数も全タスクで一致した。ステップ 2〜5 には `task_start` のイベントがない（`pre-flight` を呼ばずに進めた。ダッシュボードの backlog は `verify_step` で減るので表示への影響は小さい）。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1094 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）だけ。Bundle は VERIFIED。`check_doc_commands.py` は新しいスキルを含む7ファイル・111 コマンドで終了コード 0。
+- 2026-11-25: 下書きの確認。テストの資料の IR（設計書の見本から作ったもの）で `compile --emit` を実行し、`spec_section.md`・`plan.md`・`contract.md`・`acceptance_tests.md` を読んだ。注意書き、要件と受入条件、元の場所のコメント、`- [ ] <番号>.` の形のステップ、判断の禁じる語句、「人間が判断すること」がそろっていて、SPEC と PLAN に写せる形だった。チームのある IR（チームをまたぐステップを含む）では、`teams.json` が `load_teams_manifest` で読め、またぐステップはチームの計画に入らず、契約書の「人間が判断すること」に挙がった。2回目の `--emit` は `--force` がないので終了コード 2、`.dev/compile/` の外への `--out-dir` も終了コード 2。どちらも作業ツリーを変えなかった（INV-12）。
+- 2026-11-25: スキル `/nightly-compile` の確認で見つかったこと: (1) 要件ごとの元の場所の SHA-256 を、エージェントがどう求めるかが書かれていない（`--outline` が示すのは見出しの範囲の SHA-256 だけ）。`sed -n '<開始>,<終了>p' <ファイル> | shasum -a 256` が CMP-1 の求め方と一致することを確かめた。(2) スキルは出力先を `.dev/compile/<name>/` と書いているが、IR を `<name>.ir.json` にすると、実際は `.dev/compile/<name>.ir/` になり、`teams.json` の `project` も `<name>.ir` になる。(3) スキルが、このリポジトリの中の文書（v0.10-draft の 5.2）を参照している。対応はスキルに書き写してあるが、ほかのリポジトリの利用者には参照先がない。いずれも IDEA-030 に入れた。
+- 2026-11-25: Phase 76 の準備。v0.10-draft の残りを、Phase 76（下書きの出力 CMP-5 とスキル CMP-6）と Phase 77（影響分析 CMP-4 と表示 STAT-3）に分けることを人間が決めた。下書きの言語（v0.10-draft 7 章の5）は、見出しや決まった文言を `--lang`（既定 `ja`）で選び、IR の中の文は翻訳しない、とした。SPEC の Phase 75 の要件を 4 章へ移すときに、RCV-7 の中断の範囲（保全の段階の失敗）を文言に入れ、`allow_abbrev=False` を DX-15 として加えた。CMP-5 の書き出すファイルごとの要件は、ID の形（`[A-Z]+-[0-9]+`）に合わせて CMP-9〜12 とした。
 - 2026-11-25: Phase 75 の後の CI で、macOS・Ubuntu とも gitleaks が `tests/test_rcv7_quarantine_git_object.py`（cc4722d）の偽の秘密鍵の目印2件を `private-key` として検知して失敗した（同じ diff の中の2つの目印の間が、1つの鍵の塊として当てはまった）。本物の鍵ではない。人間が直した: その2件の fingerprint を `.gitleaksignore` に加え、テストの目印を実行時に組み立てる形に変えた（今後の diff に出ないように）。作業手順にも規則を足した。
 - 2026-11-25: Phase 75 の完了後の確認。7 ステップすべて完了。ステップ 2 だけ REJECT が2回続いて隔離され、隔離から取り込んでやり直した。ステップ 4〜7 は1回目の査読で APPROVE。保護ファイルの変更なし。査読の記録の突き合わせで、`.dev/checker/review_p75_*.txt` の 11 件すべてが履歴に記録され、`review_input` の回数と履歴の件数も全タスクで一致した。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1066 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）と、`tests/test_red_verifier.py` の `test_reaps_multiple_descendant_processes_on_timeout` の1件（全体の実行の負荷の中でだけ失敗し、単独では3回とも通る。時間に依存するテストで、IDEA-011 と同じ種類）。Bundle は VERIFIED。`check_doc_commands.py` は 106 コマンドで終了コード 0。
 - 2026-11-25: RCV-7 の確認。一時リポジトリで、偽の秘密鍵の文字列を含む新しいファイル、無視されていない `keys/id_rsa`、普通の新しいファイルを作って `rollback-step` を実行した。作業ツリーはきれいになり、前の2つは隔離ブランチにもスナップショットにも入らず、案内の `git cat-file -p` で元の中身を取り出せた（ディレクトリは先に作る必要がある。IDEA-028）。普通のファイルは `tar xzf` で取り出せた。manifest に `git_object_files` が記録され、失敗ログにも同じ案内がある。なお、`init` の `.gitignore` が `.env` を無視するので、`.env` は隔離の対象外（作業ツリーに残る）。

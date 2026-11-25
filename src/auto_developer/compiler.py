@@ -1183,3 +1183,802 @@ def format_outline_text(payload: dict[str, Any]) -> list[str]:
     for item in payload.get("missing", []):
         lines.append(f"MISSING: {item}")
     return lines
+
+
+EmitLang = Literal["ja", "en"]
+
+
+def render_draft_header(ir_filename: str, ir_sha256: str, lang: EmitLang = "ja") -> str:
+    """Render the common human-readable draft header for emitted Markdown files (CMP-5)."""
+    if lang == "en":
+        return (
+            "> **Note**: This file is a Spec Compiler draft. "
+            "A human must review, approve, and copy it into `SPEC.md` and `PLAN.md` before committing (INV-12).\n"
+            ">\n"
+            f"> Source IR: `{ir_filename}` (`sha256:{ir_sha256}`)\n"
+        )
+    return (
+        "> **注意**: このファイルは Spec Compiler の下書きです。"
+        "人間が読んで承認し、人間が `SPEC.md`・`PLAN.md` に写してコミットしてください（INV-12）。\n"
+        ">\n"
+        f"> 元の IR: `{ir_filename}` (`sha256:{ir_sha256}`)\n"
+    )
+
+
+def _format_source_comment(src: Any) -> str | None:
+    """Format a trace HTML comment from an IR source object (CMP-7/CMP-9)."""
+    if not isinstance(src, dict):
+        return None
+    path = src.get("path")
+    lines = src.get("lines")
+    sha256 = src.get("sha256")
+    if (
+        not _is_valid_relative_path(path)
+        or not _is_valid_line_range(lines)
+        or not _is_non_empty_str(sha256)
+    ):
+        return None
+    return f"<!-- source: {path}:L{lines[0]}-L{lines[1]} sha256:{sha256} -->"
+
+
+def _extract_holder_text(item: Any) -> str:
+    """Extract display text from an IR string or source-holder dict."""
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        for key in ("statement", "text", "title", "description"):
+            val = item.get(key)
+            if isinstance(val, str) and val.strip():
+                return val
+    return ""
+
+
+def render_spec_section(
+    data: dict[str, Any],
+    ir_filename: str,
+    ir_sha256: str,
+    lang: EmitLang = "ja",
+) -> str:
+    """Render `spec_section.md` draft from a validated IR dict (CMP-9)."""
+    lines: list[str] = [
+        render_draft_header(ir_filename, ir_sha256, lang=lang).rstrip("\n"),
+        "",
+        "### 5.1 （フェーズの名前）" if lang == "ja" else "### 5.1 (Phase Name)",
+        "",
+    ]
+
+    ac_by_id: dict[str, dict[str, Any]] = {}
+    acc_list = data.get("acceptance")
+    if isinstance(acc_list, list):
+        for item in acc_list:
+            if isinstance(item, dict):
+                ac_id = item.get("id")
+                if isinstance(ac_id, str) and ac_id not in ac_by_id:
+                    ac_by_id[ac_id] = item
+
+    reqs = data.get("requirements")
+    if isinstance(reqs, list):
+        obs_label = "観測できる結果" if lang == "ja" else "Observable"
+        for req in reqs:
+            if not isinstance(req, dict):
+                continue
+            req_id = req.get("id", "")
+            statement = req.get("statement", "")
+            kind = req.get("kind", "new")
+            if kind == "modify":
+                marker = "（修正）" if lang == "ja" else " (modify)"
+            else:
+                marker = ""
+            lines.append(f"- [ ] **{req_id}**{marker}: {statement}")
+
+            src_comment = _format_source_comment(req.get("source"))
+            if src_comment is not None:
+                lines.append(f"  {src_comment}")
+
+            acc_refs = req.get("acceptance")
+            if isinstance(acc_refs, list):
+                for ac_id in acc_refs:
+                    if not isinstance(ac_id, str):
+                        continue
+                    ac_item = ac_by_id.get(ac_id)
+                    if ac_item is None:
+                        continue
+                    lines.append(f"  - **{ac_id}**")
+                    lines.append(f"    - Given: {ac_item.get('given', '')}")
+                    lines.append(f"    - When: {ac_item.get('when', '')}")
+                    lines.append(f"    - Then: {ac_item.get('then', '')}")
+                    obs_raw = ac_item.get("observable")
+                    obs_items = (
+                        [x for x in obs_raw if isinstance(x, str) and x.strip()]
+                        if isinstance(obs_raw, list)
+                        else []
+                    )
+                    if len(obs_items) == 1:
+                        lines.append(f"    - {obs_label}: {obs_items[0]}")
+                    elif obs_items:
+                        lines.append(f"    - {obs_label}:")
+                        for obs in obs_items:
+                            lines.append(f"      - {obs}")
+
+    out_of_scope = data.get("out_of_scope")
+    if isinstance(out_of_scope, list) and len(out_of_scope) > 0:
+        lines.append("")
+        lines.append(
+            "## スコープ外（SPEC の 6 章に写す）"
+            if lang == "ja"
+            else "## Out of Scope (copy to SPEC section 6)"
+        )
+        lines.append("")
+        for item in out_of_scope:
+            text = _extract_holder_text(item)
+            if text:
+                lines.append(f"- {text}")
+            if isinstance(item, dict):
+                oos_comment = _format_source_comment(item.get("source"))
+                if oos_comment is not None:
+                    lines.append(f"  {oos_comment}")
+
+    return "\n".join(lines) + "\n"
+
+
+def _format_plan_step_lines(step: dict[str, Any], lang: EmitLang) -> list[str]:
+    """Format a single IR step as a PLAN.md checklist item with indented target files."""
+    n = step.get("n", "")
+    title = step.get("title", "")
+    reqs_raw = step.get("requirements")
+    req_items = (
+        [r for r in reqs_raw if isinstance(r, str) and r.strip()]
+        if isinstance(reqs_raw, list)
+        else []
+    )
+    if req_items:
+        joined = ", ".join(req_items)
+        req_suffix = f"（{joined}）" if lang == "ja" else f" ({joined})"
+    else:
+        req_suffix = ""
+    lines = [f"- [ ] {n}. {title}{req_suffix}"]
+
+    files_raw = step.get("files")
+    if isinstance(files_raw, list):
+        for file_path in files_raw:
+            if isinstance(file_path, str) and file_path.strip():
+                lines.append(f"  - `{file_path}`")
+    return lines
+
+
+def render_plan_md(
+    data: dict[str, Any],
+    ir_filename: str,
+    ir_sha256: str,
+    lang: EmitLang = "ja",
+) -> str:
+    """Render `plan.md` draft from a validated IR dict (CMP-10)."""
+    lines: list[str] = [
+        render_draft_header(ir_filename, ir_sha256, lang=lang).rstrip("\n"),
+        "",
+        "## ステップ" if lang == "ja" else "## Steps",
+        "",
+    ]
+
+    steps_raw = data.get("steps")
+    steps = [s for s in steps_raw if isinstance(s, dict)] if isinstance(steps_raw, list) else []
+    for step in steps:
+        lines.extend(_format_plan_step_lines(step, lang))
+
+    lines.extend(
+        [
+            "",
+            "## 既存テスト変更の理由" if lang == "ja" else "## Reasons for Existing Test Changes",
+            "",
+        ]
+    )
+    for step in steps:
+        n = step.get("n", "")
+        title = step.get("title", "")
+        if lang == "ja":
+            lines.append(
+                f"- ステップ {n}（{title}）: （影響分析の後に、人間が書く。既定は「既存テストは変更しない」）"
+            )
+        else:
+            lines.append(
+                f"- Step {n} ({title}): (Written by a human after impact analysis. "
+                'Default: "Do not modify existing tests.")'
+            )
+
+    if lang == "ja":
+        lines.extend(
+            [
+                "- このフェーズで前のステップが作ったテストの資料は、後のステップの検査に合わせて直してよい（アサーションは変えない）。",
+                "- 免疫テスト（`tests/immunity/**`）は変更しない。",
+                "- CLI を変えたステップでは `docs/cli.md` を作り直す。",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "- Test fixtures created by earlier steps in this phase may be adjusted to match later steps' checks (without changing assertions).",
+                "- Do not modify immunity tests (`tests/immunity/**`).",
+                "- Regenerate `docs/cli.md` in any step that changes the CLI.",
+            ]
+        )
+
+    return "\n".join(lines) + "\n"
+
+
+def partition_steps_by_team(
+    data: dict[str, Any],
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    """Assign each IR step to a single team if all its files match that team's owns (L-7).
+
+    Returns (steps_by_team_id, cross_team_steps).
+    """
+    teams_raw = data.get("teams")
+    if not isinstance(teams_raw, list) or len(teams_raw) == 0:
+        return {}, []
+
+    team_entries: list[tuple[str, list[str]]] = []
+    steps_by_team: dict[str, list[dict[str, Any]]] = {}
+    for team in teams_raw:
+        if not isinstance(team, dict):
+            continue
+        tid = team.get("id")
+        owns = team.get("owns")
+        if not isinstance(tid, str) or not tid.strip() or not isinstance(owns, list):
+            continue
+        patterns = [p for p in owns if isinstance(p, str) and p.strip()]
+        team_entries.append((tid, patterns))
+        steps_by_team[tid] = []
+
+    steps_raw = data.get("steps")
+    steps = [s for s in steps_raw if isinstance(s, dict)] if isinstance(steps_raw, list) else []
+    cross_team_steps: list[dict[str, Any]] = []
+
+    for step in steps:
+        files_raw = step.get("files")
+        files = (
+            [f for f in files_raw if isinstance(f, str) and f.strip()]
+            if isinstance(files_raw, list)
+            else []
+        )
+        if not files:
+            cross_team_steps.append(step)
+            continue
+        owners = [
+            tid
+            for tid, patterns in team_entries
+            if all(any(_match_path(file_path, pat) for pat in patterns) for file_path in files)
+        ]
+        if len(owners) == 1:
+            steps_by_team[owners[0]].append(step)
+        else:
+            cross_team_steps.append(step)
+
+    return steps_by_team, cross_team_steps
+
+
+def render_teams_json(data: dict[str, Any], project_name: str) -> str:
+    """Render `teams.json` draft compatible with `load_teams_manifest` (CMP-10)."""
+    teams_raw = data.get("teams")
+    teams_payload: list[dict[str, Any]] = []
+    if isinstance(teams_raw, list):
+        for team in teams_raw:
+            if not isinstance(team, dict):
+                continue
+            tid = team.get("id")
+            if not isinstance(tid, str) or not tid.strip():
+                continue
+            owns_raw = team.get("owns")
+            owns = (
+                [p.strip() for p in owns_raw if isinstance(p, str) and p.strip()]
+                if isinstance(owns_raw, list)
+                else []
+            )
+            teams_payload.append(
+                {
+                    "id": tid,
+                    "owns": owns,
+                    "plan": f"plans/{tid}.md",
+                    "depends_on": [],
+                }
+            )
+    payload = {
+        "version": 1,
+        "project": project_name,
+        "teams": teams_payload,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def render_team_plan_md(
+    team_id: str,
+    steps: list[dict[str, Any]],
+    ir_filename: str,
+    ir_sha256: str,
+    lang: EmitLang = "ja",
+) -> str:
+    """Render `plans/<id>.md` containing only steps owned by `team_id` (CMP-10)."""
+    lines: list[str] = [
+        render_draft_header(ir_filename, ir_sha256, lang=lang).rstrip("\n"),
+        "",
+        f"# {team_id}",
+        "",
+        "## ステップ" if lang == "ja" else "## Steps",
+        "",
+    ]
+    for step in steps:
+        lines.extend(_format_plan_step_lines(step, lang))
+    return "\n".join(lines) + "\n"
+
+
+def _format_source_ref(src: Any) -> str | None:
+    """Format a human-readable source reference from an IR source object."""
+    if not isinstance(src, dict):
+        return None
+    path = src.get("path")
+    lines = src.get("lines")
+    sha256 = src.get("sha256")
+    if (
+        not _is_valid_relative_path(path)
+        or not _is_valid_line_range(lines)
+        or not _is_non_empty_str(sha256)
+    ):
+        return None
+    return f"`{path}:L{lines[0]}-L{lines[1]}` (`sha256:{sha256}`)"
+
+
+def _escape_md_table_cell(val: str) -> str:
+    """Escape pipes and newlines for a single-line Markdown table cell."""
+    return val.replace("\r\n", " ").replace("\n", " ").replace("|", "\\|").strip()
+
+
+def _format_observable_lines(obs_raw: Any, label: str, indent: str = "") -> list[str]:
+    """Format an acceptance criterion's observable list consistently across drafts."""
+    obs_items = (
+        [x for x in obs_raw if isinstance(x, str) and x.strip()]
+        if isinstance(obs_raw, list)
+        else []
+    )
+    if len(obs_items) == 1:
+        return [f"{indent}- {label}: {obs_items[0]}"]
+    if obs_items:
+        out = [f"{indent}- {label}:"]
+        for obs in obs_items:
+            out.append(f"{indent}  - {obs}")
+        return out
+    return []
+
+
+def render_contract_md(
+    data: dict[str, Any],
+    check_payload: dict[str, Any],
+    ir_filename: str,
+    ir_sha256: str,
+    lang: EmitLang = "ja",
+) -> str:
+    """Render `contract.md` draft from a validated IR dict and check output (CMP-11)."""
+    none_text = "（なし）" if lang == "ja" else "(none)"
+    src_label = "元の場所" if lang == "ja" else "Source"
+
+    lines: list[str] = [
+        render_draft_header(ir_filename, ir_sha256, lang=lang).rstrip("\n"),
+        "",
+        "## 目的" if lang == "ja" else "## Purpose",
+        "",
+    ]
+
+    purpose = data.get("purpose")
+    purpose_text = _extract_holder_text(purpose) if purpose is not None else ""
+    if purpose_text:
+        lines.append(purpose_text)
+    else:
+        lines.append(none_text)
+    if isinstance(purpose, dict):
+        purpose_src = _format_source_ref(purpose.get("source"))
+        if purpose_src is not None:
+            lines.append("")
+            lines.append(f"- {src_label}: {purpose_src}")
+
+    lines.extend(
+        [
+            "",
+            "## 人間が判断すること" if lang == "ja" else "## Human Decisions Required",
+            "",
+        ]
+    )
+
+    warnings_raw = check_payload.get("warnings")
+    if isinstance(warnings_raw, list):
+        for warn in warnings_raw:
+            if not isinstance(warn, dict):
+                continue
+            rule = warn.get("rule", "WARN")
+            location = warn.get("location", "")
+            message = warn.get("message", "")
+            lines.append(f"- [WARN {rule}] `{location}`: {message}")
+
+    _, cross_team_steps = partition_steps_by_team(data)
+    for step in cross_team_steps:
+        n = step.get("n", "")
+        title = step.get("title", "")
+        files_raw = step.get("files")
+        files_list = (
+            [f"`{f}`" for f in files_raw if isinstance(f, str) and f.strip()]
+            if isinstance(files_raw, list)
+            else []
+        )
+        files_str = ", ".join(files_list) if files_list else none_text
+        if lang == "ja":
+            lines.append(f"- ステップ {n}: {title}（複数チームにまたがる: {files_str}）")
+        else:
+            lines.append(f"- Step {n}: {title} (spans multiple teams: {files_str})")
+
+    if lang == "ja":
+        lines.append("- 影響分析（既存のテストとドキュメントへの影響）は、Phase 77 で自動化するまで人間が書く。")
+    else:
+        lines.append(
+            "- Impact analysis (effects on existing tests and documentation) "
+            "must be written by a human until automated in Phase 77."
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 要件の一覧" if lang == "ja" else "## Requirements",
+            "",
+        ]
+    )
+    if lang == "ja":
+        lines.append("| ID | 種別 | 要件 | 受入条件 | 元の場所 |")
+    else:
+        lines.append("| ID | Kind | Statement | Acceptance | Source |")
+    lines.append("| --- | --- | --- | --- | --- |")
+
+    reqs_raw = data.get("requirements")
+    if isinstance(reqs_raw, list):
+        for req in reqs_raw:
+            if not isinstance(req, dict):
+                continue
+            req_id = _escape_md_table_cell(str(req.get("id", "")))
+            kind_raw = str(req.get("kind", "new"))
+            if lang == "ja":
+                kind_label = "修正" if kind_raw == "modify" else ("新規" if kind_raw == "new" else kind_raw)
+            else:
+                kind_label = kind_raw
+            stmt = _escape_md_table_cell(str(req.get("statement", "")))
+            acc_raw = req.get("acceptance")
+            acc_str = (
+                ", ".join(str(a) for a in acc_raw if isinstance(a, str) and a.strip())
+                if isinstance(acc_raw, list)
+                else ""
+            )
+            acc_cell = _escape_md_table_cell(acc_str) if acc_str else "-"
+            src_ref = _format_source_ref(req.get("source"))
+            src_cell = _escape_md_table_cell(src_ref) if src_ref is not None else "-"
+            lines.append(f"| {req_id} | {kind_label} | {stmt} | {acc_cell} | {src_cell} |")
+
+    lines.extend(
+        [
+            "",
+            "## 判断" if lang == "ja" else "## Decisions",
+            "",
+            (
+                "以下は不変条件（INV）の候補です。"
+                if lang == "ja"
+                else "The following decisions are candidates for invariants (INV)."
+            ),
+            "",
+        ]
+    )
+    decisions_raw = data.get("decisions")
+    decisions = [d for d in decisions_raw if isinstance(d, dict)] if isinstance(decisions_raw, list) else []
+    if not decisions:
+        lines.append(none_text)
+    else:
+        for dec in decisions:
+            dec_id = dec.get("id", "")
+            stmt = dec.get("statement", "")
+            lines.append(f"- **{dec_id}**: {stmt}")
+            forbids_raw = dec.get("forbids")
+            forbids_items = (
+                [f"`{p}`" for p in forbids_raw if isinstance(p, str) and p.strip()]
+                if isinstance(forbids_raw, list)
+                else []
+            )
+            if forbids_items:
+                forbids_label = "禁じる語句" if lang == "ja" else "Forbids"
+                lines.append(f"  - {forbids_label}: {', '.join(forbids_items)}")
+            dec_src = _format_source_ref(dec.get("source"))
+            if dec_src is not None:
+                lines.append(f"  - {src_label}: {dec_src}")
+
+    lines.extend(
+        [
+            "",
+            "## 検討した代案" if lang == "ja" else "## Alternatives Considered",
+            "",
+        ]
+    )
+    alts_raw = data.get("alternatives")
+    alts = list(alts_raw) if isinstance(alts_raw, list) else []
+    if not alts:
+        lines.append(none_text)
+    else:
+        for alt in alts:
+            alt_text = _extract_holder_text(alt)
+            if alt_text:
+                lines.append(f"- {alt_text}")
+            if isinstance(alt, dict):
+                alt_src = _format_source_ref(alt.get("source"))
+                if alt_src is not None:
+                    lines.append(f"  - {src_label}: {alt_src}")
+
+    lines.extend(
+        [
+            "",
+            "## 元の文書" if lang == "ja" else "## Source Documents",
+            "",
+        ]
+    )
+    sources_raw = data.get("source")
+    sources = [s for s in sources_raw if isinstance(s, dict)] if isinstance(sources_raw, list) else []
+    if not sources:
+        lines.append(none_text)
+    else:
+        for src in sources:
+            path = src.get("path", "")
+            sha = src.get("sha256", "")
+            lines.append(f"- `{path}` (`sha256:{sha}`)")
+
+    return "\n".join(lines) + "\n"
+
+
+def render_acceptance_tests_md(
+    data: dict[str, Any],
+    ir_filename: str,
+    ir_sha256: str,
+    lang: EmitLang = "ja",
+) -> str:
+    """Render `acceptance_tests.md` draft from a validated IR dict (CMP-12)."""
+    none_text = "（なし）" if lang == "ja" else "(none)"
+    obs_label = "観測できる結果" if lang == "ja" else "Observable"
+    ref_label = "参照する要件" if lang == "ja" else "Referenced by"
+    src_label = "元の場所" if lang == "ja" else "Source"
+
+    lines: list[str] = [
+        render_draft_header(ir_filename, ir_sha256, lang=lang).rstrip("\n"),
+        "",
+        "# 受入テストの案" if lang == "ja" else "# Acceptance Test Proposals",
+    ]
+
+    reqs_by_ac: dict[str, list[str]] = {}
+    reqs_raw = data.get("requirements")
+    if isinstance(reqs_raw, list):
+        for req in reqs_raw:
+            if not isinstance(req, dict):
+                continue
+            req_id = req.get("id")
+            acc_refs = req.get("acceptance")
+            if not isinstance(req_id, str) or not isinstance(acc_refs, list):
+                continue
+            for ac_id in acc_refs:
+                if isinstance(ac_id, str):
+                    reqs_by_ac.setdefault(ac_id, [])
+                    if req_id not in reqs_by_ac[ac_id]:
+                        reqs_by_ac[ac_id].append(req_id)
+
+    acc_raw = data.get("acceptance")
+    acc_list = [a for a in acc_raw if isinstance(a, dict)] if isinstance(acc_raw, list) else []
+    if not acc_list:
+        lines.extend(["", none_text])
+        return "\n".join(lines) + "\n"
+
+    for item in acc_list:
+        ac_id = str(item.get("id", ""))
+        lines.extend(["", f"## {ac_id}", ""])
+        lines.append(f"- Given: {item.get('given', '')}")
+        lines.append(f"- When: {item.get('when', '')}")
+        lines.append(f"- Then: {item.get('then', '')}")
+        lines.extend(_format_observable_lines(item.get("observable"), obs_label))
+        ref_reqs = reqs_by_ac.get(ac_id, [])
+        ref_str = ", ".join(ref_reqs) if ref_reqs else none_text
+        lines.append(f"- {ref_label}: {ref_str}")
+        ac_src = _format_source_ref(item.get("source"))
+        if ac_src is not None:
+            lines.append(f"- {src_label}: {ac_src}")
+
+    return "\n".join(lines) + "\n"
+
+
+def resolve_emit_out_dir(
+    ir_path: Path,
+    work_dir: Path,
+    out_dir: Path | None = None,
+) -> tuple[Path | None, str | None]:
+    """Resolve and validate --out-dir under <work_dir>/.dev/compile/ after resolving symlinks (INV-12)."""
+    resolved_root = work_dir.resolve()
+    compile_root = resolved_root / ".dev" / "compile"
+    try:
+        resolved_compile_root = compile_root.resolve()
+    except (OSError, RuntimeError) as exc:
+        return None, f"failed to resolve compile output root: {exc}"
+
+    if not resolved_compile_root.is_relative_to(resolved_root):
+        return None, f"compile output root escapes workspace root: {resolved_compile_root}"
+
+    if out_dir is None:
+        stem = ir_path.stem or "draft"
+        candidate = compile_root / stem
+    else:
+        candidate = out_dir if out_dir.is_absolute() else (resolved_root / out_dir)
+
+    try:
+        resolved_out = candidate.resolve()
+    except (OSError, RuntimeError) as exc:
+        return None, f"failed to resolve output directory {candidate}: {exc}"
+
+    if resolved_out == resolved_compile_root or not resolved_out.is_relative_to(resolved_compile_root):
+        return (
+            None,
+            f"output directory must be a subdirectory under {resolved_compile_root} (resolved: {resolved_out})",
+        )
+
+    if resolved_out.exists() and not resolved_out.is_dir():
+        return None, f"output path exists and is not a directory: {resolved_out}"
+
+    return resolved_out, None
+
+
+def emit_ir_drafts(
+    ir_path: Path,
+    work_dir: Path | None = None,
+    *,
+    out_dir: Path | None = None,
+    spec_path: Path | None = None,
+    lang: EmitLang = "ja",
+    force: bool = False,
+) -> tuple[int, dict[str, Any], list[CompileIssue], str | None]:
+    """Validate an IR file and emit deterministic draft artifacts under .dev/compile/ (CMP-5).
+
+    Returns (exit_code, json_payload, issues, error_message).
+    """
+    resolved_root = (work_dir or Path.cwd()).resolve()
+    resolved_out, out_err = resolve_emit_out_dir(ir_path, resolved_root, out_dir=out_dir)
+    if out_err is not None or resolved_out is None:
+        err_msg = out_err or "invalid output directory"
+        return (
+            2,
+            {"error": err_msg, "files": []},
+            [],
+            err_msg,
+        )
+
+    check_exit, check_payload, issues = check_ir_file(
+        ir_path, work_dir=resolved_root, spec_path=spec_path
+    )
+    if check_exit != 0:
+        return check_exit, check_payload, issues, None
+
+    try:
+        has_existing = resolved_out.exists() and any(resolved_out.iterdir())
+    except OSError as exc:
+        err_msg = f"failed to inspect output directory {resolved_out}: {exc}"
+        return (
+            2,
+            {"error": err_msg, "files": []},
+            [],
+            err_msg,
+        )
+
+    if has_existing and not force:
+        err_msg = (
+            f"output directory already contains files: {resolved_out} "
+            "(use --force to overwrite generated files)"
+        )
+        return (
+            2,
+            {"error": err_msg, "files": []},
+            [],
+            err_msg,
+        )
+
+    try:
+        ir_bytes = ir_path.read_bytes()
+        ir_data = json.loads(ir_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        err_msg = f"failed to read IR file {ir_path}: {exc}"
+        return (
+            2,
+            {"error": err_msg, "files": []},
+            [],
+            err_msg,
+        )
+
+    ir_sha256 = hashlib.sha256(ir_bytes).hexdigest()
+    check_bytes = (json.dumps(check_payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    spec_section_bytes = render_spec_section(
+        ir_data, ir_path.name, ir_sha256, lang=lang
+    ).encode("utf-8")
+    plan_bytes = render_plan_md(
+        ir_data, ir_path.name, ir_sha256, lang=lang
+    ).encode("utf-8")
+    contract_bytes = render_contract_md(
+        ir_data, check_payload, ir_path.name, ir_sha256, lang=lang
+    ).encode("utf-8")
+    acceptance_bytes = render_acceptance_tests_md(
+        ir_data, ir_path.name, ir_sha256, lang=lang
+    ).encode("utf-8")
+
+    files_to_write: list[tuple[str, bytes]] = [
+        ("ir.json", ir_bytes),
+        ("check.json", check_bytes),
+        ("spec_section.md", spec_section_bytes),
+        ("plan.md", plan_bytes),
+        ("contract.md", contract_bytes),
+        ("acceptance_tests.md", acceptance_bytes),
+    ]
+
+    teams_raw = ir_data.get("teams")
+    has_teams = isinstance(teams_raw, list) and len(teams_raw) > 0
+    if has_teams:
+        project_name = ir_path.stem or "draft"
+        teams_json_bytes = render_teams_json(ir_data, project_name).encode("utf-8")
+        files_to_write.append(("teams.json", teams_json_bytes))
+        steps_by_team, _ = partition_steps_by_team(ir_data)
+        for team in teams_raw:
+            if not isinstance(team, dict):
+                continue
+            tid = team.get("id")
+            if (
+                not isinstance(tid, str)
+                or not tid.strip()
+                or "/" in tid
+                or "\\" in tid
+                or ".." in tid
+            ):
+                err_msg = f"invalid team id for plan output: {tid!r}"
+                return 2, {"error": err_msg, "files": []}, [], err_msg
+            team_plan_bytes = render_team_plan_md(
+                tid,
+                steps_by_team.get(tid, []),
+                ir_path.name,
+                ir_sha256,
+                lang=lang,
+            ).encode("utf-8")
+            files_to_write.append((f"plans/{tid}.md", team_plan_bytes))
+
+    written_paths: list[str] = []
+    try:
+        if has_teams:
+            plans_dir = resolved_out / "plans"
+            if plans_dir.is_symlink():
+                err_msg = f"refusing to write to symlink directory: {plans_dir}"
+                return 2, {"error": err_msg, "files": []}, [], err_msg
+            if plans_dir.exists() and not plans_dir.is_dir():
+                err_msg = f"target path exists and is not a directory: {plans_dir}"
+                return 2, {"error": err_msg, "files": []}, [], err_msg
+
+        for rel_name, _ in files_to_write:
+            target = resolved_out / rel_name
+            if target.is_symlink():
+                err_msg = f"refusing to write to symlink target: {target}"
+                return 2, {"error": err_msg, "files": []}, [], err_msg
+            if target.exists() and (target.is_dir() or not target.is_file()):
+                err_msg = f"target path exists and is not a regular file: {target}"
+                return 2, {"error": err_msg, "files": []}, [], err_msg
+
+        resolved_out.mkdir(parents=True, exist_ok=True)
+        for rel_name, content_bytes in files_to_write:
+            target = resolved_out / rel_name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content_bytes)
+            written_paths.append(str(target))
+    except OSError as exc:
+        err_msg = f"failed to write draft output in {resolved_out}: {exc}"
+        return 2, {"error": err_msg, "files": []}, [], err_msg
+
+    payload: dict[str, Any] = {
+        "out_dir": str(resolved_out),
+        "lang": lang,
+        "files": written_paths,
+    }
+    return 0, payload, issues, None
