@@ -64,7 +64,7 @@
 - [x] 1. `auto-dev compile --emit <IR> [--out-dir DIR] [--lang ja|en] [--force]` の骨組み: 前提の点検（ERROR なら何も書かずに終了コード 1）、出力先は `.dev/compile/` の下だけ（外なら終了コード 2）、既存の出力先は `--force` がなければ終了コード 2、決定的な出力、共通の見出し、`ir.json` と `check.json`。`docs/cli.md` を作り直す（Red-First）（CMP-5）
 - [x] 2. `spec_section.md`: 要件と受入条件、`kind` が `modify` の印、元の場所のコメント、スコープ外（Red-First）（CMP-9）
 - [x] 3. `plan.md`（ステップと「既存テスト変更の理由」の骨組み）、チームがある場合の `teams.json`（`load_teams_manifest` で読める）と `plans/<id>.md`（チームをまたぐステップは入れない）（Red-First）（CMP-10）
-- [ ] 4. `contract.md`（目的、人間が判断すること、要件の一覧、判断、代案、元の文書）と `acceptance_tests.md`（Red-First）（CMP-11, CMP-12）
+- [x] 4. `contract.md`（目的、人間が判断すること、要件の一覧、判断、代案、元の文書）と `acceptance_tests.md`（Red-First）（CMP-11, CMP-12）
 - [ ] 5. スキル `skills/nightly-compile/SKILL.md` と `plugin.json` の `/nightly-compile`。スキルのコマンドが `check_doc_commands.py` を通る（Red-First）（CMP-6）
 
 ## 止まっていること・判断待ち

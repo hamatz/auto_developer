@@ -1510,6 +1510,285 @@ def render_team_plan_md(
     return "\n".join(lines) + "\n"
 
 
+def _format_source_ref(src: Any) -> str | None:
+    """Format a human-readable source reference from an IR source object."""
+    if not isinstance(src, dict):
+        return None
+    path = src.get("path")
+    lines = src.get("lines")
+    sha256 = src.get("sha256")
+    if (
+        not _is_valid_relative_path(path)
+        or not _is_valid_line_range(lines)
+        or not _is_non_empty_str(sha256)
+    ):
+        return None
+    return f"`{path}:L{lines[0]}-L{lines[1]}` (`sha256:{sha256}`)"
+
+
+def _escape_md_table_cell(val: str) -> str:
+    """Escape pipes and newlines for a single-line Markdown table cell."""
+    return val.replace("\r\n", " ").replace("\n", " ").replace("|", "\\|").strip()
+
+
+def _format_observable_lines(obs_raw: Any, label: str, indent: str = "") -> list[str]:
+    """Format an acceptance criterion's observable list consistently across drafts."""
+    obs_items = (
+        [x for x in obs_raw if isinstance(x, str) and x.strip()]
+        if isinstance(obs_raw, list)
+        else []
+    )
+    if len(obs_items) == 1:
+        return [f"{indent}- {label}: {obs_items[0]}"]
+    if obs_items:
+        out = [f"{indent}- {label}:"]
+        for obs in obs_items:
+            out.append(f"{indent}  - {obs}")
+        return out
+    return []
+
+
+def render_contract_md(
+    data: dict[str, Any],
+    check_payload: dict[str, Any],
+    ir_filename: str,
+    ir_sha256: str,
+    lang: EmitLang = "ja",
+) -> str:
+    """Render `contract.md` draft from a validated IR dict and check output (CMP-11)."""
+    none_text = "（なし）" if lang == "ja" else "(none)"
+    src_label = "元の場所" if lang == "ja" else "Source"
+
+    lines: list[str] = [
+        render_draft_header(ir_filename, ir_sha256, lang=lang).rstrip("\n"),
+        "",
+        "## 目的" if lang == "ja" else "## Purpose",
+        "",
+    ]
+
+    purpose = data.get("purpose")
+    purpose_text = _extract_holder_text(purpose) if purpose is not None else ""
+    if purpose_text:
+        lines.append(purpose_text)
+    else:
+        lines.append(none_text)
+    if isinstance(purpose, dict):
+        purpose_src = _format_source_ref(purpose.get("source"))
+        if purpose_src is not None:
+            lines.append("")
+            lines.append(f"- {src_label}: {purpose_src}")
+
+    lines.extend(
+        [
+            "",
+            "## 人間が判断すること" if lang == "ja" else "## Human Decisions Required",
+            "",
+        ]
+    )
+
+    warnings_raw = check_payload.get("warnings")
+    if isinstance(warnings_raw, list):
+        for warn in warnings_raw:
+            if not isinstance(warn, dict):
+                continue
+            rule = warn.get("rule", "WARN")
+            location = warn.get("location", "")
+            message = warn.get("message", "")
+            lines.append(f"- [WARN {rule}] `{location}`: {message}")
+
+    _, cross_team_steps = partition_steps_by_team(data)
+    for step in cross_team_steps:
+        n = step.get("n", "")
+        title = step.get("title", "")
+        files_raw = step.get("files")
+        files_list = (
+            [f"`{f}`" for f in files_raw if isinstance(f, str) and f.strip()]
+            if isinstance(files_raw, list)
+            else []
+        )
+        files_str = ", ".join(files_list) if files_list else none_text
+        if lang == "ja":
+            lines.append(f"- ステップ {n}: {title}（複数チームにまたがる: {files_str}）")
+        else:
+            lines.append(f"- Step {n}: {title} (spans multiple teams: {files_str})")
+
+    if lang == "ja":
+        lines.append("- 影響分析（既存のテストとドキュメントへの影響）は、Phase 77 で自動化するまで人間が書く。")
+    else:
+        lines.append(
+            "- Impact analysis (effects on existing tests and documentation) "
+            "must be written by a human until automated in Phase 77."
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 要件の一覧" if lang == "ja" else "## Requirements",
+            "",
+        ]
+    )
+    if lang == "ja":
+        lines.append("| ID | 種別 | 要件 | 受入条件 | 元の場所 |")
+    else:
+        lines.append("| ID | Kind | Statement | Acceptance | Source |")
+    lines.append("| --- | --- | --- | --- | --- |")
+
+    reqs_raw = data.get("requirements")
+    if isinstance(reqs_raw, list):
+        for req in reqs_raw:
+            if not isinstance(req, dict):
+                continue
+            req_id = _escape_md_table_cell(str(req.get("id", "")))
+            kind_raw = str(req.get("kind", "new"))
+            if lang == "ja":
+                kind_label = "修正" if kind_raw == "modify" else ("新規" if kind_raw == "new" else kind_raw)
+            else:
+                kind_label = kind_raw
+            stmt = _escape_md_table_cell(str(req.get("statement", "")))
+            acc_raw = req.get("acceptance")
+            acc_str = (
+                ", ".join(str(a) for a in acc_raw if isinstance(a, str) and a.strip())
+                if isinstance(acc_raw, list)
+                else ""
+            )
+            acc_cell = _escape_md_table_cell(acc_str) if acc_str else "-"
+            src_ref = _format_source_ref(req.get("source"))
+            src_cell = _escape_md_table_cell(src_ref) if src_ref is not None else "-"
+            lines.append(f"| {req_id} | {kind_label} | {stmt} | {acc_cell} | {src_cell} |")
+
+    lines.extend(
+        [
+            "",
+            "## 判断" if lang == "ja" else "## Decisions",
+            "",
+            (
+                "以下は不変条件（INV）の候補です。"
+                if lang == "ja"
+                else "The following decisions are candidates for invariants (INV)."
+            ),
+            "",
+        ]
+    )
+    decisions_raw = data.get("decisions")
+    decisions = [d for d in decisions_raw if isinstance(d, dict)] if isinstance(decisions_raw, list) else []
+    if not decisions:
+        lines.append(none_text)
+    else:
+        for dec in decisions:
+            dec_id = dec.get("id", "")
+            stmt = dec.get("statement", "")
+            lines.append(f"- **{dec_id}**: {stmt}")
+            forbids_raw = dec.get("forbids")
+            forbids_items = (
+                [f"`{p}`" for p in forbids_raw if isinstance(p, str) and p.strip()]
+                if isinstance(forbids_raw, list)
+                else []
+            )
+            if forbids_items:
+                forbids_label = "禁じる語句" if lang == "ja" else "Forbids"
+                lines.append(f"  - {forbids_label}: {', '.join(forbids_items)}")
+            dec_src = _format_source_ref(dec.get("source"))
+            if dec_src is not None:
+                lines.append(f"  - {src_label}: {dec_src}")
+
+    lines.extend(
+        [
+            "",
+            "## 検討した代案" if lang == "ja" else "## Alternatives Considered",
+            "",
+        ]
+    )
+    alts_raw = data.get("alternatives")
+    alts = list(alts_raw) if isinstance(alts_raw, list) else []
+    if not alts:
+        lines.append(none_text)
+    else:
+        for alt in alts:
+            alt_text = _extract_holder_text(alt)
+            if alt_text:
+                lines.append(f"- {alt_text}")
+            if isinstance(alt, dict):
+                alt_src = _format_source_ref(alt.get("source"))
+                if alt_src is not None:
+                    lines.append(f"  - {src_label}: {alt_src}")
+
+    lines.extend(
+        [
+            "",
+            "## 元の文書" if lang == "ja" else "## Source Documents",
+            "",
+        ]
+    )
+    sources_raw = data.get("source")
+    sources = [s for s in sources_raw if isinstance(s, dict)] if isinstance(sources_raw, list) else []
+    if not sources:
+        lines.append(none_text)
+    else:
+        for src in sources:
+            path = src.get("path", "")
+            sha = src.get("sha256", "")
+            lines.append(f"- `{path}` (`sha256:{sha}`)")
+
+    return "\n".join(lines) + "\n"
+
+
+def render_acceptance_tests_md(
+    data: dict[str, Any],
+    ir_filename: str,
+    ir_sha256: str,
+    lang: EmitLang = "ja",
+) -> str:
+    """Render `acceptance_tests.md` draft from a validated IR dict (CMP-12)."""
+    none_text = "（なし）" if lang == "ja" else "(none)"
+    obs_label = "観測できる結果" if lang == "ja" else "Observable"
+    ref_label = "参照する要件" if lang == "ja" else "Referenced by"
+    src_label = "元の場所" if lang == "ja" else "Source"
+
+    lines: list[str] = [
+        render_draft_header(ir_filename, ir_sha256, lang=lang).rstrip("\n"),
+        "",
+        "# 受入テストの案" if lang == "ja" else "# Acceptance Test Proposals",
+    ]
+
+    reqs_by_ac: dict[str, list[str]] = {}
+    reqs_raw = data.get("requirements")
+    if isinstance(reqs_raw, list):
+        for req in reqs_raw:
+            if not isinstance(req, dict):
+                continue
+            req_id = req.get("id")
+            acc_refs = req.get("acceptance")
+            if not isinstance(req_id, str) or not isinstance(acc_refs, list):
+                continue
+            for ac_id in acc_refs:
+                if isinstance(ac_id, str):
+                    reqs_by_ac.setdefault(ac_id, [])
+                    if req_id not in reqs_by_ac[ac_id]:
+                        reqs_by_ac[ac_id].append(req_id)
+
+    acc_raw = data.get("acceptance")
+    acc_list = [a for a in acc_raw if isinstance(a, dict)] if isinstance(acc_raw, list) else []
+    if not acc_list:
+        lines.extend(["", none_text])
+        return "\n".join(lines) + "\n"
+
+    for item in acc_list:
+        ac_id = str(item.get("id", ""))
+        lines.extend(["", f"## {ac_id}", ""])
+        lines.append(f"- Given: {item.get('given', '')}")
+        lines.append(f"- When: {item.get('when', '')}")
+        lines.append(f"- Then: {item.get('then', '')}")
+        lines.extend(_format_observable_lines(item.get("observable"), obs_label))
+        ref_reqs = reqs_by_ac.get(ac_id, [])
+        ref_str = ", ".join(ref_reqs) if ref_reqs else none_text
+        lines.append(f"- {ref_label}: {ref_str}")
+        ac_src = _format_source_ref(item.get("source"))
+        if ac_src is not None:
+            lines.append(f"- {src_label}: {ac_src}")
+
+    return "\n".join(lines) + "\n"
+
+
 def resolve_emit_out_dir(
     ir_path: Path,
     work_dir: Path,
@@ -1622,12 +1901,20 @@ def emit_ir_drafts(
     plan_bytes = render_plan_md(
         ir_data, ir_path.name, ir_sha256, lang=lang
     ).encode("utf-8")
+    contract_bytes = render_contract_md(
+        ir_data, check_payload, ir_path.name, ir_sha256, lang=lang
+    ).encode("utf-8")
+    acceptance_bytes = render_acceptance_tests_md(
+        ir_data, ir_path.name, ir_sha256, lang=lang
+    ).encode("utf-8")
 
     files_to_write: list[tuple[str, bytes]] = [
         ("ir.json", ir_bytes),
         ("check.json", check_bytes),
         ("spec_section.md", spec_section_bytes),
         ("plan.md", plan_bytes),
+        ("contract.md", contract_bytes),
+        ("acceptance_tests.md", acceptance_bytes),
     ]
 
     teams_raw = ir_data.get("teams")
