@@ -831,6 +831,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Extract heading outline from a design markdown file",
     )
     compile_parser.add_argument(
+        "--spec",
+        type=Path,
+        default=argparse.SUPPRESS,
+        metavar="SPEC_MD",
+        help="Path to SPEC.md for L-6 check (defaults to <work-dir>/SPEC.md if present)",
+    )
+    compile_parser.add_argument(
         "--json",
         action="store_true",
         help="Output compile result in JSON format",
@@ -1023,7 +1030,11 @@ def main(argv: list[str] | None = None) -> int:
             return exit_code
 
         ir_path = args.check if args.check.is_absolute() else (work_dir / args.check)
-        exit_code, payload, issues = check_ir_file(ir_path, work_dir=work_dir)
+        spec_arg: Path | None = getattr(args, "spec", None)
+        resolved_spec: Path | None = None
+        if spec_arg is not None:
+            resolved_spec = spec_arg if spec_arg.is_absolute() else (work_dir / spec_arg)
+        exit_code, payload, issues = check_ir_file(ir_path, work_dir=work_dir, spec_path=resolved_spec)
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:

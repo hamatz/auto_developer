@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeGuard
 
+from auto_developer.boundary import _match_path
+
 IR_SCHEMA_VERSION = "auto-dev-ir/1"
 CHECK_OUTPUT_SCHEMA_VERSION = "auto-dev-compile-check/1"
 OUTLINE_OUTPUT_SCHEMA_VERSION = "auto-dev-outline/1"
@@ -39,6 +41,9 @@ _FENCE_OPEN_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
 _FENCE_CLOSE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*$")
 _ATX_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*)$")
 _UNRESOLVED_MARKER_RE = re.compile(r"(?<![A-Za-z])(?:TBD|TODO)(?![A-Za-z])|要検討|未定", re.IGNORECASE)
+_SPEC_SECTION4_HEADING_RE = re.compile(r"^\s*##\s+4(?:\.|\s|$)")
+_SPEC_H2_HEADING_RE = re.compile(r"^\s*##(?!#)\s+")
+_SPEC_REQ_LINE_RE = re.compile(r"^\s*-\s+\[[xX]\]\s+\*\*([A-Z]+-[0-9]+)(?:\s|\*\*)")
 
 
 @dataclass(frozen=True)
@@ -733,9 +738,206 @@ def _lint_l9_unresolved(data: dict[str, Any], errors: list[CompileIssue]) -> Non
                 _check_unresolved_marker(step.get("title"), f"steps[{idx}].title", errors)
 
 
-def lint_ir(data: dict[str, Any], errors: list[CompileIssue], warnings: list[CompileIssue]) -> None:
+def _lint_l5_forbids(data: dict[str, Any], errors: list[CompileIssue]) -> None:
+    """L-5: Decision forbids phrases must not appear verbatim (case-sensitive) in req/acceptance."""
+    forbid_entries: list[tuple[int, str, int, str]] = []
+    decisions = data.get("decisions")
+    if isinstance(decisions, list):
+        for dec_idx, dec in enumerate(decisions):
+            if not isinstance(dec, dict):
+                continue
+            dec_id = dec.get("id")
+            dec_id_str = dec_id if isinstance(dec_id, str) else f"decisions[{dec_idx}]"
+            forbids = dec.get("forbids")
+            if not isinstance(forbids, list):
+                continue
+            for f_idx, phrase in enumerate(forbids):
+                if isinstance(phrase, str) and phrase.strip():
+                    forbid_entries.append((dec_idx, dec_id_str, f_idx, phrase))
+
+    if not forbid_entries:
+        return
+
+    reqs = data.get("requirements")
+    if isinstance(reqs, list):
+        for req_idx, req in enumerate(reqs):
+            if not isinstance(req, dict):
+                continue
+            statement = req.get("statement")
+            if not isinstance(statement, str):
+                continue
+            for dec_idx, dec_id_str, f_idx, phrase in forbid_entries:
+                if phrase in statement:
+                    _add_error(
+                        errors,
+                        f"requirements[{req_idx}].statement",
+                        f"conflicts with decisions[{dec_idx}] ({dec_id_str}) forbids[{f_idx}] {phrase!r}",
+                        rule="L-5",
+                    )
+
+    acc_list = data.get("acceptance")
+    if isinstance(acc_list, list):
+        for ac_idx, item in enumerate(acc_list):
+            if not isinstance(item, dict):
+                continue
+            for field in ("given", "when", "then"):
+                val = item.get(field)
+                if not isinstance(val, str):
+                    continue
+                for dec_idx, dec_id_str, f_idx, phrase in forbid_entries:
+                    if phrase in val:
+                        _add_error(
+                            errors,
+                            f"acceptance[{ac_idx}].{field}",
+                            f"conflicts with decisions[{dec_idx}] ({dec_id_str}) forbids[{f_idx}] {phrase!r}",
+                            rule="L-5",
+                        )
+
+
+def _parse_spec_section4_ids(spec_text: str) -> set[str]:
+    """Extract requirement IDs (`- [x] **<ID> `) from section 4 of SPEC.md."""
+    ids: set[str] = set()
+    in_section4 = False
+    fence_char: str | None = None
+    fence_len = 0
+
+    for raw_line in spec_text.splitlines():
+        if fence_char is not None:
+            close_match = _FENCE_CLOSE_RE.match(raw_line)
+            if close_match:
+                marker = close_match.group(1)
+                if marker[0] == fence_char and len(marker) >= fence_len:
+                    fence_char = None
+                    fence_len = 0
+            continue
+
+        open_match = _FENCE_OPEN_RE.match(raw_line)
+        if open_match:
+            marker = open_match.group(1)
+            info = open_match.group(2)
+            if not (marker[0] == "`" and "`" in info):
+                fence_char = marker[0]
+                fence_len = len(marker)
+                continue
+
+        if not in_section4:
+            if _SPEC_SECTION4_HEADING_RE.match(raw_line):
+                in_section4 = True
+            continue
+
+        if _SPEC_H2_HEADING_RE.match(raw_line):
+            break
+
+        req_match = _SPEC_REQ_LINE_RE.match(raw_line)
+        if req_match:
+            ids.add(req_match.group(1))
+
+    return ids
+
+
+def _lint_l6_spec_overlap(
+    data: dict[str, Any],
+    spec_section4_ids: set[str] | None,
+    warnings: list[CompileIssue],
+) -> None:
+    """L-6: Warn if requirement ID/kind conflicts with SPEC.md section 4."""
+    if spec_section4_ids is None:
+        return
+
+    reqs = data.get("requirements")
+    if not isinstance(reqs, list):
+        return
+
+    for idx, req in enumerate(reqs):
+        if not isinstance(req, dict):
+            continue
+        req_id = req.get("id")
+        kind = req.get("kind")
+        if not isinstance(req_id, str) or not REQ_ID_RE.fullmatch(req_id):
+            continue
+        if req_id in spec_section4_ids and kind != "modify":
+            _add_warning(
+                warnings,
+                f"requirements[{idx}].kind",
+                f"requirement {req_id!r} already exists in SPEC.md section 4; kind should be 'modify'",
+                rule="L-6",
+            )
+        elif kind == "modify" and req_id not in spec_section4_ids:
+            _add_warning(
+                warnings,
+                f"requirements[{idx}].kind",
+                f"requirement {req_id!r} has kind 'modify' but is not in SPEC.md section 4",
+                rule="L-6",
+            )
+
+
+def _lint_l7_teams(data: dict[str, Any], errors: list[CompileIssue]) -> None:
+    """L-7: When teams[] is non-empty, each step file must match exactly one team's owns."""
+    teams = data.get("teams")
+    if not isinstance(teams, list) or len(teams) == 0:
+        return
+
+    team_entries: list[tuple[str, list[str]]] = []
+    for t_idx, team in enumerate(teams):
+        if not isinstance(team, dict):
+            continue
+        team_id = team.get("id")
+        owns = team.get("owns")
+        if not isinstance(owns, list):
+            continue
+        tid = team_id if isinstance(team_id, str) and team_id.strip() else f"teams[{t_idx}]"
+        patterns = [p for p in owns if isinstance(p, str) and p.strip()]
+        team_entries.append((tid, patterns))
+
+    if not team_entries:
+        return
+
+    steps = data.get("steps")
+    if not isinstance(steps, list):
+        return
+
+    for s_idx, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        files = step.get("files")
+        if not isinstance(files, list):
+            continue
+        for f_idx, file_path in enumerate(files):
+            if not isinstance(file_path, str) or not file_path.strip():
+                continue
+            owners = [
+                tid
+                for tid, patterns in team_entries
+                if any(_match_path(file_path, pat) for pat in patterns)
+            ]
+            if len(owners) == 0:
+                _add_error(
+                    errors,
+                    f"steps[{s_idx}].files[{f_idx}]",
+                    f"file {file_path!r} is not owned by any team",
+                    rule="L-7",
+                )
+            elif len(owners) > 1:
+                _add_error(
+                    errors,
+                    f"steps[{s_idx}].files[{f_idx}]",
+                    f"file {file_path!r} is owned by multiple teams: {', '.join(owners)}",
+                    rule="L-7",
+                )
+
+
+def lint_ir(
+    data: dict[str, Any],
+    errors: list[CompileIssue],
+    warnings: list[CompileIssue],
+    *,
+    spec_section4_ids: set[str] | None = None,
+) -> None:
     """Run deterministic CMP-3 lints on an IR dict."""
     _lint_l1_acceptance(data, errors)
+    _lint_l5_forbids(data, errors)
+    _lint_l6_spec_overlap(data, spec_section4_ids, warnings)
+    _lint_l7_teams(data, errors)
     _lint_l8_traceability(data, warnings)
     _lint_l9_unresolved(data, errors)
 
@@ -743,6 +945,7 @@ def lint_ir(data: dict[str, Any], errors: list[CompileIssue], warnings: list[Com
 def check_ir_file(
     ir_path: Path,
     work_dir: Path | None = None,
+    spec_path: Path | None = None,
 ) -> tuple[int, dict[str, Any], list[CompileIssue]]:
     """Load and validate an IR JSON file.
 
@@ -750,6 +953,33 @@ def check_ir_file(
     Exit codes: 0 = OK, 1 = validation error, 2 = unreadable/invalid JSON/wrong schema.
     """
     issues: list[CompileIssue] = []
+    root_dir = work_dir or Path.cwd()
+
+    spec_section4_ids: set[str] | None = None
+    target_spec: Path | None = spec_path
+    explicit_spec = spec_path is not None
+    if target_spec is None:
+        candidate = root_dir / "SPEC.md"
+        if candidate.exists():
+            target_spec = candidate
+
+    if target_spec is not None:
+        try:
+            if not target_spec.exists():
+                raise FileNotFoundError(f"SPEC file not found: {target_spec}")
+            if not target_spec.is_file():
+                raise IsADirectoryError(f"SPEC path is not a regular file: {target_spec}")
+            spec_text = target_spec.read_text(encoding="utf-8")
+            spec_section4_ids = _parse_spec_section4_ids(spec_text)
+        except (OSError, UnicodeDecodeError) as exc:
+            if explicit_spec or target_spec.exists():
+                _add_error(issues, str(target_spec), f"failed to read SPEC file: {exc}")
+                payload_err: dict[str, Any] = {
+                    "schema": CHECK_OUTPUT_SCHEMA_VERSION,
+                    "errors": [i.to_dict() for i in issues],
+                    "warnings": [],
+                }
+                return 2, payload_err, issues
     try:
         raw = ir_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
@@ -795,8 +1025,8 @@ def check_ir_file(
         return 2, payload, issues
 
     errors, warnings = validate_ir_schema(data)
-    validate_ir_sources(data, work_dir or Path.cwd(), errors, warnings)
-    lint_ir(data, errors, warnings)
+    validate_ir_sources(data, root_dir, errors, warnings)
+    lint_ir(data, errors, warnings, spec_section4_ids=spec_section4_ids)
     all_issues = [*errors, *warnings]
     payload = {
         "schema": CHECK_OUTPUT_SCHEMA_VERSION,
