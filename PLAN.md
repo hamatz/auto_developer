@@ -4,16 +4,17 @@
 現在のタスク進捗と次の一手。会話ログではなく、ここに状態を残す。
 実装エージェントは1回に1ステップだけを担当し、終わったらチェックを付けてコミットする。
 セッションが切れても、SPEC.md・このファイル・git の履歴を読めば作業を再開できる状態に保つ。
-前のフェーズの PLAN は git の履歴で参照する（Phase 75 は dae87e5 時点の PLAN.md）。
+前のフェーズの PLAN は git の履歴で参照する（Phase 76 は 57ee33e 時点の PLAN.md）。
 -->
 
 ## 現在の目標
-- Phase 76: Spec Compiler の下書きの出力とスキル（SPEC.md 5.1: CMP-5, CMP-9, CMP-10, CMP-11, CMP-12, CMP-6）
-  - 要件ごとの影響分析と設計の判断は docs/contracts/phase76.md を参照する。「既存テスト変更の理由」は、この分析から作っている。
-  - INV-12: `compile` は、`.dev/compile/` の下の下書きのほかに、どのファイルも作成・変更しない。SPEC.md・PLAN.md・`teams.json` は人間が書く。
-- スコープ外: 影響分析（CMP-4）、ダッシュボードに計画の構造を重ねる表示（STAT-3）、承認した IR の保護（いずれも Phase 77）。README の更新（リリースのフェーズ）。
+- Phase 77: 影響分析と、計画の構造の表示（SPEC.md 5.1: CMP-13, CMP-4, CMP-14, GATE-14, STAT-11, STAT-3）
+  - 要件ごとの影響分析と設計の判断は docs/contracts/phase77.md を参照する。「既存テスト変更の理由」は、この分析から作っている。
+  - INV-12: `compile` は、`.dev/compile/` の下の下書きのほかに、どのファイルも作成・変更しない。
+  - ダッシュボードは、Phase 73 の見本 docs/designs/dashboard-prototype.html の構成と動きを変えない（要件の印と数を足すだけ）。
+- スコープ外: README・CHANGELOG の更新、独立監査（リリースのフェーズ）。
 
-## 作業手順（Phase 76・LESSONS.md に基づく）
+## 作業手順（Phase 77・LESSONS.md に基づく）
 - Maker と Checker は別系統のモデルにする（`commit-step` が終了コード 4 で強制する）。使うモデルを変えたときは、この節と「記録」に書く。
   - Maker: `gemini-4-hydrogen-medium`
   - Checker: `claude-sonnet-5-5`（Anthropic API 利用。環境変数 `ANTHROPIC_API_KEY` を利用）
@@ -21,10 +22,10 @@
 - **Checker の完了の通知だけでは、次に進まない。** Checker のプロセスが終わり、出力ファイルから判定が1つに決まること（GATE-5 の判定の読み取りの規則）を確かめてから記録する。
 - Checker には、指摘は要点だけにして、判定（`DECISION: APPROVE` / `DECISION: REJECT` の行、または出力全体が1つの JSON）を必ず出力の最後に書くよう求める。Checker の出力の上限（`max_tokens`）は 16384 にする（4096 では、考える部分と合わせて出力が途中で切れることがあった）。
 - Checker への入力は、要約・再構成しない。
-  1. SPEC の該当節: `awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_phase76.md`
-  2. 差分: `auto-dev review-input --task-id <n> --out-dir .dev/checker/p76_task<n>`（やり直したときは `_v2` などを付ける）
-  3. Checker の出力: `.dev/checker/review_p76_task<n>.txt` に置く（やり直したときは `_v2` などを付け、上書きしない）。
-- Checker には、SPEC の要件のうち、例外・異常系・境界値の扱いを満たしているかを、差分とテストの両方で確かめるよう求める。`compile --emit` の書き出すファイルは、ステップ 1〜4 で順に加える。まだ後のステップで加える予定のファイルがないことは、REJECT の理由にしないよう伝える（PLAN のステップの一覧を Checker に渡す）。影響分析（CMP-4）と、ダッシュボードの表示（STAT-3）は Phase 77 なので、求めないよう伝える。
+  1. SPEC の該当節: `awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_phase77.md`
+  2. 差分: `auto-dev review-input --task-id <n> --out-dir .dev/checker/p77_task<n>`（やり直したときは `_v2` などを付ける）
+  3. Checker の出力: `.dev/checker/review_p77_task<n>.txt` に置く（やり直したときは `_v2` などを付け、上書きしない）。
+- Checker には、SPEC の要件のうち、例外・異常系・境界値の扱いを満たしているかを、差分とテストの両方で確かめるよう求める。後のステップで加える予定のもの（PLAN のステップの一覧を Checker に渡す）がまだないことは、REJECT の理由にしないよう伝える。影響分析（CMP-4）は候補を並べるだけで、影響の有無の判断はしないこと（契約書 3.1）、ダッシュボードの見た目は人間が確かめること（JavaScript を実行するテストは求めない）も伝える。
 - verify-step の前に `git status --porcelain` を確認し、意図しないファイルがないことを確かめる。実験は `mktemp -d` の中で行う。
 - `--checkpoint` にはコミットの SHA を渡す（`git rev-parse HEAD`）。
 - 査読記録の順序（**この順番を崩さない**）:
@@ -51,36 +52,43 @@
 - 各ステップの検証は手元の macOS で行う。Linux での確認は人間が行う。
 - SPEC.md はフェーズの途中で変えない。SPEC にあいまいさや矛盾を見つけたら、止まって報告する。
 - Bundle を生成した後に、SPEC.md や追跡ファイルを変更しない。
+- 各ステップは `auto-dev pre-flight` で始める（`task_start` のイベントが書かれ、ダッシュボードの時系列に Maker の開始が出る。Phase 76 のステップ 2〜5 では呼ばれていなかった）。
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-<!-- docs/contracts/phase76.md の 4 章の影響分析から作成。ここに書いていない既存テストは変更しない。 -->
-- このフェーズで前のステップが作ったテストの資料（IR の見本など）は、後のステップの出力に合わせて直してよい。アサーションの趣旨は変えない。
-- ステップ 1〜4（CMP-5・CMP-9〜12）: Phase 75 で作ったテスト（`tests/test_cmp*`）は、`--emit` を加えたことで `compile` の引数の扱いの期待が変わる場合だけ、その期待を変えてよい。それ以外の既存テストは変更しない。
-- ステップ 5（CMP-6）: 既存テストは変更しない。`plugin.json` やスキルを確かめている既存テストが失敗した場合は、止まって報告する。
+<!-- docs/contracts/phase77.md の 4 章の影響分析から作成。ここに書いていない既存テストは変更しない。 -->
+- このフェーズで前のステップが作ったテストの資料（IR の見本、一時的なリポジトリの中身など）は、後のステップの検査や出力に合わせて直してよい。アサーションの趣旨は変えない。
+- ステップ 1（CMP-13）: Phase 76 で作ったテストのうち、IR のファイル名が `.ir.json` で終わり、出力先や `teams.json` の下書きの `project` に `.ir` が残ることを確かめているものは、新しい規則に合わせて期待を変えてよい。`/nightly-compile` のスキルの文言を確かめているテストは、文言の変更に合わせて変えてよい。確かめる趣旨は変えない。
+- ステップ 2・3（CMP-4）: 既存テストは変更しない。
+- ステップ 4（CMP-14）: Phase 76 で作ったテストのうち、`contract.md` の「影響分析は人間が書く」の1行や、`plan.md` の「既存テスト変更の理由」の形を確かめているものは、新しい形に合わせて期待を変えてよい。
+- ステップ 5（GATE-14）: 既存テストは変更しない。保護ファイルの一覧や `init` の雛形を確かめている既存テストが失敗した場合は、止まって報告する。
+- ステップ 6・7（STAT-11・STAT-3）: 既存テストは変更しない。
 - CLI を変えたステップでは `docs/cli.md` を作り直す（既存テストの変更ではない）。
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [x] 1. `auto-dev compile --emit <IR> [--out-dir DIR] [--lang ja|en] [--force]` の骨組み: 前提の点検（ERROR なら何も書かずに終了コード 1）、出力先は `.dev/compile/` の下だけ（外なら終了コード 2）、既存の出力先は `--force` がなければ終了コード 2、決定的な出力、共通の見出し、`ir.json` と `check.json`。`docs/cli.md` を作り直す（Red-First）（CMP-5）
-- [x] 2. `spec_section.md`: 要件と受入条件、`kind` が `modify` の印、元の場所のコメント、スコープ外（Red-First）（CMP-9）
-- [x] 3. `plan.md`（ステップと「既存テスト変更の理由」の骨組み）、チームがある場合の `teams.json`（`load_teams_manifest` で読める）と `plans/<id>.md`（チームをまたぐステップは入れない）（Red-First）（CMP-10）
-- [x] 4. `contract.md`（目的、人間が判断すること、要件の一覧、判断、代案、元の文書）と `acceptance_tests.md`（Red-First）（CMP-11, CMP-12）
-- [x] 5. スキル `skills/nightly-compile/SKILL.md` と `plugin.json` の `/nightly-compile`。スキルのコマンドが `check_doc_commands.py` を通る（Red-First）（CMP-6）
+- [ ] 1. `auto-dev compile --anchor <path>:<開始>-<終了>`、`--emit` の出力先と `project` から `.ir` を除く、`/nightly-compile` のスキルの修正（元の場所は `--anchor` で求める、指紋の書き方、v0.10-draft への参照を外す）。`docs/cli.md` を作り直す（Red-First）（CMP-13）
+- [ ] 2. `auto-dev compile --impact <IR>`: I-1（指紋の検索。Python は構文木で定義・参照・文字列を区別、ほかは行の一致。テストとそれ以外を分ける）と I-4（入口）。`--json`。どのファイルも書かない。`docs/cli.md` を作り直す（Red-First）（CMP-4）
+- [ ] 3. `compile --impact` の I-2（モックと呼び出しの回数）と I-3（記録を合成しているテスト）（Red-First）（CMP-4）
+- [ ] 4. `compile --emit` が `impact.json` を書き、`contract.md` の「影響分析」の節と、`plan.md` の各ステップの「影響の候補」に反映する（Red-First）（CMP-14）
+- [ ] 5. `docs/designs/*.ir.json` を保護ファイルにする（GATE-1 の検査と `init` の雛形）。スキルに、承認した IR は人間がコミットすると書く（Red: Maker が `docs/designs/x.ir.json` を書き換えても `verify-step` が通る）（GATE-14）
+- [ ] 6. `status --json` に `requirements[]`（題名の最後の括弧の ID と、承認した IR）と `design_irs[]`、`DESIGN_DRIFT` の注意を加える（Red-First）（STAT-11）
+- [ ] 7. ダッシュボードの backlog とチームのノードに要件の ID の印（文と元の場所の説明つき）、上部の要約に要件の数（完了／全体）、`DESIGN_DRIFT` の表示（Red-First）（STAT-3）
 
 ## 止まっていること・判断待ち
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [x] Phase 76 の準備コミット: SPEC.md（Phase 75 の要件を 4 章へ移し、4.12 CMP を新設、RCV-7 の文言を直し、DX-15 を加える。5.1 に Phase 76 の要件）、PLAN.md、docs/contracts/phase76.md。
-- [x] 準備のコミットの前に: Phase 75 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase75/` に退かせる。
-- [x] ステップ 4 の完了後（フェーズの完了後にまとめて確認）: テストの資料の IR から書き出した下書きを読み、SPEC と PLAN に写せる形かを目で確かめる。
-- [x] ステップ 5 の完了後（CI は push の後に確かめる）:
+- [ ] Phase 77 の準備コミット: SPEC.md（Phase 76 の要件を 4.12 へ移す。5.1 に Phase 77 の要件）、PLAN.md、docs/contracts/phase77.md、`scripts/verify_local.sh`（`docs/designs/*.ir.json` の保護）。
+- [x] 準備のコミットの前に: Phase 76 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase76/` に退かせる。
+- [ ] ステップ 4 の完了後: このリポジトリに対して、Phase 74〜76 の要件のいずれかを模した IR で `compile --impact` を実行し、実際に止まった原因のテストが候補に出るかを確かめる。
+- [ ] ステップ 7 の完了後:
   - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI（macOS・Ubuntu × Python 3.10・3.12、gitleaks）が通ることを確かめる。
   - 査読の記録（判定の決まらない出力の履歴を含む）と Checker の出力ファイルを突き合わせ、記録されていない出力が0件であることを確かめる。
   - Bundle を作り、`verify-bundle` が VERIFIED になることを確かめる。
-  - 設計書の見本に対して `/nightly-compile` の流れを一度通し、使える形かを確かめる。
+  - ダッシュボードの要件の表示を目で確かめる。一時的なクローンで設計書の見本の IR を `docs/designs/` に置き、`DESIGN_DRIFT` が出ること・出ないことを確かめる。
 
 ## 記録
+- 2026-11-25: Phase 77 の準備。Phase 76 の確認で見つかった IDEA-030（スキルの使い勝手）を最初のステップ（CMP-13）にし、影響分析（CMP-4・CMP-14）、承認した IR の保護（GATE-14）、要件の表示（STAT-11・STAT-3）を行う。人間が承認した。`scripts/verify_local.sh` の保護ファイルの検査に `docs/designs/*.ir.json` を先に加えた（ステップ 5 で製品の側にも加わる）。
 - 2026-11-25: Phase 76 の完了後の確認。5 ステップすべて完了し、隔離は0回。ステップ 1 だけ1回目の査読が REJECT で、ステップ 2〜5 は1回目で APPROVE。保護ファイルの変更なし。査読の記録の突き合わせで、`.dev/checker/review_p76_*.txt` の6件すべてが履歴に記録され、`review_input` の回数と履歴の件数も全タスクで一致した。ステップ 2〜5 には `task_start` のイベントがない（`pre-flight` を呼ばずに進めた。ダッシュボードの backlog は `verify_step` で減るので表示への影響は小さい）。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1094 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）だけ。Bundle は VERIFIED。`check_doc_commands.py` は新しいスキルを含む7ファイル・111 コマンドで終了コード 0。
 - 2026-11-25: 下書きの確認。テストの資料の IR（設計書の見本から作ったもの）で `compile --emit` を実行し、`spec_section.md`・`plan.md`・`contract.md`・`acceptance_tests.md` を読んだ。注意書き、要件と受入条件、元の場所のコメント、`- [ ] <番号>.` の形のステップ、判断の禁じる語句、「人間が判断すること」がそろっていて、SPEC と PLAN に写せる形だった。チームのある IR（チームをまたぐステップを含む）では、`teams.json` が `load_teams_manifest` で読め、またぐステップはチームの計画に入らず、契約書の「人間が判断すること」に挙がった。2回目の `--emit` は `--force` がないので終了コード 2、`.dev/compile/` の外への `--out-dir` も終了コード 2。どちらも作業ツリーを変えなかった（INV-12）。
 - 2026-11-25: スキル `/nightly-compile` の確認で見つかったこと: (1) 要件ごとの元の場所の SHA-256 を、エージェントがどう求めるかが書かれていない（`--outline` が示すのは見出しの範囲の SHA-256 だけ）。`sed -n '<開始>,<終了>p' <ファイル> | shasum -a 256` が CMP-1 の求め方と一致することを確かめた。(2) スキルは出力先を `.dev/compile/<name>/` と書いているが、IR を `<name>.ir.json` にすると、実際は `.dev/compile/<name>.ir/` になり、`teams.json` の `project` も `<name>.ir` になる。(3) スキルが、このリポジトリの中の文書（v0.10-draft の 5.2）を参照している。対応はスキルに書き写してあるが、ほかのリポジトリの利用者には参照先がない。いずれも IDEA-030 に入れた。
