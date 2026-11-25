@@ -483,10 +483,26 @@ class TestUntrackedTamper(unittest.TestCase):
         )
 
         orig_popen = subprocess.Popen
+        orig_capture = RedTestVerifier._capture_repo_snapshot
+        # 改ざんは「候補テストの実行中」（改ざん前のスナップショットを取った後）に起こす。
+        # サンドボックスの起動の確認（_probe_sandbox_backend）も sandbox-exec / bwrap を起動する。
+        # その確認はキャッシュされるため、キャッシュがない状態（このテストを単独で実行した場合や、
+        # スレッド数が変わって上限の組が変わった場合）では、改ざんがスナップショットより前に起き、
+        # 検知の対象外になっていた（macOS + Python 3.12 の CI で失敗。2026-11-25 に人間が修正）。
+        snapshot_taken = {"before": False}
+
+        def capture_and_mark(verifier_self: Any) -> Any:
+            snap = orig_capture(verifier_self)
+            snapshot_taken["before"] = True
+            return snap
 
         def tampering_popen(*args: Any, **kwargs: Any) -> Any:
             cmd = args[0] if args else kwargs.get("args", [])
-            if cmd and any("sandbox" in str(c) or "bwrap" in str(c) or "-c" in str(c) for c in cmd):
+            if (
+                snapshot_taken["before"]
+                and cmd
+                and any("sandbox" in str(c) or "bwrap" in str(c) or "-c" in str(c) for c in cmd)
+            ):
                 # テストプロセス起動中に未追跡ファイルの内容のみを書き換える
                 os.system(f"chflags -R nouchg '{self.repo_dir}' 2>/dev/null || true")
                 with contextlib.suppress(Exception):
@@ -496,7 +512,10 @@ class TestUntrackedTamper(unittest.TestCase):
 
         # 1. AuditDispatcher による Red 検証（実行中に未追跡ファイルの改ざんが発生）
         dispatcher = AuditDispatcher(repo_dir=self.repo_dir, audit_store=audit_store)
-        with patch("subprocess.Popen", side_effect=tampering_popen):
+        with (
+            patch("subprocess.Popen", side_effect=tampering_popen),
+            patch.object(RedTestVerifier, "_capture_repo_snapshot", capture_and_mark),
+        ):
             dispatched = dispatcher.dispatch_finding(finding, plan_path=self.plan_path)
 
         # REPO_TAMPER_DETECTED により REJECTED
