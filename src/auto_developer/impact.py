@@ -19,7 +19,28 @@ from auto_developer.compiler import (
 IMPACT_OUTPUT_SCHEMA_VERSION = "auto-dev-impact/1"
 NO_FINGERPRINTS_NOTE = "指紋がないので調べていない"
 
+RECORD_FILE_MARKERS: tuple[str, ...] = (
+    "events.jsonl",
+    "nightly_evidence",
+    "job_state.json",
+    "audit_stage.json",
+    "bundle_manifest.json",
+)
+_MOCK_NAMES: frozenset[str] = frozenset({"patch", "Mock", "MagicMock"})
+_WRITE_OPEN_MODES: frozenset[str] = frozenset({"w", "a", "x", "+"})
+
 MatchKind = Literal["definition", "reference", "string", "text"]
+
+
+@dataclass(frozen=True)
+class _IndexedTestFunc:
+    """Pre-indexed test function using mocks or call-count assertions (I-2)."""
+
+    line: int
+    qualname: str
+    names: frozenset[str]
+    strings: tuple[str, ...]
+    signals: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -34,6 +55,9 @@ class _IndexedFile:
     references: tuple[tuple[int, str], ...]
     strings: tuple[tuple[int, str], ...]
     lines: tuple[str, ...]
+    test_funcs: tuple[_IndexedTestFunc, ...] = ()
+    record_markers: tuple[str, ...] = ()
+    record_writers: tuple[str, ...] = ()
 
 
 def is_test_file(rel_path: str) -> bool:
@@ -86,6 +110,113 @@ def _entry_point_category(rel_path: str, has_main_guard: bool) -> str | None:
     return None
 
 
+def _is_patch_attr_or_name(node: ast.AST) -> bool:
+    return (isinstance(node, ast.Name) and node.id == "patch") or (
+        isinstance(node, ast.Attribute) and node.attr == "patch"
+    )
+
+
+def _iter_test_functions(tree: ast.AST) -> list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]]:
+    if not isinstance(tree, ast.Module):
+        return []
+    found: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name.startswith("test_"):
+            found.append((stmt.name, stmt))
+        elif isinstance(stmt, ast.ClassDef):
+            for member in stmt.body:
+                if (
+                    isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and member.name.startswith("test_")
+                ):
+                    found.append((f"{stmt.name}.{member.name}", member))
+    return found
+
+
+def _extract_test_funcs(tree: ast.AST) -> tuple[_IndexedTestFunc, ...]:
+    indexed: list[_IndexedTestFunc] = []
+    for qualname, func_node in _iter_test_functions(tree):
+        names: set[str] = set()
+        strings: list[str] = []
+        signals: set[str] = set()
+
+        for node in ast.walk(func_node):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(node.name)
+            elif isinstance(node, ast.Name):
+                names.add(node.id)
+                if node.id in _MOCK_NAMES:
+                    signals.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                names.add(node.attr)
+                if node.attr == "object" and _is_patch_attr_or_name(node.value):
+                    signals.add("patch.object")
+                elif (
+                    node.attr in _MOCK_NAMES
+                    or node.attr.startswith("assert_called")
+                    or node.attr == "call_count"
+                ):
+                    signals.add(node.attr)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                strings.append(node.value)
+
+        if signals:
+            indexed.append(
+                _IndexedTestFunc(
+                    line=func_node.lineno,
+                    qualname=qualname,
+                    names=frozenset(names),
+                    strings=tuple(strings),
+                    signals=tuple(sorted(signals)),
+                )
+            )
+    return tuple(indexed)
+
+
+def _is_write_open_call(call: ast.Call, *, mode_pos_index: int) -> bool:
+    mode_node: ast.expr | None = None
+    for kw in call.keywords:
+        if kw.arg == "mode":
+            mode_node = kw.value
+            break
+    if mode_node is None and len(call.args) > mode_pos_index:
+        mode_node = call.args[mode_pos_index]
+    if isinstance(mode_node, ast.Constant) and isinstance(mode_node.value, str):
+        return any(ch in mode_node.value for ch in _WRITE_OPEN_MODES)
+    return False
+
+
+def _extract_record_synthesis(tree: ast.AST) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    markers: set[str] = set()
+    writers: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            for marker in RECORD_FILE_MARKERS:
+                if marker in node.value:
+                    markers.add(marker)
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute):
+                if func.attr in ("write_text", "write_bytes"):
+                    writers.add(func.attr)
+                elif func.attr == "dump" and (
+                    (isinstance(func.value, ast.Name) and func.value.id == "json")
+                    or (isinstance(func.value, ast.Attribute) and func.value.attr == "json")
+                ):
+                    writers.add("json.dump")
+                elif func.attr == "open" and _is_write_open_call(node, mode_pos_index=0):
+                    writers.add("open")
+            elif (
+                isinstance(func, ast.Name)
+                and func.id == "open"
+                and _is_write_open_call(node, mode_pos_index=1)
+            ):
+                writers.add("open")
+    if markers and writers:
+        return tuple(sorted(markers)), tuple(sorted(writers))
+    return (), ()
+
+
 def _index_python_ast(
     rel_path: str,
     tree: ast.AST,
@@ -106,6 +237,8 @@ def _index_python_ast(
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             strings.append((node.lineno, node.value))
 
+    test_funcs = _extract_test_funcs(tree) if test_file else ()
+    record_markers, record_writers = _extract_record_synthesis(tree) if test_file else ((), ())
     category = _entry_point_category(rel_path, _has_main_guard(tree))
     return _IndexedFile(
         path=rel_path,
@@ -116,6 +249,9 @@ def _index_python_ast(
         references=tuple(references),
         strings=tuple(strings),
         lines=(),
+        test_funcs=test_funcs,
+        record_markers=record_markers,
+        record_writers=record_writers,
     )
 
 
@@ -297,50 +433,80 @@ def analyze_ir_impact(
         code_matches: list[dict[str, Any]] = []
         test_matches: list[dict[str, Any]] = []
         entry_points: list[dict[str, Any]] = []
+        mock_tests: list[dict[str, Any]] = []
 
         for idx_file in indexed_files:
             matches = _match_file_fingerprints(idx_file, fingerprints)
-            if not matches:
-                continue
+            if matches:
+                target = test_matches if idx_file.is_test else code_matches
+                for line, kind, fp in matches:
+                    target.append(
+                        {
+                            "path": idx_file.path,
+                            "line": line,
+                            "kind": kind,
+                            "fingerprint": fp,
+                        }
+                    )
 
-            target = test_matches if idx_file.is_test else code_matches
-            for line, kind, fp in matches:
-                target.append(
-                    {
-                        "path": idx_file.path,
-                        "line": line,
-                        "kind": kind,
-                        "fingerprint": fp,
-                    }
-                )
+                if idx_file.entry_category is not None:
+                    entry_points.append(
+                        {
+                            "path": idx_file.path,
+                            "category": idx_file.entry_category,
+                            "lines": sorted({m[0] for m in matches}),
+                            "fingerprints": sorted({m[2] for m in matches}),
+                        }
+                    )
 
-            if idx_file.entry_category is not None:
-                entry_points.append(
-                    {
-                        "path": idx_file.path,
-                        "category": idx_file.entry_category,
-                        "lines": sorted({m[0] for m in matches}),
-                        "fingerprints": sorted({m[2] for m in matches}),
-                    }
-                )
+            if idx_file.is_test and idx_file.test_funcs:
+                for tf in idx_file.test_funcs:
+                    matched_fps = sorted(
+                        fp
+                        for fp in fingerprints
+                        if fp in tf.names or any(fp in s for s in tf.strings)
+                    )
+                    if matched_fps:
+                        mock_tests.append(
+                            {
+                                "path": idx_file.path,
+                                "line": tf.line,
+                                "function": tf.qualname,
+                                "fingerprints": matched_fps,
+                                "signals": list(tf.signals),
+                            }
+                        )
 
-        req_results.append(
-            {
-                "id": req_id,
-                "statement": statement,
-                "fingerprints": fingerprints,
-                "searched": True,
-                "note": None,
-                "code_matches": code_matches,
-                "test_matches": test_matches,
-                "entry_points": entry_points,
-            }
-        )
+        mock_tests.sort(key=lambda m: (m["path"], m["line"], m["function"]))
+
+        req_entry: dict[str, Any] = {
+            "id": req_id,
+            "statement": statement,
+            "fingerprints": fingerprints,
+            "searched": True,
+            "note": None,
+            "code_matches": code_matches,
+            "test_matches": test_matches,
+            "entry_points": entry_points,
+        }
+        if mock_tests:
+            req_entry["mock_tests"] = mock_tests
+        req_results.append(req_entry)
+
+    record_tests = [
+        {
+            "path": idx_file.path,
+            "markers": list(idx_file.record_markers),
+            "writers": list(idx_file.record_writers),
+        }
+        for idx_file in indexed_files
+        if idx_file.is_test and idx_file.record_markers and idx_file.record_writers
+    ]
 
     payload: dict[str, Any] = {
         "schema": IMPACT_OUTPUT_SCHEMA_VERSION,
         "requirements": req_results,
-        "record_tests": [],
+        "record_tests": record_tests,
     }
     return 0, payload, [], None
 
@@ -359,6 +525,7 @@ def format_impact_text(payload: dict[str, Any]) -> list[str]:
         code_matches = req.get("code_matches", [])
         test_matches = req.get("test_matches", [])
         entry_points = req.get("entry_points", [])
+        mock_tests = req.get("mock_tests", [])
         if code_matches:
             lines.append("  code:")
             for m in code_matches:
@@ -367,12 +534,28 @@ def format_impact_text(payload: dict[str, Any]) -> list[str]:
             lines.append("  tests:")
             for m in test_matches:
                 lines.append(f"    {m['path']}:{m['line']} [{m['kind']}] ({m['fingerprint']})")
+        if mock_tests:
+            lines.append("  mock_tests:")
+            for mt in mock_tests:
+                sigs = ", ".join(mt.get("signals", []))
+                mt_fps = ", ".join(mt.get("fingerprints", []))
+                lines.append(
+                    f"    {mt['path']}:{mt['line']} {mt['function']} [{sigs}] ({mt_fps})"
+                )
         if entry_points:
             lines.append("  entry_points:")
             for ep in entry_points:
                 ep_lines = ", ".join(str(n) for n in ep.get("lines", []))
                 ep_fps = ", ".join(ep.get("fingerprints", []))
                 lines.append(f"    {ep['path']} [{ep['category']}] lines {ep_lines} ({ep_fps})")
-        if not code_matches and not test_matches and not entry_points:
+        if not code_matches and not test_matches and not entry_points and not mock_tests:
             lines.append("  (no matches)")
+
+    record_tests = payload.get("record_tests", [])
+    if record_tests:
+        lines.append("record_tests:")
+        for rt in record_tests:
+            writers = ", ".join(rt.get("writers", []))
+            markers = ", ".join(rt.get("markers", []))
+            lines.append(f"  {rt['path']} [{writers}] ({markers})")
     return lines
