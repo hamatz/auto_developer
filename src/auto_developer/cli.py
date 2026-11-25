@@ -60,7 +60,7 @@ echo "=== [1/2] Checking protected file invariants (tracked & untracked) ==="
 CHECKPOINT="${1:-HEAD}"
 
 if git rev-parse --verify "$CHECKPOINT" >/dev/null 2>&1; then
-  PROTECTED_DIFF=$(git diff --name-only "$CHECKPOINT" -- .github/ SPEC.md scripts/verify_local.sh tests/immunity/ teams.json 2>/dev/null || true)
+  PROTECTED_DIFF=$(git diff --name-only "$CHECKPOINT" -- .github/ SPEC.md scripts/verify_local.sh tests/immunity/ teams.json ':(glob)docs/designs/*.ir.json' 2>/dev/null || true)
   if [ -n "$PROTECTED_DIFF" ]; then
     echo "ERROR: Protected files were modified without authorization (git diff):"
     echo "$PROTECTED_DIFF"
@@ -68,7 +68,7 @@ if git rev-parse --verify "$CHECKPOINT" >/dev/null 2>&1; then
   fi
 fi
 
-DIRTY_PROTECTED=$(git status --porcelain | awk '{print $2}' | grep -E '^(\\.github/|SPEC\\.md|scripts/verify_local\\.sh|tests/immunity/|teams\\.json$)' || true)
+DIRTY_PROTECTED=$(git status --porcelain -uall | awk '{print $2}' | grep -E '^(\\.github/|SPEC\\.md|scripts/verify_local\\.sh|tests/immunity/|teams\\.json$|docs/designs/[^/]+\\.ir\\.json$)' || true)
 if [ -n "$DIRTY_PROTECTED" ]; then
   echo "ERROR: Protected files were created or modified (git status):"
   echo "$DIRTY_PROTECTED"

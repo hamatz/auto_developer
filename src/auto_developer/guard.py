@@ -169,12 +169,14 @@ class GitGuard:
         re.compile(r"^scripts/verify_local\.sh$"),
         re.compile(r"^tests/immunity/"),
         re.compile(r"^teams\.json$"),
+        re.compile(r"^docs/designs/[^/]+\.ir\.json$"),
     )
     BASE_PROTECTED_PATTERNS = (
         re.compile(r"^\.github/"),
         re.compile(r"^SPEC\.md$"),
         re.compile(r"^scripts/verify_local\.sh$"),
         re.compile(r"^teams\.json$"),
+        re.compile(r"^docs/designs/[^/]+\.ir\.json$"),
     )
     IMMUNITY_PATTERN = re.compile(r"^tests/immunity/")
     VALID_IMMUNITY_FILE_PATTERN = re.compile(r"^tests/immunity/test_[a-zA-Z0-9_\-]+\.py$")
@@ -377,7 +379,7 @@ print(json.dumps(data))
             if line.strip():
                 files_to_check.add(line.strip())
 
-        proc_status = self._run_git(["status", "--porcelain"])
+        proc_status = self._run_git(["status", "--porcelain", "-uall"])
         for line in proc_status.stdout.splitlines():
             if not line.strip():
                 continue
@@ -421,7 +423,7 @@ print(json.dumps(data))
                 if line.strip():
                     files_to_check.add(line.strip())
 
-            proc_status = self._run_git(["status", "--porcelain"])
+            proc_status = self._run_git(["status", "--porcelain", "-uall"])
             for line in proc_status.stdout.splitlines():
                 if not line.strip():
                     continue
@@ -446,7 +448,7 @@ print(json.dumps(data))
             if line.strip():
                 files_to_check_base.add(line.strip())
 
-        proc_status = self._run_git(["status", "--porcelain"])
+        proc_status = self._run_git(["status", "--porcelain", "-uall"])
         for line in proc_status.stdout.splitlines():
             if not line.strip():
                 continue

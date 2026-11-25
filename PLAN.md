@@ -70,7 +70,7 @@
 - [x] 2. `auto-dev compile --impact <IR>`: I-1（指紋の検索。Python は構文木で定義・参照・文字列を区別、ほかは行の一致。テストとそれ以外を分ける）と I-4（入口）。`--json`。どのファイルも書かない。`docs/cli.md` を作り直す（Red-First）（CMP-4）
 - [x] 3. `compile --impact` の I-2（モックと呼び出しの回数）と I-3（記録を合成しているテスト）（Red-First）（CMP-4）
 - [x] 4. `compile --emit` が `impact.json` を書き、`contract.md` の「影響分析」の節と、`plan.md` の各ステップの「影響の候補」に反映する（Red-First）（CMP-14）
-- [ ] 5. `docs/designs/*.ir.json` を保護ファイルにする（GATE-1 の検査と `init` の雛形）。スキルに、承認した IR は人間がコミットすると書く（Red: Maker が `docs/designs/x.ir.json` を書き換えても `verify-step` が通る）（GATE-14）
+- [x] 5. `docs/designs/*.ir.json` を保護ファイルにする（GATE-1 の検査と `init` の雛形）。スキルに、承認した IR は人間がコミットすると書く（Red: Maker が `docs/designs/x.ir.json` を書き換えても `verify-step` が通る）（GATE-14）
 - [ ] 6. `status --json` に `requirements[]`（題名の最後の括弧の ID と、承認した IR）と `design_irs[]`、`DESIGN_DRIFT` の注意を加える（Red-First）（STAT-11）
 - [ ] 7. ダッシュボードの backlog とチームのノードに要件の ID の印（文と元の場所の説明つき）、上部の要約に要件の数（完了／全体）、`DESIGN_DRIFT` の表示（Red-First）（STAT-3）
 

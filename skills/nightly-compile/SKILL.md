@@ -71,4 +71,4 @@ When the user runs `/nightly-compile`:
    - Present to the human:
      - The generated directory (default `.dev/compile/<name>/`, derived by stripping `.json` and trailing `.ir` from `<name>.ir.json`; `teams.json` also uses `<name>` as `project`) and `contract.md` path.
      - Every item under **"人間が判断すること"** (all `WARN`s, cross-team steps, and manual impact analysis).
-   - **INV-12**: Never modify `SPEC.md`, `PLAN.md`, `teams.json`, or `docs/contracts/` directly. The human reviews the drafts, copies them into `SPEC.md`, `PLAN.md`, `teams.json`, or `docs/contracts/`, and commits them.
+   - **INV-12 / GATE-14**: Never modify `SPEC.md`, `PLAN.md`, `teams.json`, `docs/contracts/`, or `docs/designs/*.ir.json` directly. The human reviews the drafts, copies them into `SPEC.md`, `PLAN.md`, `teams.json`, or `docs/contracts/`, copies the approved IR to `docs/designs/<name>.ir.json` (which is a protected file), and commits them.
