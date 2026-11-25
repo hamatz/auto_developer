@@ -70,7 +70,7 @@
 - [x] 5. `review-input` がイベント `review_input` を書く。`status` が `REVIEW_NOT_RECORDED` を `attention[]` に入れる。`/nightly-run` のスキルに「1回の入力に Checker は1回、出力は必ず記録する」を書く（Red-First）（GATE-13）
 - [x] 6. 検証の制限時間: `verify-step --timeout`、検証スクリプトの `# auto-dev: verify-timeout=<SEC>` の行、既定 300 秒の順で決める（`run`・`teams run` も同じ）。打ち切りのときに出所と延ばし方を示す。スキルに書く。`docs/cli.md` を作り直す（Red-First）（DX-13）
 - [x] 7. 隔離のあと、スナップショットにだけある新しいファイルの一覧と取り出すコマンドを表示し、失敗ログにも書く（Red: 新しいテストファイルを作ったタスクの `rollback-step` が、そのファイルを示さない）（RCV-6）
-- [ ] 8. `scripts/check_doc_commands.py`: README とスキルの `auto-dev` のコマンドを、CLI の引数定義と突き合わせる（Red-First）（DX-14）
+- [x] 8. `scripts/check_doc_commands.py`: README とスキルの `auto-dev` のコマンドを、CLI の引数定義と突き合わせる（Red-First）（DX-14）
 
 ## 止まっていること・判断待ち
 - なし。
