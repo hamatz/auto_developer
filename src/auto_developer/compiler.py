@@ -1205,6 +1205,122 @@ def render_draft_header(ir_filename: str, ir_sha256: str, lang: EmitLang = "ja")
     )
 
 
+def _format_source_comment(src: Any) -> str | None:
+    """Format a trace HTML comment from an IR source object (CMP-7/CMP-9)."""
+    if not isinstance(src, dict):
+        return None
+    path = src.get("path")
+    lines = src.get("lines")
+    sha256 = src.get("sha256")
+    if (
+        not _is_valid_relative_path(path)
+        or not _is_valid_line_range(lines)
+        or not _is_non_empty_str(sha256)
+    ):
+        return None
+    return f"<!-- source: {path}:L{lines[0]}-L{lines[1]} sha256:{sha256} -->"
+
+
+def _extract_holder_text(item: Any) -> str:
+    """Extract display text from an IR string or source-holder dict."""
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        for key in ("statement", "text", "title", "description"):
+            val = item.get(key)
+            if isinstance(val, str) and val.strip():
+                return val
+    return ""
+
+
+def render_spec_section(
+    data: dict[str, Any],
+    ir_filename: str,
+    ir_sha256: str,
+    lang: EmitLang = "ja",
+) -> str:
+    """Render `spec_section.md` draft from a validated IR dict (CMP-9)."""
+    lines: list[str] = [
+        render_draft_header(ir_filename, ir_sha256, lang=lang).rstrip("\n"),
+        "",
+        "### 5.1 （フェーズの名前）" if lang == "ja" else "### 5.1 (Phase Name)",
+        "",
+    ]
+
+    ac_by_id: dict[str, dict[str, Any]] = {}
+    acc_list = data.get("acceptance")
+    if isinstance(acc_list, list):
+        for item in acc_list:
+            if isinstance(item, dict):
+                ac_id = item.get("id")
+                if isinstance(ac_id, str) and ac_id not in ac_by_id:
+                    ac_by_id[ac_id] = item
+
+    reqs = data.get("requirements")
+    if isinstance(reqs, list):
+        obs_label = "観測できる結果" if lang == "ja" else "Observable"
+        for req in reqs:
+            if not isinstance(req, dict):
+                continue
+            req_id = req.get("id", "")
+            statement = req.get("statement", "")
+            kind = req.get("kind", "new")
+            if kind == "modify":
+                marker = "（修正）" if lang == "ja" else " (modify)"
+            else:
+                marker = ""
+            lines.append(f"- [ ] **{req_id}**{marker}: {statement}")
+
+            src_comment = _format_source_comment(req.get("source"))
+            if src_comment is not None:
+                lines.append(f"  {src_comment}")
+
+            acc_refs = req.get("acceptance")
+            if isinstance(acc_refs, list):
+                for ac_id in acc_refs:
+                    if not isinstance(ac_id, str):
+                        continue
+                    ac_item = ac_by_id.get(ac_id)
+                    if ac_item is None:
+                        continue
+                    lines.append(f"  - **{ac_id}**")
+                    lines.append(f"    - Given: {ac_item.get('given', '')}")
+                    lines.append(f"    - When: {ac_item.get('when', '')}")
+                    lines.append(f"    - Then: {ac_item.get('then', '')}")
+                    obs_raw = ac_item.get("observable")
+                    obs_items = (
+                        [x for x in obs_raw if isinstance(x, str) and x.strip()]
+                        if isinstance(obs_raw, list)
+                        else []
+                    )
+                    if len(obs_items) == 1:
+                        lines.append(f"    - {obs_label}: {obs_items[0]}")
+                    elif obs_items:
+                        lines.append(f"    - {obs_label}:")
+                        for obs in obs_items:
+                            lines.append(f"      - {obs}")
+
+    out_of_scope = data.get("out_of_scope")
+    if isinstance(out_of_scope, list) and len(out_of_scope) > 0:
+        lines.append("")
+        lines.append(
+            "## スコープ外（SPEC の 6 章に写す）"
+            if lang == "ja"
+            else "## Out of Scope (copy to SPEC section 6)"
+        )
+        lines.append("")
+        for item in out_of_scope:
+            text = _extract_holder_text(item)
+            if text:
+                lines.append(f"- {text}")
+            if isinstance(item, dict):
+                oos_comment = _format_source_comment(item.get("source"))
+                if oos_comment is not None:
+                    lines.append(f"  {oos_comment}")
+
+    return "\n".join(lines) + "\n"
+
+
 def resolve_emit_out_dir(
     ir_path: Path,
     work_dir: Path,
@@ -1299,7 +1415,8 @@ def emit_ir_drafts(
 
     try:
         ir_bytes = ir_path.read_bytes()
-    except OSError as exc:
+        ir_data = json.loads(ir_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         err_msg = f"failed to read IR file {ir_path}: {exc}"
         return (
             2,
@@ -1308,11 +1425,16 @@ def emit_ir_drafts(
             err_msg,
         )
 
+    ir_sha256 = hashlib.sha256(ir_bytes).hexdigest()
     check_bytes = (json.dumps(check_payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    spec_section_bytes = render_spec_section(
+        ir_data, ir_path.name, ir_sha256, lang=lang
+    ).encode("utf-8")
 
     files_to_write: list[tuple[str, bytes]] = [
         ("ir.json", ir_bytes),
         ("check.json", check_bytes),
+        ("spec_section.md", spec_section_bytes),
     ]
     written_paths: list[str] = []
     try:
