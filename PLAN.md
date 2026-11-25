@@ -46,6 +46,7 @@
 - E2E テストで作る一時リポジトリ・worktree は、必ず `tempfile` の中に作る。`git init` には必ず `-b <ブランチ名>` を付ける。
 - サブプロセスを起動するテストでは、`PYTHONDONTWRITEBYTECODE` と `PYTHONPYCACHEPREFIX` を環境から外して実行する。
 - テストでは、Python 3.10 にないモジュール（`tomllib` など）を使わない（CI は 3.10 と 3.12 で動く）。
+- テストで、秘密鍵などに見える目印（`-----BEGIN PRIVATE KEY-----` など）を使うときは、ソースにそのまま書かず、実行時に組み立てる（例: `"-----BEGIN " + "PRIVATE KEY-----"`）。CI の gitleaks が、本物の秘密として検知して失敗する（Phase 75 の RCV-7 のテストで起きた）。
 - `sys.platform` で分岐する処理を書くときは、分岐の前で変数の型を宣言する。
 - 各ステップの検証は手元の macOS で行う。Linux での確認は人間が行う。
 - SPEC.md はフェーズの途中で変えない。SPEC にあいまいさや矛盾を見つけたら、止まって報告する。
@@ -81,6 +82,7 @@
   - `compile --outline` を設計書の見本に対して実行し、出力を目で確かめる。
 
 ## 記録
+- 2026-11-25: Phase 75 の後の CI で、macOS・Ubuntu とも gitleaks が `tests/test_rcv7_quarantine_git_object.py`（cc4722d）の偽の秘密鍵の目印2件を `private-key` として検知して失敗した（同じ diff の中の2つの目印の間が、1つの鍵の塊として当てはまった）。本物の鍵ではない。人間が直した: その2件の fingerprint を `.gitleaksignore` に加え、テストの目印を実行時に組み立てる形に変えた（今後の diff に出ないように）。作業手順にも規則を足した。
 - 2026-11-25: Phase 75 の完了後の確認。7 ステップすべて完了。ステップ 2 だけ REJECT が2回続いて隔離され、隔離から取り込んでやり直した。ステップ 4〜7 は1回目の査読で APPROVE。保護ファイルの変更なし。査読の記録の突き合わせで、`.dev/checker/review_p75_*.txt` の 11 件すべてが履歴に記録され、`review_input` の回数と履歴の件数も全タスクで一致した。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1066 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）と、`tests/test_red_verifier.py` の `test_reaps_multiple_descendant_processes_on_timeout` の1件（全体の実行の負荷の中でだけ失敗し、単独では3回とも通る。時間に依存するテストで、IDEA-011 と同じ種類）。Bundle は VERIFIED。`check_doc_commands.py` は 106 コマンドで終了コード 0。
 - 2026-11-25: RCV-7 の確認。一時リポジトリで、偽の秘密鍵の文字列を含む新しいファイル、無視されていない `keys/id_rsa`、普通の新しいファイルを作って `rollback-step` を実行した。作業ツリーはきれいになり、前の2つは隔離ブランチにもスナップショットにも入らず、案内の `git cat-file -p` で元の中身を取り出せた（ディレクトリは先に作る必要がある。IDEA-028）。普通のファイルは `tar xzf` で取り出せた。manifest に `git_object_files` が記録され、失敗ログにも同じ案内がある。なお、`init` の `.gitignore` が `.env` を無視するので、`.env` は隔離の対象外（作業ツリーに残る）。
 - 2026-11-25: CMP-2・CMP-3・CMP-8 の確認。`compile --outline` は、設計書の見本の 11 の節を対応づけ、`NIGHTLY_REPORT.md` のテンプレートの `# Nightly Execution Report` などを見出しにしなかった。ただし、テンプレートの中の `## 4. Next Actions for Developer` は見出しとして扱われた。原因は設計書の側にある: テンプレートの外側の `` ```markdown `` の中に `` ```text `` の入れ子があり、CommonMark の規則では、入れ子を閉じる `  ``` ` が外側を閉じてしまう（GitHub での表示も同じになる）。`--outline` は規則どおりに動いており、設計書の書き方の問題を見せた形になった（IDEA-029）。資料の IR で、L-5 の ERROR（Decision 4 と Goals・CUJ 2 の `git reset --hard` / `git clean -fd`）が4件報告され、直した IR では終了コード 0。どちらも作業ツリーを変えなかった（INV-12）。

@@ -19,6 +19,10 @@ from auto_developer.models import JobState
 from auto_developer.multi_team import TeamExecutionResult, _format_worker_failure_message
 from auto_developer.orchestrator import NightlyOrchestrator
 
+# 偽の秘密鍵の目印は、実行時に組み立てる（ソースに続けて書くと、CI の gitleaks が本物の秘密鍵と誤検知する）。
+_FAKE_KEY_BEGIN = "-----BEGIN " + "PRIVATE KEY-----"
+_FAKE_KEY_END = "-----END " + "PRIVATE KEY-----"
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -77,7 +81,7 @@ class TestRcv7QuarantineGitObject(unittest.TestCase):
 
             fake_key_content = (
                 "# test fixture\n"
-                "FAKE_KEY = '-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEF\\n-----END PRIVATE KEY-----'\n"
+                f"FAKE_KEY = '{_FAKE_KEY_BEGIN}\\nMIIEvQIBADANBgkqhkiG9w0BAQEF\\n{_FAKE_KEY_END}'\n"
             )
             env_content = "SECRET_TOKEN=top_secret_value_999\n"
 
@@ -178,7 +182,7 @@ class TestRcv7QuarantineGitObject(unittest.TestCase):
             (repo / "README.md").write_text("# Modified\n", encoding="utf-8")
             secret_file = repo / "tests" / "test_secret.py"
             secret_file.parent.mkdir(parents=True, exist_ok=True)
-            secret_file.write_text("KEY = '-----BEGIN PRIVATE KEY-----'\n", encoding="utf-8")
+            secret_file.write_text(f"KEY = '{_FAKE_KEY_BEGIN}'\n", encoding="utf-8")
 
             guard = GitGuard(repo_dir=repo)
             orig_run_git = guard._run_git
@@ -207,7 +211,7 @@ class TestRcv7QuarantineGitObject(unittest.TestCase):
             checkpoint = _init_repo(repo)
             (repo / "README.md").write_text("# Modified\n", encoding="utf-8")
             new_file = repo / "untracked_secret.py"
-            new_file.write_text("KEY = '-----BEGIN PRIVATE KEY-----'\n", encoding="utf-8")
+            new_file.write_text(f"KEY = '{_FAKE_KEY_BEGIN}'\n", encoding="utf-8")
 
             guard = GitGuard(repo_dir=repo)
             orig_run_git = guard._run_git
@@ -234,7 +238,7 @@ class TestRcv7QuarantineGitObject(unittest.TestCase):
             checkpoint = _init_repo(repo)
             secret_file = repo / "tests" / "test_key_cli.py"
             secret_file.parent.mkdir(parents=True, exist_ok=True)
-            secret_file.write_text("KEY = '-----BEGIN PRIVATE KEY-----'\n", encoding="utf-8")
+            secret_file.write_text(f"KEY = '{_FAKE_KEY_BEGIN}'\n", encoding="utf-8")
 
             orig_run_git = GitGuard._run_git
 
@@ -277,7 +281,7 @@ class TestRcv7QuarantineGitObject(unittest.TestCase):
             checkpoint = _git(repo, "rev-parse", "HEAD")
 
             secret_file = repo / "leak.py"
-            secret_file.write_text("KEY = '-----BEGIN PRIVATE KEY-----'\n", encoding="utf-8")
+            secret_file.write_text(f"KEY = '{_FAKE_KEY_BEGIN}'\n", encoding="utf-8")
 
             orch = NightlyOrchestrator(
                 repo_dir=repo,
@@ -315,7 +319,7 @@ class TestRcv7QuarantineGitObject(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             wt = Path(tmp)
             checkpoint = _init_repo(wt)
-            (wt / "team_secret.py").write_text("K = '-----BEGIN PRIVATE KEY-----'\n", encoding="utf-8")
+            (wt / "team_secret.py").write_text(f"K = '{_FAKE_KEY_BEGIN}'\n", encoding="utf-8")
 
             guard = GitGuard(repo_dir=wt)
             q_branch = guard.quarantine_and_restore(
