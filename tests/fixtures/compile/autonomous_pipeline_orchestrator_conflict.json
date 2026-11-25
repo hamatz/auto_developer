@@ -1,0 +1,73 @@
+{
+  "schema": "auto-dev-ir/1",
+  "source": [
+    {
+      "path": "docs/designs/autonomous_pipeline_orchestrator.md",
+      "sha256": "fd2498224ef3c6b7a674335d1ff88cbe68370542ca39537edef09d6740801906"
+    }
+  ],
+  "requirements": [
+    {
+      "id": "ORCH-1",
+      "statement": "同一タスクで検証エラーまたは査読差戻しが2回連続した場合、直ちに作業ツリーを `git reset --hard <checkpoint> && git clean -fd` で初期化し、エラーダンプを `logs/nightly/` に隔離保存してパイプラインを安全停止する。",
+      "kind": "new",
+      "acceptance": ["AC-1"],
+      "source": {
+        "path": "docs/designs/autonomous_pipeline_orchestrator.md",
+        "lines": [31, 31],
+        "sha256": "e88ad8a278976c39d389ecebc2866006c6f1de027e3cc342220ecdb886508012"
+      }
+    }
+  ],
+  "acceptance": [
+    {
+      "id": "AC-1",
+      "given": "Task 1, Task 2 が順に定義された状態。",
+      "when": "Task 1 の実装でテストが2回連続で失敗する（または保護ファイルを不正改変する）。",
+      "then": "オーケストレーターはCircuit Breakerを発動し、作業ツリーの変更を `quarantine/task-1-*` ブランチへ退避コミット。その後、本線作業ツリーを直前のクリーンチェックポイントへ復元（`git reset --hard && git clean -fd`）。エラーログを `logs/nightly/task_1_failure.log` に保存し、`PLAN.md` のTask 1を `- [ ] Task 1 **[FAILED]**` とマーク。パイプラインを即座に安全停止する。",
+      "observable": [
+        "quarantine/task-1-* ブランチが作成される",
+        "logs/nightly/task_1_failure.log が保存される",
+        "exit_code == 1 で安全停止する"
+      ],
+      "source": {
+        "path": "docs/designs/autonomous_pipeline_orchestrator.md",
+        "lines": [74, 77],
+        "sha256": "eb030e35b8700b2879e91179c0de78f7cafafd3fd827df116e790f7f60d05c2c"
+      }
+    }
+  ],
+  "decisions": [
+    {
+      "id": "D-4",
+      "statement": "従来の `git reset --hard` & `git clean -fd` による破壊的ロールバックを廃止。タスク失敗時は作業ツリーの差分を `quarantine/task-<id>-*` ブランチへ退避コミットした上で本線を直前のチェックポイントへ復元する。",
+      "forbids": ["git reset --hard", "git clean -fd"],
+      "source": {
+        "path": "docs/designs/autonomous_pipeline_orchestrator.md",
+        "lines": [55, 56],
+        "sha256": "2fca863d92160bfc4ada3ff7dc7adc90bd88dfdbf9377ee82366c6a2a3e7af6a"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "n": 1,
+      "title": "GitGuard のロールバックと隔離退避を実装する",
+      "requirements": ["ORCH-1"],
+      "files": ["scripts/nightly_orchestrator.py"]
+    }
+  ],
+  "verification": {
+    "commands": [
+      "ruff check scripts/ tests/",
+      "mypy scripts/ tests/",
+      "pytest tests/test_nightly_orchestrator.py -v"
+    ],
+    "source": {
+      "path": "docs/designs/autonomous_pipeline_orchestrator.md",
+      "lines": [402, 418],
+      "sha256": "fd05ae6fd86272bd54024b87c246a8831cfa7c000552bdb6ae5ccc3acec615bf"
+    }
+  },
+  "open_questions": []
+}

@@ -65,7 +65,7 @@
 - [x] 4. `auto-dev compile --outline <設計書>`: 見出しを IR の要素に対応づけ、行の範囲と SHA-256 を示す。コードブロックの中の `#` を見出しにしない。足りない節があれば終了コード 1。`docs/cli.md` を作り直す（Red-First）（CMP-2）
 - [x] 5. `compile --check` の点検 L-1（受入条件）・L-8（つながらない要件とステップ）・L-9（未決の点）（Red-First）（CMP-3）
 - [x] 6. `compile --check` の点検 L-5（判断の `forbids` との食い違い）・L-6（`--spec` の 4 章との ID の重なり）・L-7（担当範囲）。`docs/cli.md` を作り直す（Red-First）（CMP-3）
-- [ ] 7. 実物の設計書 `docs/designs/autonomous_pipeline_orchestrator.md` での確認: `--outline` の対応、テストの資料の IR で L-5 の ERROR（Decision 4 と Goals・CUJ 2）、直した IR で終了コード 0（Red-First）（CMP-8）
+- [x] 7. 実物の設計書 `docs/designs/autonomous_pipeline_orchestrator.md` での確認: `--outline` の対応、テストの資料の IR で L-5 の ERROR（Decision 4 と Goals・CUJ 2）、直した IR で終了コード 0（Red-First）（CMP-8）
 
 ## 止まっていること・判断待ち
 - なし。
