@@ -547,9 +547,12 @@ def _validate_explicit_cli_families(
 
 def build_parser() -> argparse.ArgumentParser:
     """CLI の ArgumentParser を構築して返す。"""
+    # トップレベルの --checker-* と、サブコマンドの --check が前方一致でぶつかるため
+    # （省略形はドキュメントにない暗黙の機能であり、影響がないことを確認済み）
     parser = argparse.ArgumentParser(
         prog="auto-dev",
         description="Auto Developer: Trustworthy Autonomous Pipeline Orchestrator",
+        allow_abbrev=False,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument(
@@ -808,6 +811,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable automatic dashboard regeneration (.dev/dashboard.json)",
     )
 
+    # Subcommand: compile
+    compile_parser = subparsers.add_parser(
+        "compile", help="Validate auto-dev-ir/1 JSON file (INV-12: read-only)"
+    )
+    compile_parser.add_argument(
+        "--check",
+        type=Path,
+        default=None,
+        metavar="IR_JSON",
+        help="Validate an auto-dev-ir/1 JSON file",
+    )
+    compile_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output compile result in JSON format",
+    )
+
     # Subcommand: teams
     teams_parser = subparsers.add_parser("teams", help="Multi-team execution commands")
     teams_subparsers = teams_parser.add_subparsers(
@@ -966,6 +986,24 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.subcommand == "demo":
         return run_demo(keep=bool(args.keep), teams=bool(args.teams))
+
+    if args.subcommand == "compile":
+        from auto_developer.compiler import check_ir_file
+
+        if args.check is None:
+            print("ERROR: --check <IR_JSON> is required.", file=sys.stderr)
+            return 2
+        ir_path = args.check if args.check.is_absolute() else (args.work_dir.resolve() / args.check)
+        exit_code, payload, issues = check_ir_file(ir_path)
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            if issues:
+                for issue in issues:
+                    print(issue.format_line())
+            else:
+                print(f"OK: {ir_path}")
+        return exit_code
 
     work_dir = args.work_dir.resolve()
     plan_path = args.plan or (work_dir / "PLAN.md")
