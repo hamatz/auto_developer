@@ -2,3 +2,7 @@
 # Commit 3d3ef6a: Anthropic public model name strings ("claude-3-opus-20240229") assigned to api_model variable
 3d3ef6ad38af069e96694c12b9e88e3afd6599ca:scripts/auditor_client.py:generic-api-key:146
 3d3ef6ad38af069e96694c12b9e88e3afd6599ca:scripts/auditor_client.py:generic-api-key:150
+# Commit cc4722d (Phase 75 RCV-7): tests/test_rcv7_quarantine_git_object.py の偽の秘密鍵の目印（テストの資料。本物の鍵ではない）。
+# 同じファイルの後のコミットでは、目印を実行時に組み立てる形に直した。
+cc4722d1fced5c42d395e9ff41bb3eb2bcaad63d:tests/test_rcv7_quarantine_git_object.py:private-key:210
+cc4722d1fced5c42d395e9ff41bb3eb2bcaad63d:tests/test_rcv7_quarantine_git_object.py:private-key:280

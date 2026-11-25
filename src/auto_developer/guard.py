@@ -14,17 +14,29 @@ _SNAPSHOT_EXCLUDE_CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy
 _SNAPSHOT_EXCLUDE_CACHE_SUFFIXES = frozenset({".pyc", ".pyo", ".pyd"})
 
 
+class QuarantineObjectError(RuntimeError):
+    """機密ルールで除外された未追跡ファイルを Git オブジェクトとして保存できない場合のエラー (RCV-7)。"""
+
+    def __init__(self, path: str, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(f"Failed to preserve secret-excluded file '{path}' as Git object: {reason}")
+
+
 def format_snapshot_only_files_lines(
     snapshot_path: Path | None,
     snapshot_only_files: list[str],
     repo_dir: Path | None = None,
     error_reason: str | None = None,
+    git_object_files: list[dict[str, str]] | None = None,
 ) -> list[str]:
-    """スナップショットにだけある新しいファイルの一覧と tar xzf 復元コマンドを整形する (RCV-6)。"""
+    """スナップショットにだけある新しいファイルの一覧と tar xzf 復元コマンド、
+    および Git オブジェクトとして残した機密除外ファイルの復元案内を整形する (RCV-6, RCV-7)。"""
+    lines: list[str]
     if error_reason:
         reason_clean = " ".join(str(error_reason).splitlines()).strip() or "unknown error"
-        return [f"Snapshot-only new files: unavailable ({reason_clean})"]
-    if snapshot_only_files and snapshot_path is not None:
+        lines = [f"Snapshot-only new files: unavailable ({reason_clean})"]
+    elif snapshot_only_files and snapshot_path is not None:
         if repo_dir is not None:
             try:
                 snap_display = snapshot_path.relative_to(repo_dir).as_posix()
@@ -36,8 +48,17 @@ def format_snapshot_only_files_lines(
         for rel_path in snapshot_only_files:
             lines.append(f"  - {rel_path}")
         lines.append(f"Restore snapshot-only files: {shlex.join(['tar', 'xzf', snap_display, *snapshot_only_files])}")
-        return lines
-    return ["Snapshot-only new files: none"]
+    else:
+        lines = ["Snapshot-only new files: none"]
+
+    if git_object_files:
+        lines.append("Secret-excluded new files preserved as Git objects (not in quarantine branch or snapshot):")
+        for entry in git_object_files:
+            rel_path = str(entry.get("path") or "")
+            sha = str(entry.get("sha") or "")
+            if rel_path and sha:
+                lines.append(f"  - {rel_path}: git cat-file -p {sha} > {shlex.quote(rel_path)}")
+    return lines
 
 
 def is_safe_main_guard(stmt: ast.If) -> bool:
@@ -164,6 +185,7 @@ class GitGuard:
         self.last_quarantine_snapshot: Path | None = None
         self.last_snapshot_only_files: list[str] = []
         self.last_snapshot_only_error: str | None = None
+        self.last_git_object_files: list[dict[str, str]] = []
 
     def _run_git(self, args: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -594,6 +616,7 @@ print(json.dumps(data))
         task_id: str,
         checkpoint: str = "",
         job_id: str = "",
+        git_object_files: list[dict[str, str]] | None = None,
     ) -> Path:
         """作業ツリーの変更・未追跡ファイルを物理アーカイブへ安全に退避し、照合用 Manifest を生成する。
         秘密情報 (.env や鍵) はスナップショットから厳格に除外される。
@@ -648,19 +671,14 @@ print(json.dumps(data))
             "created_at": timestamp,
             "archive_name": archive_path.name,
             "files": manifest_files,
+            "git_object_files": list(git_object_files or []),
         }
         manifest_path.write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
 
         return archive_path
 
-    def list_snapshot_only_files(
-        self,
-        snapshot_path: Path | None = None,
-        checkpoint: str = "",
-        quarantine_branch: str = "",
-    ) -> list[str]:
-        """隔離直前の作業ツリーから、未追跡かつ非無視の新規ファイル（機密・キャッシュを除く）を返す (RCV-6)。"""
-        _ = snapshot_path, checkpoint, quarantine_branch
+    def _iter_untracked_non_ignored_files(self) -> list[str]:
+        """Git が追跡しておらず .gitignore でも無視されていないファイル一覧を返す。"""
         proc = self._run_git(
             ["-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard", "-z"]
         )
@@ -673,6 +691,91 @@ print(json.dumps(data))
                 continue
             if norm.startswith((".dev/", ".git/")) or norm in (".dev", ".git"):
                 continue
+            result.append(norm)
+        return sorted(set(result))
+
+    def preserve_secret_untracked_files(self) -> list[dict[str, str]]:
+        """機密ルール (INV-5) でスナップショットから除外される未追跡・非無視ファイルを Git オブジェクトとして保存する (RCV-7)。"""
+        preserved: list[dict[str, str]] = []
+        try:
+            untracked_files = self._iter_untracked_non_ignored_files()
+        except QuarantineObjectError:
+            raise
+        except subprocess.CalledProcessError as exc:
+            detail = " ".join((exc.stderr or str(exc)).splitlines()).strip()
+            raise QuarantineObjectError(
+                "<ls-files>",
+                detail or f"git ls-files exited with {exc.returncode}",
+            ) from exc
+        except Exception as exc:
+            detail = " ".join(str(exc).splitlines()).strip()
+            raise QuarantineObjectError(
+                "<ls-files>",
+                f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__,
+            ) from exc
+
+        for norm in untracked_files:
+            file_path = self.repo_dir / norm
+            try:
+                if not file_path.exists() or file_path.is_dir():
+                    continue
+                p = Path(norm)
+                is_secret = self.is_secret_file(p.name) or any(
+                    self.is_secret_file(part) for part in p.parts
+                )
+                if not is_secret:
+                    content = file_path.read_bytes()
+                    is_secret = self.has_secret_content(content)
+            except QuarantineObjectError:
+                raise
+            except Exception as exc:
+                detail = " ".join(str(exc).splitlines()).strip()
+                raise QuarantineObjectError(
+                    norm,
+                    f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__,
+                ) from exc
+            if not is_secret:
+                continue
+            try:
+                proc = self._run_git(["hash-object", "-w", "--", norm])
+            except subprocess.CalledProcessError as exc:
+                detail = " ".join((exc.stderr or str(exc)).splitlines()).strip()
+                raise QuarantineObjectError(
+                    norm,
+                    detail or f"git hash-object exited with {exc.returncode}",
+                ) from exc
+            except Exception as exc:
+                detail = " ".join(str(exc).splitlines()).strip()
+                raise QuarantineObjectError(
+                    norm,
+                    f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__,
+                ) from exc
+            obj_sha = proc.stdout.strip()
+            if not obj_sha:
+                raise QuarantineObjectError(norm, "git hash-object -w returned empty SHA")
+            preserved.append({"path": norm, "sha": obj_sha})
+        return preserved
+
+    def list_snapshot_only_files(
+        self,
+        snapshot_path: Path | None = None,
+        checkpoint: str = "",
+        quarantine_branch: str = "",
+    ) -> list[str]:
+        """隔離直前の作業ツリーから、未追跡かつ非無視の新規ファイル（実際にスナップショットに入るもののみ）を返す (RCV-6, RCV-7)。"""
+        _ = checkpoint, quarantine_branch
+        snapshot_members: set[str] | None = None
+        if snapshot_path is not None and snapshot_path.is_file():
+            import tarfile
+
+            try:
+                with tarfile.open(snapshot_path, "r:gz") as tar:
+                    snapshot_members = {m.name for m in tar.getmembers() if m.isfile()}
+            except (OSError, tarfile.TarError):
+                snapshot_members = None
+
+        result: list[str] = []
+        for norm in self._iter_untracked_non_ignored_files():
             p = Path(norm)
             if self.is_secret_file(p.name) or any(self.is_secret_file(part) for part in p.parts):
                 continue
@@ -680,6 +783,17 @@ print(json.dumps(data))
                 continue
             if p.suffix in _SNAPSHOT_EXCLUDE_CACHE_SUFFIXES:
                 continue
+            if snapshot_members is not None:
+                if norm not in snapshot_members:
+                    continue
+            else:
+                file_path = self.repo_dir / norm
+                if file_path.is_file():
+                    try:
+                        if self.has_secret_content(file_path.read_bytes()):
+                            continue
+                    except OSError:
+                        continue
             result.append(norm)
         return sorted(set(result))
 
@@ -698,6 +812,7 @@ print(json.dumps(data))
         self.last_quarantine_snapshot = None
         self.last_snapshot_only_files = []
         self.last_snapshot_only_error = None
+        self.last_git_object_files = []
 
         clean_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", task_id)
         clean_team = re.sub(r"[^a-zA-Z0-9_\-]", "_", team_id) if team_id else ""
@@ -712,11 +827,15 @@ print(json.dumps(data))
         current_branch = self.get_current_branch()
 
         if has_changes:
+            # 0. 機密ルール (INV-5) でスナップショットから除外される未追跡ファイルを Git オブジェクトとして退避 (RCV-7)
+            self.last_git_object_files = self.preserve_secret_untracked_files()
+
             # 1. 物理スナップショットの安全作成 (Manifest 連携)
             snapshot_path = self.create_quarantine_snapshot(
                 task_id=f"{team_prefix}{task_id}",
                 checkpoint=checkpoint,
                 job_id=job_id,
+                git_object_files=self.last_git_object_files,
             )
             self.last_quarantine_snapshot = snapshot_path
 

@@ -394,13 +394,19 @@ class NightlyOrchestrator:
 
             # クラッシュ時の残骸作業ツリーがあれば隔離退避してクリーン復元
             if job_state.checkpoint_hash and not self.dry_run:
+                from auto_developer.guard import QuarantineObjectError
+
                 print(f"Resetting uncommitted work back to checkpoint {job_state.checkpoint_hash} for safe resume...")
-                self.git_guard.quarantine_and_restore(
-                    job_state.checkpoint_hash,
-                    task_id=job_state.current_task_id or "interrupted",
-                    job_id=job_state.job_id,
-                    team_id=self.team_id or "",
-                )
+                try:
+                    self.git_guard.quarantine_and_restore(
+                        job_state.checkpoint_hash,
+                        task_id=job_state.current_task_id or "interrupted",
+                        job_id=job_state.job_id,
+                        team_id=self.team_id or "",
+                    )
+                except QuarantineObjectError as exc:
+                    print(f"QUARANTINE ERROR: {exc}", file=sys.stderr)
+                    return 1
                 if not job_state.base_branch:
                     job_state.base_branch = self.git_guard.get_current_branch()
         else:
@@ -1467,17 +1473,40 @@ class NightlyOrchestrator:
         job_state.status = "FAILED"
         job_state.transition_phase("QUARANTINE")
         self.dispatcher.mark_task_status(self.plan_path, task, status="failed")
-        from auto_developer.guard import format_snapshot_only_files_lines
+        from auto_developer.guard import QuarantineObjectError, format_snapshot_only_files_lines
 
-        quarantine_branch = self.git_guard.quarantine_and_restore(
-            checkpoint,
-            task_id=task.task_id,
-            job_id=job_state.job_id,
-            team_id=self.team_id or "",
-        )
+        try:
+            quarantine_branch = self.git_guard.quarantine_and_restore(
+                checkpoint,
+                task_id=task.task_id,
+                job_id=job_state.job_id,
+                team_id=self.team_id or "",
+            )
+        except QuarantineObjectError as exc:
+            log_path = self.repo_dir / "logs" / "nightly" / f"task_{task.task_id}_failure.log"
+            self.reporter.write_failure_log(
+                log_path,
+                {
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "checkpoint": checkpoint,
+                    "quarantined_branch": "",
+                    "snapshot_path": None,
+                    "snapshot_only_files": [],
+                    "snapshot_only_error": str(exc),
+                    "failure_phase": phase,
+                    "reason": f"{reason} ({exc})",
+                    "attempt_1_log": attempt_1_log or str(exc),
+                    "attempt_2_log": attempt_2_log or "(none)",
+                    "attempts": attempts or [],
+                },
+            )
+            print(f"QUARANTINE ERROR: {exc}")
+            return 1
         snapshot_path = self.git_guard.last_quarantine_snapshot
         snapshot_only_files = list(self.git_guard.last_snapshot_only_files)
         snapshot_only_error = self.git_guard.last_snapshot_only_error
+        git_object_files = list(self.git_guard.last_git_object_files)
         self._record_event(
             "rollback_step",
             task_id=task.task_id,
@@ -1497,6 +1526,7 @@ class NightlyOrchestrator:
                 "snapshot_path": str(snapshot_path) if snapshot_path else None,
                 "snapshot_only_files": snapshot_only_files,
                 "snapshot_only_error": snapshot_only_error,
+                "git_object_files": git_object_files,
                 "failure_phase": phase,
                 "reason": reason,
                 "attempt_1_log": attempt_1_log or reason,
@@ -1509,6 +1539,7 @@ class NightlyOrchestrator:
             snapshot_only_files,
             repo_dir=self.repo_dir,
             error_reason=snapshot_only_error,
+            git_object_files=git_object_files,
         ):
             print(snap_line)
         quarantined_info: dict[str, Any] = {
@@ -1518,6 +1549,7 @@ class NightlyOrchestrator:
             "snapshot_path": str(snapshot_path) if snapshot_path else None,
             "snapshot_only_files": snapshot_only_files,
             "snapshot_only_error": snapshot_only_error,
+            "git_object_files": git_object_files,
             "log_path": str(log_path),
             "root_cause_summary": reason[:300],
             "attempts": attempts or [],

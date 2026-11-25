@@ -10,7 +10,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - [x] は実装済みでテストがあるもの、[ ] は未実装（現在のフェーズの対象）を表す。
 - 新しいフェーズの要件は「## 5. 次のリリースで追加する要件」に書き、リリース後に 4 章の該当領域へ移す。
   開発の経緯（なぜそうしたか）はここに書かず、LESSONS.md・CHANGELOG.md・git 履歴に残す。
-- Checker への入力は、現在のフェーズの節を機械的に切り出した原文とする（要約しない）。例（Phase 74）:
+- Checker への入力は、現在のフェーズの節を機械的に切り出した原文とする（要約しない）。例（Phase 75）:
     awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_current.md
 - この SPEC は Elephant（人間と設計セッション）が書き、人間が承認する。Maker は変更できない（保護ファイル）。
 -->
@@ -51,6 +51,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - **INV-9 担当範囲を越えない**: チームとして作業するとき、担当範囲（`owns`）外のファイルを変更した作業は確定させず隔離する。
 - **INV-10 判定は申告ではなく出力から**: 査読の判定は、Checker の出力そのものから機械的に読み取り、記録の後に出力・差分が変わっていないことを確定の直前に確かめる。エージェントが申告した判定だけでは、確定させない（GATE-5〜7）。
 - **INV-11 表示は記録から**: 状態の表示（`status`、ダッシュボード）は、Auto Developer 自身が書いた記録（イベントログ、Evidence と査読の記録、ジョブとチームの状態、Git）と計画ファイルから作る。エージェントが進み具合を自己申告で書いたファイルを、表示の元にしない。計画ファイルの完了の印は、記録と照らし合わせて示す。
+- **INV-12 Spec Compiler は契約を書かない**: Spec Compiler（`auto-dev compile`）は、SPEC.md・PLAN.md・`teams.json`・保護ファイルを作成・変更・削除しない。出力は標準出力（と、後のフェーズで加える `.dev/compile/` の下の下書き）だけとする。下書きを契約にするのは、人間が読んで承認し、人間がコミットしたときだけである。
 
 ## 4. 機能要件（実装済み）
 
@@ -142,6 +143,12 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - 正規の差分の機密の省略（GATE-8）は、日本語などを含むファイル名の中身を、今も正しく省略している。ただし省略の表示のファイル名が8進数の形（`\351\215\265.pem`）になるので、同じ読み方にそろえて、元のファイル名で表示する。省略の規則は変えない。
   - `SECRET_FILE_IN_COMMIT` の検査は、チェックポイントからの追加・変更に加えて、種類の変更（`T`。シンボリックリンクから通常のファイルへ、など）も対象にする（BACKLOG AUD-1005）。
 - [x] **GATE-12 査読の記録の履歴**: `record-review` は、記録するたびに、3つのファイルの写しと記録（各ファイルの SHA-256・判定・モデル・時刻）を `reviews/task_<id>/history/<連番>/` にも残し、上書きしない（REJECT を含む）。最新の記録（GATE-6 が照合するもの）と、Bundle に入れるもの（BDL-4）は変えない。Checker の出力をどこに置いた場合でも、やり直しの履歴が残るようにするためである。
+- [x] **GATE-13 査読の入力と記録の厳格化**: GATE-5 の `review-input` と `record-review` を、次のように変える。`run` の経路（GATE-7）は変えない。
+  - **検証の後の作業ツリー**: `review-input` と `record-review` は、そのタスクの最新の Evidence の Tree SHA が、今の作業ツリーの Tree SHA（`verify-step` と同じ求め方。GATE-9）と一致しない場合は、終了コード 3 とし、`verify-step` を先に実行するよう案内する。検証の後に作業ツリーを変えたまま、査読の入力を作らず、記録もしない。
+  - **1回の検証に1回の査読**: `record-review` は、同じ Evidence（検証）に対して、判定の決まった査読を1回だけ記録する。すでに記録がある場合は、`CHECKER_POLICY_VIOLATION:` を出して終了コード 4 とし、記録しない。REJECT を記録した後に、検証をやり直さずに査読だけをやり直して APPROVE を記録することを防ぐ（INV-4）。
+  - **判定の決まらない出力も残す**: 判定が1つに決まらない出力（GATE-5 の終了コード 4）も、3つのファイルの写しと記録（判定は空）を GATE-12 の履歴に残す。最新の記録は変えない。このあと、同じ Evidence に対して、判定の決まった査読を1回記録できる（出力が途中で切れた場合の実行し直しのため）。
+  - **入力の記録**: `review-input` は、イベント `review_input`（タスク・チェックポイント・差分の SHA-256）を書く。`status` は、最新の Evidence について、`review_input` の回数が査読の履歴（判定の決まらないものを含む）の件数より多い場合に、`attention[]` に `REVIEW_NOT_RECORDED` として入れる。イベントの書き込みに失敗しても、結果は変えない（INV-8）。
+  - スキル（`/nightly-run`）に、「1回の `review-input` に対して Checker は1回。Checker の出力は、判定が決まらない場合も含めて、必ず `record-review` に渡す」ことを書く。
 
 ### 4.3 RCV — 失敗時の保全と復旧
 
@@ -152,6 +159,8 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - [x] **RCV-5 失敗ログの原因**: `logs/nightly/task_<id>_failure.log` の先頭に、次の2行を書く。
   - 失敗した段階（`Failure Phase:`。例: `PROTECTED_FILES`, `MAKER_NO_DIFF`, `VERIFY`, `CHECKER_REJECT`, `BOUNDARY`）
   - 原因（`Reason:`。保護ファイルの違反なら、そのファイルの一覧）
+- [x] **RCV-6 隔離の案内**: 隔離（RCV-1。`rollback-step`、`run`、`teams run` の経路）のあと、隔離ブランチにはなくスナップショットにだけある新しいファイル（隔離の直前に `git ls-files --others --exclude-standard` で求めた、Git が追跡しておらず `.gitignore` でも無視されていないファイル。機密を除く。INV-5）の一覧と、それを取り出すコマンド（`tar xzf <スナップショット> <パス>...`）を表示し、失敗ログ（RCV-5）にも書く。該当するファイルがない場合は、その旨を1行で示す。今の出力の1行目（`rollback-step` の `ROLLED BACK TO ...`）は変えない。
+  - 一覧と案内を求める処理が失敗しても、本線の復元（RCV-1）は最後まで行い、一覧を作れなかったことと理由を1行で示す。
 
 ### 4.4 RPT — レポートと計測
 
@@ -390,6 +399,20 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - RC タグが作られ、ダッシュボードが書かれたときだけ終了コード 0。
 - [x] **DX-11 ダッシュボードの動画の書き出し**: 開発用のスクリプト `scripts/record_dashboard.py` が、ダッシュボードの HTML を再生して GIF に書き出す（README や紹介の投稿のため）。製品（`auto_developer` のパッケージ）からは呼ばない。必要なライブラリ（ブラウザの操作と画像の処理）がない場合は、入れ方を表示して終了コード 2 とする。製品の実行時の依存は増やさない。
 - [x] **DX-12 サンプルの `.gitignore`（DX-3 の欠陥）**: `examples/two-teams/.gitignore` に、CORE-11 で `init` が書く行（`NIGHTLY_REPORT.md` を含む）をすべて入れる。`teams run` の後の統合で、worktree が `NIGHTLY_REPORT.md` で汚れていると判定されないようにする。サンプルの `.gitignore` が CORE-11 の行をすべて含むことを、テストで確かめる。
+- [x] **DX-13 検証の制限時間**: 検証スクリプトの制限時間を、次の順で決める。
+  - `verify-step` に `--timeout SEC` を加える（サブコマンドの後に書ける）。全体のオプション `auto-dev --timeout SEC verify-step ...` も、これまでどおり使える。両方を指定した場合は、サブコマンドの後のものを使う。
+  - どちらも指定しない場合は、検証スクリプトの先頭の 20 行の中の `# auto-dev: verify-timeout=<SEC>` の行の値を使う。その行もない場合は 300 秒とする。値が正の整数でない場合は、終了コード 2 とし、その旨を示す。
+  - `run` と `teams run`（ワーカーと統合の関門）も、同じ順で制限時間を決める。
+  - 検証が制限時間で打ち切られた場合（終了コード 124）は、今の1行目（`Verification timed out after <N>s`）を変えずに、続けて、使った制限時間の出所（オプション・検証スクリプトの行・既定値）と、`--timeout` と検証スクリプトの行で延ばせることを示す。
+  - 検証スクリプトは保護ファイル（INV-1）なので、この行は人間が書く。
+  - スキル（`/nightly-run`）に、制限時間の決め方を書く。
+- [x] **DX-14 ドキュメントのコマンドの検査**: 開発用のスクリプト `scripts/check_doc_commands.py` が、README（`README.md`、`README.en.md`）とスキル（`skills/*/SKILL.md`）に書かれた `auto-dev` のコマンドを、CLI の引数定義（`build_parser()`）と突き合わせる。製品（`auto_developer` のパッケージ）からは呼ばない。
+  - 存在しないサブコマンドと、そのサブコマンド（または全体）にないオプションを、ファイル名と行番号つきで報告し、終了コード 1 とする。なければ 0 とする。
+  - 対象にする書き方: コードブロック（`` ``` `` と `~~~`）の中の行（行頭の `$ ` は除く。行末の `\` で続く行は1つにつなげ、最初の行の番号で報告する）と、文中の `` `auto-dev ...` ``。1行を、引用符の外の `&&`・`||`・`;`・`|` で区切り、先頭の `VAR=value` の代入を飛ばして、`auto-dev` で始まる部分を調べる。`<task_id>` のような山かっこの置き換え用の語は、オプションの値として扱う。
+  - 対象にしない書き方: `$(...)` などの入れ子、`uv run` や `python -m` などで包んだ呼び出し、ヒアドキュメント。
+  - 終了コード 0 のときは、確かめたコマンドの数を示す。対象のファイルが1つもない場合は終了コード 1 とする。
+  - トップレベルのサブコマンドのうち、`README.md` に一度も出てこないものを、参考として一覧する（終了コードには影響しない）。
+  - テストで、今のリポジトリのドキュメントが通ること、存在しないサブコマンドやオプションを書いた一時ファイルでは終了コード 1 になることを確かめる。
 
 ### 4.11 STAT — 状態の表示
 
@@ -437,44 +460,60 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - 「止まっていること・判断待ち」の節の項目のうち、中身が「なし」「なし。」「None」「-」だけのものは、判断待ちとして数えない。
   - 同じ隔離ブランチを、`attention[]` に2回入れない。
   - チームが失敗した場合は、失敗したタスクの数と、原因（ワーカーのエラー、または失敗ログの `Failure Phase:` / `Reason:`）を示す。
-
-## 5. 次のリリース（v0.10.0）で追加する要件
-
-<!-- v0.10.0 の目的: Auto Developer を「良い SPEC を書ける人」以外にも使えるようにする（Spec Compiler とダッシュボード）。
-     全体の方針は docs/contracts/v0.10-draft.md を参照。
-     Phase 74 は、Phase 73 の振り返りで見つかった手直し（BACKLOG の IDEA-020〜025）。影響分析は docs/contracts/phase74.md を参照。
-     Spec Compiler（CMP）の要件と INV-12、STAT-3（計画の構造を重ねる）は、Phase 75 以降の準備で加える。 -->
-
-### 5.1 Phase 74 — 手直し（Phase 73 の振り返り）
-
-- [ ] **STAT-9 再生の最小の間隔**: STAT-6 の再生の時刻の割り当てを、次のように変える。
+- [x] **STAT-9 再生の最小の間隔**: STAT-6 の再生の時刻の割り当てを、次のように変える。
   - 時系列のイベントを時刻の順に並べ、続く2つのイベントの再生の時刻の差を、最低 1 秒（1× のとき）とする。実際の時刻の差がそれより短い場合だけ広げる。10 分を超える空白の圧縮（STAT-6）は変えない。
   - 同じ時刻のイベントは、それぞれの記録ファイルの中の順番を保つ（チームの worktree の記録と、リポジトリの記録をまとめる場合も）。
   - 再生の時刻の割り当ては、HTML に埋め込むデータ（payload）を作る Python 側で行う。テストは payload の値で確かめる。
   - `auto-dev demo --teams` が書くダッシュボードの再生の長さ（`duration`）は、時系列のイベントの数から 1 を引いた秒数以上になる（今は約1秒で、GIF に書き出しても3コマにしかならない）。
-- [ ] **STAT-10 ダッシュボードの細部**: 次の2点を直す。
+- [x] **STAT-10 ダッシュボードの細部**: 次の2点を直す。
   - 時系列の帯の上の「10 分を超える空白」の印の文字が、隣の印の文字と重ならないようにする。重なる場合は文字を出さず、印にカーソルを合わせたときに表示する。
   - `attention[]` の隔離ブランチの項目で、今の時系列の中の隔離（`rollback_step` のイベントに記録された隔離ブランチ）と、それより前の隔離を区別して示す。上部の要約の隔離の数が、今の時系列の中の隔離の数であることを、カーソルを合わせたときの説明で示す。
   - 見た目（文字の重なり）は人間が目で確かめる。テストでは、payload と HTML に、印の文字・説明・区別の情報が入っていることを確かめる。JavaScript を実行するテストは求めない。
-- [ ] **GATE-13 査読の入力と記録の厳格化**: GATE-5 の `review-input` と `record-review` を、次のように変える。`run` の経路（GATE-7）は変えない。
-  - **検証の後の作業ツリー**: `review-input` と `record-review` は、そのタスクの最新の Evidence の Tree SHA が、今の作業ツリーの Tree SHA（`verify-step` と同じ求め方。GATE-9）と一致しない場合は、終了コード 3 とし、`verify-step` を先に実行するよう案内する。検証の後に作業ツリーを変えたまま、査読の入力を作らず、記録もしない。
-  - **1回の検証に1回の査読**: `record-review` は、同じ Evidence（検証）に対して、判定の決まった査読を1回だけ記録する。すでに記録がある場合は、`CHECKER_POLICY_VIOLATION:` を出して終了コード 4 とし、記録しない。REJECT を記録した後に、検証をやり直さずに査読だけをやり直して APPROVE を記録することを防ぐ（INV-4）。
-  - **判定の決まらない出力も残す**: 判定が1つに決まらない出力（GATE-5 の終了コード 4）も、3つのファイルの写しと記録（判定は空）を GATE-12 の履歴に残す。最新の記録は変えない。このあと、同じ Evidence に対して、判定の決まった査読を1回記録できる（出力が途中で切れた場合の実行し直しのため）。
-  - **入力の記録**: `review-input` は、イベント `review_input`（タスク・チェックポイント・差分の SHA-256）を書く。`status` は、最新の Evidence について、`review_input` の回数が査読の履歴（判定の決まらないものを含む）の件数より多い場合に、`attention[]` に `REVIEW_NOT_RECORDED` として入れる。イベントの書き込みに失敗しても、結果は変えない（INV-8）。
-  - スキル（`/nightly-run`）に、「1回の `review-input` に対して Checker は1回。Checker の出力は、判定が決まらない場合も含めて、必ず `record-review` に渡す」ことを書く。
-- [ ] **DX-13 検証の制限時間**: 検証スクリプトの制限時間を、次の順で決める。
-  - `verify-step` に `--timeout SEC` を加える（サブコマンドの後に書ける）。全体のオプション `auto-dev --timeout SEC verify-step ...` も、これまでどおり使える。両方を指定した場合は、サブコマンドの後のものを使う。
-  - どちらも指定しない場合は、検証スクリプトの先頭の 20 行の中の `# auto-dev: verify-timeout=<SEC>` の行の値を使う。その行もない場合は 300 秒とする。値が正の整数でない場合は、終了コード 2 とし、その旨を示す。
-  - `run` と `teams run`（ワーカーと統合の関門）も、同じ順で制限時間を決める。
-  - 検証が制限時間で打ち切られた場合（終了コード 124）は、今の1行目（`Verification timed out after <N>s`）を変えずに、続けて、使った制限時間の出所（オプション・検証スクリプトの行・既定値）と、`--timeout` と検証スクリプトの行で延ばせることを示す。
-  - 検証スクリプトは保護ファイル（INV-1）なので、この行は人間が書く。
-  - スキル（`/nightly-run`）に、制限時間の決め方を書く。
-- [ ] **RCV-6 隔離の案内**: 隔離（RCV-1。`rollback-step`、`run`、`teams run` の経路）のあと、隔離ブランチにはなくスナップショットにだけある新しいファイル（機密を除く。INV-5）の一覧と、それを取り出すコマンド（`tar xzf <スナップショット> <パス>...`）を表示し、失敗ログ（RCV-5）にも書く。該当するファイルがない場合は、その旨を1行で示す。今の出力の1行目（`rollback-step` の `ROLLED BACK TO ...`）は変えない。
-- [ ] **DX-14 ドキュメントのコマンドの検査**: 開発用のスクリプト `scripts/check_doc_commands.py` が、README（`README.md`、`README.en.md`）とスキル（`skills/*/SKILL.md`）に書かれた `auto-dev` のコマンドを、CLI の引数定義（`build_parser()`）と突き合わせる。製品（`auto_developer` のパッケージ）からは呼ばない。
-  - 存在しないサブコマンドと、そのサブコマンド（または全体）にないオプションを、ファイル名と行番号つきで報告し、終了コード 1 とする。なければ 0 とする。
-  - コードブロックの中と、文中の `` `auto-dev ...` `` の両方を対象とする。`<task_id>` のような山かっこの置き換え用の語は、オプションの値として扱う。
-  - トップレベルのサブコマンドのうち、`README.md` に一度も出てこないものを、参考として一覧する（終了コードには影響しない）。
-  - テストで、今のリポジトリのドキュメントが通ること、存在しないサブコマンドやオプションを書いた一時ファイルでは終了コード 1 になることを確かめる。
+
+## 5. 次のリリース（v0.10.0）で追加する要件
+
+<!-- v0.10.0 の目的: Auto Developer を「良い SPEC を書ける人」以外にも使えるようにする（Spec Compiler とダッシュボード）。
+     全体の方針は docs/contracts/v0.10-draft.md、Phase 75 の影響分析と設計の判断は docs/contracts/phase75.md を参照。
+     Phase 75 は、隔離で消えるファイルの修正（IDEA-026）と、Spec Compiler の土台（中間表現の形式、設計書の見出しの読み取り、決定的な点検）。
+     下書きの出力（CMP-5）、スキル `/nightly-compile`（CMP-6）、追跡（CMP-7）、影響分析（CMP-4）、ダッシュボードに計画の構造を重ねる（STAT-3）は Phase 76 で加える。 -->
+
+### 5.1 Phase 75 — 隔離の修正と Spec Compiler の土台
+
+- [ ] **RCV-7 隔離で消えるファイルをなくす（INV-3）**: 隔離（RCV-1。`rollback-step`、`run`、`teams run` の経路）を、次のように変える。
+  - 隔離の前に、Git が追跡しておらず `.gitignore` でも無視されていないファイル（`git ls-files --others --exclude-standard`）のうち、機密の規則（INV-5。名前と中身）でスナップショットから除外されるものを求める。
+  - それらのファイルは、`git clean` の前に `git hash-object -w` で Git のオブジェクトとして書く。隔離ブランチ・スナップショット・Bundle には入れない（INV-5 は変えない）。スナップショットの照合用の一覧（manifest）に、パスとオブジェクトの SHA を記録する（中身は書かない）。
+  - オブジェクトを1つでも書けなかった場合は、隔離ブランチの作成・本線の復元・`git clean` のどれも行わず、作業ツリーをそのままにして終了コード 1 とし、書けなかったファイルと理由を示す（INV-3: 退避が終わる前に消さない）。
+  - RCV-6 の案内を直す。「スナップショットにだけある新しいファイル」の一覧と `tar xzf` のコマンドには、実際にスナップショットに入ったファイルだけを並べる。Git のオブジェクトとして残したファイルは、別の見出しで、ファイルごとに `git cat-file -p <SHA> > <パス>` の形の取り出し方を示す。失敗ログ（RCV-5）にも同じものを書く。ファイルの中身は表示しない。
+  - 今の出力の1行目（`rollback-step` の `ROLLED BACK TO ...`）と、失敗ログの先頭の2行（RCV-5）は変えない。
+- [ ] **CMP-1 中間表現（IR）と形式の検査**: `auto-dev compile --check <IR の JSON> [--json]` を加える。IR は、設計書を Auto Developer の SPEC と PLAN に移すための中間の形で、形式は次のとおり（`schema` は `"auto-dev-ir/1"`）。
+  - 最上位: `schema`（必須）、`source`（必須。1件以上。`{path, sha256}`。`sha256` はファイル全体のバイト列）、`purpose`、`terms[]`、`requirements[]`（必須。1件以上）、`acceptance[]`、`out_of_scope[]`、`decisions[]`、`steps[]`、`teams[]`、`verification`、`alternatives[]`、`open_questions[]`。
+  - `requirements[]`: `id`（`^[A-Z]+-[0-9]+$`。IR の中で重ならない）、`statement`（空でない文字列）、`kind`（`"new"` または `"modify"`）、`acceptance`（`acceptance[]` の `id` の一覧）、`source`（元の場所）、`fingerprints`（任意。文字列の一覧）。
+  - `acceptance[]`: `id`（`^AC-[0-9]+$`。重ならない）、`given`・`when`・`then`（文字列）、`observable`（観測できる結果。文字列の一覧）、`source`。
+  - `decisions[]`: `id`（`^D-[0-9]+$`。重ならない）、`statement`、`forbids`（任意。この判断が禁じる操作や書き方を表す語句の一覧）、`source`。
+  - `steps[]`: `n`（1 から始まる連番）、`title`、`requirements`（要件の `id` の一覧）、`files`（パスの一覧）。`teams[]`: `id`（重ならない）、`owns`（`teams.json` と同じ書き方の一覧）。`verification`: `commands`（文字列の一覧）、`source`。
+  - 元の場所（`source`）: `{path, lines: [開始, 終了], sha256}`。行は 1 から数え、終了を含む。`sha256` は、そのファイルの開始行から終了行までのバイト列（各行の改行を含む）の SHA-256。`path` は、リポジトリの直下からの相対パスとする。`purpose`・`terms[]`・`out_of_scope[]`・`alternatives[]` の各要素も、`source` を持てる。
+  - 検査すること（どれも ERROR）: JSON として読めること、`schema` の値、必須の項目と型、`id` の形と重なり、参照（要件の `acceptance`、ステップの `requirements`）が実在すること、ステップの番号が連番であること。
+  - 元の場所の検査（ERROR）: `path` のファイルがあること、行の範囲がファイルの中にあること、`sha256` がその範囲と一致すること（設計書が後で変わったら検出する）。最上位の `source` の `sha256` がファイル全体と一致しない場合は WARN とする（範囲ごとの一致を優先する）。
+  - 終了コード: ERROR がなければ 0（WARN だけなら 0）、ERROR があれば 1、IR のファイルが読めない・JSON でない・`schema` が `"auto-dev-ir/1"` でない場合は 2。結果は、1行に1件、`ERROR|WARN <点検の ID> <IR の中の場所>: <説明>` の形で示す。`--json` では `{"schema": "auto-dev-compile-check/1", "errors": [...], "warnings": [...]}` を出す（各件は `rule`・`location`・`message`）。形式の検査の点検の ID は `F-1` とする。
+  - INV-12: `compile` は、どのファイルも作成・変更しない（標準出力だけ）。
+- [ ] **CMP-2 設計書の見出しの読み取り**: `auto-dev compile --outline <設計書の markdown> [--json]` を加える。設計書の見出しを、IR の要素に対応づけて示す。LLM が IR の下書きを作るときの足場と、元の場所の行番号の基準にする。
+  - 対応（見出しの文字列の先頭で判定する。大文字と小文字は区別しない。先頭の番号（`1.` など）は除いて比べる）: `Overview` と `The Problem` → `purpose`、`Glossary` または `用語定義` → `terms`、`Goals` → `requirements`、`Non-Goals` → `out_of_scope`、`Architectural Decisions` → `decisions`、`Critical User Journeys` または `CUJ` → `acceptance`、`Technical Plan` と `Detailed Implementation Plan` → `steps`、`Verification Plan` → `verification`、`Alternatives Considered` → `alternatives`。見出しの後ろの括弧書き（`(Resolved Questions)` など）は無視する。
+  - コードブロック（`` ``` `` と `~~~` の囲み）の中の `#` で始まる行は、見出しとして扱わない。
+  - 各見出しについて、レベル、行の範囲（その見出しの行から、同じかより上のレベルの次の見出しの前の行まで）、範囲の SHA-256（CMP-1 と同じ求め方）、対応する IR の要素（なければ `null`）を示す。
+  - `Goals`、`Critical User Journeys`、`Verification Plan` と、`Technical Plan` か `Detailed Implementation Plan` のどちらか、が見つからない場合は、それを「足りない節」として示し、終了コード 1 とする。そろっていれば 0。ファイルが読めない場合は 2。
+  - `--json` では `{"schema": "auto-dev-outline/1", "source": {path, sha256}, "sections": [...], "missing": [...]}` を出す。INV-12: どのファイルも作成・変更しない。
+- [ ] **CMP-3 決定的な点検**: `compile --check` に、次の点検を加える。CLI で確信できるものだけを判定し、確信できない場合を ERROR にしない（意味の判断は、Phase 76 のスキルの査読に回す）。
+  - **L-1（ERROR）**: どの要件にも、`acceptance` が1件以上あり、参照する受入条件のどれにも `observable` が1件以上ある。
+  - **L-5（ERROR）**: 判断の `forbids` の語句が、要件の `statement` か、受入条件の `given`・`when`・`then` に、そのまま現れる場合は、判断と要件の食い違いとして、両方の場所を示す（大文字と小文字は区別する）。
+  - **L-6（WARN）**: `--spec <SPEC.md>`（省略時は作業ディレクトリの `SPEC.md`。なければこの点検は行わない）の 4 章に同じ ID の要件があるのに `kind` が `"modify"` でない場合、または `kind` が `"modify"` なのに 4 章にその ID がない場合。
+  - **L-7（ERROR）**: `teams[]` が1件以上ある場合に、2つのチームの `owns` が同じステップのファイルに当てはまる（`teams.json` の担当範囲の検査と同じ当てはめ方）、または、どのチームの `owns` にも当てはまらないステップのファイルがある。
+  - **L-8（WARN）**: どの要件にもつながらないステップ、どのステップにもつながらない要件。
+  - **L-9（ERROR）**: `open_questions[]` が空でない、または、要件の `statement`・受入条件の各項目・ステップの `title` に、未決の目印（`TBD`、`TODO`、`要検討`、`未定`）が含まれる。
+- [ ] **CMP-8 実物の設計書での確認**: `docs/designs/autonomous_pipeline_orchestrator.md` を入力にしたテストを置く。
+  - `compile --outline` が、Overview・Glossary（`用語定義`）・The Problem・Goals・Non-Goals・Architectural Decisions・CUJs・Technical Plan・Alternatives Considered・Detailed Implementation Plan・Verification Plan を対応づけ、`NIGHTLY_REPORT.md` のテンプレートのコードブロックの中の `#` の行を見出しとして扱わないこと。足りない節がなく、終了コード 0 になること。
+  - この設計書から作った IR をテストの資料（`tests/fixtures/compile/` の下）として置く。元の場所は、設計書の実際の行と SHA-256 を指すこと。
+  - その IR に対して `compile --check` が、Decision 4（隔離ブランチへの退避。`git reset --hard` と `git clean -fd` による破壊的なロールバックを廃止する）と、Goals の Fail-Fast の要件・CUJ 2 の受入条件（どちらも `git reset --hard` / `git clean -fd` を使うと書いている）の食い違いを、L-5 の ERROR として報告し、終了コード 1 になること。
+  - 食い違いを直した IR（同じ資料の別のファイル）では、終了コード 0 になること。
 
 ## 6. スコープ外
 

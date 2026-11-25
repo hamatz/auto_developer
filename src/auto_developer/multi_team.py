@@ -3347,10 +3347,12 @@ def _format_worker_failure_message(
                         snap_path = Path(str(snap_raw)) if snap_raw else None
                         snap_files = list(q_task.get("snapshot_only_files") or [])
                         snap_error = q_task.get("snapshot_only_error")
+                        git_obj_files = list(q_task.get("git_object_files") or [])
                         for snap_line in format_snapshot_only_files_lines(
                             snap_path,
                             snap_files,
                             error_reason=str(snap_error) if snap_error else None,
+                            git_object_files=git_obj_files,
                         ):
                             lines.append(f"    {snap_line}")
                 except (OSError, json.JSONDecodeError, ValueError):

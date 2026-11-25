@@ -174,6 +174,15 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | `--enable` | No | `False` | Enable automatic dashboard regeneration on STAT-4 events (.dev/dashboard.json) |
 | `--disable` | No | `False` | Disable automatic dashboard regeneration (.dev/dashboard.json) |
 
+### `auto-dev compile`
+
+| Argument / Option | Required | Default | Description |
+| --- | --- | --- | --- |
+| `--check IR_JSON` | No | - | Validate an auto-dev-ir/1 JSON file |
+| `--outline DESIGN_MD` | No | - | Extract heading outline from a design markdown file |
+| `--spec SPEC_MD` | No | - | Path to SPEC.md for L-6 check (defaults to <work-dir>/SPEC.md if present) |
+| `--json` | No | `False` | Output compile result in JSON format |
+
 ### `auto-dev teams`
 
 #### `auto-dev teams init`

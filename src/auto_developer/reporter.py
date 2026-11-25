@@ -774,11 +774,13 @@ class MorningReporter:
         snap_path = Path(str(snap_raw)) if snap_raw else None
         snap_only_files = list(failure_data.get("snapshot_only_files") or [])
         snap_only_error = failure_data.get("snapshot_only_error")
+        git_object_files = list(failure_data.get("git_object_files") or [])
         snap_lines = format_snapshot_only_files_lines(
             snap_path,
             snap_only_files,
             repo_dir=self.repo_dir,
             error_reason=str(snap_only_error) if snap_only_error else None,
+            git_object_files=git_object_files,
         )
         content = [
             f"Failure Phase: {failure_phase}",

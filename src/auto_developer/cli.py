@@ -547,9 +547,12 @@ def _validate_explicit_cli_families(
 
 def build_parser() -> argparse.ArgumentParser:
     """CLI の ArgumentParser を構築して返す。"""
+    # トップレベルの --checker-* と、サブコマンドの --check が前方一致でぶつかるため
+    # （省略形はドキュメントにない暗黙の機能であり、影響がないことを確認済み）
     parser = argparse.ArgumentParser(
         prog="auto-dev",
         description="Auto Developer: Trustworthy Autonomous Pipeline Orchestrator",
+        allow_abbrev=False,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument(
@@ -808,6 +811,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable automatic dashboard regeneration (.dev/dashboard.json)",
     )
 
+    # Subcommand: compile
+    compile_parser = subparsers.add_parser(
+        "compile",
+        help="Validate auto-dev-ir/1 JSON or extract design outline (INV-12: read-only)",
+    )
+    compile_parser.add_argument(
+        "--check",
+        type=Path,
+        default=None,
+        metavar="IR_JSON",
+        help="Validate an auto-dev-ir/1 JSON file",
+    )
+    compile_parser.add_argument(
+        "--outline",
+        type=Path,
+        default=None,
+        metavar="DESIGN_MD",
+        help="Extract heading outline from a design markdown file",
+    )
+    compile_parser.add_argument(
+        "--spec",
+        type=Path,
+        default=argparse.SUPPRESS,
+        metavar="SPEC_MD",
+        help="Path to SPEC.md for L-6 check (defaults to <work-dir>/SPEC.md if present)",
+    )
+    compile_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output compile result in JSON format",
+    )
+
     # Subcommand: teams
     teams_parser = subparsers.add_parser("teams", help="Multi-team execution commands")
     teams_subparsers = teams_parser.add_subparsers(
@@ -966,6 +1001,49 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.subcommand == "demo":
         return run_demo(keep=bool(args.keep), teams=bool(args.teams))
+
+    if args.subcommand == "compile":
+        from auto_developer.compiler import (
+            check_ir_file,
+            format_outline_text,
+            outline_design_file,
+        )
+
+        if args.check is not None and args.outline is not None:
+            print("ERROR: --check and --outline cannot be used together.", file=sys.stderr)
+            return 2
+        if args.check is None and args.outline is None:
+            print("ERROR: --check <IR_JSON> or --outline <DESIGN_MD> is required.", file=sys.stderr)
+            return 2
+
+        work_dir = args.work_dir.resolve()
+        if args.outline is not None:
+            doc_path = args.outline if args.outline.is_absolute() else (work_dir / args.outline)
+            exit_code, payload, error_msg = outline_design_file(doc_path, work_dir=work_dir)
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            elif error_msg is not None:
+                print(f"ERROR: {error_msg}", file=sys.stderr)
+            else:
+                for line in format_outline_text(payload):
+                    print(line)
+            return exit_code
+
+        ir_path = args.check if args.check.is_absolute() else (work_dir / args.check)
+        spec_arg: Path | None = getattr(args, "spec", None)
+        resolved_spec: Path | None = None
+        if spec_arg is not None:
+            resolved_spec = spec_arg if spec_arg.is_absolute() else (work_dir / spec_arg)
+        exit_code, payload, issues = check_ir_file(ir_path, work_dir=work_dir, spec_path=resolved_spec)
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            if issues:
+                for issue in issues:
+                    print(issue.format_line())
+            else:
+                print(f"OK: {ir_path}")
+        return exit_code
 
     work_dir = args.work_dir.resolve()
     plan_path = args.plan or (work_dir / "PLAN.md")
@@ -1830,17 +1908,40 @@ def main(argv: list[str] | None = None) -> int:
                 rollback_job_id = JobState.load(state_file).job_id
             except (OSError, json.JSONDecodeError, ValueError):
                 rollback_job_id = ""
-        from auto_developer.guard import format_snapshot_only_files_lines
+        from auto_developer.guard import QuarantineObjectError, format_snapshot_only_files_lines
 
-        quarantine_branch = git_guard.quarantine_and_restore(
-            args.checkpoint,
-            task_id=task_id,
-            job_id=rollback_job_id,
-            team_id=team_ctx.team_id if team_ctx else "",
-        )
+        try:
+            quarantine_branch = git_guard.quarantine_and_restore(
+                args.checkpoint,
+                task_id=task_id,
+                job_id=rollback_job_id,
+                team_id=team_ctx.team_id if team_ctx else "",
+            )
+        except QuarantineObjectError as exc:
+            if target:
+                log_path = work_dir / "logs" / "nightly" / f"task_{target.task_id}_failure.log"
+                base_reason = args.reason or "Verification failed"
+                reporter.write_failure_log(
+                    log_path,
+                    {
+                        "task_id": target.task_id,
+                        "title": target.title,
+                        "checkpoint": args.checkpoint,
+                        "quarantined_branch": "",
+                        "snapshot_path": None,
+                        "snapshot_only_files": [],
+                        "snapshot_only_error": str(exc),
+                        "failure_phase": "ROLLBACK",
+                        "reason": f"{base_reason} ({exc})",
+                        "attempt_1_log": str(exc),
+                    },
+                )
+            print(f"ROLLBACK FAILED: {exc}", file=sys.stderr)
+            return 1
         snapshot_path = git_guard.last_quarantine_snapshot
         snapshot_only_files = list(git_guard.last_snapshot_only_files)
         snapshot_only_error = git_guard.last_snapshot_only_error
+        git_object_files = list(git_guard.last_git_object_files)
         if target:
             log_path = work_dir / "logs" / "nightly" / f"task_{target.task_id}_failure.log"
             reporter.write_failure_log(
@@ -1853,6 +1954,7 @@ def main(argv: list[str] | None = None) -> int:
                     "snapshot_path": str(snapshot_path) if snapshot_path else None,
                     "snapshot_only_files": snapshot_only_files,
                     "snapshot_only_error": snapshot_only_error,
+                    "git_object_files": git_object_files,
                     "failure_phase": "ROLLBACK",
                     "reason": args.reason or "Verification failed",
                     "attempt_1_log": args.reason,
@@ -1871,6 +1973,7 @@ def main(argv: list[str] | None = None) -> int:
             snapshot_only_files,
             repo_dir=work_dir,
             error_reason=snapshot_only_error,
+            git_object_files=git_object_files,
         ):
             print(snap_line)
         return 0
