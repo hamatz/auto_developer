@@ -3,11 +3,41 @@ from __future__ import annotations
 import ast
 import json
 import re
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from auto_developer.models import Task
+
+_SNAPSHOT_EXCLUDE_CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+_SNAPSHOT_EXCLUDE_CACHE_SUFFIXES = frozenset({".pyc", ".pyo", ".pyd"})
+
+
+def format_snapshot_only_files_lines(
+    snapshot_path: Path | None,
+    snapshot_only_files: list[str],
+    repo_dir: Path | None = None,
+    error_reason: str | None = None,
+) -> list[str]:
+    """スナップショットにだけある新しいファイルの一覧と tar xzf 復元コマンドを整形する (RCV-6)。"""
+    if error_reason:
+        reason_clean = " ".join(str(error_reason).splitlines()).strip() or "unknown error"
+        return [f"Snapshot-only new files: unavailable ({reason_clean})"]
+    if snapshot_only_files and snapshot_path is not None:
+        if repo_dir is not None:
+            try:
+                snap_display = snapshot_path.relative_to(repo_dir).as_posix()
+            except ValueError:
+                snap_display = str(snapshot_path)
+        else:
+            snap_display = str(snapshot_path)
+        lines = ["Snapshot-only new files (not in quarantine branch):"]
+        for rel_path in snapshot_only_files:
+            lines.append(f"  - {rel_path}")
+        lines.append(f"Restore snapshot-only files: {shlex.join(['tar', 'xzf', snap_display, *snapshot_only_files])}")
+        return lines
+    return ["Snapshot-only new files: none"]
 
 
 def is_safe_main_guard(stmt: ast.If) -> bool:
@@ -131,6 +161,9 @@ class GitGuard:
     def __init__(self, repo_dir: Path | None = None) -> None:
         self.repo_dir = repo_dir or Path.cwd()
         self._last_working_tree_sha: str | None = None
+        self.last_quarantine_snapshot: Path | None = None
+        self.last_snapshot_only_files: list[str] = []
+        self.last_snapshot_only_error: str | None = None
 
     def _run_git(self, args: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -620,6 +653,36 @@ print(json.dumps(data))
 
         return archive_path
 
+    def list_snapshot_only_files(
+        self,
+        snapshot_path: Path | None = None,
+        checkpoint: str = "",
+        quarantine_branch: str = "",
+    ) -> list[str]:
+        """隔離直前の作業ツリーから、未追跡かつ非無視の新規ファイル（機密・キャッシュを除く）を返す (RCV-6)。"""
+        _ = snapshot_path, checkpoint, quarantine_branch
+        proc = self._run_git(
+            ["-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard", "-z"]
+        )
+        result: list[str] = []
+        for entry in proc.stdout.split("\0"):
+            norm = entry
+            while norm.startswith("./"):
+                norm = norm[2:]
+            if not norm:
+                continue
+            if norm.startswith((".dev/", ".git/")) or norm in (".dev", ".git"):
+                continue
+            p = Path(norm)
+            if self.is_secret_file(p.name) or any(self.is_secret_file(part) for part in p.parts):
+                continue
+            if any(part in _SNAPSHOT_EXCLUDE_CACHE_DIRS for part in p.parts):
+                continue
+            if p.suffix in _SNAPSHOT_EXCLUDE_CACHE_SUFFIXES:
+                continue
+            result.append(norm)
+        return sorted(set(result))
+
     def quarantine_and_restore(
         self,
         checkpoint: str,
@@ -631,6 +694,10 @@ print(json.dumps(data))
         秘密情報 (.env や鍵) は Git 隔離ブランチおよびスナップショットから厳格に除外される。
         """
         import time
+
+        self.last_quarantine_snapshot = None
+        self.last_snapshot_only_files = []
+        self.last_snapshot_only_error = None
 
         clean_id = re.sub(r"[^a-zA-Z0-9_\-]", "_", task_id)
         clean_team = re.sub(r"[^a-zA-Z0-9_\-]", "_", team_id) if team_id else ""
@@ -646,7 +713,25 @@ print(json.dumps(data))
 
         if has_changes:
             # 1. 物理スナップショットの安全作成 (Manifest 連携)
-            self.create_quarantine_snapshot(task_id=f"{team_prefix}{task_id}", checkpoint=checkpoint, job_id=job_id)
+            snapshot_path = self.create_quarantine_snapshot(
+                task_id=f"{team_prefix}{task_id}",
+                checkpoint=checkpoint,
+                job_id=job_id,
+            )
+            self.last_quarantine_snapshot = snapshot_path
+
+            # 1.5. スナップショットにだけある新しいファイルの一覧を隔離ブランチ作成・復元前に取得 (RCV-6)
+            try:
+                self.last_snapshot_only_files = self.list_snapshot_only_files(
+                    snapshot_path,
+                    checkpoint,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.last_snapshot_only_files = []
+                detail = " ".join(str(exc).splitlines()).strip()
+                self.last_snapshot_only_error = (
+                    f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+                )
 
             # 2. 隔離ブランチへの安全なステージとコミット (追跡済みファイルのみ add -u でステージし、シークレット検査を実施)
             if clean_team and clean_job:

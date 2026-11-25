@@ -49,7 +49,7 @@ from auto_developer.runner import (
     RunnerAdapter,
     parse_checker_decision,
 )
-from auto_developer.verifier import DeterministicVerifier
+from auto_developer.verifier import DeterministicVerifier, resolve_verify_timeout
 
 VERSION = "0.9.0"
 
@@ -275,6 +275,32 @@ def _parse_owns_arg(raw_owns: list[str] | None) -> list[str] | None:
 def _compute_canonical_diff(work_dir: Path, checkpoint: str) -> bytes:
     """GATE-5: compute_canonical_diff への委譲。"""
     return compute_canonical_diff(work_dir, checkpoint)
+
+
+def _verify_evidence_matches_working_tree(work_dir: Path, evidence: dict[str, Any]) -> bool:
+    """GATE-13: Evidence の Tree SHA が現在の作業ツリーと一致するか検証する。"""
+    expected_tree_sha = str(evidence.get("tree_sha", "")).strip()
+    if not expected_tree_sha:
+        print(
+            "EVIDENCE_ERROR: Verification evidence has no tree_sha. Run `auto-dev verify-step` first.",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        current_tree_sha = GitGuard(repo_dir=work_dir).get_working_tree_sha()
+    except (subprocess.CalledProcessError, OSError) as e:
+        print(
+            f"EVIDENCE_ERROR: Failed to compute working tree SHA: {e}. Run `auto-dev verify-step` first.",
+            file=sys.stderr,
+        )
+        return False
+    if current_tree_sha != expected_tree_sha:
+        print(
+            "EVIDENCE_ERROR: Working tree has changed since verification. Run `auto-dev verify-step` first.",
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 def _resolve_cli_team_context(
@@ -550,7 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="Simulate execution without modifying git or state"
     )
     parser.add_argument(
-        "--timeout", type=int, default=300, help="Max verification timeout in seconds"
+        "--timeout", type=int, default=None, help="Max verification timeout in seconds (default: 300)"
     )
     parser.add_argument(
         "--resume", action="store_true", help="Resume interrupted job from state file"
@@ -626,7 +652,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Explicit ownership glob pattern(s) for team execution (repeatable or comma-separated)",
     )
     run_parser.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS, help="Simulate execution without modifying git or state")
-    run_parser.add_argument("--timeout", type=int, default=None, help="Max verification timeout in seconds")
+    run_parser.add_argument("--timeout", type=int, default=argparse.SUPPRESS, help="Max verification timeout in seconds")
     run_parser.add_argument("--resume", action="store_true", default=argparse.SUPPRESS, help="Resume interrupted job from state file")
     run_parser.add_argument("--mock", action="store_true", default=argparse.SUPPRESS, help="Run with simulated mock agents (for testing only)")
     run_parser.add_argument("--maker-cmd", type=str, default=argparse.SUPPRESS, help="Command template to execute Maker")
@@ -663,6 +689,12 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser = subparsers.add_parser("verify-step", help="Check protected files and run verify script")
     verify_parser.add_argument("--checkpoint", type=str, required=True, help="Checkpoint commit hash")
     verify_parser.add_argument("--task-id", type=str, default="default", help="Task ID being verified")
+    verify_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="Max verification timeout in seconds",
+    )
 
     # Subcommand: commit-step
     commit_parser = subparsers.add_parser("commit-step", help="Commit current task and mark [x] in PLAN.md")
@@ -1291,6 +1323,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: Task {args.task_id} not found in {effective_plan_path}", file=sys.stderr)
             return 1
 
+        try:
+            verify_timeout, verify_timeout_source = resolve_verify_timeout(args.timeout, verify_script)
+        except ValueError as timeout_err:
+            print(f"CONFIG ERROR: {timeout_err}", file=sys.stderr)
+            return 2
+
         original_plan_content = effective_plan_path.read_text(encoding="utf-8")
         # 検証対象の最終ツリーに PLAN.md の完了反映を含める
         dispatcher.mark_task_status(effective_plan_path, target, status="completed")
@@ -1338,7 +1376,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 11
 
         code, out = verifier.run_verification(
-            verify_script, timeout_sec=args.timeout, cwd=work_dir
+            verify_script,
+            timeout_sec=verify_timeout,
+            cwd=work_dir,
+            timeout_source=verify_timeout_source,
         )
         duration_sec = round(time.time() - start_time, 2)
         attempt = metrics.count_verify_attempts(args.task_id, args.checkpoint, phase=phase) + 1
@@ -1789,12 +1830,17 @@ def main(argv: list[str] | None = None) -> int:
                 rollback_job_id = JobState.load(state_file).job_id
             except (OSError, json.JSONDecodeError, ValueError):
                 rollback_job_id = ""
+        from auto_developer.guard import format_snapshot_only_files_lines
+
         quarantine_branch = git_guard.quarantine_and_restore(
             args.checkpoint,
             task_id=task_id,
             job_id=rollback_job_id,
             team_id=team_ctx.team_id if team_ctx else "",
         )
+        snapshot_path = git_guard.last_quarantine_snapshot
+        snapshot_only_files = list(git_guard.last_snapshot_only_files)
+        snapshot_only_error = git_guard.last_snapshot_only_error
         if target:
             log_path = work_dir / "logs" / "nightly" / f"task_{target.task_id}_failure.log"
             reporter.write_failure_log(
@@ -1804,6 +1850,9 @@ def main(argv: list[str] | None = None) -> int:
                     "title": target.title,
                     "checkpoint": args.checkpoint,
                     "quarantined_branch": quarantine_branch,
+                    "snapshot_path": str(snapshot_path) if snapshot_path else None,
+                    "snapshot_only_files": snapshot_only_files,
+                    "snapshot_only_error": snapshot_only_error,
                     "failure_phase": "ROLLBACK",
                     "reason": args.reason or "Verification failed",
                     "attempt_1_log": args.reason,
@@ -1817,6 +1866,13 @@ def main(argv: list[str] | None = None) -> int:
             reason=args.reason or "",
         )
         print(f"ROLLED BACK TO {args.checkpoint} (Work quarantined to: {quarantine_branch or 'none'})")
+        for snap_line in format_snapshot_only_files_lines(
+            snapshot_path,
+            snapshot_only_files,
+            repo_dir=work_dir,
+            error_reason=snapshot_only_error,
+        ):
+            print(snap_line)
         return 0
 
     elif args.subcommand == "review-input":
@@ -1836,6 +1892,8 @@ def main(argv: list[str] | None = None) -> int:
         if not checkpoint:
             print(f"EVIDENCE_ERROR: Evidence for task {args.task_id} has no checkpoint", file=sys.stderr)
             return 3
+        if not _verify_evidence_matches_working_tree(work_dir, review_evidence):
+            return 3
         try:
             diff_bytes = _compute_canonical_diff(work_dir, checkpoint)
         except subprocess.CalledProcessError as e:
@@ -1845,6 +1903,22 @@ def main(argv: list[str] | None = None) -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         diff_out = out_dir / "diff.patch"
         diff_out.write_bytes(diff_bytes)
+
+        diff_sha256 = hashlib.sha256(diff_bytes).hexdigest()
+        effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
+        metrics = MetricsLog(
+            repo_dir=work_dir,
+            plan_path=effective_plan_path,
+            team_id=team_ctx.team_id if team_ctx else None,
+        )
+        metrics.record_event(
+            "review_input",
+            task_id=args.task_id,
+            checkpoint=checkpoint,
+            diff_sha256=diff_sha256,
+            evidence_issued_at=review_evidence.get("issued_at"),
+        )
+
         print(f"REVIEW_INPUT_WRITTEN: {diff_out}")
         return 0
 
@@ -1885,6 +1959,15 @@ def main(argv: list[str] | None = None) -> int:
         if target_evidence is None:
             print(f"EVIDENCE_ERROR: No valid verification evidence for task {args.task_id}", file=sys.stderr)
             return 3
+        if not _verify_evidence_matches_working_tree(work_dir, target_evidence):
+            return 3
+        if evidence_store.has_decided_review_for_evidence(args.task_id, target_evidence):
+            print(
+                f"CHECKER_POLICY_VIOLATION: Review already recorded for task {args.task_id} "
+                "on the current verification evidence; re-run verify-step before recording another review",
+                file=sys.stderr,
+            )
+            return 4
 
         checker_output_path: Path = args.checker_output
         if not checker_output_path.is_file():
@@ -1900,14 +1983,7 @@ def main(argv: list[str] | None = None) -> int:
             return 4
 
         dec = parse_checker_decision(output_text)
-        if dec is None:
-            print(
-                "CHECKER_POLICY_VIOLATION: Checker output must contain exactly one DECISION line (APPROVE or REJECT)",
-                file=sys.stderr,
-            )
-            return 4
-
-        if args.decision is not None:
+        if dec is not None and args.decision is not None:
             declared = args.decision.strip().upper()
             if declared != dec:
                 print(
@@ -1939,6 +2015,28 @@ def main(argv: list[str] | None = None) -> int:
         if not spec_excerpt.strip() or spec_excerpt not in full_spec:
             print(
                 "CHECKER_POLICY_VIOLATION: --spec-file must be a non-empty contiguous excerpt of SPEC.md",
+                file=sys.stderr,
+            )
+            return 4
+
+        if dec is None:
+            evidence_store.record_review(
+                task_id=args.task_id,
+                evidence=target_evidence,
+                decision="",
+                checker_output_path=checker_output_path,
+                diff_path=diff_file,
+                spec_path=spec_excerpt_file,
+                maker_model=args.maker_model,
+                maker_family=maker_fam,
+                maker_family_source=maker_fam_source,
+                checker_model=args.checker_model,
+                checker_family=checker_fam,
+                checker_family_source=checker_fam_source,
+                reason=args.reason or "",
+            )
+            print(
+                "CHECKER_POLICY_VIOLATION: Checker output must contain exactly one DECISION line (APPROVE or REJECT)",
                 file=sys.stderr,
             )
             return 4
@@ -2252,7 +2350,11 @@ def main(argv: list[str] | None = None) -> int:
     audit_baseline = getattr(args, "audit_baseline", None)
     dry_run = bool(getattr(args, "dry_run", False))
     resume = bool(getattr(args, "resume", False))
-    timeout = getattr(args, "timeout", None) or 300
+    try:
+        timeout, timeout_source = resolve_verify_timeout(getattr(args, "timeout", None), verify_script)
+    except ValueError as timeout_err:
+        print(f"CONFIG ERROR: {timeout_err}", file=sys.stderr)
+        return 2
 
     if enable_audit and not is_mock and not auditor_cmd:
         print(
@@ -2315,6 +2417,7 @@ def main(argv: list[str] | None = None) -> int:
         runner_adapter=runner,
         dry_run=dry_run,
         timeout_sec=timeout,
+        timeout_source=timeout_source,
         resume=resume,
         team_id=resolved_team_id,
         owns_patterns=resolved_owns,

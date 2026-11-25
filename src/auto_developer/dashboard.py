@@ -19,6 +19,7 @@ DASHBOARD_CONFIG_REL = Path(".dev") / "dashboard.json"
 
 _GAP_THRESHOLD_SEC = 600.0
 _COMPRESSED_GAP_SEC = 3.0
+_MIN_EVENT_GAP_SEC = 1.0
 _TEAM_SCOPED_EVENTS = frozenset({
     "task_start",
     "verify_step",
@@ -79,6 +80,22 @@ def _event_source(ev_name: str) -> str:
     return "evidence"
 
 
+def _sort_timeline_events(timeline_raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sort timeline events chronologically while preserving file/input order on ties."""
+    keyed: list[tuple[float, int, dict[str, Any]]] = []
+    last_ts = float("-inf")
+    for idx, ev in enumerate(timeline_raw):
+        ts_val = _parse_ts_seconds(ev)
+        if ts_val is not None:
+            last_ts = ts_val
+            sort_ts = ts_val
+        else:
+            sort_ts = last_ts
+        keyed.append((sort_ts, idx, ev))
+    keyed.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in keyed]
+
+
 def _build_replay_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Normalize an auto-dev-status/2 snapshot into the STAT-6 replay payload."""
     repo = snapshot.get("repo") or {}
@@ -86,7 +103,7 @@ def _build_replay_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     backlog = snapshot.get("backlog") or {}
     teams_block = snapshot.get("teams")
     attention_raw = snapshot.get("attention") or []
-    timeline_raw = snapshot.get("timeline") or []
+    timeline_raw = _sort_timeline_events(list(snapshot.get("timeline") or []))
 
     base_ref = str(repo.get("branch") or "main")
     head_full = str(repo.get("head") or "")
@@ -176,19 +193,22 @@ def _build_replay_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
 
     for ev in timeline_raw:
         real_t = _parse_ts_seconds(ev)
-        if prev_real_t is not None and real_t is not None:
-            delta = max(0.0, real_t - prev_real_t)
-            if delta > _GAP_THRESHOLD_SEC:
-                gap_start = replay_t
-                replay_t += _COMPRESSED_GAP_SEC
-                gaps_out.append({
-                    "t0": round(gap_start, 3),
-                    "t1": round(replay_t, 3),
-                    "real_gap": round(delta, 1),
-                    "label": _format_gap_label(delta),
-                })
+        if events_out:
+            if prev_real_t is not None and real_t is not None:
+                delta = max(0.0, real_t - prev_real_t)
+                if delta > _GAP_THRESHOLD_SEC:
+                    gap_start = replay_t
+                    replay_t += _COMPRESSED_GAP_SEC
+                    gaps_out.append({
+                        "t0": round(gap_start, 3),
+                        "t1": round(replay_t, 3),
+                        "real_gap": round(delta, 1),
+                        "label": _format_gap_label(delta),
+                    })
+                else:
+                    replay_t += max(_MIN_EVENT_GAP_SEC, delta)
             else:
-                replay_t += delta
+                replay_t += _MIN_EVENT_GAP_SEC
         if real_t is not None:
             prev_real_t = real_t
 
@@ -229,14 +249,24 @@ def _build_replay_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         })
 
     duration = round(replay_t, 3) if events_out else 0.0
-    attention_out = [
-        {
+    timeline_quarantines = {
+        str(ev["quarantine_branch"]).strip()
+        for ev in timeline_raw
+        if ev.get("event") == "rollback_step" and ev.get("quarantine_branch")
+    }
+    attention_out: list[dict[str, Any]] = []
+    for a in attention_raw:
+        att_item: dict[str, Any] = {
             "severity": str(a.get("severity") or "INFO"),
             "kind": str(a.get("kind") or ""),
             "text": str(a.get("message") or a.get("text") or ""),
         }
-        for a in attention_raw
-    ]
+        scope = a.get("scope")
+        if not scope and att_item["kind"] in ("QUARANTINE_BRANCH", "TEAM_QUARANTINE") and a.get("quarantine_branch"):
+            scope = "current" if str(a["quarantine_branch"]).strip() in timeline_quarantines else "previous"
+        if scope in ("current", "previous"):
+            att_item["scope"] = scope
+        attention_out.append(att_item)
 
     return {
         "schema": snapshot.get("schema"),
@@ -272,10 +302,20 @@ def _render_attention_initial(attention: list[dict[str, Any]]) -> tuple[str, str
         grouped.setdefault(kind, []).append(item)
     groups_html: list[str] = []
     for kind, items in grouped.items():
-        lis = "".join(
-            f'<li>[{_e(a.get("severity", "INFO"))}] {_e(a.get("message") or a.get("text") or "")}</li>'
-            for a in items
-        )
+        li_parts: list[str] = []
+        for a in items:
+            scope = a.get("scope")
+            scope_attr = f' data-scope="{_e(scope)}"' if scope in ("current", "previous") else ""
+            scope_badge = (
+                '<span class="att-scope current">current</span> '
+                if scope == "current"
+                else ('<span class="att-scope previous">previous</span> ' if scope == "previous" else "")
+            )
+            li_parts.append(
+                f'<li{scope_attr}>{scope_badge}[{_e(a.get("severity", "INFO"))}] '
+                f'{_e(a.get("message") or a.get("text") or "")}</li>'
+            )
+        lis = "".join(li_parts)
         groups_html.append(
             f'<details class="att-group" data-kind="{_e(kind)}">'
             f'<summary><span class="att-kind">{_e(kind)}</span>'
@@ -352,6 +392,7 @@ def render_dashboard_html(
   .counters {{ display: flex; gap: 16px; font-family: var(--mono); font-size: 11.5px; color: var(--ink2); margin-left: auto; }}
   .counters strong {{ font-family: var(--display); font-size: 15px; color: var(--ink); margin-left: 3px; }}
   .counters .warn strong {{ color: var(--bad); }}
+  .counters #c-q-wrap {{ cursor: help; }}
 
   .attention {{ padding: 7px 20px; font-size: 12.5px; display: flex; gap: 10px; align-items: flex-start; border-bottom: 1px solid var(--line); flex-wrap: wrap; }}
   .attention.clear {{ background: var(--ok-bg); color: #065F46; align-items: center; }}
@@ -366,6 +407,9 @@ def render_dashboard_html(
   details.att-group[open] summary::before {{ content: '▾'; }}
   .att-cnt {{ background: #9F1239; color: #fff; border-radius: 999px; padding: 0 6px; font-size: 10px; }}
   .att-list {{ margin: 4px 0 2px 16px; font-size: 11.5px; line-height: 1.45; }}
+  .att-scope {{ display: inline-block; font-family: var(--mono); font-size: 9.5px; font-weight: 700; padding: 0 5px; border-radius: 4px; margin-right: 4px; }}
+  .att-scope.current {{ background: var(--bad); color: #fff; }}
+  .att-scope.previous {{ background: var(--subtle); color: var(--ink2); border: 1px solid var(--line); }}
 
   .main {{ flex: 1; display: grid; grid-template-columns: 1fr 300px; min-height: 0; }}
   .floor {{ position: relative; overflow: auto; background-image: radial-gradient(var(--line) 1.2px, transparent 1.2px); background-size: 20px 20px; display: flex; flex-direction: column; }}
@@ -462,7 +506,7 @@ def render_dashboard_html(
     <span>Tasks<strong id="c-tasks">0/0</strong></span>
     <span>Reviews<strong id="c-reviews">0</strong></span>
     <span>Retries<strong id="c-retries">0</strong></span>
-    <span id="c-q-wrap">Quarantined<strong id="c-q">0</strong></span>
+    <span id="c-q-wrap" title="Quarantined tasks in the current timeline (excludes prior runs)">Quarantined<strong id="c-q">0</strong></span>
   </div>
 </header>
 {schema_banner}
@@ -620,7 +664,7 @@ def render_dashboard_html(
         const msg = id + ': ' + t.note;
         if (!hasQuarantine && !seenAtt.has(msg)) {{
           seenAtt.add(msg);
-          live.push({{ kind: S.mode === 'teams' ? 'TEAM_QUARANTINE' : 'QUARANTINE_BRANCH', severity: 'HIGH', text: msg }});
+          live.push({{ kind: S.mode === 'teams' ? 'TEAM_QUARANTINE' : 'QUARANTINE_BRANCH', severity: 'HIGH', scope: 'current', text: msg }});
         }}
       }}
     }});
@@ -636,7 +680,12 @@ def render_dashboard_html(
           grouped.get(kind).push(a);
         }});
         const groupsHtml = Array.from(grouped.entries()).map(([kind, items]) => {{
-          const lis = items.map(a => `<li>${{a.severity ? '[' + esc(a.severity) + '] ' : ''}}${{esc(a.text)}}</li>`).join('');
+          const lis = items.map(a => {{
+            const sc = (a.scope === 'current' || a.scope === 'previous') ? a.scope : '';
+            const scAttr = sc ? ` data-scope="${{sc}}"` : '';
+            const scBadge = sc ? `<span class="att-scope ${{sc}}">${{sc}}</span> ` : '';
+            return `<li${{scAttr}}>${{scBadge}}${{a.severity ? '[' + esc(a.severity) + '] ' : ''}}${{esc(a.text)}}</li>`;
+          }}).join('');
           return `<details class="att-group" data-kind="${{esc(kind)}}"${{openKinds.has(kind) ? ' open' : ''}}><summary><span class="att-kind">${{esc(kind)}}</span><span class="att-cnt">${{items.length}}</span></summary><ul class="att-list">${{lis}}</ul></details>`;
         }}).join('');
         att.className = 'attention alert';
@@ -776,15 +825,17 @@ def render_dashboard_html(
     let lastGapLabelRight = -Infinity;
     (S.gaps || []).forEach(g => {{
       const x0 = gx(g.t0), x1 = gx(g.t1);
-      h += `<rect x="${{x0}}" y="2" width="${{Math.max(4, x1 - x0)}}" height="${{GH - 16}}" fill="var(--review-bg)" opacity="0.7"/>`;
-      h += `<line x1="${{x0}}" x2="${{x0}}" y1="2" y2="${{GH - 14}}" stroke="var(--review)" stroke-dasharray="3 2"/>`;
       const label = String(g.label || '');
       const cx = (x0 + x1) / 2;
-      const halfW = (label.length * 5.5) / 2 + 4;
-      if (label && cx - halfW > lastGapLabelRight) {{
-        h += `<text class="g-gap" x="${{cx}}" y="9" text-anchor="middle">${{esc(label)}}</text>`;
-        lastGapLabelRight = cx + halfW;
-      }}
+      const halfW = (label.length * 6.5) / 2 + 6;
+      const showLabel = Boolean(label && cx - halfW > lastGapLabelRight);
+      if (showLabel) lastGapLabelRight = cx + halfW;
+      h += `<g class="g-gap-mark">`;
+      if (label) h += `<title>${{esc(label)}}</title>`;
+      h += `<rect x="${{x0}}" y="2" width="${{Math.max(4, x1 - x0)}}" height="${{GH - 16}}" fill="var(--review-bg)" opacity="0.7"/>`;
+      h += `<line x1="${{x0}}" x2="${{x0}}" y1="2" y2="${{GH - 14}}" stroke="var(--review)" stroke-dasharray="3 2"/>`;
+      if (showLabel) h += `<text class="g-gap" x="${{cx}}" y="9" text-anchor="middle">${{esc(label)}}</text>`;
+      h += `</g>`;
     }});
     lanes.forEach((ln, i) => {{
       const y = G.top + i * G.lane;

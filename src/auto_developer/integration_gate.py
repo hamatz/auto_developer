@@ -15,7 +15,7 @@ from typing import Any
 from auto_developer.bundler import EvidenceBundler
 from auto_developer.guard import GitGuard
 from auto_developer.metrics import MetricsLog
-from auto_developer.verifier import DeterministicVerifier
+from auto_developer.verifier import DeterministicVerifier, resolve_verify_timeout
 from auto_developer.worktree import WorktreeError, WorktreeManager
 
 logger = logging.getLogger(__name__)
@@ -340,8 +340,9 @@ class IntegrationGate:
         self,
         base_commit: str = "main",
         verify_script: Path | None = None,
-        timeout_sec: int = 300,
+        timeout_sec: int | None = None,
         target_dir: Path | None = None,
+        timeout_source: str | None = None,
     ) -> tuple[bool, int, str]:
         """マージ後の統合ブランチ上で全体検証スクリプトを実行する。
 
@@ -360,8 +361,17 @@ class IntegrationGate:
             return False, 10, f"Protected files modified during integration:\n{diff_proc.stdout.strip()}"
 
         script_path = verify_script or (run_dir / "scripts" / "verify_local.sh")
+        try:
+            resolved_timeout, resolved_source = resolve_verify_timeout(timeout_sec, script_path)
+        except ValueError as err:
+            return False, 2, f"CONFIG ERROR: {err}"
+        if timeout_source:
+            resolved_source = timeout_source
         code, out = self.verifier.run_verification(
-            script_path, timeout_sec=timeout_sec, cwd=run_dir
+            script_path,
+            timeout_sec=resolved_timeout,
+            cwd=run_dir,
+            timeout_source=resolved_source,
         )
         return code == 0, code, out
 
@@ -371,8 +381,9 @@ class IntegrationGate:
         inputs: list[TeamIntegrationInput],
         base_commit: str = "main",
         verify_script: Path | None = None,
-        timeout_sec: int = 300,
+        timeout_sec: int | None = None,
         resume: bool = False,
+        timeout_source: str | None = None,
     ) -> IntegrationResult:
         """独立自律チーム統合パイプラインのエンドツーエンド実行。
 
@@ -600,6 +611,7 @@ class IntegrationGate:
                 verify_script=verify_script,
                 timeout_sec=timeout_sec,
                 target_dir=target_dir,
+                timeout_source=timeout_source,
             )
             self._record_event(
                 "integration_reverify",

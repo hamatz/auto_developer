@@ -175,6 +175,78 @@ def _collect_team_failure_reason(
     return "; ".join(reasons) if reasons else None
 
 
+def _count_review_inputs_for_evidence(
+    events: list[dict[str, Any]],
+    task_id: str,
+    evidence: dict[str, Any],
+    *,
+    current_phase: str = "unknown",
+) -> int:
+    """Count review_input events associated with the given evidence record."""
+    target_issued_at = evidence.get("issued_at")
+    if target_issued_at is None:
+        return 0
+    target_checkpoint = str(evidence.get("checkpoint", "")).strip()
+    count = 0
+    for ev in events:
+        if ev.get("event") != "review_input":
+            continue
+        ev_phase = ev.get("phase")
+        if current_phase != "unknown" and ev_phase and ev_phase != "unknown" and ev_phase != current_phase:
+            continue
+        if str(ev.get("task_id", "")).strip() != str(task_id).strip():
+            continue
+        if ev.get("evidence_issued_at") != target_issued_at:
+            continue
+        ev_cp = str(ev.get("checkpoint", "")).strip()
+        if target_checkpoint and ev_cp and ev_cp != target_checkpoint:
+            continue
+        count += 1
+    return count
+
+
+def _check_review_not_recorded(
+    *,
+    ev_store: EvidenceStore,
+    events: list[dict[str, Any]],
+    task_id: str,
+    latest_evidence: dict[str, Any] | None,
+    attention: list[dict[str, Any]],
+    current_phase: str = "unknown",
+    team_id: str | None = None,
+) -> None:
+    """Append REVIEW_NOT_RECORDED to attention if review_input count exceeds review history."""
+    if latest_evidence is None:
+        return
+    review_input_count = _count_review_inputs_for_evidence(
+        events,
+        task_id,
+        latest_evidence,
+        current_phase=current_phase,
+    )
+    if review_input_count <= 0:
+        return
+    review_history_count = ev_store.count_review_history_for_evidence(task_id, latest_evidence)
+    if review_input_count > review_history_count:
+        missing_reviews = review_input_count - review_history_count
+        prefix = f"Team '{team_id}' task {task_id}" if team_id else f"Task {task_id}"
+        item: dict[str, Any] = {
+            "kind": "REVIEW_NOT_RECORDED",
+            "severity": "HIGH",
+            "task_id": task_id,
+            "review_input_count": review_input_count,
+            "review_history_count": review_history_count,
+            "message": (
+                f"{prefix} has {review_input_count} review_input event(s) "
+                f"but only {review_history_count} recorded review(s) "
+                f"({missing_reviews} unrecorded)"
+            ),
+        }
+        if team_id:
+            item["team_id"] = team_id
+        attention.append(item)
+
+
 def _collect_teams_snapshot(
     repo_dir: Path,
     attention: list[dict[str, Any]],
@@ -226,13 +298,38 @@ def _collect_teams_snapshot(
         ev_records: list[dict[str, Any]] = []
         if wt_exists:
             wt_store = EvidenceStore(repo_dir=wt_path)
+            wt_records_by_task: dict[str, dict[str, Any]] = {}
             for rec in wt_store.get_records():
+                rec_tid = str(rec.get("task_id", "")).strip()
+                if rec_tid and rec_tid not in wt_records_by_task:
+                    wt_records_by_task[rec_tid] = rec
                 ev_records.append({
                     "task_id": rec.get("task_id"),
                     "tree_sha": rec.get("tree_sha"),
                     "commit": rec.get("commit"),
                     "status": rec.get("status"),
                 })
+            wt_task_ids: set[str] = set(wt_records_by_task.keys())
+            if wt_store.evidence_dir.is_dir():
+                for p in sorted(wt_store.evidence_dir.glob("task_*.json")):
+                    stem_tid = p.stem[len("task_"):]
+                    if stem_tid:
+                        wt_task_ids.add(stem_tid)
+            if wt_task_ids:
+                wt_metrics = MetricsLog(repo_dir=wt_path)
+                wt_events = wt_metrics.read_all_events()
+                wt_phase = wt_metrics.get_current_phase()
+                for wt_tid in sorted(wt_task_ids):
+                    wt_latest = wt_store.get_evidence(wt_tid) or wt_records_by_task.get(wt_tid)
+                    _check_review_not_recorded(
+                        ev_store=wt_store,
+                        events=wt_events,
+                        task_id=wt_tid,
+                        latest_evidence=wt_latest,
+                        attention=attention,
+                        current_phase=wt_phase,
+                        team_id=tid,
+                    )
 
         failure_reason = _collect_team_failure_reason(team, wt_path, wt_exists)
 
@@ -262,6 +359,7 @@ def _collect_teams_snapshot(
                 "kind": "TEAM_QUARANTINE",
                 "severity": "HIGH",
                 "task_id": None,
+                "quarantine_branch": qb,
                 "message": f"Team '{tid}' quarantine branch: {qb}",
             })
 
@@ -520,7 +618,16 @@ def _collect_timeline(
             "additions": additions,
             "deletions": deletions,
         }
-        for opt_key in ("tag", "reason", "exit_code", "job_id", "model", "checker_model", "maker_model"):
+        for opt_key in (
+            "tag",
+            "reason",
+            "exit_code",
+            "job_id",
+            "model",
+            "checker_model",
+            "maker_model",
+            "quarantine_branch",
+        ):
             if opt_key in ev and ev[opt_key] is not None:
                 entry[opt_key] = ev[opt_key]
         timeline.append(entry)
@@ -685,6 +792,14 @@ def collect_status_snapshot(
                         "task_id": t.task_id,
                         "message": f"Task {t.task_id} was rejected by Checker ({ev.get('model') or 'unknown'})",
                     })
+        _check_review_not_recorded(
+            ev_store=ev_store,
+            events=all_events,
+            task_id=t.task_id,
+            latest_evidence=ev_store.get_evidence(t.task_id) or ev_rec,
+            attention=attention,
+            current_phase=current_phase,
+        )
 
     seen_quarantines: set[str] = set()
     teams_info = _collect_teams_snapshot(resolved_repo, attention, seen_quarantines=seen_quarantines)
@@ -697,6 +812,7 @@ def collect_status_snapshot(
             "kind": "QUARANTINE_BRANCH",
             "severity": "HIGH",
             "task_id": None,
+            "quarantine_branch": q_br,
             "message": f"Quarantine branch present: {q_br}",
         })
 
@@ -740,6 +856,20 @@ def collect_status_snapshot(
         teams_info=teams_info,
         backlog=backlog,
     )
+
+    timeline_quarantines = {
+        str(ev["quarantine_branch"]).strip()
+        for ev in timeline
+        if ev.get("event") == "rollback_step" and ev.get("quarantine_branch")
+    }
+    for item in attention:
+        if item.get("kind") in ("QUARANTINE_BRANCH", "TEAM_QUARANTINE"):
+            q_br = str(item.get("quarantine_branch") or "").strip()
+            in_timeline = bool(q_br and q_br in timeline_quarantines)
+            item["scope"] = "current" if in_timeline else "previous"
+            suffix = " (current timeline)" if in_timeline else " (previous run)"
+            if not str(item.get("message") or "").endswith(suffix):
+                item["message"] = f"{item.get('message', '')}{suffix}"
 
     return {
         "schema": STATUS_SCHEMA,

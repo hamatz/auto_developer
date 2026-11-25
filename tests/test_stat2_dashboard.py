@@ -345,7 +345,7 @@ console.log(JSON.stringify({ lefts, attHtml: elements.get('attention').innerHTML
             ],
         }
         pmix = _extract_embedded_snapshot(render_dashboard_html(snap_mixed_ts))
-        self.assertEqual(pmix["duration"], 63.0)
+        self.assertEqual(pmix["duration"], 64.0)
         gaps_mix = pmix["gaps"]
         assert isinstance(gaps_mix, list)
         self.assertEqual(len(gaps_mix), 1)
@@ -548,6 +548,117 @@ console.log(JSON.stringify({ at0, atEnd, afterClickClock }));
 
         # Gantt click at x=70 (G.left) seeks back to 00:00
         self.assertTrue(str(res["afterClickClock"]).startswith("00:00 / "))
+
+    def test_stat9_minimum_event_spacing_preserves_order_and_gap_compression(self) -> None:
+        """STAT-9: 同秒・1秒未満間隔のイベントが最低1秒ずつ空いて記録順が保たれ、601s空白圧縮と両立すること。"""
+        base_snap = {
+            "schema": STATUS_SCHEMA,
+            "repo": {"head": "abc1234", "branch": "main"},
+            "plan": {"path": "PLAN.md", "tasks": []},
+            "teams": None,
+            "attention": [],
+            "backlog": {"plan": [{"task_id": "1", "title": "T1", "status": "completed"}]},
+        }
+
+        # 1. 同秒の3件のイベント: 1秒ずつ空いて記録順が保たれること
+        snap_same_sec = {
+            **base_snap,
+            "timeline": [
+                {"ts": 1000.0, "event": "task_start", "task_id": "1", "attempt": 1},
+                {"ts": 1000.0, "event": "verify_step", "task_id": "1", "result": "PASSED"},
+                {"ts": 1000.0, "event": "commit_step", "task_id": "1", "commit": "1111111"},
+            ],
+        }
+        p_same = _extract_embedded_snapshot(render_dashboard_html(snap_same_sec))
+        ev_same = p_same["events"]
+        assert isinstance(ev_same, list)
+        self.assertEqual([e["kind"] for e in ev_same], ["task_start", "verify", "commit"])
+        self.assertEqual([e["t"] for e in ev_same], [0.0, 1.0, 2.0])
+        self.assertEqual(p_same["duration"], 2.0)
+
+        # 2. 1秒未満の間隔のイベント: 最低1秒ずつ空くこと
+        snap_subsec = {
+            **base_snap,
+            "timeline": [
+                {"ts": 1000.0, "event": "task_start", "task_id": "1", "attempt": 1},
+                {"ts": 1000.2, "event": "verify_step", "task_id": "1", "result": "FAILED"},
+                {"ts": 1000.7, "event": "verify_step", "task_id": "1", "result": "PASSED"},
+            ],
+        }
+        p_sub = _extract_embedded_snapshot(render_dashboard_html(snap_subsec))
+        ev_sub = p_sub["events"]
+        assert isinstance(ev_sub, list)
+        self.assertEqual([e["t"] for e in ev_sub], [0.0, 1.0, 2.0])
+        self.assertEqual(p_sub["duration"], 2.0)
+
+        # 3. 同秒イベントと10分超の空白圧縮の組み合わせ
+        snap_combo = {
+            **base_snap,
+            "timeline": [
+                {"ts": 1000.0, "event": "task_start", "task_id": "1", "attempt": 1},
+                {"ts": 1000.0, "event": "verify_step", "task_id": "1", "result": "PASSED"},
+                {"ts": 1000.0, "event": "checker_review", "task_id": "1", "decision": "APPROVE"},
+                {"ts": 1601.0, "event": "commit_step", "task_id": "1", "commit": "1111111"},
+                {"ts": 1601.0, "event": "task_start", "task_id": "2", "attempt": 1},
+            ],
+        }
+        p_combo = _extract_embedded_snapshot(render_dashboard_html(snap_combo))
+        ev_combo = p_combo["events"]
+        assert isinstance(ev_combo, list)
+        self.assertEqual([e["t"] for e in ev_combo], [0.0, 1.0, 2.0, 5.0, 6.0])
+        self.assertEqual(p_combo["duration"], 6.0)
+        self.assertEqual(
+            p_combo["gaps"],
+            [{"t0": 2.0, "t1": 5.0, "real_gap": 601.0, "label": "+10m gap"}],
+        )
+
+    def test_stat9_multi_team_same_second_preserves_file_order_and_spaces_replay(self) -> None:
+        """STAT-9: チームの worktree とリポジトリの記録で同じ時刻のイベントがあってもファイル順を保ち1秒ずつ空くこと。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            trial = Path(tmp) / "two-teams"
+            shutil.copytree(_EXAMPLE_DIR, trial)
+            subprocess.run(["git", "init", "-b", "main"], cwd=trial, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=trial, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=trial, check=True, capture_output=True)
+            subprocess.run(["git", "add", "-A"], cwd=trial, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=trial, check=True, capture_output=True)
+            self.assertEqual(cli_main(["--work-dir", str(trial), "teams", "prepare"]), 0)
+
+            teams_payload, rc_status, _ = get_teams_status(trial)
+            self.assertEqual(rc_status, 0)
+            assert isinstance(teams_payload, dict)
+            job_id = str(teams_payload["job_id"])
+
+            core_wt = trial / ".dev" / "worktrees" / "core"
+            core_events = MetricsLog(repo_dir=core_wt, team_id="core").events_path
+            core_events.parent.mkdir(parents=True, exist_ok=True)
+            core_events.write_text(
+                "\n".join([
+                    json.dumps({"schema": 1, "ts": 100, "event": "task_start", "task_id": "1", "attempt": 1}),
+                    json.dumps({"schema": 1, "ts": 100, "event": "verify_step", "task_id": "1", "result": "PASSED"}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            main_events = MetricsLog(repo_dir=trial).events_path
+            main_events.parent.mkdir(parents=True, exist_ok=True)
+            main_events.write_text(
+                "\n".join([
+                    json.dumps({"schema": 1, "ts": 100, "event": "integration_start", "job_id": job_id}),
+                    json.dumps({"schema": 1, "ts": 100, "event": "rc_tag", "job_id": job_id, "tag": "rc/test"}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+
+            snap = collect_status_snapshot(trial)
+            embedded = _extract_embedded_snapshot(render_dashboard_html(snap))
+            events = embedded["events"]
+            assert isinstance(events, list)
+            self.assertEqual(
+                [(e["team"], e["kind"]) for e in events],
+                [(None, "integration_start"), (None, "rc_tag"), ("core", "task_start"), ("core", "verify")],
+            )
+            self.assertEqual([e["t"] for e in events], [0.0, 1.0, 2.0, 3.0])
+            self.assertEqual(embedded["duration"], 3.0)
 
     def test_dashboard_watch_regenerates_html_with_meta_refresh_and_stops_on_ctrl_c(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

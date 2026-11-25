@@ -16,7 +16,7 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | `--report REPORT` | No | - | Path to NIGHTLY_REPORT.md |
 | `--state-file STATE_FILE` | No | - | Path to persistent job state file |
 | `--dry-run` | No | `False` | Simulate execution without modifying git or state |
-| `--timeout TIMEOUT` | No | `300` | Max verification timeout in seconds |
+| `--timeout TIMEOUT` | No | - | Max verification timeout in seconds (default: 300) |
 | `--resume` | No | `False` | Resume interrupted job from state file |
 | `--mock` | No | `False` | Run with simulated mock agents (for testing only) |
 | `--maker-cmd MAKER_CMD` | No | `""` | Command template to execute Maker |
@@ -84,6 +84,7 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | --- | --- | --- | --- |
 | `--checkpoint CHECKPOINT` | Yes | - | Checkpoint commit hash |
 | `--task-id TASK_ID` | No | `default` | Task ID being verified |
+| `--timeout TIMEOUT` | No | - | Max verification timeout in seconds |
 
 ### `auto-dev commit-step`
 

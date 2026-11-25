@@ -315,7 +315,11 @@ class EvidenceStore:
         checker_family_source: str,
         reason: str = "",
     ) -> dict[str, Any]:
-        """GATE-5: 査読の3ファイルの写しを Evidence 保存先へ置き、照合用メタデータを記録する。"""
+        """GATE-5: 査読の3ファイルの写しを Evidence 保存先へ置き、照合用メタデータを記録する。
+
+        decision が空文字のとき（判定が1つに決まらない出力）は GATE-12 の history/<連番>/ にのみ残し、
+        最新の記録（reviews/task_<id>.json と直下の写し）は変更しない。
+        """
         import hashlib
         import json
         import shutil
@@ -326,17 +330,10 @@ class EvidenceStore:
         copies_dir = reviews_dir / f"task_{task_id}"
         copies_dir.mkdir(parents=True, exist_ok=True)
 
-        out_copy = copies_dir / "checker_output.txt"
-        diff_copy = copies_dir / "diff.patch"
-        spec_copy = copies_dir / "spec_excerpt.md"
-        shutil.copyfile(checker_output_path, out_copy)
-        shutil.copyfile(diff_path, diff_copy)
-        shutil.copyfile(spec_path, spec_copy)
-
         def _sha256(p: Path) -> str:
             return hashlib.sha256(p.read_bytes()).hexdigest()
 
-        record: dict[str, Any] = {
+        base_record: dict[str, Any] = {
             "task_id": str(task_id),
             "evidence_token": str(evidence.get("token", "")),
             "evidence_issued_at": evidence.get("issued_at"),
@@ -348,11 +345,6 @@ class EvidenceStore:
             "diff_sha256": _sha256(diff_path),
             "spec_path": str(spec_path.resolve()),
             "spec_sha256": _sha256(spec_path),
-            "copies": {
-                "checker_output": str(out_copy),
-                "diff": str(diff_copy),
-                "spec": str(spec_copy),
-            },
             "maker_model": maker_model,
             "maker_family": maker_family,
             "maker_family_source": maker_family_source,
@@ -362,10 +354,8 @@ class EvidenceStore:
             "reason": reason,
             "recorded_at": time.time(),
         }
-        review_path = reviews_dir / f"task_{task_id}.json"
-        review_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        # GATE-12: 記録のたびに 3 ファイルの写しと記録を history/<連番>/ にも残し、上書きしない
+        # GATE-12: 記録のたびに 3 ファイルの写しと記録を history/<連番>/ に残し、上書きしない
         history_base = copies_dir / "history"
         history_base.mkdir(parents=True, exist_ok=True)
         seq = 1
@@ -376,10 +366,10 @@ class EvidenceStore:
         hist_out = hist_dir / "checker_output.txt"
         hist_diff = hist_dir / "diff.patch"
         hist_spec = hist_dir / "spec_excerpt.md"
-        shutil.copyfile(out_copy, hist_out)
-        shutil.copyfile(diff_copy, hist_diff)
-        shutil.copyfile(spec_copy, hist_spec)
-        hist_record = dict(record)
+        shutil.copyfile(checker_output_path, hist_out)
+        shutil.copyfile(diff_path, hist_diff)
+        shutil.copyfile(spec_path, hist_spec)
+        hist_record = dict(base_record)
         hist_record["copies"] = {
             "checker_output": str(hist_out),
             "diff": str(hist_diff),
@@ -388,7 +378,73 @@ class EvidenceStore:
         (hist_dir / "review.json").write_text(
             json.dumps(hist_record, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+
+        if not decision.strip():
+            return hist_record
+
+        out_copy = copies_dir / "checker_output.txt"
+        diff_copy = copies_dir / "diff.patch"
+        spec_copy = copies_dir / "spec_excerpt.md"
+        shutil.copyfile(hist_out, out_copy)
+        shutil.copyfile(hist_diff, diff_copy)
+        shutil.copyfile(hist_spec, spec_copy)
+
+        record = dict(base_record)
+        record["copies"] = {
+            "checker_output": str(out_copy),
+            "diff": str(diff_copy),
+            "spec": str(spec_copy),
+        }
+        review_path = reviews_dir / f"task_{task_id}.json"
+        review_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
         return record
+
+    def has_decided_review_for_evidence(self, task_id: str, evidence: dict[str, Any]) -> bool:
+        """指定 Evidence（検証トークン）に対して判定の決まった査読が既に記録されているかを返す。"""
+        existing = self.get_review_record(task_id)
+        if existing is None:
+            return False
+        dec = str(existing.get("decision", "")).strip().upper()
+        if dec not in ("APPROVE", "REJECT"):
+            return False
+        current_token = str(evidence.get("token", "")).strip()
+        existing_token = str(existing.get("evidence_token", "")).strip()
+        if current_token and existing_token:
+            return existing_token == current_token
+        return (
+            existing.get("evidence_issued_at") is not None
+            and existing.get("evidence_issued_at") == evidence.get("issued_at")
+        )
+
+    def count_review_history_for_evidence(self, task_id: str, evidence: dict[str, Any]) -> int:
+        """指定 Evidence に対する GATE-12 査読履歴（判定の決まらない出力を含む）の件数を返す。"""
+        import json
+
+        history_base = self.evidence_dir / "reviews" / f"task_{task_id}" / "history"
+        if not history_base.is_dir():
+            return 0
+        target_token = str(evidence.get("token", "")).strip()
+        target_issued_at = evidence.get("issued_at")
+        count = 0
+        for p in sorted(history_base.iterdir()):
+            if not p.is_dir():
+                continue
+            review_file = p / "review.json"
+            if not review_file.is_file():
+                continue
+            try:
+                rec = json.loads(review_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(rec, dict):
+                continue
+            rec_token = str(rec.get("evidence_token", "")).strip()
+            if target_token and rec_token:
+                if rec_token == target_token:
+                    count += 1
+            elif target_issued_at is not None and rec.get("evidence_issued_at") == target_issued_at:
+                count += 1
+        return count
 
     def get_review_record(self, task_id: str) -> dict[str, Any] | None:
         """指定タスクの査読記録を取得する。"""

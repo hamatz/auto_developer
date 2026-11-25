@@ -965,11 +965,53 @@ def check_trivial_red_ast(target: ast.AST | Path | str) -> tuple[bool, str]:
     return False, ""
 
 
+DEFAULT_VERIFY_TIMEOUT_SEC = 300
+VERIFY_TIMEOUT_DIRECTIVE_RE = re.compile(r"^\s*#\s*auto-dev:\s*verify-timeout\s*=\s*(.*?)\s*$")
+VERIFY_TIMEOUT_DIRECTIVE_SCAN_LINES = 20
+
+
+def resolve_verify_timeout(cli_timeout: int | None, script_path: Path | None) -> tuple[int, str]:
+    """検証スクリプトの制限時間（秒）とその出所を優先順位に従って解決する。
+
+    優先順位:
+    1. CLI の `--timeout` 指定（サブコマンド優先）
+    2. 検証スクリプト先頭 20 行以内の `# auto-dev: verify-timeout=<SEC>`
+    3. 既定値 300 秒
+    """
+    if cli_timeout is not None:
+        if cli_timeout <= 0:
+            raise ValueError(f"Invalid --timeout value '{cli_timeout}': must be a positive integer.")
+        return cli_timeout, f"--timeout option ({cli_timeout}s)"
+
+    if script_path is not None and script_path.exists() and script_path.is_file():
+        lines = script_path.read_text(encoding="utf-8", errors="replace").splitlines()[
+            :VERIFY_TIMEOUT_DIRECTIVE_SCAN_LINES
+        ]
+        for line in lines:
+            match = VERIFY_TIMEOUT_DIRECTIVE_RE.match(line)
+            if not match:
+                continue
+            raw_val = match.group(1).strip()
+            if not re.fullmatch(r"[0-9]+", raw_val) or int(raw_val) <= 0:
+                raise ValueError(
+                    f"Invalid '# auto-dev: verify-timeout=' value '{raw_val}' in {script_path}: "
+                    "must be a positive integer."
+                )
+            sec = int(raw_val)
+            return sec, f"{script_path.name} directive (# auto-dev: verify-timeout={sec})"
+
+    return DEFAULT_VERIFY_TIMEOUT_SEC, f"default ({DEFAULT_VERIFY_TIMEOUT_SEC}s)"
+
+
 class DeterministicVerifier:
     """ローカル検証スクリプトの実行と判定を担当。"""
 
     def run_verification(
-        self, script_path: Path, timeout_sec: int = 300, cwd: Path | None = None
+        self,
+        script_path: Path,
+        timeout_sec: int = DEFAULT_VERIFY_TIMEOUT_SEC,
+        cwd: Path | None = None,
+        timeout_source: str | None = None,
     ) -> tuple[int, str]:
         """検証スクリプトを実行し、(exit_code, output) を返す。"""
         if not script_path.exists():
@@ -988,7 +1030,14 @@ class DeterministicVerifier:
             output = proc.stdout + "\n" + proc.stderr
             return proc.returncode, output.strip()
         except subprocess.TimeoutExpired as e:
-            return 124, f"Verification timed out after {timeout_sec}s: {e}"
+            source_label = timeout_source or f"configured ({timeout_sec}s)"
+            return 124, (
+                f"Verification timed out after {timeout_sec}s: {e}\n"
+                f"Timeout source: {source_label}\n"
+                f"To increase the timeout, pass --timeout <SEC> (e.g. `auto-dev verify-step --timeout <SEC> ...`) "
+                f"or set `# auto-dev: verify-timeout=<SEC>` in the first {VERIFY_TIMEOUT_DIRECTIVE_SCAN_LINES} lines "
+                f"of {script_path.name}."
+            )
         except Exception as e:  # noqa: BLE001
             return 1, f"Failed to execute verification script: {e}"
 
