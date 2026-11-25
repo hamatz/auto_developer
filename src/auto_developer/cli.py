@@ -814,7 +814,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Subcommand: compile
     compile_parser = subparsers.add_parser(
         "compile",
-        help="Validate auto-dev-ir/1 JSON or extract design outline (INV-12: read-only)",
+        help="Validate auto-dev-ir/1 JSON, extract design outline, or emit drafts under .dev/compile/ (INV-12)",
     )
     compile_parser.add_argument(
         "--check",
@@ -829,6 +829,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="DESIGN_MD",
         help="Extract heading outline from a design markdown file",
+    )
+    compile_parser.add_argument(
+        "--emit",
+        type=Path,
+        default=None,
+        metavar="IR_JSON",
+        help="Emit draft artifacts under .dev/compile/ from an auto-dev-ir/1 JSON file",
+    )
+    compile_parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Output directory under .dev/compile/ for --emit (default: .dev/compile/<ir_stem>/)",
+    )
+    compile_parser.add_argument(
+        "--lang",
+        choices=["ja", "en"],
+        default="ja",
+        help="Language for emitted draft headings and boilerplate (default: ja)",
+    )
+    compile_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing generated files in --out-dir",
     )
     compile_parser.add_argument(
         "--spec",
@@ -1005,15 +1030,31 @@ def main(argv: list[str] | None = None) -> int:
     if args.subcommand == "compile":
         from auto_developer.compiler import (
             check_ir_file,
+            emit_ir_drafts,
             format_outline_text,
             outline_design_file,
         )
 
-        if args.check is not None and args.outline is not None:
-            print("ERROR: --check and --outline cannot be used together.", file=sys.stderr)
+        selected_modes = [
+            name
+            for name, val in (
+                ("--check", args.check),
+                ("--outline", args.outline),
+                ("--emit", args.emit),
+            )
+            if val is not None
+        ]
+        if len(selected_modes) > 1:
+            print(
+                f"ERROR: {' and '.join(selected_modes)} cannot be used together.",
+                file=sys.stderr,
+            )
             return 2
-        if args.check is None and args.outline is None:
-            print("ERROR: --check <IR_JSON> or --outline <DESIGN_MD> is required.", file=sys.stderr)
+        if len(selected_modes) == 0:
+            print(
+                "ERROR: --check <IR_JSON>, --outline <DESIGN_MD>, or --emit <IR_JSON> is required.",
+                file=sys.stderr,
+            )
             return 2
 
         work_dir = args.work_dir.resolve()
@@ -1029,11 +1070,34 @@ def main(argv: list[str] | None = None) -> int:
                     print(line)
             return exit_code
 
-        ir_path = args.check if args.check.is_absolute() else (work_dir / args.check)
         spec_arg: Path | None = getattr(args, "spec", None)
         resolved_spec: Path | None = None
         if spec_arg is not None:
             resolved_spec = spec_arg if spec_arg.is_absolute() else (work_dir / spec_arg)
+
+        if args.emit is not None:
+            ir_path = args.emit if args.emit.is_absolute() else (work_dir / args.emit)
+            exit_code, payload, issues, error_msg = emit_ir_drafts(
+                ir_path,
+                work_dir=work_dir,
+                out_dir=args.out_dir,
+                spec_path=resolved_spec,
+                lang=args.lang,
+                force=bool(args.force),
+            )
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            elif error_msg is not None:
+                print(f"ERROR: {error_msg}", file=sys.stderr)
+            elif exit_code != 0:
+                for issue in issues:
+                    print(issue.format_line())
+            else:
+                for written in payload.get("files", []):
+                    print(written)
+            return exit_code
+
+        ir_path = args.check if args.check.is_absolute() else (work_dir / args.check)
         exit_code, payload, issues = check_ir_file(ir_path, work_dir=work_dir, spec_path=resolved_spec)
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))

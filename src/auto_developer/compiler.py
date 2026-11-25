@@ -1183,3 +1183,160 @@ def format_outline_text(payload: dict[str, Any]) -> list[str]:
     for item in payload.get("missing", []):
         lines.append(f"MISSING: {item}")
     return lines
+
+
+EmitLang = Literal["ja", "en"]
+
+
+def render_draft_header(ir_filename: str, ir_sha256: str, lang: EmitLang = "ja") -> str:
+    """Render the common human-readable draft header for emitted Markdown files (CMP-5)."""
+    if lang == "en":
+        return (
+            "> **Note**: This file is a Spec Compiler draft. "
+            "A human must review, approve, and copy it into `SPEC.md` and `PLAN.md` before committing (INV-12).\n"
+            ">\n"
+            f"> Source IR: `{ir_filename}` (`sha256:{ir_sha256}`)\n"
+        )
+    return (
+        "> **注意**: このファイルは Spec Compiler の下書きです。"
+        "人間が読んで承認し、人間が `SPEC.md`・`PLAN.md` に写してコミットしてください（INV-12）。\n"
+        ">\n"
+        f"> 元の IR: `{ir_filename}` (`sha256:{ir_sha256}`)\n"
+    )
+
+
+def resolve_emit_out_dir(
+    ir_path: Path,
+    work_dir: Path,
+    out_dir: Path | None = None,
+) -> tuple[Path | None, str | None]:
+    """Resolve and validate --out-dir under <work_dir>/.dev/compile/ after resolving symlinks (INV-12)."""
+    resolved_root = work_dir.resolve()
+    compile_root = resolved_root / ".dev" / "compile"
+    try:
+        resolved_compile_root = compile_root.resolve()
+    except (OSError, RuntimeError) as exc:
+        return None, f"failed to resolve compile output root: {exc}"
+
+    if not resolved_compile_root.is_relative_to(resolved_root):
+        return None, f"compile output root escapes workspace root: {resolved_compile_root}"
+
+    if out_dir is None:
+        stem = ir_path.stem or "draft"
+        candidate = compile_root / stem
+    else:
+        candidate = out_dir if out_dir.is_absolute() else (resolved_root / out_dir)
+
+    try:
+        resolved_out = candidate.resolve()
+    except (OSError, RuntimeError) as exc:
+        return None, f"failed to resolve output directory {candidate}: {exc}"
+
+    if resolved_out == resolved_compile_root or not resolved_out.is_relative_to(resolved_compile_root):
+        return (
+            None,
+            f"output directory must be a subdirectory under {resolved_compile_root} (resolved: {resolved_out})",
+        )
+
+    if resolved_out.exists() and not resolved_out.is_dir():
+        return None, f"output path exists and is not a directory: {resolved_out}"
+
+    return resolved_out, None
+
+
+def emit_ir_drafts(
+    ir_path: Path,
+    work_dir: Path | None = None,
+    *,
+    out_dir: Path | None = None,
+    spec_path: Path | None = None,
+    lang: EmitLang = "ja",
+    force: bool = False,
+) -> tuple[int, dict[str, Any], list[CompileIssue], str | None]:
+    """Validate an IR file and emit deterministic draft artifacts under .dev/compile/ (CMP-5).
+
+    Returns (exit_code, json_payload, issues, error_message).
+    """
+    resolved_root = (work_dir or Path.cwd()).resolve()
+    resolved_out, out_err = resolve_emit_out_dir(ir_path, resolved_root, out_dir=out_dir)
+    if out_err is not None or resolved_out is None:
+        err_msg = out_err or "invalid output directory"
+        return (
+            2,
+            {"error": err_msg, "files": []},
+            [],
+            err_msg,
+        )
+
+    check_exit, check_payload, issues = check_ir_file(
+        ir_path, work_dir=resolved_root, spec_path=spec_path
+    )
+    if check_exit != 0:
+        return check_exit, check_payload, issues, None
+
+    try:
+        has_existing = resolved_out.exists() and any(resolved_out.iterdir())
+    except OSError as exc:
+        err_msg = f"failed to inspect output directory {resolved_out}: {exc}"
+        return (
+            2,
+            {"error": err_msg, "files": []},
+            [],
+            err_msg,
+        )
+
+    if has_existing and not force:
+        err_msg = (
+            f"output directory already contains files: {resolved_out} "
+            "(use --force to overwrite generated files)"
+        )
+        return (
+            2,
+            {"error": err_msg, "files": []},
+            [],
+            err_msg,
+        )
+
+    try:
+        ir_bytes = ir_path.read_bytes()
+    except OSError as exc:
+        err_msg = f"failed to read IR file {ir_path}: {exc}"
+        return (
+            2,
+            {"error": err_msg, "files": []},
+            [],
+            err_msg,
+        )
+
+    check_bytes = (json.dumps(check_payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+    files_to_write: list[tuple[str, bytes]] = [
+        ("ir.json", ir_bytes),
+        ("check.json", check_bytes),
+    ]
+    written_paths: list[str] = []
+    try:
+        for rel_name, _ in files_to_write:
+            target = resolved_out / rel_name
+            if target.is_symlink():
+                err_msg = f"refusing to write to symlink target: {target}"
+                return 2, {"error": err_msg, "files": []}, [], err_msg
+            if target.exists() and (target.is_dir() or not target.is_file()):
+                err_msg = f"target path exists and is not a regular file: {target}"
+                return 2, {"error": err_msg, "files": []}, [], err_msg
+
+        resolved_out.mkdir(parents=True, exist_ok=True)
+        for rel_name, content_bytes in files_to_write:
+            target = resolved_out / rel_name
+            target.write_bytes(content_bytes)
+            written_paths.append(str(target))
+    except OSError as exc:
+        err_msg = f"failed to write draft output in {resolved_out}: {exc}"
+        return 2, {"error": err_msg, "files": []}, [], err_msg
+
+    payload: dict[str, Any] = {
+        "out_dir": str(resolved_out),
+        "lang": lang,
+        "files": written_paths,
+    }
+    return 0, payload, issues, None
