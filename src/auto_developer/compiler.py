@@ -1185,6 +1185,81 @@ def format_outline_text(payload: dict[str, Any]) -> list[str]:
     return lines
 
 
+_ANCHOR_RANGE_RE = re.compile(r"([0-9]+)-([0-9]+)")
+
+
+def anchor_source_range(
+    anchor_spec: str,
+    work_dir: Path | None = None,
+) -> tuple[int, dict[str, Any], str | None]:
+    """Compute a CMP-1 source anchor {path, lines, sha256} for `<path>:<start>-<end>` (CMP-13).
+
+    Returns (exit_code, json_payload, error_message).
+    """
+    path_part, sep, range_part = anchor_spec.rpartition(":")
+    if not sep or not path_part.strip():
+        err = f"invalid --anchor format {anchor_spec!r}; expected <path>:<start>-<end>"
+        return 2, {"error": err}, err
+
+    range_match = _ANCHOR_RANGE_RE.fullmatch(range_part)
+    if range_match is None:
+        err = f"invalid line range in --anchor {anchor_spec!r}; expected <start>-<end>"
+        return 2, {"error": err}, err
+
+    start = int(range_match.group(1))
+    end = int(range_match.group(2))
+    if start < 1 or start > end:
+        err = f"invalid line range [{start}, {end}]; expected 1 <= start <= end"
+        return 2, {"error": err}, err
+
+    resolved_root = (work_dir or Path.cwd()).resolve()
+    try:
+        resolved_file = (resolved_root / path_part).resolve()
+    except (OSError, RuntimeError) as exc:
+        err = f"failed to resolve source path {path_part!r}: {exc}"
+        return 2, {"error": err}, err
+
+    if not resolved_file.is_relative_to(resolved_root):
+        err = f"source path escapes workspace root: {path_part!r}"
+        return 2, {"error": err}, err
+
+    if not resolved_file.exists():
+        err = f"source file not found: {path_part!r}"
+        return 2, {"error": err}, err
+
+    if not resolved_file.is_file():
+        err = f"source path is not a regular file: {path_part!r}"
+        return 2, {"error": err}, err
+
+    try:
+        raw_bytes = resolved_file.read_bytes()
+    except OSError as exc:
+        err = f"failed to read source file {path_part!r}: {exc}"
+        return 2, {"error": err}, err
+
+    file_lines = raw_bytes.splitlines(keepends=True)
+    total_lines = len(file_lines)
+    if end > total_lines:
+        err = f"line range [{start}, {end}] exceeds file length ({total_lines} lines)"
+        return 2, {"error": err}, err
+
+    slice_bytes = b"".join(file_lines[start - 1 : end])
+    sha256 = hashlib.sha256(slice_bytes).hexdigest()
+    rel_path = resolved_file.relative_to(resolved_root).as_posix()
+    payload: dict[str, Any] = {
+        "path": rel_path,
+        "lines": [start, end],
+        "sha256": sha256,
+    }
+    return 0, payload, None
+
+
+def format_anchor_text(payload: dict[str, Any]) -> str:
+    """Format a CMP-1 source anchor payload as a single human-readable line."""
+    lines = payload.get("lines", [0, 0])
+    return f"{payload.get('path')}:L{lines[0]}-L{lines[1]} sha256:{payload.get('sha256')}"
+
+
 EmitLang = Literal["ja", "en"]
 
 
@@ -1789,6 +1864,13 @@ def render_acceptance_tests_md(
     return "\n".join(lines) + "\n"
 
 
+def _derive_ir_project_name(ir_path: Path) -> str:
+    """Derive draft directory / project name by stripping `.json` and optional trailing `.ir` (CMP-13)."""
+    name = ir_path.name
+    base = name.removesuffix(".json") if name.endswith(".json") else ir_path.stem
+    return base.removesuffix(".ir") or "draft"
+
+
 def resolve_emit_out_dir(
     ir_path: Path,
     work_dir: Path,
@@ -1806,7 +1888,7 @@ def resolve_emit_out_dir(
         return None, f"compile output root escapes workspace root: {resolved_compile_root}"
 
     if out_dir is None:
-        stem = ir_path.stem or "draft"
+        stem = _derive_ir_project_name(ir_path)
         candidate = compile_root / stem
     else:
         candidate = out_dir if out_dir.is_absolute() else (resolved_root / out_dir)
@@ -1920,7 +2002,7 @@ def emit_ir_drafts(
     teams_raw = ir_data.get("teams")
     has_teams = isinstance(teams_raw, list) and len(teams_raw) > 0
     if has_teams:
-        project_name = ir_path.stem or "draft"
+        project_name = _derive_ir_project_name(ir_path)
         teams_json_bytes = render_teams_json(ir_data, project_name).encode("utf-8")
         files_to_write.append(("teams.json", teams_json_bytes))
         steps_by_team, _ = partition_steps_by_team(ir_data)

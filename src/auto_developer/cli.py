@@ -838,11 +838,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit draft artifacts under .dev/compile/ from an auto-dev-ir/1 JSON file",
     )
     compile_parser.add_argument(
+        "--anchor",
+        type=str,
+        default=None,
+        metavar="PATH:START-END",
+        help="Compute CMP-1 source anchor {path, lines, sha256} for a file line range",
+    )
+    compile_parser.add_argument(
         "--out-dir",
         type=Path,
         default=None,
         metavar="DIR",
-        help="Output directory under .dev/compile/ for --emit (default: .dev/compile/<ir_stem>/)",
+        help="Output directory under .dev/compile/ for --emit (default: .dev/compile/<name>/)",
     )
     compile_parser.add_argument(
         "--lang",
@@ -1029,8 +1036,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.subcommand == "compile":
         from auto_developer.compiler import (
+            anchor_source_range,
             check_ir_file,
             emit_ir_drafts,
+            format_anchor_text,
             format_outline_text,
             outline_design_file,
         )
@@ -1041,6 +1050,7 @@ def main(argv: list[str] | None = None) -> int:
                 ("--check", args.check),
                 ("--outline", args.outline),
                 ("--emit", args.emit),
+                ("--anchor", args.anchor),
             )
             if val is not None
         ]
@@ -1052,12 +1062,22 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if len(selected_modes) == 0:
             print(
-                "ERROR: --check <IR_JSON>, --outline <DESIGN_MD>, or --emit <IR_JSON> is required.",
+                "ERROR: --check <IR_JSON>, --outline <DESIGN_MD>, --emit <IR_JSON>, or --anchor <PATH:START-END> is required.",
                 file=sys.stderr,
             )
             return 2
 
         work_dir = args.work_dir.resolve()
+        if args.anchor is not None:
+            exit_code, payload, error_msg = anchor_source_range(args.anchor, work_dir=work_dir)
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            elif error_msg is not None:
+                print(f"ERROR: {error_msg}", file=sys.stderr)
+            else:
+                print(format_anchor_text(payload))
+            return exit_code
+
         if args.outline is not None:
             doc_path = args.outline if args.outline.is_absolute() else (work_dir / args.outline)
             exit_code, payload, error_msg = outline_design_file(doc_path, work_dir=work_dir)

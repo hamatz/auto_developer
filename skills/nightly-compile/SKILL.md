@@ -13,7 +13,7 @@ When the user runs `/nightly-compile`:
 
 1. **Input Preparation**:
    - Accept either a single EGM design document (e.g., `docs/designs/*.md`) or a document bundle (`goal.md`, `architecture.md`, `decision.md`, `todo.md`, etc.).
-   - If given a document bundle, assemble it into a single design document at `.dev/compile/<name>.design.md` following the `v0.10-draft` §5.2 mapping:
+   - If given a document bundle, assemble it into a single design document at `.dev/compile/<name>.design.md` using the following mapping:
      - `goal.md` → Overview / Goals / Non-Goals
      - `architecture.md` → Technical Plan
      - `decision.md` → Architectural Decisions / Alternatives Considered
@@ -30,7 +30,12 @@ When the user runs `/nightly-compile`:
 3. **Draft IR (`auto-dev-ir/1`)**:
    Write the IR JSON (`"schema": "auto-dev-ir/1"`) to `.dev/compile/<name>.ir.json`:
    - Write `requirements`, `acceptance`, and `decisions` following the design document's exact wording; do **not** summarize or paraphrase in a way that changes meaning.
-   - Attach `source` locations (`path`, `lines`, `sha256`) to every element, using the line ranges reported by `--outline`.
+   - Attach `source` locations (`path`, `lines`, `sha256`) to every requirement and element by running:
+     ```bash
+     auto-dev compile --anchor <path>:<start>-<end> --json
+     ```
+     (Use the section line ranges from `--outline` and exact line ranges in the design document.)
+   - For each requirement, populate `fingerprints` with the names of functions, classes, commands, options, or marker strings (e.g., `SANDBOX_UNAVAILABLE`) that the requirement introduces or changes (used as search terms for impact analysis).
    - Record operations forbidden by decisions in `forbids`.
    - Record any unclear or undecided points in `open_questions` instead of guessing.
 
@@ -64,6 +69,6 @@ When the user runs `/nightly-compile`:
    ```
    (Use `--lang en` for English headings/boilerplate, `--out-dir .dev/compile/<dir>` to choose a subdirectory under `.dev/compile/`, and `--force` only when intentionally overwriting previously emitted draft files.)
    - Present to the human:
-     - The generated directory (default `.dev/compile/<name>/`) and `contract.md` path.
+     - The generated directory (default `.dev/compile/<name>/`, derived by stripping `.json` and trailing `.ir` from `<name>.ir.json`; `teams.json` also uses `<name>` as `project`) and `contract.md` path.
      - Every item under **"人間が判断すること"** (all `WARN`s, cross-team steps, and manual impact analysis).
    - **INV-12**: Never modify `SPEC.md`, `PLAN.md`, `teams.json`, or `docs/contracts/` directly. The human reviews the drafts, copies them into `SPEC.md`, `PLAN.md`, `teams.json`, or `docs/contracts/`, and commits them.
