@@ -1321,6 +1321,195 @@ def render_spec_section(
     return "\n".join(lines) + "\n"
 
 
+def _format_plan_step_lines(step: dict[str, Any], lang: EmitLang) -> list[str]:
+    """Format a single IR step as a PLAN.md checklist item with indented target files."""
+    n = step.get("n", "")
+    title = step.get("title", "")
+    reqs_raw = step.get("requirements")
+    req_items = (
+        [r for r in reqs_raw if isinstance(r, str) and r.strip()]
+        if isinstance(reqs_raw, list)
+        else []
+    )
+    if req_items:
+        joined = ", ".join(req_items)
+        req_suffix = f"（{joined}）" if lang == "ja" else f" ({joined})"
+    else:
+        req_suffix = ""
+    lines = [f"- [ ] {n}. {title}{req_suffix}"]
+
+    files_raw = step.get("files")
+    if isinstance(files_raw, list):
+        for file_path in files_raw:
+            if isinstance(file_path, str) and file_path.strip():
+                lines.append(f"  - `{file_path}`")
+    return lines
+
+
+def render_plan_md(
+    data: dict[str, Any],
+    ir_filename: str,
+    ir_sha256: str,
+    lang: EmitLang = "ja",
+) -> str:
+    """Render `plan.md` draft from a validated IR dict (CMP-10)."""
+    lines: list[str] = [
+        render_draft_header(ir_filename, ir_sha256, lang=lang).rstrip("\n"),
+        "",
+        "## ステップ" if lang == "ja" else "## Steps",
+        "",
+    ]
+
+    steps_raw = data.get("steps")
+    steps = [s for s in steps_raw if isinstance(s, dict)] if isinstance(steps_raw, list) else []
+    for step in steps:
+        lines.extend(_format_plan_step_lines(step, lang))
+
+    lines.extend(
+        [
+            "",
+            "## 既存テスト変更の理由" if lang == "ja" else "## Reasons for Existing Test Changes",
+            "",
+        ]
+    )
+    for step in steps:
+        n = step.get("n", "")
+        title = step.get("title", "")
+        if lang == "ja":
+            lines.append(
+                f"- ステップ {n}（{title}）: （影響分析の後に、人間が書く。既定は「既存テストは変更しない」）"
+            )
+        else:
+            lines.append(
+                f"- Step {n} ({title}): (Written by a human after impact analysis. "
+                'Default: "Do not modify existing tests.")'
+            )
+
+    if lang == "ja":
+        lines.extend(
+            [
+                "- このフェーズで前のステップが作ったテストの資料は、後のステップの検査に合わせて直してよい（アサーションは変えない）。",
+                "- 免疫テスト（`tests/immunity/**`）は変更しない。",
+                "- CLI を変えたステップでは `docs/cli.md` を作り直す。",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "- Test fixtures created by earlier steps in this phase may be adjusted to match later steps' checks (without changing assertions).",
+                "- Do not modify immunity tests (`tests/immunity/**`).",
+                "- Regenerate `docs/cli.md` in any step that changes the CLI.",
+            ]
+        )
+
+    return "\n".join(lines) + "\n"
+
+
+def partition_steps_by_team(
+    data: dict[str, Any],
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    """Assign each IR step to a single team if all its files match that team's owns (L-7).
+
+    Returns (steps_by_team_id, cross_team_steps).
+    """
+    teams_raw = data.get("teams")
+    if not isinstance(teams_raw, list) or len(teams_raw) == 0:
+        return {}, []
+
+    team_entries: list[tuple[str, list[str]]] = []
+    steps_by_team: dict[str, list[dict[str, Any]]] = {}
+    for team in teams_raw:
+        if not isinstance(team, dict):
+            continue
+        tid = team.get("id")
+        owns = team.get("owns")
+        if not isinstance(tid, str) or not tid.strip() or not isinstance(owns, list):
+            continue
+        patterns = [p for p in owns if isinstance(p, str) and p.strip()]
+        team_entries.append((tid, patterns))
+        steps_by_team[tid] = []
+
+    steps_raw = data.get("steps")
+    steps = [s for s in steps_raw if isinstance(s, dict)] if isinstance(steps_raw, list) else []
+    cross_team_steps: list[dict[str, Any]] = []
+
+    for step in steps:
+        files_raw = step.get("files")
+        files = (
+            [f for f in files_raw if isinstance(f, str) and f.strip()]
+            if isinstance(files_raw, list)
+            else []
+        )
+        if not files:
+            cross_team_steps.append(step)
+            continue
+        owners = [
+            tid
+            for tid, patterns in team_entries
+            if all(any(_match_path(file_path, pat) for pat in patterns) for file_path in files)
+        ]
+        if len(owners) == 1:
+            steps_by_team[owners[0]].append(step)
+        else:
+            cross_team_steps.append(step)
+
+    return steps_by_team, cross_team_steps
+
+
+def render_teams_json(data: dict[str, Any], project_name: str) -> str:
+    """Render `teams.json` draft compatible with `load_teams_manifest` (CMP-10)."""
+    teams_raw = data.get("teams")
+    teams_payload: list[dict[str, Any]] = []
+    if isinstance(teams_raw, list):
+        for team in teams_raw:
+            if not isinstance(team, dict):
+                continue
+            tid = team.get("id")
+            if not isinstance(tid, str) or not tid.strip():
+                continue
+            owns_raw = team.get("owns")
+            owns = (
+                [p.strip() for p in owns_raw if isinstance(p, str) and p.strip()]
+                if isinstance(owns_raw, list)
+                else []
+            )
+            teams_payload.append(
+                {
+                    "id": tid,
+                    "owns": owns,
+                    "plan": f"plans/{tid}.md",
+                    "depends_on": [],
+                }
+            )
+    payload = {
+        "version": 1,
+        "project": project_name,
+        "teams": teams_payload,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def render_team_plan_md(
+    team_id: str,
+    steps: list[dict[str, Any]],
+    ir_filename: str,
+    ir_sha256: str,
+    lang: EmitLang = "ja",
+) -> str:
+    """Render `plans/<id>.md` containing only steps owned by `team_id` (CMP-10)."""
+    lines: list[str] = [
+        render_draft_header(ir_filename, ir_sha256, lang=lang).rstrip("\n"),
+        "",
+        f"# {team_id}",
+        "",
+        "## ステップ" if lang == "ja" else "## Steps",
+        "",
+    ]
+    for step in steps:
+        lines.extend(_format_plan_step_lines(step, lang))
+    return "\n".join(lines) + "\n"
+
+
 def resolve_emit_out_dir(
     ir_path: Path,
     work_dir: Path,
@@ -1430,14 +1619,57 @@ def emit_ir_drafts(
     spec_section_bytes = render_spec_section(
         ir_data, ir_path.name, ir_sha256, lang=lang
     ).encode("utf-8")
+    plan_bytes = render_plan_md(
+        ir_data, ir_path.name, ir_sha256, lang=lang
+    ).encode("utf-8")
 
     files_to_write: list[tuple[str, bytes]] = [
         ("ir.json", ir_bytes),
         ("check.json", check_bytes),
         ("spec_section.md", spec_section_bytes),
+        ("plan.md", plan_bytes),
     ]
+
+    teams_raw = ir_data.get("teams")
+    has_teams = isinstance(teams_raw, list) and len(teams_raw) > 0
+    if has_teams:
+        project_name = ir_path.stem or "draft"
+        teams_json_bytes = render_teams_json(ir_data, project_name).encode("utf-8")
+        files_to_write.append(("teams.json", teams_json_bytes))
+        steps_by_team, _ = partition_steps_by_team(ir_data)
+        for team in teams_raw:
+            if not isinstance(team, dict):
+                continue
+            tid = team.get("id")
+            if (
+                not isinstance(tid, str)
+                or not tid.strip()
+                or "/" in tid
+                or "\\" in tid
+                or ".." in tid
+            ):
+                err_msg = f"invalid team id for plan output: {tid!r}"
+                return 2, {"error": err_msg, "files": []}, [], err_msg
+            team_plan_bytes = render_team_plan_md(
+                tid,
+                steps_by_team.get(tid, []),
+                ir_path.name,
+                ir_sha256,
+                lang=lang,
+            ).encode("utf-8")
+            files_to_write.append((f"plans/{tid}.md", team_plan_bytes))
+
     written_paths: list[str] = []
     try:
+        if has_teams:
+            plans_dir = resolved_out / "plans"
+            if plans_dir.is_symlink():
+                err_msg = f"refusing to write to symlink directory: {plans_dir}"
+                return 2, {"error": err_msg, "files": []}, [], err_msg
+            if plans_dir.exists() and not plans_dir.is_dir():
+                err_msg = f"target path exists and is not a directory: {plans_dir}"
+                return 2, {"error": err_msg, "files": []}, [], err_msg
+
         for rel_name, _ in files_to_write:
             target = resolved_out / rel_name
             if target.is_symlink():
@@ -1450,6 +1682,7 @@ def emit_ir_drafts(
         resolved_out.mkdir(parents=True, exist_ok=True)
         for rel_name, content_bytes in files_to_write:
             target = resolved_out / rel_name
+            target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content_bytes)
             written_paths.append(str(target))
     except OSError as exc:
