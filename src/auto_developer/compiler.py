@@ -38,6 +38,7 @@ _LEADING_NUM_RE = re.compile(r"^\s*\d+(?:\.\d+)*[.)]?\s+")
 _FENCE_OPEN_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
 _FENCE_CLOSE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*$")
 _ATX_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*)$")
+_UNRESOLVED_MARKER_RE = re.compile(r"(?<![A-Za-z])(?:TBD|TODO)(?![A-Za-z])|要検討|未定", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -592,6 +593,153 @@ def validate_ir_sources(
         )
 
 
+def _lint_l1_acceptance(data: dict[str, Any], errors: list[CompileIssue]) -> None:
+    """L-1: Every requirement must have >=1 acceptance, and each referenced AC must have >=1 observable."""
+    ac_by_id: dict[str, tuple[int, dict[str, Any]]] = {}
+    acc_list = data.get("acceptance")
+    if isinstance(acc_list, list):
+        for ac_idx, item in enumerate(acc_list):
+            if isinstance(item, dict):
+                ac_id = item.get("id")
+                if isinstance(ac_id, str) and ac_id not in ac_by_id:
+                    ac_by_id[ac_id] = (ac_idx, item)
+
+    reqs = data.get("requirements")
+    if not isinstance(reqs, list):
+        return
+
+    reported_ac_indices: set[int] = set()
+    for req_idx, req in enumerate(reqs):
+        if not isinstance(req, dict):
+            continue
+        req_id = req.get("id")
+        acc_refs = req.get("acceptance")
+        if not isinstance(acc_refs, list):
+            continue
+        if len(acc_refs) == 0:
+            _add_error(
+                errors,
+                f"requirements[{req_idx}].acceptance",
+                f"requirement {req_id!r} must reference at least one acceptance criterion",
+                rule="L-1",
+            )
+            continue
+        for ac_id in acc_refs:
+            if not isinstance(ac_id, str) or ac_id not in ac_by_id:
+                continue
+            ac_idx, ac_item = ac_by_id[ac_id]
+            if ac_idx in reported_ac_indices:
+                continue
+            observable = ac_item.get("observable")
+            if isinstance(observable, list) and not any(
+                isinstance(x, str) and x.strip() for x in observable
+            ):
+                reported_ac_indices.add(ac_idx)
+                _add_error(
+                    errors,
+                    f"acceptance[{ac_idx}].observable",
+                    f"acceptance criterion {ac_id!r} must define at least one observable result",
+                    rule="L-1",
+                )
+
+
+def _lint_l8_traceability(data: dict[str, Any], warnings: list[CompileIssue]) -> None:
+    """L-8: Warn on requirements not linked to any step and steps not linked to any requirement."""
+    req_entries: list[tuple[int, str]] = []
+    reqs = data.get("requirements")
+    if isinstance(reqs, list):
+        for req_idx, req in enumerate(reqs):
+            if isinstance(req, dict):
+                req_id = req.get("id")
+                if isinstance(req_id, str) and REQ_ID_RE.fullmatch(req_id):
+                    req_entries.append((req_idx, req_id))
+
+    valid_req_ids = {rid for _, rid in req_entries}
+    covered_req_ids: set[str] = set()
+
+    steps = data.get("steps")
+    if isinstance(steps, list):
+        for step_idx, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            step_reqs = step.get("requirements")
+            if not isinstance(step_reqs, list):
+                continue
+            linked = [r for r in step_reqs if isinstance(r, str) and r in valid_req_ids]
+            covered_req_ids.update(linked)
+            if valid_req_ids and not linked:
+                step_n = step.get("n", step_idx + 1)
+                _add_warning(
+                    warnings,
+                    f"steps[{step_idx}].requirements",
+                    f"step {step_n} is not linked to any requirement",
+                    rule="L-8",
+                )
+
+    for req_idx, req_id in req_entries:
+        if req_id not in covered_req_ids:
+            _add_warning(
+                warnings,
+                f"requirements[{req_idx}]",
+                f"requirement {req_id!r} is not linked to any step",
+                rule="L-8",
+            )
+
+
+def _check_unresolved_marker(val: Any, location: str, errors: list[CompileIssue]) -> None:
+    if isinstance(val, str):
+        match = _UNRESOLVED_MARKER_RE.search(val)
+        if match:
+            _add_error(
+                errors,
+                location,
+                f"contains unresolved marker {match.group(0)!r}",
+                rule="L-9",
+            )
+
+
+def _lint_l9_unresolved(data: dict[str, Any], errors: list[CompileIssue]) -> None:
+    """L-9: Non-empty open_questions or unresolved markers (TBD/TODO/要検討/未定)."""
+    open_questions = data.get("open_questions")
+    if isinstance(open_questions, list) and len(open_questions) > 0:
+        _add_error(
+            errors,
+            "open_questions",
+            f"open_questions must be empty ({len(open_questions)} remaining)",
+            rule="L-9",
+        )
+
+    reqs = data.get("requirements")
+    if isinstance(reqs, list):
+        for idx, req in enumerate(reqs):
+            if isinstance(req, dict):
+                _check_unresolved_marker(req.get("statement"), f"requirements[{idx}].statement", errors)
+
+    acc_list = data.get("acceptance")
+    if isinstance(acc_list, list):
+        for idx, item in enumerate(acc_list):
+            if isinstance(item, dict):
+                for field in ("given", "when", "then"):
+                    _check_unresolved_marker(item.get(field), f"acceptance[{idx}].{field}", errors)
+                obs = item.get("observable")
+                if isinstance(obs, list):
+                    for o_idx, o_val in enumerate(obs):
+                        _check_unresolved_marker(o_val, f"acceptance[{idx}].observable[{o_idx}]", errors)
+
+    steps = data.get("steps")
+    if isinstance(steps, list):
+        for idx, step in enumerate(steps):
+            if isinstance(step, dict):
+                _check_unresolved_marker(step.get("title"), f"steps[{idx}].title", errors)
+
+
+def lint_ir(data: dict[str, Any], errors: list[CompileIssue], warnings: list[CompileIssue]) -> None:
+    """Run deterministic CMP-3 lints on an IR dict."""
+    _lint_l1_acceptance(data, errors)
+    _lint_l8_traceability(data, warnings)
+    _lint_l9_unresolved(data, errors)
+
+
 def check_ir_file(
     ir_path: Path,
     work_dir: Path | None = None,
@@ -648,6 +796,7 @@ def check_ir_file(
 
     errors, warnings = validate_ir_schema(data)
     validate_ir_sources(data, work_dir or Path.cwd(), errors, warnings)
+    lint_ir(data, errors, warnings)
     all_issues = [*errors, *warnings]
     payload = {
         "schema": CHECK_OUTPUT_SCHEMA_VERSION,

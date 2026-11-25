@@ -63,7 +63,7 @@
 - [x] 2. `auto-dev compile --check <IR>`: IR（`auto-dev-ir/1`）の形式の検査（必須の項目・型・`id` の形と重なり・参照・ステップの連番）、終了コード 0 / 1 / 2、`--json`。どのファイルも書かない。`docs/cli.md` を作り直す（Red-First）（CMP-1）
 - [x] 3. `compile --check` の元の場所の検査: ファイルの有無、行の範囲、範囲の SHA-256（ERROR）、ファイル全体の SHA-256（WARN）（Red-First）（CMP-1）
 - [x] 4. `auto-dev compile --outline <設計書>`: 見出しを IR の要素に対応づけ、行の範囲と SHA-256 を示す。コードブロックの中の `#` を見出しにしない。足りない節があれば終了コード 1。`docs/cli.md` を作り直す（Red-First）（CMP-2）
-- [ ] 5. `compile --check` の点検 L-1（受入条件）・L-8（つながらない要件とステップ）・L-9（未決の点）（Red-First）（CMP-3）
+- [x] 5. `compile --check` の点検 L-1（受入条件）・L-8（つながらない要件とステップ）・L-9（未決の点）（Red-First）（CMP-3）
 - [ ] 6. `compile --check` の点検 L-5（判断の `forbids` との食い違い）・L-6（`--spec` の 4 章との ID の重なり）・L-7（担当範囲）。`docs/cli.md` を作り直す（Red-First）（CMP-3）
 - [ ] 7. 実物の設計書 `docs/designs/autonomous_pipeline_orchestrator.md` での確認: `--outline` の対応、テストの資料の IR で L-5 の ERROR（Decision 4 と Goals・CUJ 2）、直した IR で終了コード 0（Red-First）（CMP-8）
 
