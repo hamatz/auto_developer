@@ -24,21 +24,48 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
-def _make_valid_ir() -> dict[str, Any]:
+def _make_valid_ir(work_dir: Path | None = None) -> dict[str, Any]:
+    doc_rel = "docs/designs/sample.md"
+    if work_dir is not None:
+        doc_path = work_dir / doc_rel
+        doc_path.parent.mkdir(parents=True, exist_ok=True)
+        doc_bytes = "".join(f"Line {i}: sample design\n" for i in range(1, 31)).encode("utf-8")
+        doc_path.write_bytes(doc_bytes)
+        lines = doc_bytes.splitlines(keepends=True)
+
+        def _range_sha(start: int, end: int) -> str:
+            return hashlib.sha256(b"".join(lines[start - 1 : end])).hexdigest()
+
+        file_sha = hashlib.sha256(doc_bytes).hexdigest()
+        purpose_sha = _range_sha(1, 5)
+        terms_sha = _range_sha(6, 10)
+        req_sha = _range_sha(11, 15)
+        ac_sha = _range_sha(16, 20)
+        dec_sha = _range_sha(21, 25)
+        ver_sha = _range_sha(26, 30)
+    else:
+        file_sha = "a" * 64
+        purpose_sha = "b" * 64
+        terms_sha = "c" * 64
+        req_sha = "d" * 64
+        ac_sha = "e" * 64
+        dec_sha = "f" * 64
+        ver_sha = "1" * 64
+
     return {
         "schema": "auto-dev-ir/1",
         "source": [
             {
-                "path": "docs/designs/sample.md",
-                "sha256": "a" * 64,
+                "path": doc_rel,
+                "sha256": file_sha,
             }
         ],
         "purpose": {
             "text": "Sample purpose",
             "source": {
-                "path": "docs/designs/sample.md",
+                "path": doc_rel,
                 "lines": [1, 5],
-                "sha256": "b" * 64,
+                "sha256": purpose_sha,
             },
         },
         "terms": [
@@ -46,9 +73,9 @@ def _make_valid_ir() -> dict[str, Any]:
                 "term": "IR",
                 "definition": "Intermediate Representation",
                 "source": {
-                    "path": "docs/designs/sample.md",
+                    "path": doc_rel,
                     "lines": [6, 10],
-                    "sha256": "c" * 64,
+                    "sha256": terms_sha,
                 },
             }
         ],
@@ -59,9 +86,9 @@ def _make_valid_ir() -> dict[str, Any]:
                 "kind": "new",
                 "acceptance": ["AC-1"],
                 "source": {
-                    "path": "docs/designs/sample.md",
+                    "path": doc_rel,
                     "lines": [11, 15],
-                    "sha256": "d" * 64,
+                    "sha256": req_sha,
                 },
                 "fingerprints": ["run_checks"],
             }
@@ -74,9 +101,9 @@ def _make_valid_ir() -> dict[str, Any]:
                 "then": "It exits with 0",
                 "observable": ["exit_code == 0"],
                 "source": {
-                    "path": "docs/designs/sample.md",
+                    "path": doc_rel,
                     "lines": [16, 20],
-                    "sha256": "e" * 64,
+                    "sha256": ac_sha,
                 },
             }
         ],
@@ -87,9 +114,9 @@ def _make_valid_ir() -> dict[str, Any]:
                 "statement": "Use JSON for IR.",
                 "forbids": ["YAML"],
                 "source": {
-                    "path": "docs/designs/sample.md",
+                    "path": doc_rel,
                     "lines": [21, 25],
-                    "sha256": "f" * 64,
+                    "sha256": dec_sha,
                 },
             }
         ],
@@ -110,9 +137,9 @@ def _make_valid_ir() -> dict[str, Any]:
         "verification": {
             "commands": ["python3 -m unittest"],
             "source": {
-                "path": "docs/designs/sample.md",
+                "path": doc_rel,
                 "lines": [26, 30],
-                "sha256": "1" * 64,
+                "sha256": ver_sha,
             },
         },
         "alternatives": ["TOML"],
@@ -140,8 +167,9 @@ class TestCMP1CompileSchema(unittest.TestCase):
 
     def test_valid_ir_returns_zero_and_json_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            ir_path = self._write_ir(Path(tmp), _make_valid_ir())
-            proc = self._run_cli(["compile", "--check", str(ir_path), "--json"])
+            root = Path(tmp)
+            ir_path = self._write_ir(root, _make_valid_ir(root))
+            proc = self._run_cli(["--work-dir", str(root), "compile", "--check", str(ir_path), "--json"])
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             data = json.loads(proc.stdout)
             self.assertEqual(data["schema"], "auto-dev-compile-check/1")
@@ -372,7 +400,7 @@ class TestCMP1CompileSchema(unittest.TestCase):
             repo = Path(tmp)
             sub = repo / "nested"
             sub.mkdir()
-            ir_path = self._write_ir(sub, _make_valid_ir())
+            ir_path = self._write_ir(sub, _make_valid_ir(repo))
             before = _snapshot(repo)
 
             rc = main(["--work-dir", str(repo), "compile", "--check", str(ir_path)])
@@ -385,8 +413,11 @@ class TestCMP1CompileSchema(unittest.TestCase):
 
     def test_compile_check_with_top_level_checker_option(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            ir_path = self._write_ir(Path(tmp), _make_valid_ir())
-            proc = self._run_cli(["--checker-model", "test-model", "compile", "--check", str(ir_path)])
+            root = Path(tmp)
+            ir_path = self._write_ir(root, _make_valid_ir(root))
+            proc = self._run_cli(
+                ["--work-dir", str(root), "--checker-model", "test-model", "compile", "--check", str(ir_path)]
+            )
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_compile_without_check_returns_two(self) -> None:

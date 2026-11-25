@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeGuard
 
 IR_SCHEMA_VERSION = "auto-dev-ir/1"
 CHECK_OUTPUT_SCHEMA_VERSION = "auto-dev-compile-check/1"
@@ -46,6 +47,10 @@ def _is_int(val: Any) -> bool:
 
 def _add_error(errors: list[CompileIssue], location: str, message: str, rule: str = "F-1") -> None:
     errors.append(CompileIssue(severity="ERROR", rule=rule, location=location, message=message))
+
+
+def _add_warning(warnings: list[CompileIssue], location: str, message: str, rule: str = "F-1") -> None:
+    warnings.append(CompileIssue(severity="WARN", rule=rule, location=location, message=message))
 
 
 def _validate_str_list(
@@ -382,7 +387,192 @@ def validate_ir_schema(data: dict[str, Any]) -> tuple[list[CompileIssue], list[C
     return errors, warnings
 
 
-def check_ir_file(ir_path: Path) -> tuple[int, dict[str, Any], list[CompileIssue]]:
+def _is_valid_relative_path(path: Any) -> TypeGuard[str]:
+    return isinstance(path, str) and bool(path.strip()) and not Path(path).is_absolute()
+
+
+def _is_valid_line_range(lines: Any) -> TypeGuard[list[int]]:
+    return (
+        isinstance(lines, list)
+        and len(lines) == 2
+        and _is_int(lines[0])
+        and _is_int(lines[1])
+        and lines[0] >= 1
+        and lines[1] >= lines[0]
+    )
+
+
+def _load_source_file(
+    rel_path: str,
+    resolved_root: Path,
+    cache: dict[str, tuple[bytes, list[bytes]] | str],
+) -> tuple[bytes, list[bytes]] | str:
+    if rel_path in cache:
+        return cache[rel_path]
+
+    try:
+        resolved_file = (resolved_root / rel_path).resolve()
+    except (OSError, RuntimeError) as exc:
+        err = f"failed to resolve source path {rel_path!r}: {exc}"
+        cache[rel_path] = err
+        return err
+
+    if not resolved_file.is_relative_to(resolved_root):
+        err = f"source path escapes workspace root: {rel_path!r}"
+        cache[rel_path] = err
+        return err
+
+    if not resolved_file.exists():
+        err = f"source file not found: {rel_path!r}"
+        cache[rel_path] = err
+        return err
+
+    if not resolved_file.is_file():
+        err = f"source path is not a regular file: {rel_path!r}"
+        cache[rel_path] = err
+        return err
+
+    try:
+        raw_bytes = resolved_file.read_bytes()
+    except OSError as exc:
+        err = f"failed to read source file {rel_path!r}: {exc}"
+        cache[rel_path] = err
+        return err
+
+    loaded = (raw_bytes, raw_bytes.splitlines(keepends=True))
+    cache[rel_path] = loaded
+    return loaded
+
+
+def _check_top_level_sources(
+    sources: Any,
+    resolved_root: Path,
+    cache: dict[str, tuple[bytes, list[bytes]] | str],
+    errors: list[CompileIssue],
+    warnings: list[CompileIssue],
+) -> None:
+    if not isinstance(sources, list):
+        return
+    for idx, item in enumerate(sources):
+        if not isinstance(item, dict):
+            continue
+        rel_path = item.get("path")
+        if not _is_valid_relative_path(rel_path):
+            continue
+        loaded = _load_source_file(rel_path, resolved_root, cache)
+        if isinstance(loaded, str):
+            _add_error(errors, f"source[{idx}].path", loaded)
+            continue
+        raw_bytes, _ = loaded
+        expected_sha = item.get("sha256")
+        if _is_non_empty_str(expected_sha):
+            actual_sha = hashlib.sha256(raw_bytes).hexdigest()
+            if actual_sha != expected_sha:
+                _add_warning(
+                    warnings,
+                    f"source[{idx}].sha256",
+                    f"file sha256 mismatch (expected {expected_sha}, actual {actual_sha})",
+                )
+
+
+def _check_element_source(
+    src: Any,
+    location: str,
+    resolved_root: Path,
+    cache: dict[str, tuple[bytes, list[bytes]] | str],
+    errors: list[CompileIssue],
+) -> None:
+    if not isinstance(src, dict):
+        return
+    rel_path = src.get("path")
+    if not _is_valid_relative_path(rel_path):
+        return
+    loaded = _load_source_file(rel_path, resolved_root, cache)
+    if isinstance(loaded, str):
+        _add_error(errors, f"{location}.path", loaded)
+        return
+    _, file_lines = loaded
+    lines = src.get("lines")
+    if not _is_valid_line_range(lines):
+        return
+    start, end = int(lines[0]), int(lines[1])
+    total_lines = len(file_lines)
+    if end > total_lines:
+        _add_error(
+            errors,
+            f"{location}.lines",
+            f"line range [{start}, {end}] exceeds file length ({total_lines} lines)",
+        )
+        return
+    expected_sha = src.get("sha256")
+    if _is_non_empty_str(expected_sha):
+        slice_bytes = b"".join(file_lines[start - 1 : end])
+        actual_sha = hashlib.sha256(slice_bytes).hexdigest()
+        if actual_sha != expected_sha:
+            _add_error(
+                errors,
+                f"{location}.sha256",
+                f"line range sha256 mismatch (expected {expected_sha}, actual {actual_sha})",
+            )
+
+
+def validate_ir_sources(
+    data: dict[str, Any],
+    work_dir: Path,
+    errors: list[CompileIssue],
+    warnings: list[CompileIssue],
+) -> None:
+    """Validate source file existence, line ranges, and SHA-256 digests against work_dir."""
+    resolved_root = work_dir.resolve()
+    cache: dict[str, tuple[bytes, list[bytes]] | str] = {}
+
+    _check_top_level_sources(data.get("source"), resolved_root, cache, errors, warnings)
+
+    purpose = data.get("purpose")
+    if isinstance(purpose, dict) and purpose.get("source") is not None:
+        _check_element_source(purpose["source"], "purpose.source", resolved_root, cache, errors)
+
+    for list_field in ("terms", "out_of_scope", "alternatives"):
+        items = data.get(list_field)
+        if isinstance(items, list):
+            for idx, item in enumerate(items):
+                if isinstance(item, dict) and item.get("source") is not None:
+                    _check_element_source(
+                        item["source"],
+                        f"{list_field}[{idx}].source",
+                        resolved_root,
+                        cache,
+                        errors,
+                    )
+
+    for req_field in ("requirements", "acceptance", "decisions"):
+        items = data.get(req_field)
+        if isinstance(items, list):
+            for idx, item in enumerate(items):
+                if isinstance(item, dict) and "source" in item:
+                    _check_element_source(
+                        item.get("source"),
+                        f"{req_field}[{idx}].source",
+                        resolved_root,
+                        cache,
+                        errors,
+                    )
+
+    verification = data.get("verification")
+    if isinstance(verification, dict) and "source" in verification:
+        _check_element_source(
+            verification.get("source"),
+            "verification.source",
+            resolved_root,
+            cache,
+            errors,
+        )
+
+
+def check_ir_file(
+    ir_path: Path,
+    work_dir: Path | None = None,
+) -> tuple[int, dict[str, Any], list[CompileIssue]]:
     """Load and validate an IR JSON file.
 
     Returns (exit_code, json_payload, issues).
@@ -434,6 +624,7 @@ def check_ir_file(ir_path: Path) -> tuple[int, dict[str, Any], list[CompileIssue
         return 2, payload, issues
 
     errors, warnings = validate_ir_schema(data)
+    validate_ir_sources(data, work_dir or Path.cwd(), errors, warnings)
     all_issues = [*errors, *warnings]
     payload = {
         "schema": CHECK_OUTPUT_SCHEMA_VERSION,

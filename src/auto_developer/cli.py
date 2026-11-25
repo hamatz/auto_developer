@@ -993,8 +993,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.check is None:
             print("ERROR: --check <IR_JSON> is required.", file=sys.stderr)
             return 2
-        ir_path = args.check if args.check.is_absolute() else (args.work_dir.resolve() / args.check)
-        exit_code, payload, issues = check_ir_file(ir_path)
+        work_dir = args.work_dir.resolve()
+        ir_path = args.check if args.check.is_absolute() else (work_dir / args.check)
+        exit_code, payload, issues = check_ir_file(ir_path, work_dir=work_dir)
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:

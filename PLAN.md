@@ -61,7 +61,7 @@
 ## ステップ
 - [x] 1. 隔離で、機密の規則でスナップショットから外れる新しいファイルを Git のオブジェクトとして残し、`git cat-file -p` での取り出し方を案内する。書けなければ何も消さずに終了コード 1。スナップショットにだけある一覧には、実際に入ったファイルだけを並べる（Red: 偽の秘密鍵の文字列を含む新しいファイルが、`rollback-step` で消え、案内の `tar xzf` でも取り出せない）（RCV-7）
 - [x] 2. `auto-dev compile --check <IR>`: IR（`auto-dev-ir/1`）の形式の検査（必須の項目・型・`id` の形と重なり・参照・ステップの連番）、終了コード 0 / 1 / 2、`--json`。どのファイルも書かない。`docs/cli.md` を作り直す（Red-First）（CMP-1）
-- [ ] 3. `compile --check` の元の場所の検査: ファイルの有無、行の範囲、範囲の SHA-256（ERROR）、ファイル全体の SHA-256（WARN）（Red-First）（CMP-1）
+- [x] 3. `compile --check` の元の場所の検査: ファイルの有無、行の範囲、範囲の SHA-256（ERROR）、ファイル全体の SHA-256（WARN）（Red-First）（CMP-1）
 - [ ] 4. `auto-dev compile --outline <設計書>`: 見出しを IR の要素に対応づけ、行の範囲と SHA-256 を示す。コードブロックの中の `#` を見出しにしない。足りない節があれば終了コード 1。`docs/cli.md` を作り直す（Red-First）（CMP-2）
 - [ ] 5. `compile --check` の点検 L-1（受入条件）・L-8（つながらない要件とステップ）・L-9（未決の点）（Red-First）（CMP-3）
 - [ ] 6. `compile --check` の点検 L-5（判断の `forbids` との食い違い）・L-6（`--spec` の 4 章との ID の重なり）・L-7（担当範囲）。`docs/cli.md` を作り直す（Red-First）（CMP-3）
