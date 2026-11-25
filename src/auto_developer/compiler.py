@@ -1421,13 +1421,39 @@ def _format_plan_step_lines(step: dict[str, Any], lang: EmitLang) -> list[str]:
     return lines
 
 
+def _collect_step_impact_tests(
+    step: dict[str, Any],
+    impact_by_req: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Collect sorted unique test file paths (I-1 and I-2) for a step's requirements."""
+    reqs_raw = step.get("requirements")
+    req_ids = (
+        [r for r in reqs_raw if isinstance(r, str) and r.strip()]
+        if isinstance(reqs_raw, list)
+        else []
+    )
+    paths: set[str] = set()
+    for req_id in req_ids:
+        req_entry = impact_by_req.get(req_id)
+        if not isinstance(req_entry, dict):
+            continue
+        for match in req_entry.get("test_matches", []):
+            if isinstance(match, dict) and isinstance(match.get("path"), str):
+                paths.add(match["path"])
+        for mock_test in req_entry.get("mock_tests", []):
+            if isinstance(mock_test, dict) and isinstance(mock_test.get("path"), str):
+                paths.add(mock_test["path"])
+    return sorted(paths)
+
+
 def render_plan_md(
     data: dict[str, Any],
     ir_filename: str,
     ir_sha256: str,
     lang: EmitLang = "ja",
+    impact_payload: dict[str, Any] | None = None,
 ) -> str:
-    """Render `plan.md` draft from a validated IR dict (CMP-10)."""
+    """Render `plan.md` draft from a validated IR dict (CMP-10, CMP-14)."""
     lines: list[str] = [
         render_draft_header(ir_filename, ir_sha256, lang=lang).rstrip("\n"),
         "",
@@ -1439,6 +1465,12 @@ def render_plan_md(
     steps = [s for s in steps_raw if isinstance(s, dict)] if isinstance(steps_raw, list) else []
     for step in steps:
         lines.extend(_format_plan_step_lines(step, lang))
+
+    impact_by_req: dict[str, dict[str, Any]] = {}
+    if isinstance(impact_payload, dict):
+        for req_entry in impact_payload.get("requirements", []):
+            if isinstance(req_entry, dict) and isinstance(req_entry.get("id"), str):
+                impact_by_req[req_entry["id"]] = req_entry
 
     lines.extend(
         [
@@ -1459,6 +1491,15 @@ def render_plan_md(
                 f"- Step {n} ({title}): (Written by a human after impact analysis. "
                 'Default: "Do not modify existing tests.")'
             )
+        candidate_paths = _collect_step_impact_tests(step, impact_by_req)
+        if candidate_paths:
+            joined = ", ".join(f"`{p}`" for p in candidate_paths)
+            if lang == "ja":
+                lines.append(f"  - 影響の候補: {joined}")
+            else:
+                lines.append(f"  - Impact candidates: {joined}")
+        else:
+            lines.append("  - 影響の候補なし" if lang == "ja" else "  - No impact candidates")
 
     if lang == "ja":
         lines.extend(
@@ -1623,14 +1664,113 @@ def _format_observable_lines(obs_raw: Any, label: str, indent: str = "") -> list
     return []
 
 
+def _render_impact_section_lines(
+    impact_payload: dict[str, Any] | None,
+    lang: EmitLang,
+) -> list[str]:
+    """Render the `## 影響分析` / `## Impact Analysis` section for `contract.md` (CMP-14)."""
+    none_text = "（なし）" if lang == "ja" else "(none)"
+    lines: list[str] = [
+        "",
+        "## 影響分析" if lang == "ja" else "## Impact Analysis",
+        "",
+    ]
+    if not isinstance(impact_payload, dict):
+        lines.append(none_text)
+        return lines
+
+    reqs_raw = impact_payload.get("requirements")
+    reqs = [r for r in reqs_raw if isinstance(r, dict)] if isinstance(reqs_raw, list) else []
+    if not reqs:
+        lines.append(none_text)
+    else:
+        for req in reqs:
+            req_id = str(req.get("id", ""))
+            lines.append(f"### {req_id}")
+            lines.append("")
+            if not req.get("searched"):
+                note = req.get("note") or "指紋がないので調べていない"
+                msg = note if lang == "ja" else "Not searched (no fingerprints specified)"
+                lines.append(f"- {msg}")
+                lines.append("")
+                continue
+
+            fps = [fp for fp in req.get("fingerprints", []) if isinstance(fp, str)]
+            fps_str = ", ".join(f"`{fp}`" for fp in fps) if fps else none_text
+            lines.append(f"- {'指紋' if lang == 'ja' else 'Fingerprints'}: {fps_str}")
+
+            code_matches = req.get("code_matches", [])
+            lines.append(f"- {'コード候補 (I-1)' if lang == 'ja' else 'Code candidates (I-1)'}:")
+            if code_matches:
+                for m in code_matches:
+                    lines.append(f"  - `{m['path']}:{m['line']}` [{m['kind']}] (`{m['fingerprint']}`)")
+            else:
+                lines.append(f"  - {none_text}")
+
+            test_matches = req.get("test_matches", [])
+            lines.append(f"- {'テスト候補 (I-1)' if lang == 'ja' else 'Test candidates (I-1)'}:")
+            if test_matches:
+                for m in test_matches:
+                    lines.append(f"  - `{m['path']}:{m['line']}` [{m['kind']}] (`{m['fingerprint']}`)")
+            else:
+                lines.append(f"  - {none_text}")
+
+            mock_tests = req.get("mock_tests", [])
+            lines.append(
+                f"- {'モック・呼び出し回数テスト (I-2)' if lang == 'ja' else 'Mock/call-count tests (I-2)'}:"
+            )
+            if mock_tests:
+                for mt in mock_tests:
+                    sigs = ", ".join(mt.get("signals", []))
+                    mt_fps = ", ".join(mt.get("fingerprints", []))
+                    lines.append(
+                        f"  - `{mt['path']}:{mt['line']}` `{mt['function']}` [{sigs}] ({mt_fps})"
+                    )
+            else:
+                lines.append(f"  - {none_text}")
+
+            entry_points = req.get("entry_points", [])
+            lines.append(f"- {'入口候補 (I-4)' if lang == 'ja' else 'Entry points (I-4)'}:")
+            if entry_points:
+                for ep in entry_points:
+                    ep_lines = ", ".join(str(n) for n in ep.get("lines", []))
+                    ep_fps = ", ".join(ep.get("fingerprints", []))
+                    lines.append(
+                        f"  - `{ep['path']}` [{ep['category']}] lines {ep_lines} ({ep_fps})"
+                    )
+            else:
+                lines.append(f"  - {none_text}")
+            lines.append("")
+
+    record_tests = impact_payload.get("record_tests", [])
+    lines.append(
+        "### 記録を合成しているテスト (I-3)"
+        if lang == "ja"
+        else "### Record-Synthesizing Tests (I-3)"
+    )
+    lines.append("")
+    if isinstance(record_tests, list) and record_tests:
+        for rt in record_tests:
+            if not isinstance(rt, dict):
+                continue
+            writers = ", ".join(rt.get("writers", []))
+            markers = ", ".join(rt.get("markers", []))
+            lines.append(f"- `{rt['path']}` [{writers}] ({markers})")
+    else:
+        lines.append(none_text)
+
+    return lines
+
+
 def render_contract_md(
     data: dict[str, Any],
     check_payload: dict[str, Any],
     ir_filename: str,
     ir_sha256: str,
     lang: EmitLang = "ja",
+    impact_payload: dict[str, Any] | None = None,
 ) -> str:
-    """Render `contract.md` draft from a validated IR dict and check output (CMP-11)."""
+    """Render `contract.md` draft from a validated IR dict and check output (CMP-11, CMP-14)."""
     none_text = "（なし）" if lang == "ja" else "(none)"
     src_label = "元の場所" if lang == "ja" else "Source"
 
@@ -1688,11 +1828,10 @@ def render_contract_md(
             lines.append(f"- Step {n}: {title} (spans multiple teams: {files_str})")
 
     if lang == "ja":
-        lines.append("- 影響分析（既存のテストとドキュメントへの影響）は、Phase 77 で自動化するまで人間が書く。")
+        lines.append("- 影響分析の候補を確かめ、既存テストを変えるかどうかを決める。")
     else:
         lines.append(
-            "- Impact analysis (effects on existing tests and documentation) "
-            "must be written by a human until automated in Phase 77."
+            "- Review the impact analysis candidates and decide whether to modify existing tests."
         )
 
     lines.extend(
@@ -1786,6 +1925,8 @@ def render_contract_md(
                 alt_src = _format_source_ref(alt.get("source"))
                 if alt_src is not None:
                     lines.append(f"  - {src_label}: {alt_src}")
+
+    lines.extend(_render_impact_section_lines(impact_payload, lang))
 
     lines.extend(
         [
@@ -1975,16 +2116,25 @@ def emit_ir_drafts(
             err_msg,
         )
 
+    from auto_developer.impact import analyze_ir_impact
+
+    impact_exit, impact_payload, impact_issues, impact_err = analyze_ir_impact(
+        ir_path, work_dir=resolved_root, allow_non_git=True
+    )
+    if impact_exit != 0:
+        return impact_exit, impact_payload, impact_issues, impact_err
+
     ir_sha256 = hashlib.sha256(ir_bytes).hexdigest()
     check_bytes = (json.dumps(check_payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    impact_bytes = (json.dumps(impact_payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     spec_section_bytes = render_spec_section(
         ir_data, ir_path.name, ir_sha256, lang=lang
     ).encode("utf-8")
     plan_bytes = render_plan_md(
-        ir_data, ir_path.name, ir_sha256, lang=lang
+        ir_data, ir_path.name, ir_sha256, lang=lang, impact_payload=impact_payload
     ).encode("utf-8")
     contract_bytes = render_contract_md(
-        ir_data, check_payload, ir_path.name, ir_sha256, lang=lang
+        ir_data, check_payload, ir_path.name, ir_sha256, lang=lang, impact_payload=impact_payload
     ).encode("utf-8")
     acceptance_bytes = render_acceptance_tests_md(
         ir_data, ir_path.name, ir_sha256, lang=lang
@@ -1993,6 +2143,7 @@ def emit_ir_drafts(
     files_to_write: list[tuple[str, bytes]] = [
         ("ir.json", ir_bytes),
         ("check.json", check_bytes),
+        ("impact.json", impact_bytes),
         ("spec_section.md", spec_section_bytes),
         ("plan.md", plan_bytes),
         ("contract.md", contract_bytes),

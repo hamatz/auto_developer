@@ -184,7 +184,7 @@ class TestCmp11And12EmitContractAcceptance(unittest.TestCase):
             self.assertIn("docs/designs/sample.md:L1-L5", contract_text)
 
             # Human decisions always present even with 0 warnings
-            self.assertIn("Phase 77", contract_text)
+            self.assertIn("影響分析の候補を確かめ", contract_text)
 
             # Requirements table
             self.assertIn("CMP-11", contract_text)
@@ -278,7 +278,7 @@ class TestCmp11And12EmitContractAcceptance(unittest.TestCase):
             self.assertEqual(positions, sorted(positions))
             self.assertIn("new", contract_en)
             self.assertIn("modify", contract_en)
-            self.assertIn("Phase 77", contract_en)
+            self.assertIn("Review the impact analysis candidates", contract_en)
 
             acc_en = (out_a / "acceptance_tests.md").read_text(encoding="utf-8")
             self.assertIn("Observable", acc_en)

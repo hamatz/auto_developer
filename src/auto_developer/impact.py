@@ -340,6 +340,8 @@ def _match_file_fingerprints(
 def analyze_ir_impact(
     ir_path: Path,
     work_dir: Path | None = None,
+    *,
+    allow_non_git: bool = False,
 ) -> tuple[int, dict[str, Any], list[CompileIssue], str | None]:
     """Analyze potential repository impact of an auto-dev-ir/1 JSON file (CMP-4).
 
@@ -394,7 +396,10 @@ def analyze_ir_impact(
     try:
         tracked_paths = _list_tracked_files(root_dir)
     except RuntimeError as exc:
-        return _error_result(2, str(exc))
+        if allow_non_git:
+            tracked_paths = []
+        else:
+            return _error_result(2, str(exc))
 
     indexed_files: list[_IndexedFile] = []
     for rel in tracked_paths:
