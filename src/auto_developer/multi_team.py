@@ -3333,6 +3333,29 @@ def _format_worker_failure_message(
         else:
             lines.append(f"  - {tid} ({status})")
 
+        wt_dir = wt_paths.get(tid)
+        if wt_dir is not None:
+            wt_state_file = wt_dir / ".dev" / "job_state.json"
+            if wt_state_file.is_file():
+                try:
+                    wt_js = JobState.load(wt_state_file)
+                    q_task = wt_js.quarantined_task
+                    if isinstance(q_task, dict):
+                        from auto_developer.guard import format_snapshot_only_files_lines
+
+                        snap_raw = q_task.get("snapshot_path")
+                        snap_path = Path(str(snap_raw)) if snap_raw else None
+                        snap_files = list(q_task.get("snapshot_only_files") or [])
+                        snap_error = q_task.get("snapshot_only_error")
+                        for snap_line in format_snapshot_only_files_lines(
+                            snap_path,
+                            snap_files,
+                            error_reason=str(snap_error) if snap_error else None,
+                        ):
+                            lines.append(f"    {snap_line}")
+                except (OSError, json.JSONDecodeError, ValueError):
+                    pass
+
     kept = ", ".join(f"{t.id}={wt_paths[t.id]}" for t in manifest.teams if t.id in wt_paths)
     if kept:
         lines.append(f"Worktrees preserved (not deleted): {kept}")

@@ -763,11 +763,23 @@ class MorningReporter:
 
     def write_failure_log(self, log_path: Path, failure_data: dict[str, Any]) -> None:
         """logs/nightly/task_<id>_failure.log を作成する。"""
+        from auto_developer.guard import format_snapshot_only_files_lines
+
         log_path.parent.mkdir(parents=True, exist_ok=True)
         failure_phase = str(
             failure_data.get("failure_phase") or failure_data.get("phase") or "UNKNOWN"
         ).strip()
         reason_line = str(failure_data.get("reason") or "").replace("\r", " ").replace("\n", " ").strip()
+        snap_raw = failure_data.get("snapshot_path")
+        snap_path = Path(str(snap_raw)) if snap_raw else None
+        snap_only_files = list(failure_data.get("snapshot_only_files") or [])
+        snap_only_error = failure_data.get("snapshot_only_error")
+        snap_lines = format_snapshot_only_files_lines(
+            snap_path,
+            snap_only_files,
+            repo_dir=self.repo_dir,
+            error_reason=str(snap_only_error) if snap_only_error else None,
+        )
         content = [
             f"Failure Phase: {failure_phase}",
             f"Reason: {reason_line}",
@@ -775,6 +787,9 @@ class MorningReporter:
             f"Task ID: {failure_data.get('task_id')}",
             f"Task Title: {failure_data.get('title')}",
             f"Checkpoint Commit: {failure_data.get('checkpoint')}",
+            "",
+            "--- SNAPSHOT-ONLY NEW FILES ---",
+            *snap_lines,
             "",
             "--- ATTEMPT 1 LOG ---",
             failure_data.get("attempt_1_log", "(none)"),

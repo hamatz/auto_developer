@@ -1830,12 +1830,17 @@ def main(argv: list[str] | None = None) -> int:
                 rollback_job_id = JobState.load(state_file).job_id
             except (OSError, json.JSONDecodeError, ValueError):
                 rollback_job_id = ""
+        from auto_developer.guard import format_snapshot_only_files_lines
+
         quarantine_branch = git_guard.quarantine_and_restore(
             args.checkpoint,
             task_id=task_id,
             job_id=rollback_job_id,
             team_id=team_ctx.team_id if team_ctx else "",
         )
+        snapshot_path = git_guard.last_quarantine_snapshot
+        snapshot_only_files = list(git_guard.last_snapshot_only_files)
+        snapshot_only_error = git_guard.last_snapshot_only_error
         if target:
             log_path = work_dir / "logs" / "nightly" / f"task_{target.task_id}_failure.log"
             reporter.write_failure_log(
@@ -1845,6 +1850,9 @@ def main(argv: list[str] | None = None) -> int:
                     "title": target.title,
                     "checkpoint": args.checkpoint,
                     "quarantined_branch": quarantine_branch,
+                    "snapshot_path": str(snapshot_path) if snapshot_path else None,
+                    "snapshot_only_files": snapshot_only_files,
+                    "snapshot_only_error": snapshot_only_error,
                     "failure_phase": "ROLLBACK",
                     "reason": args.reason or "Verification failed",
                     "attempt_1_log": args.reason,
@@ -1858,6 +1866,13 @@ def main(argv: list[str] | None = None) -> int:
             reason=args.reason or "",
         )
         print(f"ROLLED BACK TO {args.checkpoint} (Work quarantined to: {quarantine_branch or 'none'})")
+        for snap_line in format_snapshot_only_files_lines(
+            snapshot_path,
+            snapshot_only_files,
+            repo_dir=work_dir,
+            error_reason=snapshot_only_error,
+        ):
+            print(snap_line)
         return 0
 
     elif args.subcommand == "review-input":

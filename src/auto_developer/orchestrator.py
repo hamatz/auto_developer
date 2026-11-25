@@ -1467,12 +1467,17 @@ class NightlyOrchestrator:
         job_state.status = "FAILED"
         job_state.transition_phase("QUARANTINE")
         self.dispatcher.mark_task_status(self.plan_path, task, status="failed")
+        from auto_developer.guard import format_snapshot_only_files_lines
+
         quarantine_branch = self.git_guard.quarantine_and_restore(
             checkpoint,
             task_id=task.task_id,
             job_id=job_state.job_id,
             team_id=self.team_id or "",
         )
+        snapshot_path = self.git_guard.last_quarantine_snapshot
+        snapshot_only_files = list(self.git_guard.last_snapshot_only_files)
+        snapshot_only_error = self.git_guard.last_snapshot_only_error
         self._record_event(
             "rollback_step",
             task_id=task.task_id,
@@ -1489,6 +1494,9 @@ class NightlyOrchestrator:
                 "title": task.title,
                 "checkpoint": checkpoint,
                 "quarantined_branch": quarantine_branch,
+                "snapshot_path": str(snapshot_path) if snapshot_path else None,
+                "snapshot_only_files": snapshot_only_files,
+                "snapshot_only_error": snapshot_only_error,
                 "failure_phase": phase,
                 "reason": reason,
                 "attempt_1_log": attempt_1_log or reason,
@@ -1496,10 +1504,20 @@ class NightlyOrchestrator:
                 "attempts": attempts or [],
             },
         )
+        for snap_line in format_snapshot_only_files_lines(
+            snapshot_path,
+            snapshot_only_files,
+            repo_dir=self.repo_dir,
+            error_reason=snapshot_only_error,
+        ):
+            print(snap_line)
         quarantined_info: dict[str, Any] = {
             "task_id": task.task_id,
             "phase": phase,
             "quarantined_branch": quarantine_branch,
+            "snapshot_path": str(snapshot_path) if snapshot_path else None,
+            "snapshot_only_files": snapshot_only_files,
+            "snapshot_only_error": snapshot_only_error,
             "log_path": str(log_path),
             "root_cause_summary": reason[:300],
             "attempts": attempts or [],
