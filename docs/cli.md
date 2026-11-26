@@ -181,7 +181,9 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | `--check IR_JSON` | No | - | Validate an auto-dev-ir/1 JSON file |
 | `--outline DESIGN_MD` | No | - | Extract heading outline from a design markdown file |
 | `--emit IR_JSON` | No | - | Emit draft artifacts under .dev/compile/ from an auto-dev-ir/1 JSON file |
-| `--out-dir DIR` | No | - | Output directory under .dev/compile/ for --emit (default: .dev/compile/<ir_stem>/) |
+| `--anchor PATH:START-END` | No | - | Compute CMP-1 source anchor {path, lines, sha256} for a file line range |
+| `--impact IR_JSON` | No | - | Analyze potential repository impact from an auto-dev-ir/1 JSON file (INV-12) |
+| `--out-dir DIR` | No | - | Output directory under .dev/compile/ for --emit (default: .dev/compile/<name>/) |
 | `--lang LANG` | No | `ja` | Language for emitted draft headings and boilerplate (default: ja) |
 | `--force` | No | `False` | Overwrite existing generated files in --out-dir |
 | `--spec SPEC_MD` | No | - | Path to SPEC.md for L-6 check (defaults to <work-dir>/SPEC.md if present) |

@@ -1185,6 +1185,81 @@ def format_outline_text(payload: dict[str, Any]) -> list[str]:
     return lines
 
 
+_ANCHOR_RANGE_RE = re.compile(r"([0-9]+)-([0-9]+)")
+
+
+def anchor_source_range(
+    anchor_spec: str,
+    work_dir: Path | None = None,
+) -> tuple[int, dict[str, Any], str | None]:
+    """Compute a CMP-1 source anchor {path, lines, sha256} for `<path>:<start>-<end>` (CMP-13).
+
+    Returns (exit_code, json_payload, error_message).
+    """
+    path_part, sep, range_part = anchor_spec.rpartition(":")
+    if not sep or not path_part.strip():
+        err = f"invalid --anchor format {anchor_spec!r}; expected <path>:<start>-<end>"
+        return 2, {"error": err}, err
+
+    range_match = _ANCHOR_RANGE_RE.fullmatch(range_part)
+    if range_match is None:
+        err = f"invalid line range in --anchor {anchor_spec!r}; expected <start>-<end>"
+        return 2, {"error": err}, err
+
+    start = int(range_match.group(1))
+    end = int(range_match.group(2))
+    if start < 1 or start > end:
+        err = f"invalid line range [{start}, {end}]; expected 1 <= start <= end"
+        return 2, {"error": err}, err
+
+    resolved_root = (work_dir or Path.cwd()).resolve()
+    try:
+        resolved_file = (resolved_root / path_part).resolve()
+    except (OSError, RuntimeError) as exc:
+        err = f"failed to resolve source path {path_part!r}: {exc}"
+        return 2, {"error": err}, err
+
+    if not resolved_file.is_relative_to(resolved_root):
+        err = f"source path escapes workspace root: {path_part!r}"
+        return 2, {"error": err}, err
+
+    if not resolved_file.exists():
+        err = f"source file not found: {path_part!r}"
+        return 2, {"error": err}, err
+
+    if not resolved_file.is_file():
+        err = f"source path is not a regular file: {path_part!r}"
+        return 2, {"error": err}, err
+
+    try:
+        raw_bytes = resolved_file.read_bytes()
+    except OSError as exc:
+        err = f"failed to read source file {path_part!r}: {exc}"
+        return 2, {"error": err}, err
+
+    file_lines = raw_bytes.splitlines(keepends=True)
+    total_lines = len(file_lines)
+    if end > total_lines:
+        err = f"line range [{start}, {end}] exceeds file length ({total_lines} lines)"
+        return 2, {"error": err}, err
+
+    slice_bytes = b"".join(file_lines[start - 1 : end])
+    sha256 = hashlib.sha256(slice_bytes).hexdigest()
+    rel_path = resolved_file.relative_to(resolved_root).as_posix()
+    payload: dict[str, Any] = {
+        "path": rel_path,
+        "lines": [start, end],
+        "sha256": sha256,
+    }
+    return 0, payload, None
+
+
+def format_anchor_text(payload: dict[str, Any]) -> str:
+    """Format a CMP-1 source anchor payload as a single human-readable line."""
+    lines = payload.get("lines", [0, 0])
+    return f"{payload.get('path')}:L{lines[0]}-L{lines[1]} sha256:{payload.get('sha256')}"
+
+
 EmitLang = Literal["ja", "en"]
 
 
@@ -1346,13 +1421,39 @@ def _format_plan_step_lines(step: dict[str, Any], lang: EmitLang) -> list[str]:
     return lines
 
 
+def _collect_step_impact_tests(
+    step: dict[str, Any],
+    impact_by_req: dict[str, dict[str, Any]],
+) -> list[str]:
+    """Collect sorted unique test file paths (I-1 and I-2) for a step's requirements."""
+    reqs_raw = step.get("requirements")
+    req_ids = (
+        [r for r in reqs_raw if isinstance(r, str) and r.strip()]
+        if isinstance(reqs_raw, list)
+        else []
+    )
+    paths: set[str] = set()
+    for req_id in req_ids:
+        req_entry = impact_by_req.get(req_id)
+        if not isinstance(req_entry, dict):
+            continue
+        for match in req_entry.get("test_matches", []):
+            if isinstance(match, dict) and isinstance(match.get("path"), str):
+                paths.add(match["path"])
+        for mock_test in req_entry.get("mock_tests", []):
+            if isinstance(mock_test, dict) and isinstance(mock_test.get("path"), str):
+                paths.add(mock_test["path"])
+    return sorted(paths)
+
+
 def render_plan_md(
     data: dict[str, Any],
     ir_filename: str,
     ir_sha256: str,
     lang: EmitLang = "ja",
+    impact_payload: dict[str, Any] | None = None,
 ) -> str:
-    """Render `plan.md` draft from a validated IR dict (CMP-10)."""
+    """Render `plan.md` draft from a validated IR dict (CMP-10, CMP-14)."""
     lines: list[str] = [
         render_draft_header(ir_filename, ir_sha256, lang=lang).rstrip("\n"),
         "",
@@ -1364,6 +1465,12 @@ def render_plan_md(
     steps = [s for s in steps_raw if isinstance(s, dict)] if isinstance(steps_raw, list) else []
     for step in steps:
         lines.extend(_format_plan_step_lines(step, lang))
+
+    impact_by_req: dict[str, dict[str, Any]] = {}
+    if isinstance(impact_payload, dict):
+        for req_entry in impact_payload.get("requirements", []):
+            if isinstance(req_entry, dict) and isinstance(req_entry.get("id"), str):
+                impact_by_req[req_entry["id"]] = req_entry
 
     lines.extend(
         [
@@ -1384,6 +1491,15 @@ def render_plan_md(
                 f"- Step {n} ({title}): (Written by a human after impact analysis. "
                 'Default: "Do not modify existing tests.")'
             )
+        candidate_paths = _collect_step_impact_tests(step, impact_by_req)
+        if candidate_paths:
+            joined = ", ".join(f"`{p}`" for p in candidate_paths)
+            if lang == "ja":
+                lines.append(f"  - 影響の候補: {joined}")
+            else:
+                lines.append(f"  - Impact candidates: {joined}")
+        else:
+            lines.append("  - 影響の候補なし" if lang == "ja" else "  - No impact candidates")
 
     if lang == "ja":
         lines.extend(
@@ -1548,14 +1664,113 @@ def _format_observable_lines(obs_raw: Any, label: str, indent: str = "") -> list
     return []
 
 
+def _render_impact_section_lines(
+    impact_payload: dict[str, Any] | None,
+    lang: EmitLang,
+) -> list[str]:
+    """Render the `## 影響分析` / `## Impact Analysis` section for `contract.md` (CMP-14)."""
+    none_text = "（なし）" if lang == "ja" else "(none)"
+    lines: list[str] = [
+        "",
+        "## 影響分析" if lang == "ja" else "## Impact Analysis",
+        "",
+    ]
+    if not isinstance(impact_payload, dict):
+        lines.append(none_text)
+        return lines
+
+    reqs_raw = impact_payload.get("requirements")
+    reqs = [r for r in reqs_raw if isinstance(r, dict)] if isinstance(reqs_raw, list) else []
+    if not reqs:
+        lines.append(none_text)
+    else:
+        for req in reqs:
+            req_id = str(req.get("id", ""))
+            lines.append(f"### {req_id}")
+            lines.append("")
+            if not req.get("searched"):
+                note = req.get("note") or "指紋がないので調べていない"
+                msg = note if lang == "ja" else "Not searched (no fingerprints specified)"
+                lines.append(f"- {msg}")
+                lines.append("")
+                continue
+
+            fps = [fp for fp in req.get("fingerprints", []) if isinstance(fp, str)]
+            fps_str = ", ".join(f"`{fp}`" for fp in fps) if fps else none_text
+            lines.append(f"- {'指紋' if lang == 'ja' else 'Fingerprints'}: {fps_str}")
+
+            code_matches = req.get("code_matches", [])
+            lines.append(f"- {'コード候補 (I-1)' if lang == 'ja' else 'Code candidates (I-1)'}:")
+            if code_matches:
+                for m in code_matches:
+                    lines.append(f"  - `{m['path']}:{m['line']}` [{m['kind']}] (`{m['fingerprint']}`)")
+            else:
+                lines.append(f"  - {none_text}")
+
+            test_matches = req.get("test_matches", [])
+            lines.append(f"- {'テスト候補 (I-1)' if lang == 'ja' else 'Test candidates (I-1)'}:")
+            if test_matches:
+                for m in test_matches:
+                    lines.append(f"  - `{m['path']}:{m['line']}` [{m['kind']}] (`{m['fingerprint']}`)")
+            else:
+                lines.append(f"  - {none_text}")
+
+            mock_tests = req.get("mock_tests", [])
+            lines.append(
+                f"- {'モック・呼び出し回数テスト (I-2)' if lang == 'ja' else 'Mock/call-count tests (I-2)'}:"
+            )
+            if mock_tests:
+                for mt in mock_tests:
+                    sigs = ", ".join(mt.get("signals", []))
+                    mt_fps = ", ".join(mt.get("fingerprints", []))
+                    lines.append(
+                        f"  - `{mt['path']}:{mt['line']}` `{mt['function']}` [{sigs}] ({mt_fps})"
+                    )
+            else:
+                lines.append(f"  - {none_text}")
+
+            entry_points = req.get("entry_points", [])
+            lines.append(f"- {'入口候補 (I-4)' if lang == 'ja' else 'Entry points (I-4)'}:")
+            if entry_points:
+                for ep in entry_points:
+                    ep_lines = ", ".join(str(n) for n in ep.get("lines", []))
+                    ep_fps = ", ".join(ep.get("fingerprints", []))
+                    lines.append(
+                        f"  - `{ep['path']}` [{ep['category']}] lines {ep_lines} ({ep_fps})"
+                    )
+            else:
+                lines.append(f"  - {none_text}")
+            lines.append("")
+
+    record_tests = impact_payload.get("record_tests", [])
+    lines.append(
+        "### 記録を合成しているテスト (I-3)"
+        if lang == "ja"
+        else "### Record-Synthesizing Tests (I-3)"
+    )
+    lines.append("")
+    if isinstance(record_tests, list) and record_tests:
+        for rt in record_tests:
+            if not isinstance(rt, dict):
+                continue
+            writers = ", ".join(rt.get("writers", []))
+            markers = ", ".join(rt.get("markers", []))
+            lines.append(f"- `{rt['path']}` [{writers}] ({markers})")
+    else:
+        lines.append(none_text)
+
+    return lines
+
+
 def render_contract_md(
     data: dict[str, Any],
     check_payload: dict[str, Any],
     ir_filename: str,
     ir_sha256: str,
     lang: EmitLang = "ja",
+    impact_payload: dict[str, Any] | None = None,
 ) -> str:
-    """Render `contract.md` draft from a validated IR dict and check output (CMP-11)."""
+    """Render `contract.md` draft from a validated IR dict and check output (CMP-11, CMP-14)."""
     none_text = "（なし）" if lang == "ja" else "(none)"
     src_label = "元の場所" if lang == "ja" else "Source"
 
@@ -1613,11 +1828,10 @@ def render_contract_md(
             lines.append(f"- Step {n}: {title} (spans multiple teams: {files_str})")
 
     if lang == "ja":
-        lines.append("- 影響分析（既存のテストとドキュメントへの影響）は、Phase 77 で自動化するまで人間が書く。")
+        lines.append("- 影響分析の候補を確かめ、既存テストを変えるかどうかを決める。")
     else:
         lines.append(
-            "- Impact analysis (effects on existing tests and documentation) "
-            "must be written by a human until automated in Phase 77."
+            "- Review the impact analysis candidates and decide whether to modify existing tests."
         )
 
     lines.extend(
@@ -1712,6 +1926,8 @@ def render_contract_md(
                 if alt_src is not None:
                     lines.append(f"  - {src_label}: {alt_src}")
 
+    lines.extend(_render_impact_section_lines(impact_payload, lang))
+
     lines.extend(
         [
             "",
@@ -1789,6 +2005,13 @@ def render_acceptance_tests_md(
     return "\n".join(lines) + "\n"
 
 
+def _derive_ir_project_name(ir_path: Path) -> str:
+    """Derive draft directory / project name by stripping `.json` and optional trailing `.ir` (CMP-13)."""
+    name = ir_path.name
+    base = name.removesuffix(".json") if name.endswith(".json") else ir_path.stem
+    return base.removesuffix(".ir") or "draft"
+
+
 def resolve_emit_out_dir(
     ir_path: Path,
     work_dir: Path,
@@ -1806,7 +2029,7 @@ def resolve_emit_out_dir(
         return None, f"compile output root escapes workspace root: {resolved_compile_root}"
 
     if out_dir is None:
-        stem = ir_path.stem or "draft"
+        stem = _derive_ir_project_name(ir_path)
         candidate = compile_root / stem
     else:
         candidate = out_dir if out_dir.is_absolute() else (resolved_root / out_dir)
@@ -1893,16 +2116,25 @@ def emit_ir_drafts(
             err_msg,
         )
 
+    from auto_developer.impact import analyze_ir_impact
+
+    impact_exit, impact_payload, impact_issues, impact_err = analyze_ir_impact(
+        ir_path, work_dir=resolved_root, allow_non_git=True
+    )
+    if impact_exit != 0:
+        return impact_exit, impact_payload, impact_issues, impact_err
+
     ir_sha256 = hashlib.sha256(ir_bytes).hexdigest()
     check_bytes = (json.dumps(check_payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    impact_bytes = (json.dumps(impact_payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     spec_section_bytes = render_spec_section(
         ir_data, ir_path.name, ir_sha256, lang=lang
     ).encode("utf-8")
     plan_bytes = render_plan_md(
-        ir_data, ir_path.name, ir_sha256, lang=lang
+        ir_data, ir_path.name, ir_sha256, lang=lang, impact_payload=impact_payload
     ).encode("utf-8")
     contract_bytes = render_contract_md(
-        ir_data, check_payload, ir_path.name, ir_sha256, lang=lang
+        ir_data, check_payload, ir_path.name, ir_sha256, lang=lang, impact_payload=impact_payload
     ).encode("utf-8")
     acceptance_bytes = render_acceptance_tests_md(
         ir_data, ir_path.name, ir_sha256, lang=lang
@@ -1911,6 +2143,7 @@ def emit_ir_drafts(
     files_to_write: list[tuple[str, bytes]] = [
         ("ir.json", ir_bytes),
         ("check.json", check_bytes),
+        ("impact.json", impact_bytes),
         ("spec_section.md", spec_section_bytes),
         ("plan.md", plan_bytes),
         ("contract.md", contract_bytes),
@@ -1920,7 +2153,7 @@ def emit_ir_drafts(
     teams_raw = ir_data.get("teams")
     has_teams = isinstance(teams_raw, list) and len(teams_raw) > 0
     if has_teams:
-        project_name = ir_path.stem or "draft"
+        project_name = _derive_ir_project_name(ir_path)
         teams_json_bytes = render_teams_json(ir_data, project_name).encode("utf-8")
         files_to_write.append(("teams.json", teams_json_bytes))
         steps_by_team, _ = partition_steps_by_team(ir_data)

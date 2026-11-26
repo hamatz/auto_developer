@@ -154,7 +154,7 @@ class TestCmp9EmitSpecSection(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             self.assertIn("spec_section.md", proc.stdout)
 
-            spec_out = root / ".dev" / "compile" / "phase76.ir" / "spec_section.md"
+            spec_out = root / ".dev" / "compile" / "phase76" / "spec_section.md"
             self.assertTrue(spec_out.is_file())
             text = spec_out.read_text(encoding="utf-8")
 

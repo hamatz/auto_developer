@@ -10,7 +10,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
 - [x] は実装済みでテストがあるもの、[ ] は未実装（現在のフェーズの対象）を表す。
 - 新しいフェーズの要件は「## 5. 次のリリースで追加する要件」に書き、リリース後に 4 章の該当領域へ移す。
   開発の経緯（なぜそうしたか）はここに書かず、LESSONS.md・CHANGELOG.md・git 履歴に残す。
-- Checker への入力は、現在のフェーズの節を機械的に切り出した原文とする（要約しない）。例（Phase 76）:
+- Checker への入力は、現在のフェーズの節を機械的に切り出した原文とする（要約しない）。例（Phase 77）:
     awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_current.md
 - この SPEC は Elephant（人間と設計セッション）が書き、人間が承認する。Maker は変更できない（保護ファイル）。
 -->
@@ -509,17 +509,7 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - この設計書から作った IR をテストの資料（`tests/fixtures/compile/` の下）として置く。元の場所は、設計書の実際の行と SHA-256 を指すこと。
   - その IR に対して `compile --check` が、Decision 4（隔離ブランチへの退避。`git reset --hard` と `git clean -fd` による破壊的なロールバックを廃止する）と、Goals の Fail-Fast の要件・CUJ 2 の受入条件（どちらも `git reset --hard` / `git clean -fd` を使うと書いている）の食い違いを、L-5 の ERROR として報告し、終了コード 1 になること。
   - 食い違いを直した IR（同じ資料の別のファイル）では、終了コード 0 になること。
-
-## 5. 次のリリース（v0.10.0）で追加する要件
-
-<!-- v0.10.0 の目的: Auto Developer を「良い SPEC を書ける人」以外にも使えるようにする（Spec Compiler とダッシュボード）。
-     全体の方針は docs/contracts/v0.10-draft.md、Phase 76 の影響分析と設計の判断は docs/contracts/phase76.md を参照。
-     Phase 76 は、Spec Compiler の下書きの出力（CMP-5）とスキル `/nightly-compile`（CMP-6）。
-     影響分析（CMP-4）と、ダッシュボードに計画の構造を重ねる表示（STAT-3）、承認した IR の保護は Phase 77 で加える。 -->
-
-### 5.1 Phase 76 — Spec Compiler の下書きの出力とスキル
-
-- [ ] **CMP-5 下書きの出力**: `auto-dev compile --emit <IR> [--out-dir DIR] [--lang ja|en] [--force]` を加える。IR から、人間が SPEC・PLAN・`teams.json`・契約書に写すための下書きを作る。
+- [x] **CMP-5 下書きの出力**: `auto-dev compile --emit <IR> [--out-dir DIR] [--lang ja|en] [--force]` を加える。IR から、人間が SPEC・PLAN・`teams.json`・契約書に写すための下書きを作る。
   - **前提の点検**: 書き出す前に、`--check` と同じ点検（`--spec` の扱いも同じ）を行う。ERROR が1件でもあれば、何も書かずに点検の結果を示し、終了コード 1 とする。IR が読めない場合などは、`--check` と同じく終了コード 2 とする。
   - **出力先（INV-12）**: 既定は `<作業ディレクトリ>/.dev/compile/<IR のファイル名から拡張子を除いたもの>/`。`--out-dir` は、`<作業ディレクトリ>/.dev/compile/` の下（シンボリックリンクを解決した後のパスで判定する）でなければ、何も書かずに終了コード 2 とする。出力先にファイルがある場合は、`--force` がなければ何も書かずに終了コード 2 とする。`--force` のときは、このコマンドが作る名前のファイルだけを書き直し、ほかのファイルは消さない。出力先の外のファイル（SPEC.md・PLAN.md・`teams.json`・保護ファイルを含む）は、作成・変更・削除しない。
   - **決定的な出力**: 同じ IR と同じオプションからは、同じバイト列を出す。時刻など、実行ごとに変わる値を入れない。
@@ -527,24 +517,24 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - **`--lang`**: 下書きの見出しや決まった文言の言語（既定は `ja`）。IR の中の文（要件の文など）は、IR のとおりに写し、翻訳しない。
   - 書き出したファイルの一覧を表示し、終了コード 0 とする。
   - 書き出すファイル: `ir.json`（入力の IR と同じバイト列）、`check.json`（`--check --json` と同じ内容）、`spec_section.md`、`plan.md`、`contract.md`、`acceptance_tests.md`。IR の `teams[]` が1件以上ある場合は、`teams.json` と `plans/<チームの id>.md` も。各ファイルの中身は、CMP-9〜CMP-12 による。
-- [ ] **CMP-9 SPEC の節の下書き**（`spec_section.md`）:
+- [x] **CMP-9 SPEC の節の下書き**（`spec_section.md`）:
   - `### 5.1 （フェーズの名前）` の見出しの下に、要件を IR の順に `- [ ] **<id>**: <statement>` の形で並べる。`kind` が `"modify"` の要件は、`id` の後に「（修正）」（`en` では `(modify)`）を付ける。
   - 各要件の下に、参照する受入条件を1件ずつ、Given・When・Then・観測できる結果（`observable`）とともに字下げして書く。
   - 各要件の直後に、元の場所を `<!-- source: <path>:L<開始>-L<終了> sha256:<SHA-256> -->` の1行で書く（追跡のため。CMP-7 の一部）。
   - `out_of_scope[]` があれば、「スコープ外（SPEC の 6 章に写す）」の見出しの下に並べる。
-- [ ] **CMP-10 PLAN の下書き**（`plan.md`、`teams.json`、`plans/<id>.md`）:
+- [x] **CMP-10 PLAN の下書き**（`plan.md`、`teams.json`、`plans/<id>.md`）:
   - `## ステップ` の見出しの下に、ステップを `- [ ] <n>. <title>（<要件の id をカンマで区切る>）` の形で並べる。各ステップの下に、対象のファイルを字下げして書く。この形は、既存の計画ファイルの読み取り（`- [ ] <番号>.`）で読めること。
   - `## 既存テスト変更の理由` の見出しの下に、ステップごとに「（影響分析の後に、人間が書く。既定は「既存テストは変更しない」）」の行と、決まった3行（「このフェーズで前のステップが作ったテストの資料は、後のステップの検査に合わせて直してよい（アサーションは変えない）」「免疫テスト（`tests/immunity/**`）は変更しない」「CLI を変えたステップでは `docs/cli.md` を作り直す」）を書く。
   - `teams[]` がある場合: `teams.json` は、既存の `teams.json` と同じ形（`version` は 1、`project` は IR のファイル名から拡張子を除いたもの、各チームの `id`・`owns`・`plan`（`plans/<id>.md`）・`depends_on`（空））で、既存の `teams.json` の読み込み（`load_teams_manifest`）で読めること。`plans/<id>.md` には、ステップの対象のファイルがすべてそのチームの `owns` に当てはまる（L-7 と同じ当てはめ方）ステップだけを、上の形で並べる。複数のチームにまたがるステップは、どのチームの計画にも入れず、契約書の「人間が判断すること」に挙げる。
-- [ ] **CMP-11 契約書の下書き**（`contract.md`）: 次の節をこの順に置く。
+- [x] **CMP-11 契約書の下書き**（`contract.md`）: 次の節をこの順に置く。
   - 目的（`purpose` の文と元の場所）。
   - 人間が判断すること: `--check` の WARN のすべて、複数のチームにまたがるステップ、「影響分析（既存のテストとドキュメントへの影響）は、Phase 77 で自動化するまで人間が書く」の1行。WARN がなくても、この節は省かない。
   - 要件の一覧: ID・種別（新規／修正）・要件の文・受入条件の ID・元の場所の表。
   - 判断（`decisions[]`）: 判断の文、禁じる語句（`forbids`）、元の場所。不変条件の候補として示す。
   - 検討した代案（`alternatives[]`）。
   - 元の文書: IR の `source[]` のパスと SHA-256。
-- [ ] **CMP-12 受入テストの案**（`acceptance_tests.md`）: 受入条件ごとに、ID を見出しにして、Given・When・Then・観測できる結果、その受入条件を参照する要件の ID、元の場所を書く。テストのコードは書かない。
-- [ ] **CMP-6 スキル `/nightly-compile`**: `skills/nightly-compile/SKILL.md` を置き、`plugin.json` の `suggestedPrompts` に `/nightly-compile` を加える。スキルは、エージェントに次の流れを指示する。
+- [x] **CMP-12 受入テストの案**（`acceptance_tests.md`）: 受入条件ごとに、ID を見出しにして、Given・When・Then・観測できる結果、その受入条件を参照する要件の ID、元の場所を書く。テストのコードは書かない。
+- [x] **CMP-6 スキル `/nightly-compile`**: `skills/nightly-compile/SKILL.md` を置き、`plugin.json` の `suggestedPrompts` に `/nightly-compile` を加える。スキルは、エージェントに次の流れを指示する。
   - **入力**: EGM の設計書（`docs/designs/*.md`）。または文書群（`goal.md`、`architecture.md`、`decision.md`、`todo.md` など）。文書群の場合は、v0.10-draft の 5.2 の対応で1つの設計書の形に組み立てて `.dev/compile/<name>.design.md` に置き、足りない節（受入条件にあたる CUJ、Verification Plan など）は推測で埋めず、人間に聞く。
   - **見出しの確認**: `auto-dev compile --outline <設計書>` を実行する。終了コード 1（足りない節がある）なら、止まって人間に聞く。
   - **IR の下書き**: `.dev/compile/<name>.ir.json` に、IR（`auto-dev-ir/1`）を書く。要件・受入条件・判断の文は、設計書の文に沿って書き、要約で意味を変えない。すべての要素に元の場所を付け、行の範囲は `--outline` の出力を基準にする。判断が禁じる操作は `forbids` に書く。はっきりしない点は推測で埋めず、`open_questions` に書く。
@@ -552,6 +542,48 @@ v0.8.0 までの開発ログ形式の SPEC（機能A〜YYY）は docs/history/SP
   - **独立した査読**: Maker（IR を書いたモデル）と別の系統のモデルに、設計書・IR・点検の結果だけを渡して査読させる。確かめること: 設計書の Goals・CUJ・Decisions がすべて IR にあること、要件の文が設計書の意味を変えていないこと、「A または B」の場合分け（L-2）、同じ対象への「行う」と「行わない」（L-3）、定義のない用語（L-4）。査読の出力は `.dev/compile/<name>.review.txt` に置き、最後に `DECISION: APPROVE` か `DECISION: REJECT` を書かせる。REJECT なら IR を直して点検からやり直す。REJECT が2回続いたら止まって人間に渡す。文書群から組み立てた場合は、この査読を省かない。
   - **書き出しと引き渡し**: `auto-dev compile --emit` を実行し、`contract.md` の場所と、「人間が判断すること」の項目を人間に伝える。SPEC.md・PLAN.md・`teams.json` は書き換えない（INV-12）。写してコミットするのは人間である。
   - スキルに書いた `auto-dev` のコマンドは、`scripts/check_doc_commands.py`（DX-14）を通ること。
+
+## 5. 次のリリース（v0.10.0）で追加する要件
+
+<!-- v0.10.0 の目的: Auto Developer を「良い SPEC を書ける人」以外にも使えるようにする（Spec Compiler とダッシュボード）。
+     全体の方針は docs/contracts/v0.10-draft.md、Phase 77 の影響分析と設計の判断は docs/contracts/phase77.md を参照。
+     Phase 77 は、スキルの使い勝手の修正（IDEA-030）、影響分析（CMP-4）、承認した IR の保護、ダッシュボードに計画の構造を重ねる表示（STAT-3）。
+     このあと v0.10.0 のリリースのフェーズ（README、CHANGELOG、独立監査）。 -->
+
+### 5.1 Phase 77 — 影響分析と、計画の構造の表示
+
+- [ ] **CMP-13 元の場所の補助と出力先の名前**: 次の3点を変える。
+  - `auto-dev compile --anchor <path>:<開始>-<終了> [--json]` を加える。CMP-1 の元の場所の形（`{path, lines, sha256}`。SHA-256 の求め方も CMP-1 と同じ）を1件出す。ファイルがない、行の範囲がファイルの外、開始が終了より後、形が違う場合は、終了コード 2 とする。どのファイルも作成・変更しない（INV-12）。
+  - `compile --emit` の既定の出力先と、`teams.json` の下書きの `project` は、IR のファイル名から `.json` を除き、さらに末尾が `.ir` なら、それも除いたものとする（`calc.ir.json` → `calc`）。
+  - スキル `/nightly-compile`: 要件ごとの元の場所は `compile --anchor` で求めると書く。出力先の説明を上の規則に合わせる。要件の `fingerprints` には、その要件が変える関数・クラス・コマンド・オプションの名前や、判定の目印の文字列（例: `SANDBOX_UNAVAILABLE`）を書くと書く（影響分析 CMP-4 の検索の語になる）。このリポジトリの中の文書（v0.10-draft）への参照を外す（対応の表はスキルに書いたまま残す）。
+- [ ] **CMP-4 影響分析**: `auto-dev compile --impact <IR> [--json]` を加える。IR の要件が、作業ディレクトリのリポジトリのどこに影響しうるかを、決定的に洗い出す。判断はせず、候補を並べる。どのファイルも作成・変更しない（INV-12）。
+  - 対象は、Git が追跡しているファイル（`git ls-files`）とする。`.dev/` の下は除く。
+  - **I-1 指紋の検索**: 要件の `fingerprints` の各語を探す。Python のファイルは構文木で調べ、定義（関数・クラスの名前）、参照（名前・属性）、文字列の定数（語を含むもの）を区別する。それ以外の文字のファイル（`.md`、`.sh`、`.json`、`.toml`、`.yml` など）は、行の中の文字列の一致で調べる。テストのファイル（`tests/` の下、または `test_*.py`・`*_test.py`）とそれ以外を分けて、ファイルと行を示す。
+  - **I-2 モックと呼び出しの回数**: テストの関数のうち、指紋の語を参照し、かつ、モック（`patch`、`patch.object`、`Mock`、`MagicMock`）か呼び出しの回数の確認（`assert_called*`、`call_count`）を使っているものを示す。
+  - **I-3 記録を合成しているテスト**: 記録のファイルの名前（`events.jsonl`、`nightly_evidence`、`job_state.json`、`audit_stage.json`、`bundle_manifest.json`）を文字列の定数に含み、ファイルに書き込んでいる（`write_text`、`write_bytes`、書き込みの `open`、`json.dump`）テストのファイルを示す。要件ごとではなく、IR 全体に対して1回示す。
+  - **I-4 入口**: README（`README*.md`）、スキル（`skills/*/SKILL.md`）、`docs/` の直下の Markdown、`if __name__ == "__main__"` を持つスクリプトのうち、指紋の語が出てくるものを示す。
+  - `fingerprints` のない要件は、「指紋がないので調べていない」と示す。
+  - 結果は、要件の ID の順、ファイルのパスの順、行の順に並べ、同じ入力からは同じ出力を出す。
+  - 終了コード: 調べられた場合は 0（候補があってもなくても）。IR が読めない場合は 2。IR の形式の検査（CMP-1 の `F-1`）に ERROR がある場合は、調べずに 1。
+  - `--json` では `{"schema": "auto-dev-impact/1", "requirements": [...], "record_tests": [...]}` を出す。
+- [ ] **CMP-14 下書きへの影響分析の反映**: `compile --emit` は、CMP-4 の影響分析も行い、次のように下書きに反映する。
+  - 出力先に `impact.json`（`--impact --json` と同じ内容）を書く。
+  - `contract.md` に「影響分析」の節を置き、要件ごとに I-1・I-2・I-4 の候補を、IR 全体の I-3 の候補とともに示す。「人間が判断すること」の「影響分析は人間が書く」の1行は、「影響分析の候補を確かめ、既存テストを変えるかどうかを決める」に変える。
+  - `plan.md` の「既存テスト変更の理由」の各ステップの行の下に、そのステップの要件の I-1・I-2 で見つかったテストのファイルを「影響の候補」として並べる。候補がなければ「影響の候補なし」と書く。
+- [ ] **GATE-14 承認した IR の保護**: `docs/designs/` の直下の `*.ir.json`（人間が承認した IR）を、保護ファイル（INV-1）に加える。
+  - `verify-step` と `commit-step` の保護ファイルの検査（GATE-1。追跡・未追跡の両方）で、作成・変更・削除を検知する。
+  - `auto-dev init` が作る検証スクリプトの保護ファイルの検査にも加える。
+  - スキル `/nightly-compile` に、承認した IR は人間が `docs/designs/<name>.ir.json` としてコミットすること（エージェントは書かないこと）を書く。
+- [ ] **STAT-11 要件のスナップショット**: `status --json` のスナップショットに、次を加える。INV-11 の記録と、承認した IR（`docs/designs/*.ir.json`）だけから作る。`schema` は変えない（項目を足すだけ）。
+  - `requirements[]`: 計画ファイルのタスクの題名の最後の括弧の中にある要件の ID（`[A-Z]+-[0-9]+` の形。全角と半角の括弧の両方）と、承認した IR の要件を合わせたもの。各要件に、`id`、`statement`（IR にあれば。なければ `null`）、`source`（IR にあれば）、その要件を参照するタスク（チームのジョブではチームの ID とともに）、状態（参照するタスクがすべて完了なら `done`、一部が完了なら `in_progress`、ほかは `pending`）。
+  - `design_irs[]`: 承認した IR のファイルごとに、パス、ファイルの SHA-256、元の場所の検査（CMP-1）の結果（`ok` か `drift`。`drift` なら一致しない要素の一覧）。
+  - 承認した IR の元の場所が設計書と一致しない場合は、`attention[]` に `DESIGN_DRIFT` として入れる（設計書が承認の後に変わったことを示す）。
+  - IR が読めない場合は、推測で埋めず、その旨と理由を示す（STAT-1 と同じ）。
+- [ ] **STAT-3 計画の構造の表示**: ダッシュボード（STAT-6）に、要件の構造を重ねる。見本 `docs/designs/dashboard-prototype.html` の構成と動きは変えない。
+  - backlog のチケットと、チームのノードの作業中のタスクに、要件の ID の小さな印を付ける。印にカーソルを合わせると、要件の文と元の場所（`<path>:L<開始>-L<終了>`）を示す（IR がない要件は ID だけ）。
+  - 上部の要約に、要件の数（完了／全体）を加える。再生の時刻に合わせて、完了の数が増える。
+  - `DESIGN_DRIFT` は、ほかの `attention[]` の項目と同じく、上部の判断待ちの帯に出す。
+  - 見た目は人間が目で確かめる。テストでは、payload と HTML に、要件の ID・文・元の場所・数が入っていることを確かめる。JavaScript を実行するテストは求めない。
 
 ## 6. スコープ外
 

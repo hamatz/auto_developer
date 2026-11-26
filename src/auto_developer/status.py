@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from auto_developer.bundler import check_audit_diff_status
+from auto_developer.compiler import IR_SCHEMA_VERSION, CompileIssue, validate_ir_sources
 from auto_developer.dispatcher import TaskDispatcher, strip_html_comments_preserving_lines
 from auto_developer.evidence import EvidenceStore, resolve_evidence_records_dir
 from auto_developer.metrics import MetricsLog
@@ -28,6 +30,8 @@ _BLOCKED_HEADING_RE = re.compile(r"^#{1,6}\s+.*(?:止まっていること|判�
 _ANY_HEADING_RE = re.compile(r"^#{1,6}\s+")
 _REFS_RE = re.compile(r"\[refs:\s*([^\]]+)\]")
 _EMPTY_BLOCKED_PLACEHOLDERS = frozenset({"なし", "なし。", "none", "-"})
+_TRAILING_REQ_PAREN_RE = re.compile(r"(?:\(([^()]*)\)|（([^（）]*)）)\s*$")
+_REQ_ID_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Z]+-[0-9]+(?![A-Za-z0-9_])")
 
 
 def _run_git_text(repo_dir: Path, args: list[str]) -> tuple[bool, str, str]:
@@ -504,6 +508,177 @@ def _build_backlog(
     }
 
 
+def _extract_requirement_ids_from_title(title: str) -> list[str]:
+    """Extract requirement IDs ([A-Z]+-[0-9]+) from the last trailing parentheses of a task title."""
+    match = _TRAILING_REQ_PAREN_RE.search(title.rstrip())
+    if match is None:
+        return []
+    inner = match.group(1) if match.group(1) is not None else match.group(2)
+    if not inner:
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    for token in _REQ_ID_TOKEN_RE.findall(inner):
+        if token not in seen:
+            seen.add(token)
+            result.append(token)
+    return result
+
+
+def _collect_design_irs_and_ir_reqs(
+    repo_dir: Path,
+    attention: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Read approved IRs from docs/designs/*.ir.json, verify CMP-1 sources, and collect requirement metadata."""
+    designs_dir = repo_dir / "docs" / "designs"
+    if not designs_dir.is_dir():
+        return [], {}
+
+    design_irs: list[dict[str, Any]] = []
+    ir_reqs: dict[str, dict[str, Any]] = {}
+
+    for ir_path in sorted(designs_dir.glob("*.ir.json")):
+        if not ir_path.is_file():
+            continue
+        rel_path = ir_path.relative_to(repo_dir).as_posix()
+        try:
+            raw_bytes = ir_path.read_bytes()
+        except OSError as exc:
+            reason = f"Failed to read IR file: {exc}"
+            design_irs.append({
+                "path": rel_path,
+                "sha256": None,
+                "status": "error",
+                "mismatches": [],
+                "reason": reason,
+            })
+            continue
+
+        file_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+        try:
+            data = json.loads(raw_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            reason = f"Failed to parse IR JSON: {exc}"
+            design_irs.append({
+                "path": rel_path,
+                "sha256": file_sha256,
+                "status": "error",
+                "mismatches": [],
+                "reason": reason,
+            })
+            continue
+
+        if not isinstance(data, dict) or data.get("schema") != IR_SCHEMA_VERSION:
+            got_schema = data.get("schema") if isinstance(data, dict) else type(data).__name__
+            reason = f"Unexpected IR schema {got_schema!r} (expected {IR_SCHEMA_VERSION!r})"
+            design_irs.append({
+                "path": rel_path,
+                "sha256": file_sha256,
+                "status": "error",
+                "mismatches": [],
+                "reason": reason,
+            })
+            continue
+
+        errors: list[CompileIssue] = []
+        warnings: list[CompileIssue] = []
+        validate_ir_sources(data, repo_dir, errors, warnings)
+        mismatches = [issue.to_dict() for issue in errors]
+
+        if mismatches:
+            ir_status = "drift"
+            attention.append({
+                "kind": "DESIGN_DRIFT",
+                "severity": "MEDIUM",
+                "task_id": None,
+                "design_ir": rel_path,
+                "mismatches": mismatches,
+                "message": (
+                    f"Design IR '{rel_path}' has {len(mismatches)} source mismatch(es) "
+                    "with design document"
+                ),
+            })
+        else:
+            ir_status = "ok"
+
+        design_irs.append({
+            "path": rel_path,
+            "sha256": file_sha256,
+            "status": ir_status,
+            "mismatches": mismatches,
+            "reason": None,
+        })
+
+        reqs_raw = data.get("requirements")
+        if isinstance(reqs_raw, list):
+            for req in reqs_raw:
+                if not isinstance(req, dict):
+                    continue
+                req_id = req.get("id")
+                if not isinstance(req_id, str) or not req_id.strip():
+                    continue
+                req_id = req_id.strip()
+                if req_id not in ir_reqs:
+                    stmt = req.get("statement")
+                    src = req.get("source")
+                    ir_reqs[req_id] = {
+                        "statement": stmt if isinstance(stmt, str) else None,
+                        "source": src if isinstance(src, dict) else None,
+                    }
+
+    return design_irs, ir_reqs
+
+
+def _build_requirements_snapshot(
+    backlog: dict[str, list[dict[str, str]]],
+    ir_reqs: dict[str, dict[str, Any]],
+    *,
+    is_teams: bool,
+) -> list[dict[str, Any]]:
+    """Combine plan task requirement IDs and approved IR requirements into STAT-11 requirements[]."""
+    tasks_by_req: dict[str, list[dict[str, Any]]] = {}
+    for group_key, task_list in backlog.items():
+        for t in task_list:
+            req_ids = _extract_requirement_ids_from_title(str(t.get("title") or ""))
+            for rid in req_ids:
+                task_ref: dict[str, Any] = {
+                    "task_id": t["task_id"],
+                    "title": t["title"],
+                    "status": t["status"],
+                }
+                if is_teams:
+                    task_ref["team"] = group_key
+                tasks_by_req.setdefault(rid, []).append(task_ref)
+
+    ordered_ids: list[str] = []
+    seen_ids: set[str] = set()
+    for rid in (*ir_reqs.keys(), *tasks_by_req.keys()):
+        if rid not in seen_ids:
+            seen_ids.add(rid)
+            ordered_ids.append(rid)
+
+    requirements: list[dict[str, Any]] = []
+    for rid in ordered_ids:
+        meta = ir_reqs.get(rid) or {}
+        ref_tasks = tasks_by_req.get(rid, [])
+        done_count = sum(1 for t in ref_tasks if t.get("status") == "completed")
+        if ref_tasks and done_count == len(ref_tasks):
+            req_status = "done"
+        elif done_count > 0:
+            req_status = "in_progress"
+        else:
+            req_status = "pending"
+
+        requirements.append({
+            "id": rid,
+            "statement": meta.get("statement"),
+            "source": meta.get("source"),
+            "tasks": ref_tasks,
+            "status": req_status,
+        })
+    return requirements
+
+
 def _collect_timeline(
     repo_dir: Path,
     all_main_events: list[dict[str, Any]],
@@ -848,6 +1023,12 @@ def collect_status_snapshot(
 
     plan_task_ids = {t.task_id for t in tasks_raw}
     backlog = _build_backlog(resolved_repo, tasks_raw, teams_info, dispatcher)
+    design_irs, ir_reqs = _collect_design_irs_and_ir_reqs(resolved_repo, attention)
+    requirements = _build_requirements_snapshot(
+        backlog,
+        ir_reqs,
+        is_teams=isinstance(teams_info, dict),
+    )
     timeline, timeline_start, timeline_end = _collect_timeline(
         repo_dir=resolved_repo,
         all_main_events=all_events,
@@ -895,6 +1076,8 @@ def collect_status_snapshot(
         "timeline_start": timeline_start,
         "timeline_end": timeline_end,
         "backlog": backlog,
+        "requirements": requirements,
+        "design_irs": design_irs,
     }
 
 

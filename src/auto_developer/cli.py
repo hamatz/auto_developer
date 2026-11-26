@@ -60,7 +60,7 @@ echo "=== [1/2] Checking protected file invariants (tracked & untracked) ==="
 CHECKPOINT="${1:-HEAD}"
 
 if git rev-parse --verify "$CHECKPOINT" >/dev/null 2>&1; then
-  PROTECTED_DIFF=$(git diff --name-only "$CHECKPOINT" -- .github/ SPEC.md scripts/verify_local.sh tests/immunity/ teams.json 2>/dev/null || true)
+  PROTECTED_DIFF=$(git diff --name-only "$CHECKPOINT" -- .github/ SPEC.md scripts/verify_local.sh tests/immunity/ teams.json ':(glob)docs/designs/*.ir.json' 2>/dev/null || true)
   if [ -n "$PROTECTED_DIFF" ]; then
     echo "ERROR: Protected files were modified without authorization (git diff):"
     echo "$PROTECTED_DIFF"
@@ -68,7 +68,7 @@ if git rev-parse --verify "$CHECKPOINT" >/dev/null 2>&1; then
   fi
 fi
 
-DIRTY_PROTECTED=$(git status --porcelain | awk '{print $2}' | grep -E '^(\\.github/|SPEC\\.md|scripts/verify_local\\.sh|tests/immunity/|teams\\.json$)' || true)
+DIRTY_PROTECTED=$(git status --porcelain -uall | awk '{print $2}' | grep -E '^(\\.github/|SPEC\\.md|scripts/verify_local\\.sh|tests/immunity/|teams\\.json$|docs/designs/[^/]+\\.ir\\.json$)' || true)
 if [ -n "$DIRTY_PROTECTED" ]; then
   echo "ERROR: Protected files were created or modified (git status):"
   echo "$DIRTY_PROTECTED"
@@ -838,11 +838,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit draft artifacts under .dev/compile/ from an auto-dev-ir/1 JSON file",
     )
     compile_parser.add_argument(
+        "--anchor",
+        type=str,
+        default=None,
+        metavar="PATH:START-END",
+        help="Compute CMP-1 source anchor {path, lines, sha256} for a file line range",
+    )
+    compile_parser.add_argument(
+        "--impact",
+        type=Path,
+        default=None,
+        metavar="IR_JSON",
+        help="Analyze potential repository impact from an auto-dev-ir/1 JSON file (INV-12)",
+    )
+    compile_parser.add_argument(
         "--out-dir",
         type=Path,
         default=None,
         metavar="DIR",
-        help="Output directory under .dev/compile/ for --emit (default: .dev/compile/<ir_stem>/)",
+        help="Output directory under .dev/compile/ for --emit (default: .dev/compile/<name>/)",
     )
     compile_parser.add_argument(
         "--lang",
@@ -1029,11 +1043,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.subcommand == "compile":
         from auto_developer.compiler import (
+            anchor_source_range,
             check_ir_file,
             emit_ir_drafts,
+            format_anchor_text,
             format_outline_text,
             outline_design_file,
         )
+        from auto_developer.impact import analyze_ir_impact, format_impact_text
 
         selected_modes = [
             name
@@ -1041,6 +1058,8 @@ def main(argv: list[str] | None = None) -> int:
                 ("--check", args.check),
                 ("--outline", args.outline),
                 ("--emit", args.emit),
+                ("--anchor", args.anchor),
+                ("--impact", args.impact),
             )
             if val is not None
         ]
@@ -1052,12 +1071,37 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if len(selected_modes) == 0:
             print(
-                "ERROR: --check <IR_JSON>, --outline <DESIGN_MD>, or --emit <IR_JSON> is required.",
+                "ERROR: --check <IR_JSON>, --outline <DESIGN_MD>, --emit <IR_JSON>, --anchor <PATH:START-END>, or --impact <IR_JSON> is required.",
                 file=sys.stderr,
             )
             return 2
 
         work_dir = args.work_dir.resolve()
+        if args.impact is not None:
+            ir_path = args.impact if args.impact.is_absolute() else (work_dir / args.impact)
+            exit_code, payload, issues, error_msg = analyze_ir_impact(ir_path, work_dir=work_dir)
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            elif error_msg is not None:
+                print(f"ERROR: {error_msg}", file=sys.stderr)
+            elif exit_code != 0:
+                for issue in issues:
+                    print(issue.format_line())
+            else:
+                for line in format_impact_text(payload):
+                    print(line)
+            return exit_code
+
+        if args.anchor is not None:
+            exit_code, payload, error_msg = anchor_source_range(args.anchor, work_dir=work_dir)
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            elif error_msg is not None:
+                print(f"ERROR: {error_msg}", file=sys.stderr)
+            else:
+                print(format_anchor_text(payload))
+            return exit_code
+
         if args.outline is not None:
             doc_path = args.outline if args.outline.is_absolute() else (work_dir / args.outline)
             exit_code, payload, error_msg = outline_design_file(doc_path, work_dir=work_dir)
