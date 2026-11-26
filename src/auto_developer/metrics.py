@@ -265,9 +265,11 @@ class MetricsLog:
             phase = kwargs.pop("phase", None) or self.get_current_phase()
             head = kwargs.pop("head", None) or self.get_current_head()
             team = kwargs.pop("team", self.team_id)
+            now_ns = time.time_ns()
             record: dict[str, Any] = {
                 "schema": 1,
-                "ts": int(time.time()),
+                "ts": int(now_ns // 1_000_000_000),
+                "ts_ms": int(now_ns // 1_000_000),
                 "event": event,
                 "phase": phase,
                 "head": head,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -51,9 +52,15 @@ def _safe_json_for_script(payload: dict[str, Any]) -> str:
 
 
 def _parse_ts_seconds(ev: dict[str, Any]) -> float | None:
-    raw_ts = ev.get("ts")
-    if isinstance(raw_ts, (int, float)) and not isinstance(raw_ts, bool):
-        return float(raw_ts)
+    for key, scale in (("ts_ms", 1000.0), ("ts", 1.0)):
+        raw = ev.get(key)
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            try:
+                val = float(raw) / scale
+            except OverflowError:
+                continue
+            if math.isfinite(val):
+                return val
     raw_iso = ev.get("timestamp")
     if isinstance(raw_iso, str) and raw_iso.strip():
         try:
