@@ -178,6 +178,83 @@ class MetricsLog:
             print(f"METRICS_WARNING: Failed to count verify attempts: {e}", file=sys.stderr)
             return 0
 
+    def count_task_failures_since_reset(
+        self,
+        task_id: str,
+        phase: str | None = None,
+        team_id: str | None = None,
+    ) -> dict[str, int]:
+        """GATE-15: 同一フェーズ・タスク（およびチーム）の最後のコミットまたは隔離以降の失敗回数を数える。"""
+        zero = {"verify_failures": 0, "checker_rejects": 0, "total": 0}
+        if not self.events_path.exists():
+            return zero
+        if not self.events_path.is_file():
+            print(
+                f"METRICS_WARNING: Failed to read events log (not a file), skipping INV-4 fail-fast check: {self.events_path}",
+                file=sys.stderr,
+            )
+            return zero
+
+        target_phase = phase or self.get_current_phase()
+        target_team = team_id if team_id is not None else self.team_id
+        verify_failures = 0
+        checker_rejects = 0
+        try:
+            with open(self.events_path, "r", encoding="utf-8", errors="replace") as f:
+                for line_no, line in enumerate(f, start=1):
+                    line_s = line.strip()
+                    if not line_s:
+                        continue
+                    try:
+                        record = json.loads(line_s)
+                    except json.JSONDecodeError as e:
+                        print(
+                            f"METRICS_WARNING: Skipping unreadable event line {line_no} in {self.events_path}: {e}",
+                            file=sys.stderr,
+                        )
+                        continue
+                    if not isinstance(record, dict):
+                        print(
+                            f"METRICS_WARNING: Skipping non-object event line {line_no} in {self.events_path}",
+                            file=sys.stderr,
+                        )
+                        continue
+                    if str(record.get("phase")) != target_phase:
+                        continue
+                    if str(record.get("task_id")) != str(task_id):
+                        continue
+                    rec_team = record.get("team") or None
+                    if target_team is not None:
+                        if rec_team != target_team:
+                            continue
+                    elif rec_team is not None:
+                        continue
+
+                    ev = record.get("event")
+                    if (ev == "commit_step" and record.get("result") == "COMMITTED") or ev == "rollback_step":
+                        verify_failures = 0
+                        checker_rejects = 0
+                    elif ev == "verify_step":
+                        res = record.get("result")
+                        if res not in ("PASSED", "FAIL_FAST_STOPPED"):
+                            verify_failures += 1
+                    elif ev == "checker_review":
+                        dec = str(record.get("decision", "")).strip().upper()
+                        if dec == "REJECT":
+                            checker_rejects += 1
+        except OSError as e:
+            print(
+                f"METRICS_WARNING: Failed to read events log, skipping INV-4 fail-fast check: {e}",
+                file=sys.stderr,
+            )
+            return zero
+
+        return {
+            "verify_failures": verify_failures,
+            "checker_rejects": checker_rejects,
+            "total": verify_failures + checker_rejects,
+        }
+
     def _maybe_update_dashboard(self) -> None:
         """STAT-7: 自動更新が有効ならダッシュボード HTML を再生成する。失敗時は1回だけ警告を出す。"""
         try_update_dashboard(self.repo_dir, plan_path=self.plan_path)

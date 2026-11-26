@@ -64,7 +64,7 @@
 - README は人間が持つ契約なので、Maker は変更しない。README のコマンドのテスト（DX-1）や検査（DX-14）が失敗した場合は、止まって報告する。
 
 ## ステップ
-- [ ] 1. `verify-step` と `commit-step` が、そのタスクの最後のコミットか隔離の後の失敗（検証の失敗と査読の REJECT）を記録から数え、2回以上なら `INV4_FAIL_FAST:` で止まる（`verify-step` は終了コード 1、`commit-step` は 4）。スキルに書く（Red: REJECT と検証の失敗の後に、3回目の `verify-step` が通る）（GATE-15）
+- [x] 1. `verify-step` と `commit-step` が、そのタスクの最後のコミットか隔離の後の失敗（検証の失敗と査読の REJECT）を記録から数え、2回以上なら `INV4_FAIL_FAST:` で止まる（`verify-step` は終了コード 1、`commit-step` は 4）。スキルに書く（Red: REJECT と検証の失敗の後に、3回目の `verify-step` が通る）（GATE-15）
 - [ ] 2. イベントにミリ秒の時刻 `ts_ms` を加え、時系列と再生は `ts_ms` で並べる。`demo --teams` で統合のイベントが最後に来る（Red: `demo --teams` の時系列で `integration_start` がチームのイベントより前に来る）（STAT-12）
 - [ ] 3. 版の表記を 0.10.0 にそろえる（`pyproject.toml`、`plugin.json`、`__version__`、CLI の表示）。`CHANGELOG.md` の `## [0.10.0]` と `docs/releases/v0.10.0.md` があることを確かめる（Red: `test_version_consistency.py` の新しい期待）（REL-6）
 
