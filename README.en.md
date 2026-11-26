@@ -4,11 +4,17 @@
 
 Auto Developer lets an AI agent work through your tasks one at a time while you are away (overnight, for example) **without drifting from the agreed specification and verification rules**. Both successful and failed work are left behind in a form a human can check afterwards.
 
+![Dashboard replaying the night of the two-team demo](docs/images/dashboard-demo.gif)
+
+*The dashboard replaying `auto-dev demo --teams`: tickets leave the backlog for the teams, and commits that passed verification and review pile up on the right.*
+
 - **One task at a time; only verified and reviewed work is committed**: after the agent (the Maker) implements a task, the change must pass your verification script (linter, type checker, tests). A model from a different family (the Checker) then reviews it, reading only the SPEC and the diff. Only changes that pass both are committed.
 - **Failures are quarantined, not thrown away**: work that fails verification or review is moved to a `quarantine/*` branch, and the main line is restored to the last good state.
 - **Verifiable records**: verification results and the Checker's inputs and output are recorded, bound to hashes of the working tree and the SPEC. `auto-dev bundle` packs them into one ZIP, and `auto-dev verify-bundle` lets a third party check it for tampering and approval.
-- **Protected files are enforced by machine**: if the agent changes `SPEC.md`, the verification script, `tests/immunity/` (regression tests for past failures), `.github/`, or `teams.json`, the run stops automatically.
-- **Multiple teams in parallel**: each team has its own scope (`owns`) and gets its own Git worktree. Teams work in parallel; their work is re-verified and merged into an integration branch with an RC tag (merging into main is left to a human).
+- **Protected files are enforced by machine**: if the agent changes `SPEC.md`, the verification script, `tests/immunity/` (regression tests for past failures), `.github/`, `teams.json`, or an approved design (`docs/designs/*.ir.json`), the run stops automatically.
+- **From design document to draft plan (Spec Compiler)**: turns an EGM design document into drafts of the SPEC, the PLAN and a contract, with candidate impacts on existing tests. A draft becomes the contract only when a human reads and approves it.
+- **Replay the night**: `auto-dev dashboard` builds a single HTML file from the records alone, showing on a timeline what happened and what a human needs to decide.
+- **Multiple teams in parallel (experimental)**: each team has its own scope (`owns`) and gets its own Git worktree. Teams work in parallel; their work is re-verified and merged into an integration branch with an RC tag (merging into main is left to a human).
 
 ## Requirements
 
@@ -37,6 +43,15 @@ The demo shows the following in one command:
 
 Run `auto-dev demo --keep` to keep the demo directory and look inside.
 
+You can also replay a night with two teams on the dashboard.
+
+<!-- readme-test: run -->
+```bash
+auto-dev demo --teams
+```
+
+Two teams work in parallel (one fails verification once and fixes it on the second attempt), and their work is integrated with an RC tag. Open the `dashboard.html` shown at the end in a browser to replay the night (add `--keep` to keep the demo directory).
+
 ## Using it in your project
 
 ### 1. Initialize
@@ -50,6 +65,8 @@ git init -b main
 auto-dev init
 git add -A && git commit -m "Add Auto Developer"
 auto-dev pre-flight
+auto-dev status
+auto-dev dashboard
 ```
 
 Files created:
@@ -62,7 +79,7 @@ Files created:
 | `tests/immunity/` | Regression tests for past failures | Human (the agent cannot change it) |
 | `.gitignore` | Lines that ignore generated files such as `.dev/` and `logs/`, and `.env`, are appended | Automatic |
 
-Replace the second half of `scripts/verify_local.sh` with your project's test command. Verification fails if there are no tests at all, so that it can never pass trivially. `auto-dev pre-flight` shows whether the working tree is clean and what the next task is.
+Replace the second half of `scripts/verify_local.sh` with your project's test command. Verification fails if there are no tests at all, so that it can never pass trivially. `auto-dev pre-flight` shows whether the working tree is clean and what the next task is. `auto-dev status` shows the current state and what needs a human decision, and `auto-dev dashboard` turns it into a single HTML file (`.dev/dashboard.html`).
 
 ### 2. Let an agent run it
 
@@ -80,7 +97,8 @@ agy plugin install https://github.com/hamatz/auto_developer
 | Skill | What it does |
 | --- | --- |
 | `/nightly-setup` | Initialize (same as `auto-dev init`) |
-| `/nightly-run` | Run the tasks in `PLAN.md` in order (per team if `teams.json` exists) |
+| `/nightly-compile` | Draft the SPEC, PLAN and a contract from a design document (see below) |
+| `/nightly-run` | Run the tasks in `PLAN.md` in order (per team if `teams.json` exists). Can also turn on the dashboard |
 | `/nightly-bundle` | Create a bundle |
 | `/nightly-verify <zip>` | Verify a bundle |
 
@@ -110,9 +128,42 @@ auto-dev bundle                      # ZIP for handing over (sensitive files are
 auto-dev verify-bundle <bundle.zip>  # check the ZIP for tampering and approval
 ```
 
-Failed tasks are kept on `quarantine/<task>-<time>` branches; `brief` shows how to inspect and discard them.
+Failed tasks are kept on `quarantine/<task>-<time>` branches; `brief` shows how to inspect and discard them. How to restore newly created files is shown at quarantine time and in the failure log (`logs/nightly/`).
 
-## Running multiple teams in parallel
+### 4. Replay the night on the dashboard
+
+<!-- readme-test: skip（実行の結果があると中身が出る） -->
+```bash
+auto-dev dashboard                   # write .dev/dashboard.html (replayable from the records)
+auto-dev dashboard --enable          # from now on, rewrite it whenever a record is written (it updates while open)
+auto-dev dashboard --disable
+```
+
+The dashboard is built only from Auto Developer's own records (events, evidence, review records, Git). Files that the agent writes about its own progress are not used.
+
+## Starting from a design document (Spec Compiler)
+
+Writing a good SPEC and PLAN takes practice. If you have an EGM design document (`docs/designs/*.md`, with sections such as Goals, CUJs, Architectural Decisions and Verification Plan), the agent skill `/nightly-compile` takes you to the drafts.
+
+1. The agent reads the design document and writes an intermediate representation (IR) to `.dev/compile/<name>.ir.json`.
+2. `auto-dev compile --check` checks it for missing acceptance criteria, contradictions with decisions, open questions and more; the agent fixes it until it passes.
+3. A model from a different family reviews the IR against the design document.
+4. `auto-dev compile --emit` writes a SPEC section, PLAN steps, `teams.json`, a contract, acceptance test outlines and candidate impacts to `.dev/compile/<name>/`.
+5. **A human reads the contract, copies the drafts into SPEC.md and PLAN.md, and commits them.** The Spec Compiler never changes SPEC.md, PLAN.md or `teams.json`.
+
+<!-- readme-test: skip（設計書と IR が必要） -->
+```bash
+auto-dev compile --outline docs/designs/my-feature.md   # headings mapped to IR parts
+auto-dev compile --check .dev/compile/my-feature.ir.json
+auto-dev compile --impact .dev/compile/my-feature.ir.json
+auto-dev compile --emit .dev/compile/my-feature.ir.json
+```
+
+If you commit the approved IR as `docs/designs/<name>.ir.json`, the dashboard shows progress per requirement and warns when the design document changes later (`DESIGN_DRIFT`).
+
+## Running multiple teams in parallel (experimental)
+
+For now, all teams use the same Maker, Checker and verification, so splitting into teams gives you separated scopes and parallel execution, nothing more. Team-specific skills, models and review criteria are being considered for the next version. We recommend starting with a single team.
 
 Describe each team's scope (`owns`) and plan file (`plans/<team>.md`) in `teams.json`. `auto-dev teams init` creates a template (two teams, `core` and `ui`, by default).
 
@@ -169,6 +220,9 @@ See section 3 of [SPEC.md](SPEC.md) (in Japanese) for the full list.
 - Sensitive files (`.env*`, key files, and so on) are excluded from quarantine branches, bundles, and the diff given to the Checker.
 - If the Maker and the Checker (or the auditor) are from the same model family, the review does not count as an approval.
 - The review decision is read from the Checker's actual output, not from what the agent reports.
+- If verification or review fails twice in a row for the same task, the run stops instead of guessing its way forward.
+- Status displays are built from Auto Developer's own records.
+- The Spec Compiler never writes the contract (SPEC, PLAN, `teams.json`).
 
 ## Appendix
 

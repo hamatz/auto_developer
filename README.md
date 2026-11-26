@@ -4,11 +4,17 @@
 
 Auto Developer は、AI エージェントに開発を任せている間（夜間など、人間がいない間）も、**合意した仕様と検証の条件から外れずに**、タスクを1つずつ進めるための道具です。成功した作業も失敗した作業も、あとから人間が確かめられる形で残します。
 
+![2チームのデモの夜を再生したダッシュボード](docs/images/dashboard-demo.gif)
+
+*`auto-dev demo --teams` の夜を再生したダッシュボード。backlog のチケットがチームに渡り、検証と査読を通ったコミットが右に積み上がる。*
+
 - **1タスクずつ、検証と査読を通ったものだけを確定する**: エージェント（Maker）が実装したら、検証スクリプト（リンター・型検査・テスト）を通し、さらに別系統のモデル（Checker）が SPEC と差分だけを読んで査読します。両方を通ったものだけがコミットされます。
 - **失敗は捨てずに隔離する**: 検証や査読に通らなかった作業は `quarantine/*` ブランチに退避し、本線は直前の正常な状態に戻します。
 - **あとから検証できる記録を残す**: 検証の結果と査読の入力・出力を、作業ツリーと SPEC のハッシュに結びつけて記録します。`auto-dev bundle` で1つの ZIP にまとめ、`auto-dev verify-bundle` で第三者が改ざんの有無と承認を確かめられます。
-- **守るべきファイルは機械で守る**: `SPEC.md`、検証スクリプト、`tests/immunity/`（再発防止のテスト）、`.github/`、`teams.json` は、エージェントが変更すると自動で止まります。
-- **複数のチームで並行して進められる**: 担当範囲（`owns`）を分けたチームごとに Git の worktree を作り、並行して作業させ、最後に検証し直してから統合のブランチと RC タグを作ります（main への取り込みは人間が行います）。
+- **守るべきファイルは機械で守る**: `SPEC.md`、検証スクリプト、`tests/immunity/`（再発防止のテスト）、`.github/`、`teams.json`、承認した設計（`docs/designs/*.ir.json`）は、エージェントが変更すると自動で止まります。
+- **設計書から計画の下書きを作る（Spec Compiler）**: EGM の設計書から、SPEC・PLAN・契約書の下書きと、既存のテストへの影響の候補を作ります。下書きを契約にするのは、人間が読んで承認したときだけです。
+- **夜の作業を再生できる**: `auto-dev dashboard` が、記録だけから1枚の HTML を作り、何が起きて、何を人間が判断すべきかを時系列で見せます。
+- **複数のチームで並行して進められる（実験的）**: 担当範囲（`owns`）を分けたチームごとに Git の worktree を作り、並行して作業させ、最後に検証し直してから統合のブランチと RC タグを作ります（main への取り込みは人間が行います）。
 
 ## 動作環境
 
@@ -37,6 +43,15 @@ auto-dev demo
 
 `auto-dev demo --keep` とすると、デモのディレクトリを残して中を見られます。
 
+2チームが並行して動く夜を、ダッシュボードで再生することもできます。
+
+<!-- readme-test: run -->
+```bash
+auto-dev demo --teams
+```
+
+2つのチームが並行してタスクを進め（一方は検証に一度失敗して、2回目で直ります）、統合して RC タグを作ります。最後に表示される `dashboard.html` をブラウザで開くと、夜の作業を再生できます（`--keep` を付けると、デモのディレクトリが残ります）。
+
 ## 自分のプロジェクトで使う
 
 ### 1. 初期化する
@@ -50,6 +65,8 @@ git init -b main
 auto-dev init
 git add -A && git commit -m "Add Auto Developer"
 auto-dev pre-flight
+auto-dev status
+auto-dev dashboard
 ```
 
 できるファイル:
@@ -62,7 +79,7 @@ auto-dev pre-flight
 | `tests/immunity/` | 再発防止のテスト | 人間（エージェントは変更できない） |
 | `.gitignore` | `.dev/`、`logs/` などの生成物と、`.env` を除外する行を追記 | 自動 |
 
-`scripts/verify_local.sh` の後半を、あなたのプロジェクトのテストのコマンドに置き換えてください。テストが1件もないと、検証は失敗します（検証を素通りさせないためです）。`auto-dev pre-flight` は、作業ツリーがきれいかどうかと、次のタスクを表示します。
+`scripts/verify_local.sh` の後半を、あなたのプロジェクトのテストのコマンドに置き換えてください。テストが1件もないと、検証は失敗します（検証を素通りさせないためです）。`auto-dev pre-flight` は、作業ツリーがきれいかどうかと、次のタスクを表示します。`auto-dev status` は今の状態と人間が判断すべきことを、`auto-dev dashboard` はそれを1枚の HTML（`.dev/dashboard.html`）にしたものを作ります。
 
 ### 2. エージェントに実行させる
 
@@ -81,7 +98,8 @@ agy plugin install https://github.com/hamatz/auto_developer
 | スキル | すること |
 | --- | --- |
 | `/nightly-setup` | 初期化（`auto-dev init` と同じ） |
-| `/nightly-run` | `PLAN.md` のタスクを順に実行する（`teams.json` があればチームごとに実行する） |
+| `/nightly-compile` | 設計書から、SPEC・PLAN・契約書の下書きを作る（後述） |
+| `/nightly-run` | `PLAN.md` のタスクを順に実行する（`teams.json` があればチームごとに実行する）。ダッシュボードを有効にするかも選べる |
 | `/nightly-bundle` | Bundle を作る |
 | `/nightly-verify <zip>` | Bundle を検証する |
 
@@ -111,9 +129,42 @@ auto-dev bundle                      # 提出用の ZIP（機密のファイル�
 auto-dev verify-bundle <bundle.zip>  # ZIP の改ざんの有無と承認を確かめる
 ```
 
-失敗したタスクは `quarantine/<タスク>-<時刻>` のブランチにあり、`brief` に差分の見方と捨て方が表示されます。
+失敗したタスクは `quarantine/<タスク>-<時刻>` のブランチにあり、`brief` に差分の見方と捨て方が表示されます。新しく作ったファイルの取り出し方は、隔離のときの表示と失敗ログ（`logs/nightly/`）にあります。
 
-## 複数のチームで並行して進める
+### 4. ダッシュボードで夜を振り返る
+
+<!-- readme-test: skip（実行の結果があると中身が出る） -->
+```bash
+auto-dev dashboard                   # .dev/dashboard.html を作る（記録から再生できる）
+auto-dev dashboard --enable          # 以後、記録が書かれるたびに作り直す（開いたまま更新される）
+auto-dev dashboard --disable
+```
+
+ダッシュボードは、Auto Developer 自身が書いた記録（イベント、Evidence、査読の記録、Git）だけから作ります。エージェントが自己申告で書いたファイルは使いません。
+
+## 設計書から始める（Spec Compiler）
+
+良い SPEC と PLAN を書くのは、慣れていないと難しい作業です。EGM の設計書（`docs/designs/*.md`。Goals・CUJ・Architectural Decisions・Verification Plan などの節を持つもの）があれば、エージェントのスキル `/nightly-compile` で、下書きまで作れます。
+
+1. エージェントが設計書を読み、中間表現（IR）を `.dev/compile/<名前>.ir.json` に書く。
+2. `auto-dev compile --check` で、受入条件の欠け・判断との食い違い・未決の点などを点検し、通るまで直す。
+3. 別系統のモデルが、設計書と IR を突き合わせて査読する。
+4. `auto-dev compile --emit` が、`.dev/compile/<名前>/` に SPEC の節・PLAN のステップ・`teams.json`・契約書・受入テストの案・影響の候補を書き出す。
+5. **人間が契約書を読み、SPEC.md と PLAN.md に写してコミットする**。Spec Compiler は SPEC.md・PLAN.md・`teams.json` を書き換えません。
+
+<!-- readme-test: skip（設計書と IR が必要） -->
+```bash
+auto-dev compile --outline docs/designs/my-feature.md   # 見出しと IR の要素の対応
+auto-dev compile --check .dev/compile/my-feature.ir.json
+auto-dev compile --impact .dev/compile/my-feature.ir.json
+auto-dev compile --emit .dev/compile/my-feature.ir.json
+```
+
+承認した IR を `docs/designs/<名前>.ir.json` としてコミットすると、ダッシュボードに要件ごとの進み具合が出て、設計書が後で変わったときに知らせます（`DESIGN_DRIFT`）。
+
+## 複数のチームで並行して進める（実験的）
+
+今は、すべてのチームが同じ Maker・Checker・検証を使います。チームに分ける利点は、担当範囲の分離と並行の実行です。チームごとにスキルやモデル、査読の基準を変える機能は、次の版で検討しています。まずは単一のチームで使うことを勧めます。
 
 `teams.json` に、チームごとの担当範囲（`owns`）と計画ファイル（`plans/<チーム>.md`）を書きます。`auto-dev teams init` で雛形ができます（既定は `core` と `ui` の2チーム）。
 
@@ -170,6 +221,9 @@ auto-dev teams status
 - 機密に当たるファイル（`.env*`、鍵ファイルなど）は、隔離ブランチ・Bundle・Checker に渡す差分に含めない。
 - Maker と Checker（と監査役）が同じ系統のモデルなら、承認として扱わない。
 - 査読の判定は、エージェントの申告ではなく、Checker の出力そのものから読み取る。
+- 同じタスクで検証か査読に2回続けて失敗したら、推測で先に進まずに止まる。
+- 状態の表示は、Auto Developer 自身の記録から作る。
+- Spec Compiler は契約（SPEC・PLAN・`teams.json`）を書かない。
 
 ## その他
 
