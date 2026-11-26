@@ -72,7 +72,7 @@
 - [x] 4. `compile --emit` が `impact.json` を書き、`contract.md` の「影響分析」の節と、`plan.md` の各ステップの「影響の候補」に反映する（Red-First）（CMP-14）
 - [x] 5. `docs/designs/*.ir.json` を保護ファイルにする（GATE-1 の検査と `init` の雛形）。スキルに、承認した IR は人間がコミットすると書く（Red: Maker が `docs/designs/x.ir.json` を書き換えても `verify-step` が通る）（GATE-14）
 - [x] 6. `status --json` に `requirements[]`（題名の最後の括弧の ID と、承認した IR）と `design_irs[]`、`DESIGN_DRIFT` の注意を加える（Red-First）（STAT-11）
-- [ ] 7. ダッシュボードの backlog とチームのノードに要件の ID の印（文と元の場所の説明つき）、上部の要約に要件の数（完了／全体）、`DESIGN_DRIFT` の表示（Red-First）（STAT-3）
+- [x] 7. ダッシュボードの backlog とチームのノードに要件の ID の印（文と元の場所の説明つき）、上部の要約に要件の数（完了／全体）、`DESIGN_DRIFT` の表示（Red-First）（STAT-3）
 
 ## 止まっていること・判断待ち
 - なし。

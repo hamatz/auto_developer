@@ -96,6 +96,26 @@ def _sort_timeline_events(timeline_raw: list[dict[str, Any]]) -> list[dict[str, 
     return [item[2] for item in keyed]
 
 
+def _format_req_source(source: Any) -> str | None:
+    """Format a CMP-1 requirement source dict as '<path>:L<start>-L<end>'."""
+    if not isinstance(source, dict):
+        return None
+    path = source.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    lines = source.get("lines")
+    if (
+        isinstance(lines, list)
+        and len(lines) == 2
+        and isinstance(lines[0], int)
+        and not isinstance(lines[0], bool)
+        and isinstance(lines[1], int)
+        and not isinstance(lines[1], bool)
+    ):
+        return f"{path.strip()}:L{lines[0]}-L{lines[1]}"
+    return path.strip()
+
+
 def _build_replay_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Normalize an auto-dev-status/2 snapshot into the STAT-6 replay payload."""
     repo = snapshot.get("repo") or {}
@@ -110,6 +130,39 @@ def _build_replay_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     base_commit = head_full[:7] if head_full else "HEAD"
 
     is_teams = isinstance(teams_block, dict)
+    reqs_raw = snapshot.get("requirements") or []
+    requirements_out: list[dict[str, Any]] = []
+    task_reqs_map: dict[tuple[str, str], list[str]] = {}
+    if isinstance(reqs_raw, list):
+        for req in reqs_raw:
+            if not isinstance(req, dict):
+                continue
+            rid = str(req.get("id") or "").strip()
+            if not rid:
+                continue
+            stmt_raw = req.get("statement")
+            stmt = str(stmt_raw) if isinstance(stmt_raw, str) else None
+            src_label = _format_req_source(req.get("source"))
+            req_tasks_out: list[dict[str, str]] = []
+            for tref in req.get("tasks") or []:
+                if not isinstance(tref, dict):
+                    continue
+                t_team = str(tref.get("team") or ("plan" if not is_teams else ""))
+                t_id = str(tref.get("task_id") or "")
+                if not t_id:
+                    continue
+                req_tasks_out.append({"team": t_team, "id": t_id})
+                bucket = task_reqs_map.setdefault((t_team, t_id), [])
+                if rid not in bucket:
+                    bucket.append(rid)
+            requirements_out.append({
+                "id": rid,
+                "statement": stmt,
+                "source": src_label,
+                "status": str(req.get("status") or "pending"),
+                "tasks": req_tasks_out,
+            })
+
     teams_out: list[dict[str, Any]] = []
     title_lookup: dict[tuple[str, str], str] = {}
     fallback_title_lookup: dict[str, str] = {}
@@ -130,11 +183,12 @@ def _build_replay_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
                 else str(owns_raw or "")
             )
             raw_tasks = backlog.get(tid) or []
-            tasks_out = [
+            tasks_out: list[dict[str, Any]] = [
                 {
                     "id": str(t.get("task_id", "")),
                     "title": str(t.get("title", "")),
                     "status": str(t.get("status", "pending")),
+                    "reqs": task_reqs_map.get((tid, str(t.get("task_id", ""))), []),
                 }
                 for t in raw_tasks
             ]
@@ -158,6 +212,7 @@ def _build_replay_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "id": str(t.get("task_id", "")),
                 "title": str(t.get("title", "")),
                 "status": str(t.get("status", "pending")),
+                "reqs": task_reqs_map.get(("plan", str(t.get("task_id", ""))), []),
             }
             for t in raw_tasks
         ]
@@ -283,6 +338,7 @@ def _build_replay_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
             "checker": default_checker or "checker",
         },
         "teams": teams_out,
+        "requirements": requirements_out,
         "duration": duration,
         "gaps": gaps_out,
         "events": events_out,
@@ -360,6 +416,8 @@ def render_dashboard_html(
     att_cls, att_html = _render_attention_initial(attention_raw)
     base_ref = _e(payload["base"]["ref"])
     job_pill = _e(payload["job_id"])
+    reqs_total = len(payload.get("requirements") or [])
+    reqs_wrap_style = "" if reqs_total > 0 else ' style="display:none"'
     snapshot_json = _safe_json_for_script(payload)
 
     return f"""<!DOCTYPE html>
@@ -461,6 +519,8 @@ def render_dashboard_html(
   .ticket {{ background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--c, var(--ink2)); border-radius: 6px; padding: 6px 8px; font-size: 11px; line-height: 1.3; box-shadow: 0 1px 3px rgba(0,0,0,.04); }}
   .ticket .tk {{ font-family: var(--mono); font-size: 9.5px; font-weight: 700; color: var(--c, var(--ink2)); }}
   .ticket .tt {{ display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }}
+  .req-badges {{ display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }}
+  .req-badge {{ font-family: var(--mono); font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 4px; background: var(--subtle); border: 1px solid var(--line); color: var(--ink2); cursor: help; }}
   .ticket.empty {{ border-left-color: var(--ok); color: var(--ok); font-family: var(--mono); font-size: 10.5px; text-align: center; }}
   .bl-count {{ font-family: var(--display); font-size: 22px; font-weight: 700; }}
   .lock {{ font-family: var(--mono); font-size: 10px; padding: 6px 9px; border: 1px dashed var(--line); border-radius: 6px; color: var(--ink2); background: var(--bg); }}
@@ -504,6 +564,7 @@ def render_dashboard_html(
   </div>
   <div class="counters">
     <span>Tasks<strong id="c-tasks">0/0</strong></span>
+    <span id="c-reqs-wrap"{reqs_wrap_style}>Reqs<strong id="c-reqs">0/{reqs_total}</strong></span>
     <span>Reviews<strong id="c-reviews">0</strong></span>
     <span>Retries<strong id="c-retries">0</strong></span>
     <span id="c-q-wrap" title="Quarantined tasks in the current timeline (excludes prior runs)">Quarantined<strong id="c-q">0</strong></span>
@@ -551,6 +612,9 @@ def render_dashboard_html(
 (() => {{
   const S = JSON.parse(document.getElementById('snapshot').textContent);
   const EV = (S.events || []).slice().sort((a, b) => a.t - b.t);
+  const REQS = S.requirements || [];
+  const reqMap = {{}};
+  REQS.forEach(r => {{ if (r && r.id) reqMap[r.id] = r; }});
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));
   const fmt = t => {{ t = Math.max(0, t); const m = Math.floor(t / 60), s = Math.floor(t % 60); return String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0'); }};
   const short = m => (m || '').replace(/-(medium|large|small)$/, '');
@@ -638,6 +702,13 @@ def render_dashboard_html(
       }}
       st.log.push(e);
     }}
+    st.reqsDone = 0;
+    REQS.forEach(r => {{
+      const rtasks = r && r.tasks ? r.tasks : [];
+      if (rtasks.length > 0 && rtasks.every(rt => st.teams[rt.team] && st.teams[rt.team].done[rt.id])) {{
+        st.reqsDone++;
+      }}
+    }});
     return st;
   }}
 
@@ -697,6 +768,10 @@ def render_dashboard_html(
     }}
 
     document.getElementById('c-tasks').textContent = st.tasksDone + '/' + total;
+    const reqsWrap = document.getElementById('c-reqs-wrap');
+    if (reqsWrap) reqsWrap.style.display = REQS.length ? '' : 'none';
+    const reqsEl = document.getElementById('c-reqs');
+    if (reqsEl) reqsEl.textContent = st.reqsDone + '/' + REQS.length;
     document.getElementById('c-reviews').textContent = st.reviews;
     document.getElementById('c-retries').textContent = st.retries;
     document.getElementById('c-q').textContent = st.quarantined;
@@ -713,9 +788,20 @@ def render_dashboard_html(
       const b = L[id];
       return `<div class="node ${{cls}}" style="left:${{b.x}}px;top:${{b.y}}px;width:${{b.w}}px;min-height:${{b.h}}px">${{ports.in ? '<div class="port in"></div>' : ''}}<div class="head"><span class="k">${{k}}</span><span class="state">${{state}}</span></div><div class="body">${{inner}}</div>${{ports.out ? '<div class="port out"></div>' : ''}}</div>`;
     }};
+    const reqBadges = (reqs) => {{
+      if (!reqs || !reqs.length) return '';
+      return '<div class="req-badges">' + reqs.map(rid => {{
+        const m = reqMap[rid];
+        const parts = [];
+        if (m && m.statement) parts.push(m.statement);
+        if (m && m.source) parts.push(m.source);
+        const tip = parts.length ? parts.join('\\n') : rid;
+        return `<span class="req-badge" title="${{esc(tip)}}">${{esc(rid)}}</span>`;
+      }}).join('') + '</div>';
+    }};
     const left = [];
     (S.teams || []).forEach((tm, ti) => (tm.tasks || []).forEach(x => {{ if (!st.started[tm.id + ':' + x.id]) left.push({{ tm, ti, x }}); }}));
-    const tickets = left.map(o => `<div class="ticket" style="--c:${{TEAM_COL[o.ti % TEAM_COL.length]}}"><div class="tk">${{esc(o.tm.id)}} · #${{esc(o.x.id)}}</div><div class="tt">${{esc(o.x.title)}}</div></div>`).join('')
+    const tickets = left.map(o => `<div class="ticket" style="--c:${{TEAM_COL[o.ti % TEAM_COL.length]}}"><div class="tk">${{esc(o.tm.id)}} · #${{esc(o.x.id)}}</div><div class="tt">${{esc(o.x.title)}}</div>${{reqBadges(o.x.reqs)}}</div>`).join('')
       || (total === 0 ? '<div class="ticket empty">no tasks in plan</div>' : '<div class="ticket empty">backlog empty — all tickets dispatched</div>');
     const planScope = S.mode === 'teams' ? 'tickets from plans/*.md' : 'tickets from ' + esc((S.teams[0] && S.teams[0].owns) || 'PLAN.md');
     let html = node('plan', left.length ? '' : 'done', 'BACKLOG // ' + esc(S.project), left.length + ' / ' + total + ' LEFT',
@@ -731,7 +817,7 @@ def render_dashboard_html(
       const bots = t.bots.map((b, i) => `<span class="bot ${{b.r}} ${{b.s}}${{isNew(tm.id + t.task + i + b.label)}}">${{b.r === 'maker' ? '◆' : '◇'}} ${{esc(b.label)}}</span>`).join('') || '<span class="idle">idle bay</span>';
       const state = t.phase === 'making' && t.attempt > 1 ? 'FIXING #' + t.attempt : STATE_LABEL[t.phase];
       html += node('team:' + tm.id, t.phase, 'WT · ' + esc(tm.branch), state,
-        `<div><div class="title">${{esc(title)}}</div><div class="scope">${{esc(tm.owns)}}</div></div>
+        `<div><div class="title">${{esc(title)}}</div>${{reqBadges(cur ? cur.reqs : null)}}<div class="scope">${{esc(tm.owns)}}</div></div>
          <div class="bay">${{bots}}</div>
          <div class="pips">${{pips}}<span style="margin-left:6px" class="note ${{t.phase === 'failed' ? 'bad' : (t.phase === 'done' ? 'ok' : '')}}">${{esc(t.note)}}</span></div>`, {{ in: true, out: true }});
     }});
