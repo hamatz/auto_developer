@@ -37,7 +37,7 @@
   6. APPROVE なら `auto-dev commit-step --task-id <n> --checkpoint <SHA> --maker-model <maker> --checker-model <checker> --checker-reason "<reason>"`
   7. commit-step が終了コード 3 で拒否されたら、verify-step からやり直す。再検証した後も、査読と record-review をやり直す。
   8. commit-step が終了コード 4 で拒否されたら、原因を「止まっていること・判断待ち」に書いて止まる。引数を変えて再実行しない。
-- Checker の判定が2回続けて承認にならなかったら（REJECT、または実行し直しても判定が読み取れない）、INV-4 に従って隔離して止まる。
+- 同じタスクで、検証の失敗（`verify-step` の失敗）と査読の不承認（REJECT、または実行し直しても判定が読み取れない）を合わせて、2回続けて失敗したら、INV-4 に従って隔離して止まる。たとえば「REJECT → 手直し → 検証の失敗」も2回続けての失敗に数える（Phase 77 のステップ 2 では、これを数えずに3回目の検証に進んだ）。
 - 隔離したときは、`rollback-step` の案内（RCV-6・RCV-7）に従い、隔離ブランチの差分だけでなく、スナップショットにだけある新しいファイルと、Git のオブジェクトとして残したファイル（取り出し方つき）も報告に書く。
 - 人間の承認を PLAN.md に記録するコミットは、`git commit -m "docs(plan): ..." -- PLAN.md` の形にする。**ステップの途中（verify-step の後、commit-step の前）には PLAN.md を変えない**（Evidence の Tree SHA と合わなくなる）。
 - CLI の引数を変えるステップでは、同じステップで `python scripts/gen_cli_reference.py` を実行して `docs/cli.md` を作り直す（DX-4 のテストが一致を確かめる）。
@@ -78,16 +78,20 @@
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [ ] Phase 77 の準備コミット: SPEC.md（Phase 76 の要件を 4.12 へ移す。5.1 に Phase 77 の要件）、PLAN.md、docs/contracts/phase77.md、`scripts/verify_local.sh`（`docs/designs/*.ir.json` の保護）。
+- [x] Phase 77 の準備コミット: SPEC.md（Phase 76 の要件を 4.12 へ移す。5.1 に Phase 77 の要件）、PLAN.md、docs/contracts/phase77.md、`scripts/verify_local.sh`（`docs/designs/*.ir.json` の保護）。
 - [x] 準備のコミットの前に: Phase 76 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase76/` に退かせる。
-- [ ] ステップ 4 の完了後: このリポジトリに対して、Phase 74〜76 の要件のいずれかを模した IR で `compile --impact` を実行し、実際に止まった原因のテストが候補に出るかを確かめる。
-- [ ] ステップ 7 の完了後:
+- [x] ステップ 4 の完了後（フェーズの完了後にまとめて確認）: このリポジトリに対して、Phase 74〜76 の要件のいずれかを模した IR で `compile --impact` を実行し、実際に止まった原因のテストが候補に出るかを確かめる。
+- [x] ステップ 7 の完了後（CI は push の後に確かめる）:
   - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI（macOS・Ubuntu × Python 3.10・3.12、gitleaks）が通ることを確かめる。
   - 査読の記録（判定の決まらない出力の履歴を含む）と Checker の出力ファイルを突き合わせ、記録されていない出力が0件であることを確かめる。
   - Bundle を作り、`verify-bundle` が VERIFIED になることを確かめる。
   - ダッシュボードの要件の表示を目で確かめる。一時的なクローンで設計書の見本の IR を `docs/designs/` に置き、`DESIGN_DRIFT` が出ること・出ないことを確かめる。
 
 ## 記録
+- 2026-11-26: Phase 77 の完了後の確認。7 ステップすべて完了し、隔離は0回。ステップ 2・5・6 は1回目の査読が REJECT、ほかは1回目で APPROVE。保護ファイルの変更なし。査読の記録の突き合わせで、`.dev/checker/review_p77_*.txt` の 10 件すべてが履歴に記録され、`review_input` の回数と履歴の件数も全タスクで一致した。全ステップに `task_start` があった。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1128 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）だけ。Bundle は VERIFIED。`check_doc_commands.py` は 112 コマンドで終了コード 0。
+- 2026-11-26: INV-4 の手順の逸脱が1件。ステップ 2 で、査読の REJECT（1回目の失敗）→ 手直し → `verify-step` の失敗（2回目の失敗）となったのに、止まらずに3回目の検証に進み、そのあと APPROVE でコミットした（c2e114b）。原因は、PLAN の作業手順が「Checker の判定が2回続けて承認にならなかったら」としか書いておらず、検証の失敗と査読の不承認を合わせて数えることが読み取れなかったこと（SPEC の INV-4 は「検証または査読の失敗が2回続いたら」）。最後の査読は APPROVE で、後のステップもその上に積まれているので、コミットは戻さない。作業手順の文言を直し、低レベルのコマンドの経路で INV-4 を機械で守る案を IDEA-031 に入れた。
+- 2026-11-26: 影響分析の確認。このリポジトリで、Phase 74 の GATE-13 と Phase 75 の RCV-7 を模した IR（`fingerprints` に `record-review`・`CHECKER_POLICY_VIOLATION`、`quarantine_and_restore`・`list_snapshot_only_files`）で `compile --impact` を実行した。実際にそのフェーズで止まった原因のテスト（`tests/immunity/test_immunity_checker_policy.py`、`tests/test_rcv6_quarantine_snapshot_listing.py`）が、どちらも候補に出た。候補の数は GATE-13 で 25 ファイル、RCV-7 で 5 ファイル。`docs/contracts/phase70/immunity/` の写しもテストとして数えられる（IDEA-032）。`compile --anchor` は SPEC の行の元の場所を正しく出した。
+- 2026-11-26: 要件の表示の確認。このリポジトリのダッシュボードで、backlog とチームのノードに要件の ID の印（カーソルで文が出る）、上部に `Reqs 2/6` のような数が出た。一時的なクローンで、設計書の見本の IR を `docs/designs/` に置くと `design_irs` が `ok`、設計書の 31 行目を1文字変えると `drift` になり、`attention[]` と判断待ちの帯に `DESIGN_DRIFT` が出た。
 - 2026-11-25: Phase 77 の準備。Phase 76 の確認で見つかった IDEA-030（スキルの使い勝手）を最初のステップ（CMP-13）にし、影響分析（CMP-4・CMP-14）、承認した IR の保護（GATE-14）、要件の表示（STAT-11・STAT-3）を行う。人間が承認した。`scripts/verify_local.sh` の保護ファイルの検査に `docs/designs/*.ir.json` を先に加えた（ステップ 5 で製品の側にも加わる）。
 - 2026-11-25: Phase 76 の完了後の確認。5 ステップすべて完了し、隔離は0回。ステップ 1 だけ1回目の査読が REJECT で、ステップ 2〜5 は1回目で APPROVE。保護ファイルの変更なし。査読の記録の突き合わせで、`.dev/checker/review_p76_*.txt` の6件すべてが履歴に記録され、`review_input` の回数と履歴の件数も全タスクで一致した。ステップ 2〜5 には `task_start` のイベントがない（`pre-flight` を呼ばずに進めた。ダッシュボードの backlog は `verify_step` で減るので表示への影響は小さい）。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1094 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）だけ。Bundle は VERIFIED。`check_doc_commands.py` は新しいスキルを含む7ファイル・111 コマンドで終了コード 0。
 - 2026-11-25: 下書きの確認。テストの資料の IR（設計書の見本から作ったもの）で `compile --emit` を実行し、`spec_section.md`・`plan.md`・`contract.md`・`acceptance_tests.md` を読んだ。注意書き、要件と受入条件、元の場所のコメント、`- [ ] <番号>.` の形のステップ、判断の禁じる語句、「人間が判断すること」がそろっていて、SPEC と PLAN に写せる形だった。チームのある IR（チームをまたぐステップを含む）では、`teams.json` が `load_teams_manifest` で読め、またぐステップはチームの計画に入らず、契約書の「人間が判断すること」に挙がった。2回目の `--emit` は `--force` がないので終了コード 2、`.dev/compile/` の外への `--out-dir` も終了コード 2。どちらも作業ツリーを変えなかった（INV-12）。
