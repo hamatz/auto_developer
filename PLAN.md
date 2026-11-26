@@ -72,9 +72,9 @@
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [ ] Phase 78 の準備コミット: SPEC.md（Phase 77 の要件を 4 章へ移し、2 章の保護ファイルに IR を加える。5.1 に Phase 78 の要件）、PLAN.md、docs/contracts/phase78.md、README.md、README.en.md、CHANGELOG.md、docs/releases/v0.10.0.md、docs/images/dashboard-demo.gif。
+- [x] Phase 78 の準備コミット: SPEC.md（Phase 77 の要件を 4 章へ移し、2 章の保護ファイルに IR を加える。5.1 に Phase 78 の要件）、PLAN.md、docs/contracts/phase78.md、README.md、README.en.md、CHANGELOG.md、docs/releases/v0.10.0.md、docs/images/dashboard-demo.gif。
 - [x] 準備のコミットの前に: Phase 77 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase77/` に退かせる。
-- [ ] ステップ 2 の完了後: `demo --teams` のダッシュボードで、2チームが並行に見え、統合が最後に来ることを確かめ、`docs/images/dashboard-demo.gif` を作り直す。
+- [x] ステップ 2 の完了後（フェーズの完了後にまとめて確認）: `demo --teams` のダッシュボードで、2チームが並行に見え、統合が最後に来ることを確かめ、`docs/images/dashboard-demo.gif` を作り直す。
 - [ ] ステップ 3 の完了後:
   - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI（macOS・Ubuntu × Python 3.10・3.12、gitleaks）が通ることを確かめる。
   - 査読の記録と Checker の出力ファイルを突き合わせ、記録されていない出力が0件であることを確かめる。
@@ -83,6 +83,10 @@
   - CHANGELOG とリリースノートの日付を直し、`v0.10.0` のタグを打つ。
 
 ## 記録
+- 2026-11-27: Phase 78 の完了後の確認。3 ステップすべて完了し、隔離は0回（ステップ 1・2 は1回目の査読が REJECT、2回目で APPROVE）。README・CHANGELOG・リリースノートと保護ファイルは、準備のコミットの後に変わっていない。査読の記録の突き合わせで、`.dev/checker/review_p78_*.txt` の5件すべてが履歴に記録され、`review_input` の回数とも一致した。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1146 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）と、Phase 75 でも見た `test_reaps_multiple_descendant_processes_on_timeout`（単独では2回とも通る）。`auto-dev --version` は 0.10.0。Bundle は VERIFIED（`AUDIT_OUTDATED` はリリース前の監査で解消する）。`check_doc_commands.py` は 144 コマンドで終了コード 0。
+- 2026-11-27: GATE-15 の確認。一時リポジトリで、失敗する検証スクリプトで `verify-step` を3回実行すると、3回目は検証を実行せずに `INV4_FAIL_FAST:`（失敗の内訳と `rollback-step` の案内）で止まり、`commit-step` も同じく拒否した。`rollback-step` の後は、数え直されて `verify-step` が通った。
+- 2026-11-27: STAT-12 の確認。`demo --teams` の時系列が `ts_ms` で並び、2チームのイベントが交互に現れ、統合のイベントは最後に来た。ダッシュボードの再生でも、2チームが並行に動き、統合の列の帯は統合の始まりから出る。`docs/images/dashboard-demo.gif` を作り直した（124 コマ、約 12 秒、3.8MB）。
+- 2026-11-27: v0.9.0 のタグは `v.0.9.0`（SPEC の REL-2 では `v0.9.0` の形）。v0.10.0 のタグは `v0.10.0` の形にする。`v.0.9.0` から HEAD までの製品のコード（`src/`・`scripts/`）の差分は 19 ファイル・約 7,600 行（約 370KB）。
 - 2026-11-26: Phase 78（v0.10.0 のリリース）の準備。リリースの前に IDEA-031（INV-4 の機械化）を GATE-15 として入れることを人間が決めた。README の GIF を作り直したときに、同じ秒のイベントが記録ファイルの順に並ぶため、`demo --teams` の2チームが順番に動いているように見え、統合の列の帯が最初から始まっていた。見せ場の GIF なので、STAT-12（ミリ秒の時刻）をリリースの前に入れる。README（日本語・英語）・CHANGELOG・リリースノートは人間が書いた。マルチチームは実験的と明記した。
 - 2026-11-26: Phase 77 の完了後の確認。7 ステップすべて完了し、隔離は0回。ステップ 2・5・6 は1回目の査読が REJECT、ほかは1回目で APPROVE。保護ファイルの変更なし。査読の記録の突き合わせで、`.dev/checker/review_p77_*.txt` の 10 件すべてが履歴に記録され、`review_input` の回数と履歴の件数も全タスクで一致した。全ステップに `task_start` があった。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1128 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）だけ。Bundle は VERIFIED。`check_doc_commands.py` は 112 コマンドで終了コード 0。
 - 2026-11-26: INV-4 の手順の逸脱が1件。ステップ 2 で、査読の REJECT（1回目の失敗）→ 手直し → `verify-step` の失敗（2回目の失敗）となったのに、止まらずに3回目の検証に進み、そのあと APPROVE でコミットした（c2e114b）。原因は、PLAN の作業手順が「Checker の判定が2回続けて承認にならなかったら」としか書いておらず、検証の失敗と査読の不承認を合わせて数えることが読み取れなかったこと（SPEC の INV-4 は「検証または査読の失敗が2回続いたら」）。最後の査読は APPROVE で、後のステップもその上に積まれているので、コミットは戻さない。作業手順の文言を直し、低レベルのコマンドの経路で INV-4 を機械で守る案を IDEA-031 に入れた。
