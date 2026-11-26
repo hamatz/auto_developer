@@ -56,6 +56,8 @@ v0.10.0 aims to make Auto Developer usable by people who do not write good speci
 - Multi-team execution is **experimental**. All teams use the same Maker, Checker and verification; team-specific skills, models and review criteria are planned for v0.11 (`docs/contracts/v0.11-draft.md`).
 - `compile --impact` lists candidates only; it does not decide whether a test must change. Files under `docs/` named `test_*.py` are counted as tests (IDEA-032).
 - A few timing-dependent tests can fail on heavily loaded machines (IDEA-011).
+- The independent release audit (`claude-opus-5-5`, LIVE, from `f98c251` to `53d55a9`) returned no findings. Its input was about 600,000 tokens (the whole diff, including tests and documents) and the auditor reasoned only briefly, so treat it as weak assurance. Narrowing and splitting the audit input is planned (IDEA-017).
+- A run with only `--enable-audit` reports "0 / N tasks completed" in `NIGHTLY_REPORT.md`, which looks like a failure (IDEA-018).
 
 ---
 

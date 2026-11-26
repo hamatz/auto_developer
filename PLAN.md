@@ -75,7 +75,7 @@
 - [x] Phase 78 の準備コミット: SPEC.md（Phase 77 の要件を 4 章へ移し、2 章の保護ファイルに IR を加える。5.1 に Phase 78 の要件）、PLAN.md、docs/contracts/phase78.md、README.md、README.en.md、CHANGELOG.md、docs/releases/v0.10.0.md、docs/images/dashboard-demo.gif。
 - [x] 準備のコミットの前に: Phase 77 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase77/` に退かせる。
 - [x] ステップ 2 の完了後（フェーズの完了後にまとめて確認）: `demo --teams` のダッシュボードで、2チームが並行に見え、統合が最後に来ることを確かめ、`docs/images/dashboard-demo.gif` を作り直す。
-- [ ] ステップ 3 の完了後:
+- [x] ステップ 3 の完了後:
   - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI（macOS・Ubuntu × Python 3.10・3.12、gitleaks）が通ることを確かめる。
   - 査読の記録と Checker の出力ファイルを突き合わせ、記録されていない出力が0件であることを確かめる。
   - Bundle を作り、`verify-bundle` が VERIFIED になることを確かめる。
@@ -83,6 +83,7 @@
   - CHANGELOG とリリースノートの日付を直し、`v0.10.0` のタグを打つ。
 
 ## 記録
+- 2026-11-27: リリース前の独立監査（`claude-opus-5-5`、LIVE、起点 f98c251、対象 53d55a9）。1回目は出力の上限 8192 トークンを考える部分で使い切って打ち切られ（`stop_reason=max_tokens`）、`AUDIT_PENDING` で止まった（途中で切れた結果を0件として扱わない安全策が働いた）。監査役のコマンドに `--max-tokens 32000 --timeout 1800` を足して再実行し、`end_turn` で指摘0件（`SUCCESS`）。Bundle は VERIFIED で、監査の検証も通った。ただし入力は約 60 万トークン（v0.9.0 の約 25 万の倍以上。テストとドキュメントを含む差分の全体）で、監査役の出力は 2,183 トークン（考えた部分 2,174）と短く、弱い保証として扱う。CHANGELOG とリリースノートの Known issues に書いた。監査の入力を製品のコードに絞る・分ける改善（IDEA-017）を v0.11 の早いうちに行う。監査だけの実行の報告が「0 / 3 件のタスクが正常に完了」と失敗に見える問題（IDEA-018）も、同時に直す。人間が v0.10.0 のリリースを決めた。
 - 2026-11-27: Phase 78 の完了後の確認。3 ステップすべて完了し、隔離は0回（ステップ 1・2 は1回目の査読が REJECT、2回目で APPROVE）。README・CHANGELOG・リリースノートと保護ファイルは、準備のコミットの後に変わっていない。査読の記録の突き合わせで、`.dev/checker/review_p78_*.txt` の5件すべてが履歴に記録され、`review_input` の回数とも一致した。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1146 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）と、Phase 75 でも見た `test_reaps_multiple_descendant_processes_on_timeout`（単独では2回とも通る）。`auto-dev --version` は 0.10.0。Bundle は VERIFIED（`AUDIT_OUTDATED` はリリース前の監査で解消する）。`check_doc_commands.py` は 144 コマンドで終了コード 0。
 - 2026-11-27: GATE-15 の確認。一時リポジトリで、失敗する検証スクリプトで `verify-step` を3回実行すると、3回目は検証を実行せずに `INV4_FAIL_FAST:`（失敗の内訳と `rollback-step` の案内）で止まり、`commit-step` も同じく拒否した。`rollback-step` の後は、数え直されて `verify-step` が通った。
 - 2026-11-27: STAT-12 の確認。`demo --teams` の時系列が `ts_ms` で並び、2チームのイベントが交互に現れ、統合のイベントは最後に来た。ダッシュボードの再生でも、2チームが並行に動き、統合の列の帯は統合の始まりから出る。`docs/images/dashboard-demo.gif` を作り直した（124 コマ、約 12 秒、3.8MB）。
