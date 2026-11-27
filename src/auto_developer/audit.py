@@ -1332,11 +1332,21 @@ class IndependentAuditRunner:
                 })
             return findings
 
-        # AUDIT-7: 差分が上限を超えるためファイル単位で分割して監査する
+        # AUDIT-7 / AUDIT-10: 差分が上限を超えるためファイル単位で分割して監査する
         file_diffs: list[tuple[str, str]] = []
         for file_path in sorted(diff_files):
             f_res = subprocess.run(
-                ["git", "-c", "core.quotePath=false", "diff", "--no-renames", target_baseline, target_sha, "--", file_path],
+                [
+                    "git",
+                    "-c",
+                    "core.quotePath=false",
+                    "diff",
+                    "--no-renames",
+                    target_baseline,
+                    target_sha,
+                    "--",
+                    f":(literal){file_path}",
+                ],
                 cwd=repo_dir,
                 capture_output=True,
                 text=True,

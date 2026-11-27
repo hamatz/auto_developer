@@ -604,8 +604,8 @@ print(json.dumps(data))
 
     def sanitize_staged_changes(self) -> list[str]:
         """ステージされたファイルの内容を検査し、シークレットを含むファイルをステージから除外する。"""
-        proc = self._run_git(["diff", "--cached", "--name-only"])
-        staged_files = [f.strip() for f in proc.stdout.splitlines() if f.strip()]
+        proc = self._run_git(["diff", "--cached", "--name-only", "-z"])
+        staged_files = [f for f in proc.stdout.split("\0") if f]
         excluded = []
         for file_rel in staged_files:
             file_path = self.repo_dir / file_rel
@@ -613,7 +613,7 @@ print(json.dumps(data))
                 try:
                     content = file_path.read_bytes()
                     if self.has_secret_content(content):
-                        self._run_git(["reset", "HEAD", "--", file_rel])
+                        self._run_git(["reset", "HEAD", "--", f":(literal){file_rel}"])
                         excluded.append(file_rel)
                 except OSError:
                     pass
