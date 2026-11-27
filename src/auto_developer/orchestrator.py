@@ -47,6 +47,7 @@ class NightlyOrchestrator:
         fallback_models: list[str] | None = None,
         enable_audit_stage: bool = False,
         audit_baseline_commit: str | None = None,
+        audit_paths: list[str] | None = None,
         maker_family: str | None = None,
         checker_family: str | None = None,
         auditor_family: str | None = None,
@@ -84,6 +85,7 @@ class NightlyOrchestrator:
         self.fallback_models = list(fallback_models or [])
         self.enable_audit_stage = enable_audit_stage
         self.audit_baseline_commit = audit_baseline_commit
+        self.audit_paths: list[str] | None = list(audit_paths) if audit_paths is not None else None
 
         self.git_guard = GitGuard(repo_dir=self.repo_dir)
         self.dispatcher = TaskDispatcher()
@@ -1189,12 +1191,14 @@ class NightlyOrchestrator:
         baseline_commit: str,
         target_commit: str = "HEAD",
         auditor_runner: Any | None = None,
+        audit_paths: list[str] | None = None,
     ) -> dict[str, Any]:
         """ジョブ完了時に外部独立監査役を起動し、多層防壁で選別した真正指摘を次期 PLAN.md に登録する (RRR.2)。"""
         from auto_developer.audit import IndependentAuditRunner
         from auto_developer.dispatcher import AuditDispatcher
         from auto_developer.verifier import RedTestVerifier
 
+        effective_audit_paths = audit_paths if audit_paths is not None else self.audit_paths
         auditor = auditor_runner or self.auditor_runner
         if not auditor and (self.auditor_model or self.auditor_cmd_template):
             auditor = IndependentAuditRunner(
@@ -1204,6 +1208,7 @@ class NightlyOrchestrator:
                 maker_model=self.maker_model,
                 maker_family=self.maker_family,
                 auditor_family=self.auditor_family,
+                audit_paths=effective_audit_paths,
             )
 
         if not auditor:
@@ -1222,17 +1227,29 @@ class NightlyOrchestrator:
             verifier = RedTestVerifier(repo_dir=self.repo_dir)
             dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=verifier)
 
-            findings = auditor.audit_repository(
-                repo_dir=self.repo_dir,
-                target_commit=target_commit,
-                baseline_commit=baseline_commit,
-            )
+            if effective_audit_paths is not None:
+                findings = auditor.audit_repository(
+                    repo_dir=self.repo_dir,
+                    target_commit=target_commit,
+                    baseline_commit=baseline_commit,
+                    audit_paths=effective_audit_paths,
+                )
+            else:
+                findings = auditor.audit_repository(
+                    repo_dir=self.repo_dir,
+                    target_commit=target_commit,
+                    baseline_commit=baseline_commit,
+                )
             screen_res = auditor.screen_and_dispatch_findings(
                 findings=findings,
                 dispatcher=dispatcher,
                 plan_path=self.plan_path,
             )
             audit_metadata = getattr(auditor, "last_run_metadata", {}) or {}
+            rec_audit_paths = audit_metadata.get("audit_paths", effective_audit_paths or [])
+            rec_diff_files_count = int(audit_metadata.get("diff_files_count", 0) or 0)
+            rec_diff_bytes = int(audit_metadata.get("diff_bytes", 0) or 0)
+            rec_empty_diff = bool(audit_metadata.get("empty_diff", False))
 
             # 監査証跡レコードの保存 (SSS.4)
             audit_rec_dir = self.repo_dir / ".git" / "nightly_evidence" / "records"
@@ -1247,6 +1264,10 @@ class NightlyOrchestrator:
                         "mode": audit_metadata.get("mode", "LIVE"),
                         "provider": audit_metadata.get("provider"),
                         "provider_request_id": audit_metadata.get("provider_request_id"),
+                        "audit_paths": rec_audit_paths,
+                        "diff_files_count": rec_diff_files_count,
+                        "diff_bytes": rec_diff_bytes,
+                        "empty_diff": rec_empty_diff,
                         "audit_metadata": audit_metadata,
                         "dispatched_count": len(screen_res["dispatched"]),
                         "rejected_count": len(screen_res["rejected"]),
@@ -1273,6 +1294,10 @@ class NightlyOrchestrator:
                 "duplicate_count": len(screen_res.get("duplicates", [])),
                 "baseline_commit": baseline_commit,
                 "target_commit": target_commit,
+                "audit_paths": rec_audit_paths,
+                "diff_files_count": rec_diff_files_count,
+                "diff_bytes": rec_diff_bytes,
+                "empty_diff": rec_empty_diff,
                 "audit_metadata": audit_metadata,
             }
             self._record_audit_stage_event(

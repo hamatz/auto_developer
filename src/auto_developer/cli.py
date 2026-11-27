@@ -638,6 +638,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--audit-baseline", type=str, default=None, help="Baseline commit hash for independent audit comparison"
     )
+    parser.add_argument(
+        "--audit-paths", type=str, default=None, help="Comma-separated git pathspecs to restrict independent audit diff"
+    )
 
     subparsers = parser.add_subparsers(dest="subcommand", help="Subcommand actions")
 
@@ -685,6 +688,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--auditor-family", type=str, default=argparse.SUPPRESS, help="Explicit model family for Independent Auditor")
     run_parser.add_argument("--auditor-fallback-models", type=str, default=argparse.SUPPRESS, help="Comma-separated fallback models for independent auditor")
     run_parser.add_argument("--audit-baseline", type=str, default=argparse.SUPPRESS, help="Baseline commit hash for independent audit comparison")
+    run_parser.add_argument("--audit-paths", type=str, default=argparse.SUPPRESS, help="Comma-separated git pathspecs to restrict independent audit diff")
     run_parser.add_argument(
         "--dashboard",
         action="store_true",
@@ -2610,6 +2614,12 @@ def main(argv: list[str] | None = None) -> int:
         else []
     )
     audit_baseline = getattr(args, "audit_baseline", None)
+    raw_audit_paths = getattr(args, "audit_paths", None)
+    audit_paths = (
+        [p.strip() for p in raw_audit_paths.split(",") if p.strip()]
+        if raw_audit_paths
+        else None
+    )
     dry_run = bool(getattr(args, "dry_run", False))
     resume = bool(getattr(args, "resume", False))
     try:
@@ -2693,6 +2703,7 @@ def main(argv: list[str] | None = None) -> int:
         auditor_family=auditor_family,
         fallback_models=fallback_models,
         audit_baseline_commit=audit_baseline,
+        audit_paths=audit_paths,
     )
     use_dashboard = bool(getattr(args, "dashboard", False)) and not dry_run
     prev_dash_env = os.environ.get("AUTO_DEV_DASHBOARD")

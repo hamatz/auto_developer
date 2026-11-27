@@ -36,11 +36,16 @@ class TestLiveClaudeAudit(unittest.TestCase):
         self.src_file = self.repo_dir / "src" / "math_lib.py"
         self.src_file.parent.mkdir(parents=True, exist_ok=True)
         # 意図的な不具合（負数の場合に例外を投げず加算してしまう欠陥）
-        self.src_file.write_text("def add_positive(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
+        self.src_file.write_text("def add_positive(a: int, b: int) -> int:\n    return 0\n", encoding="utf-8")
 
         subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True)
-        subprocess.run(["git", "commit", "-m", "Base commit with defect"], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "Base commit"], cwd=self.repo_dir, check=True)
         self.base_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_dir, capture_output=True, text=True, check=True).stdout.strip()
+
+        self.src_file.write_text("def add_positive(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True)
+        subprocess.run(["git", "commit", "-m", "Target commit with defect"], cwd=self.repo_dir, check=True)
+        self.target_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_dir, capture_output=True, text=True, check=True).stdout.strip()
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -95,7 +100,7 @@ class TestLiveClaudeAudit(unittest.TestCase):
 
         findings = runner.audit_repository(
             repo_dir=self.repo_dir,
-            target_commit=self.base_commit,
+            target_commit=self.target_commit,
             baseline_commit=self.base_commit,
         )
         self.assertEqual(len(findings), 1)

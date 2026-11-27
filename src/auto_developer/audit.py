@@ -276,6 +276,25 @@ class AuditRunner:
         raise TypeError(f"Unsupported audit input type: {type(audit_input).__name__}")
 
 
+DEFAULT_AUDIT_PATHSPECS: tuple[str, ...] = (
+    ".",
+    ":(exclude)tests/",
+    ":(exclude)docs/",
+    ":(exclude)examples/",
+    ":(exclude)*.md",
+)
+
+
+def resolve_audit_pathspecs(audit_paths: list[str] | tuple[str, ...] | None) -> list[str]:
+    """Resolve explicit audit pathspecs or fall back to default exclusions (AUDIT-6)."""
+    if audit_paths is None:
+        return list(DEFAULT_AUDIT_PATHSPECS)
+    cleaned = [str(p).strip() for p in audit_paths if str(p).strip()]
+    if not cleaned:
+        return list(DEFAULT_AUDIT_PATHSPECS)
+    return cleaned
+
+
 class IndependentAuditRunner:
     """SPEC.md と git diff のみを厳格に入力とし、独立したLLMセッションから構造化 AuditFinding を抽出するランナー (EEE.2)。"""
 
@@ -322,6 +341,7 @@ class IndependentAuditRunner:
         maker_model: str | None = None,
         maker_family: str | None = None,
         auditor_family: str | None = None,
+        audit_paths: list[str] | None = None,
     ) -> None:
         self.auditor_cmd_template = auditor_cmd_template
         self.model_name = model_name
@@ -333,6 +353,7 @@ class IndependentAuditRunner:
         self.maker_model = maker_model or (config.maker_model if config else "gemini-3.8-flash")
         self.maker_family = maker_family if maker_family is not None else (config.maker_family if config else None)
         self.auditor_family = auditor_family if auditor_family is not None else (config.auditor_family if config else None)
+        self.audit_paths: list[str] | None = list(audit_paths) if audit_paths is not None else None
         self.audit_runner = AuditRunner()
         self.last_run_metadata: dict[str, Any] | None = None
         self._last_envelope_metadata: dict[str, Any] | None = None
@@ -828,8 +849,9 @@ class IndependentAuditRunner:
         baseline_commit: str | None = None,
         spec_path: Path | str | None = None,
         head_commit: str | None = None,
+        audit_paths: list[str] | None = None,
     ) -> list[AuditFinding]:
-        """指定されたベースラインコミットからの diff およびコミット拘束された SPEC を抽出し、独立外部監査を実行する (RRR.1)。"""
+        """指定されたベースラインコミットからの diff およびコミット拘束された SPEC を抽出し、独立外部監査を実行する (RRR.1 / AUDIT-6)。"""
         import hashlib
         import subprocess
 
@@ -862,15 +884,28 @@ class IndependentAuditRunner:
         )
         target_tree_sha = tree_res.stdout.strip()
 
-        # baseline から target までの git diff を厳格に抽出
+        effective_pathspecs = resolve_audit_pathspecs(audit_paths if audit_paths is not None else self.audit_paths)
+
+        # baseline から target までの git diff を範囲で絞って抽出 (AUDIT-6)
         diff_res = subprocess.run(
-            ["git", "diff", target_baseline, target_sha],
+            ["git", "diff", target_baseline, target_sha, "--", *effective_pathspecs],
             cwd=repo_dir,
             capture_output=True,
             text=True,
             check=True,
         )
         git_diff = diff_res.stdout
+
+        name_res = subprocess.run(
+            ["git", "diff", "--name-only", target_baseline, target_sha, "--", *effective_pathspecs],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        diff_files = [line for line in name_res.stdout.splitlines() if line.strip()]
+        diff_files_count = len(diff_files)
+        diff_bytes = len(git_diff.encode("utf-8"))
 
         # SPEC.md の内容を target_commit から厳密に抽出 (SSS.2 / Sol氏 Phase 58 P1指摘)
         # 作業ツリーへのフォールバックを完全撤廃し、コミット内に存在しない場合は Fail-Closed で即座に拒絶
@@ -901,6 +936,27 @@ class IndependentAuditRunner:
         spec_sha256 = hashlib.sha256(spec_content.encode("utf-8")).hexdigest()
         diff_sha256 = hashlib.sha256(git_diff.encode("utf-8")).hexdigest()
 
+        if not git_diff.strip() and diff_files_count == 0:
+            self.last_run_metadata = {
+                "mode": "SKIPPED_EMPTY_DIFF",
+                "provider": None,
+                "provider_request_id": None,
+                "auditor_model": self.model_name,
+                "maker_model": self.maker_model,
+                "status": "COMPLETED",
+                "findings_count": 0,
+                "baseline_commit": target_baseline,
+                "target_commit": target_sha,
+                "target_tree_sha": target_tree_sha,
+                "spec_sha256": spec_sha256,
+                "diff_sha256": diff_sha256,
+                "audit_paths": effective_pathspecs,
+                "diff_files_count": 0,
+                "diff_bytes": 0,
+                "empty_diff": True,
+            }
+            return []
+
         findings = self.audit(spec_content=spec_content, git_diff=git_diff)
         for finding in findings:
             finding.baseline_commit = target_baseline
@@ -916,6 +972,10 @@ class IndependentAuditRunner:
                 "target_tree_sha": target_tree_sha,
                 "spec_sha256": spec_sha256,
                 "diff_sha256": diff_sha256,
+                "audit_paths": effective_pathspecs,
+                "diff_files_count": diff_files_count,
+                "diff_bytes": diff_bytes,
+                "empty_diff": False,
             })
         return findings
 

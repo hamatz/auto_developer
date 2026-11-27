@@ -333,7 +333,34 @@ class MorningReporter:
             lines.append(f"- **監査ステータス**: `{status_str}`")
 
             audit_meta = audit_stage.get("audit_metadata")
-            if audit_meta:
+            audit_paths = audit_stage.get("audit_paths") or (
+                audit_meta.get("audit_paths") if isinstance(audit_meta, dict) else None
+            )
+            diff_files_count = (
+                audit_stage.get("diff_files_count")
+                if "diff_files_count" in audit_stage
+                else (audit_meta.get("diff_files_count") if isinstance(audit_meta, dict) else None)
+            )
+            diff_bytes = (
+                audit_stage.get("diff_bytes")
+                if "diff_bytes" in audit_stage
+                else (audit_meta.get("diff_bytes") if isinstance(audit_meta, dict) else None)
+            )
+            empty_diff = bool(
+                audit_stage.get("empty_diff")
+                or (audit_meta.get("empty_diff") if isinstance(audit_meta, dict) else False)
+            )
+            if audit_paths:
+                formatted_paths = ", ".join(f"`{p}`" for p in audit_paths)
+                lines.append(f"- **監査対象範囲 (Audit Paths)**: {formatted_paths}")
+            if diff_files_count is not None or diff_bytes is not None:
+                fc = diff_files_count if diff_files_count is not None else 0
+                db = diff_bytes if diff_bytes is not None else 0
+                lines.append(f"- **監査対象差分 (Audit Diff)**: {fc} ファイル, {db} バイト")
+            if empty_diff:
+                lines.append("- **監査スキップ**: 対象範囲の差分が空のため、監査役を呼ばずに `SUCCESS`（指摘0件）としました。")
+
+            if audit_meta and not empty_diff:
                 mode = audit_meta.get("mode") or audit_stage.get("mode", "LIVE")
                 prov = audit_meta.get("provider", "independent")
                 auditor_m = audit_meta.get("auditor_model", "N/A")
