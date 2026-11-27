@@ -25,6 +25,167 @@ class MorningReporter:
         return "UNKNOWN"
 
     @staticmethod
+    def _is_audit_only_run(summary_data: dict[str, Any], audit_stage: dict[str, Any] | None) -> bool:
+        """新しく完了したタスクがなく監査を行った実行かどうかを判定する (RPT-8)。"""
+        if isinstance(summary_data.get("multi_team"), dict):
+            return False
+        if not isinstance(audit_stage, dict) or audit_stage.get("status") == "SKIPPED":
+            return False
+        if str(summary_data.get("status", "")) == "FAILED (EXCEPTION)":
+            return False
+        succeeded = int(summary_data.get("succeeded_count", 0) or 0)
+        quarantined_count = int(summary_data.get("quarantined_count", 0) or 0)
+        return succeeded == 0 and quarantined_count == 0 and not summary_data.get("quarantined_task")
+
+    @staticmethod
+    def _extract_audit_depth(audit_stage: dict[str, Any]) -> dict[str, Any]:
+        """監査の範囲・組数・組ごとのトークン数と弱い保証の注意を抽出する (RPT-8)。"""
+        from auto_developer.audit import extract_thinking_tokens
+
+        audit_meta = audit_stage.get("audit_metadata")
+        meta_dict = audit_meta if isinstance(audit_meta, dict) else {}
+
+        audit_paths = audit_stage.get("audit_paths") or meta_dict.get("audit_paths")
+        diff_files_count = (
+            audit_stage.get("diff_files_count")
+            if "diff_files_count" in audit_stage
+            else meta_dict.get("diff_files_count")
+        )
+        diff_bytes = (
+            audit_stage.get("diff_bytes")
+            if "diff_bytes" in audit_stage
+            else meta_dict.get("diff_bytes")
+        )
+        empty_diff = bool(audit_stage.get("empty_diff") or meta_dict.get("empty_diff"))
+
+        raw_chunks = audit_stage.get("chunks")
+        if raw_chunks is None:
+            raw_chunks = meta_dict.get("chunks")
+
+        def _int_or_none(val: Any) -> int | None:
+            if isinstance(val, int) and not isinstance(val, bool):
+                return val
+            return None
+
+        def _build_entry(idx: int, chunk_dict: dict[str, Any]) -> dict[str, Any]:
+            usage = chunk_dict.get("usage")
+            usage_dict = usage if isinstance(usage, dict) else {}
+            in_tok = _int_or_none(chunk_dict.get("input_tokens"))
+            if in_tok is None:
+                in_tok = _int_or_none(usage_dict.get("input_tokens") or usage_dict.get("prompt_tokens"))
+            out_tok = _int_or_none(chunk_dict.get("output_tokens"))
+            if out_tok is None:
+                out_tok = _int_or_none(usage_dict.get("output_tokens") or usage_dict.get("completion_tokens"))
+            think_tok = _int_or_none(chunk_dict.get("thinking_tokens"))
+            if think_tok is None:
+                think_tok = extract_thinking_tokens(usage_dict)
+            weak = (
+                in_tok is not None
+                and think_tok is not None
+                and in_tok > 0
+                and think_tok * 100 < in_tok
+            )
+            return {
+                "chunk_index": int(chunk_dict.get("chunk_index") or idx),
+                "status": chunk_dict.get("status"),
+                "error": chunk_dict.get("error"),
+                "input_tokens": in_tok,
+                "output_tokens": out_tok,
+                "thinking_tokens": think_tok,
+                "weak_assurance": weak,
+            }
+
+        chunk_entries: list[dict[str, Any]] = []
+        if isinstance(raw_chunks, list):
+            for idx, item in enumerate(raw_chunks, 1):
+                if isinstance(item, dict):
+                    chunk_entries.append(_build_entry(idx, item))
+            total_chunks = int(
+                audit_stage.get("total_chunks")
+                or meta_dict.get("total_chunks")
+                or len(chunk_entries)
+            )
+        elif not empty_diff and isinstance(meta_dict.get("usage"), dict):
+            chunk_entries.append(_build_entry(1, {"chunk_index": 1, "usage": meta_dict["usage"]}))
+            total_chunks = 1
+        else:
+            total_chunks = (
+                0
+                if empty_diff
+                else int(audit_stage.get("total_chunks") or meta_dict.get("total_chunks") or 0)
+            )
+
+        failed_chunk_index = _int_or_none(
+            audit_stage.get("failed_chunk_index")
+            if "failed_chunk_index" in audit_stage
+            else meta_dict.get("failed_chunk_index")
+        )
+        raw_executed = (
+            audit_stage.get("executed_chunks")
+            if "executed_chunks" in audit_stage
+            else meta_dict.get("executed_chunks")
+        )
+        raw_not_executed = (
+            audit_stage.get("not_executed_chunks")
+            if "not_executed_chunks" in audit_stage
+            else meta_dict.get("not_executed_chunks")
+        )
+        if isinstance(raw_executed, list):
+            executed_chunks = [int(x) for x in raw_executed if isinstance(x, int) and not isinstance(x, bool)]
+        else:
+            executed_chunks = [
+                c["chunk_index"] for c in chunk_entries if c.get("status") != "NOT_EXECUTED"
+            ]
+        if isinstance(raw_not_executed, list):
+            not_executed_chunks = [
+                int(x) for x in raw_not_executed if isinstance(x, int) and not isinstance(x, bool)
+            ]
+        else:
+            not_executed_chunks = [
+                c["chunk_index"] for c in chunk_entries if c.get("status") == "NOT_EXECUTED"
+            ]
+            if not not_executed_chunks and failed_chunk_index is not None and total_chunks > failed_chunk_index:
+                not_executed_chunks = list(range(failed_chunk_index + 1, total_chunks + 1))
+
+        weak_chunks = [c["chunk_index"] for c in chunk_entries if c["weak_assurance"]]
+        return {
+            "audit_paths": audit_paths,
+            "diff_files_count": diff_files_count,
+            "diff_bytes": diff_bytes,
+            "empty_diff": empty_diff,
+            "total_chunks": total_chunks,
+            "failed_chunk_index": failed_chunk_index,
+            "executed_chunks": executed_chunks,
+            "not_executed_chunks": not_executed_chunks,
+            "chunk_entries": chunk_entries,
+            "weak_chunks": weak_chunks,
+            "has_weak_assurance": bool(weak_chunks),
+        }
+
+    @staticmethod
+    def _format_audit_depth_summary(status_str: str, audit_depth: dict[str, Any]) -> str:
+        """監査の深さ（全体の組数と失敗・未実行の状況）を要約する (RPT-8 / AUDIT-9)。"""
+        total_chunks = audit_depth["total_chunks"]
+        failed_idx = audit_depth.get("failed_chunk_index")
+        not_executed = audit_depth.get("not_executed_chunks") or []
+        is_failure = (
+            status_str in ("AUDIT_PENDING", "AUDIT_FAILED")
+            or failed_idx is not None
+            or bool(not_executed)
+        )
+        if not is_failure:
+            return f"{total_chunks} 組"
+        if failed_idx is not None:
+            if not_executed:
+                not_exec_str = "・".join(str(i) for i in not_executed)
+                return f"{total_chunks} 組のうち {failed_idx} 組目で失敗（{not_exec_str} 組目は実行していない）"
+            return f"{total_chunks} 組のうち {failed_idx} 組目で失敗"
+        if not_executed:
+            not_exec_str = "・".join(str(i) for i in not_executed)
+            return f"{total_chunks} 組のうち実行前に失敗（{not_exec_str} 組目は実行していない）"
+        return f"{total_chunks} 組（失敗）"
+
+    @staticmethod
     def _extract_record_fields(rec_data: dict[str, Any]) -> tuple[str, str, str | None]:
         """Evidence レコードから (commit_sha, evidence_tree_sha, checker_decision) を抽出する。"""
         commit_val = rec_data.get("commit", "")
@@ -74,6 +235,12 @@ class MorningReporter:
         verify_command = summary_data.get("verify_command")
         known_limitations = summary_data.get("known_limitations") or []
 
+        multi_team_data = summary_data.get("multi_team")
+        is_multi_team = isinstance(multi_team_data, dict)
+        audit_stage = summary_data.get("audit_stage") if not is_multi_team else None
+        is_audit_only = self._is_audit_only_run(summary_data, audit_stage)
+        audit_depth = self._extract_audit_depth(audit_stage) if isinstance(audit_stage, dict) else None
+
         lines = [
             "# AUTO DEVELOPER / MORNING BRIEF",
             "",
@@ -81,12 +248,17 @@ class MorningReporter:
             "",
         ]
 
-        # 1. 成果の要約 (Executive Summary) / 機能P
-        if executive_summary:
+        # 1. 成果の要約 (Executive Summary) / 機能P, RPT-8
+        effective_summary = executive_summary
+        if is_audit_only and (
+            not effective_summary or "件のタスクが正常に完了" in str(effective_summary)
+        ):
+            effective_summary = f"監査だけの実行（計画のタスクは {total} 件すべて完了済み）"
+        if effective_summary:
             lines.extend(
                 [
                     "## 成果の要約 (Executive Summary)",
-                    executive_summary,
+                    effective_summary,
                     "",
                 ]
             )
@@ -125,16 +297,18 @@ class MorningReporter:
                 ]
             )
 
-        multi_team_data = summary_data.get("multi_team")
-        is_multi_team = isinstance(multi_team_data, dict)
-
-        # 3. 概要 (Status Overview) / 機能R
+        # 3. 概要 (Status Overview) / 機能R, RPT-8
+        task_progress_str = (
+            f"監査だけの実行（計画のタスクは {total} 件すべて完了済み）"
+            if is_audit_only
+            else f"**{succeeded} / {total}** 完了"
+        )
         status_lines = [
             "## 概要 (Status Overview)",
             "| 指標 | 状況 |",
             "| :--- | :--- |",
             f"| **稼働ステータス** | **{status}** |",
-            f"| **タスク進捗** | **{succeeded} / {total}** 完了 |",
+            f"| **タスク進捗** | {task_progress_str} |",
             f"| **要確認・隔離** | **{quarantined_count}** 件 |",
         ]
         if is_multi_team:
@@ -321,8 +495,7 @@ class MorningReporter:
             for lim in known_limitations:
                 lines.append(f"- {lim}")
 
-        audit_stage = summary_data.get("audit_stage") if not isinstance(multi_team_data, dict) else None
-        if audit_stage:
+        if audit_stage and audit_depth is not None:
             lines.extend(
                 [
                     "",
@@ -333,7 +506,65 @@ class MorningReporter:
             lines.append(f"- **監査ステータス**: `{status_str}`")
 
             audit_meta = audit_stage.get("audit_metadata")
-            if audit_meta:
+            audit_paths = audit_depth["audit_paths"]
+            diff_files_count = audit_depth["diff_files_count"]
+            diff_bytes = audit_depth["diff_bytes"]
+            empty_diff = audit_depth["empty_diff"]
+            total_chunks = audit_depth["total_chunks"]
+            chunk_entries = audit_depth["chunk_entries"]
+
+            if audit_paths:
+                formatted_paths = ", ".join(f"`{p}`" for p in audit_paths)
+                lines.append(f"- **監査対象範囲 (Audit Paths)**: {formatted_paths}")
+            if diff_files_count is not None or diff_bytes is not None:
+                fc = diff_files_count if diff_files_count is not None else 0
+                db = diff_bytes if diff_bytes is not None else 0
+                lines.append(f"- **監査対象差分 (Audit Diff)**: {fc} ファイル, {db} バイト")
+            if empty_diff:
+                lines.append("- **監査スキップ**: 対象範囲の差分が空のため、監査役を呼ばずに `SUCCESS`（指摘0件）としました。")
+            elif total_chunks > 0 or chunk_entries:
+                depth_summary = self._format_audit_depth_summary(status_str, audit_depth)
+                lines.append(f"- **監査の深さ（組の数）**: {depth_summary}")
+                failed_idx = audit_depth.get("failed_chunk_index")
+                for c_entry in chunk_entries:
+                    c_status = c_entry.get("status")
+                    if c_status == "NOT_EXECUTED":
+                        lines.append(f"  - 組 {c_entry['chunk_index']}: 未実行（実行していない）")
+                        continue
+                    is_failed_chunk = (
+                        c_status in ("AUDIT_PENDING", "AUDIT_FAILED", "FAILED")
+                        or (failed_idx is not None and c_entry["chunk_index"] == failed_idx)
+                    )
+                    if (
+                        is_failed_chunk
+                        and c_entry["input_tokens"] is None
+                        and c_entry["output_tokens"] is None
+                    ):
+                        lines.append(f"  - 組 {c_entry['chunk_index']}: 失敗")
+                        continue
+                    in_s = str(c_entry["input_tokens"]) if c_entry["input_tokens"] is not None else "N/A"
+                    out_s = str(c_entry["output_tokens"]) if c_entry["output_tokens"] is not None else "N/A"
+                    think_s = (
+                        f"{c_entry['thinking_tokens']} トークン"
+                        if c_entry["thinking_tokens"] is not None
+                        else "N/A"
+                    )
+                    fail_suffix = " [失敗]" if is_failed_chunk else ""
+                    warn_suffix = (
+                        " [注意: 監査役の考えた量が入力に比べて少ない（弱い保証）]"
+                        if c_entry["weak_assurance"]
+                        else ""
+                    )
+                    lines.append(
+                        f"  - 組 {c_entry['chunk_index']}: 入力 {in_s} トークン / 出力 {out_s} トークン（うち考えた部分: {think_s}）{fail_suffix}{warn_suffix}"
+                    )
+                if audit_depth["has_weak_assurance"]:
+                    weak_list = ", ".join(str(i) for i in audit_depth["weak_chunks"])
+                    lines.append(
+                        f"- **注意**: 監査役の考えた量が入力に比べて少ない（弱い保証）（該当組: {weak_list}）"
+                    )
+
+            if audit_meta and not empty_diff:
                 mode = audit_meta.get("mode") or audit_stage.get("mode", "LIVE")
                 prov = audit_meta.get("provider", "independent")
                 auditor_m = audit_meta.get("auditor_model", "N/A")
@@ -559,30 +790,41 @@ class MorningReporter:
                         "隔離されたタスクはありません（すべてのタスクが正常完了または未着手です）。",
                         "",
                         "## あなたに判断してほしいこと (Next Actions for Developer)",
-                        "- [x] すべての予定タスクが正常に検証され、本線にコミットされました。",
                     ]
                 )
-                has_origin = False
-                try:
-                    res = subprocess.run(
-                        ["git", "remote", "get-url", "origin"],
-                        check=False,
-                        cwd=effective_repo,
-                        capture_output=True,
-                        text=True,
-                    )
-                    if res.returncode == 0 and res.stdout.strip():
-                        has_origin = True
-                except (subprocess.SubprocessError, OSError):
-                    has_origin = False
-
-                if has_origin:
+                if is_audit_only:
                     lines.append(
-                        f"- `git log --oneline -n {succeeded}` でコミット内容を確認後、`git push origin` でリモートへ反映してください。"
+                        f"- 監査だけの実行（計画のタスクは {total} 件すべて完了済み）です。独立監査の結果を確認してください。"
                     )
                 else:
                     lines.append(
-                        f"- リモートリポジトリ (origin) は未設定です。`git log -p -n {succeeded}` でコミット差分を確認してください。"
+                        "- [x] すべての予定タスクが正常に検証され、本線にコミットされました。"
+                    )
+                    has_origin = False
+                    try:
+                        res = subprocess.run(
+                            ["git", "remote", "get-url", "origin"],
+                            check=False,
+                            cwd=effective_repo,
+                            capture_output=True,
+                            text=True,
+                        )
+                        if res.returncode == 0 and res.stdout.strip():
+                            has_origin = True
+                    except (subprocess.SubprocessError, OSError):
+                        has_origin = False
+
+                    if has_origin:
+                        lines.append(
+                            f"- `git log --oneline -n {succeeded}` でコミット内容を確認後、`git push origin` でリモートへ反映してください。"
+                        )
+                    else:
+                        lines.append(
+                            f"- リモートリポジトリ (origin) は未設定です。`git log -p -n {succeeded}` でコミット差分を確認してください。"
+                        )
+                if audit_depth is not None and audit_depth["has_weak_assurance"]:
+                    lines.append(
+                        "- [ ] **注意**: 監査役の考えた量が入力に比べて少ない（弱い保証）。対象範囲や分割上限の見直しを検討してください。"
                     )
 
             # 5. エスカレーションされた指摘の列挙 (WWW.5)
@@ -645,17 +887,30 @@ class MorningReporter:
         executive_summary = summary_data.get("executive_summary")
         quick_try = summary_data.get("quick_try_command")
         multi_team_data = summary_data.get("multi_team")
+        audit_stage = summary_data.get("audit_stage") if not isinstance(multi_team_data, dict) else None
+        is_audit_only = self._is_audit_only_run(summary_data, audit_stage)
+        audit_depth = self._extract_audit_depth(audit_stage) if isinstance(audit_stage, dict) else None
 
+        progress_str = (
+            f"監査だけの実行（計画のタスクは {total} 件すべて完了済み）"
+            if is_audit_only
+            else f"{succeeded}/{total} tasks completed ({quarantined_count} quarantined)"
+        )
         lines = [
             "============================================================",
             "               AUTO DEVELOPER / MORNING BRIEF               ",
             "============================================================",
             f" Status: {status}",
-            f" Progress: {succeeded}/{total} tasks completed ({quarantined_count} quarantined)",
+            f" Progress: {progress_str}",
             f" Checkpoint: {checkpoint}",
         ]
-        if executive_summary:
-            lines.append(f" Summary: {executive_summary}")
+        effective_summary = executive_summary
+        if is_audit_only and (
+            not effective_summary or "件のタスクが正常に完了" in str(effective_summary)
+        ):
+            effective_summary = f"監査だけの実行（計画のタスクは {total} 件すべて完了済み）"
+        if effective_summary:
+            lines.append(f" Summary: {effective_summary}")
         if quick_try:
             lines.append(f" Quick Try: {quick_try}")
         if not isinstance(multi_team_data, dict):
@@ -695,12 +950,78 @@ class MorningReporter:
                     ]
                 )
             else:
+                lines.append("------------------------------------------------------------")
+                if is_audit_only:
+                    lines.append(
+                        f" Audit-only run complete (all {total} planned tasks already completed)."
+                    )
+                else:
+                    lines.append(" All tasks completed smoothly. Ready for review or push!")
+
+            if audit_stage and audit_depth is not None:
                 lines.extend(
                     [
                         "------------------------------------------------------------",
-                        " All tasks completed smoothly. Ready for review or push!",
+                        " [Independent Audit Stage]",
+                        f"  Status: {audit_stage.get('status', 'UNKNOWN')}",
                     ]
                 )
+                if audit_depth["audit_paths"]:
+                    lines.append(f"  Audit Paths: {', '.join(audit_depth['audit_paths'])}")
+                if (
+                    audit_depth["diff_files_count"] is not None
+                    or audit_depth["diff_bytes"] is not None
+                ):
+                    fc = audit_depth["diff_files_count"] or 0
+                    db = audit_depth["diff_bytes"] or 0
+                    lines.append(f"  Audit Diff: {fc} files, {db} bytes")
+                if audit_depth["empty_diff"]:
+                    lines.append("  Skipped: 対象範囲の差分が空のため監査役を呼ばずに SUCCESS")
+                elif audit_depth["total_chunks"] > 0 or audit_depth["chunk_entries"]:
+                    depth_summary = self._format_audit_depth_summary(
+                        str(audit_stage.get("status", "UNKNOWN")), audit_depth
+                    )
+                    lines.append(f"  Chunks: {depth_summary}")
+                    failed_idx = audit_depth.get("failed_chunk_index")
+                    for c_entry in audit_depth["chunk_entries"]:
+                        c_status = c_entry.get("status")
+                        if c_status == "NOT_EXECUTED":
+                            lines.append(f"  Chunk {c_entry['chunk_index']}: not executed")
+                            continue
+                        is_failed_chunk = (
+                            c_status in ("AUDIT_PENDING", "AUDIT_FAILED", "FAILED")
+                            or (failed_idx is not None and c_entry["chunk_index"] == failed_idx)
+                        )
+                        if (
+                            is_failed_chunk
+                            and c_entry["input_tokens"] is None
+                            and c_entry["output_tokens"] is None
+                        ):
+                            lines.append(f"  Chunk {c_entry['chunk_index']}: failed")
+                            continue
+                        in_s = (
+                            str(c_entry["input_tokens"])
+                            if c_entry["input_tokens"] is not None
+                            else "N/A"
+                        )
+                        out_s = (
+                            str(c_entry["output_tokens"])
+                            if c_entry["output_tokens"] is not None
+                            else "N/A"
+                        )
+                        think_s = (
+                            str(c_entry["thinking_tokens"])
+                            if c_entry["thinking_tokens"] is not None
+                            else "N/A"
+                        )
+                        fail_suffix = " [FAILED]" if is_failed_chunk else ""
+                        lines.append(
+                            f"  Chunk {c_entry['chunk_index']}: input={in_s}, output={out_s}, thinking={think_s}{fail_suffix}"
+                        )
+                    if audit_depth["has_weak_assurance"]:
+                        lines.append(
+                            "  Warning: 監査役の考えた量が入力に比べて少ない（弱い保証）"
+                        )
 
         if isinstance(multi_team_data, dict):
             all_no_changes = bool(multi_team_data.get("all_no_changes"))
@@ -1050,6 +1371,8 @@ class MorningReporter:
         audit_stage_data: dict[str, Any] | None = None
         if multi_team_data is None:
             for cand_audit in [
+                resolve_evidence_records_dir(effective_repo) / "audit_stage.json",
+                effective_repo / ".dev" / "evidence" / "records" / "audit_stage.json",
                 effective_repo / ".git" / "nightly_evidence" / "audit_stage.json",
                 effective_repo / ".dev" / "audit_stage.json",
             ]:

@@ -31,6 +31,8 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | `--auditor-family AUDITOR_FAMILY` | No | - | Explicit model family for Independent Auditor |
 | `--auditor-fallback-models AUDITOR_FALLBACK_MODELS` | No | `""` | Comma-separated fallback models for independent auditor |
 | `--audit-baseline AUDIT_BASELINE` | No | - | Baseline commit hash for independent audit comparison |
+| `--audit-paths AUDIT_PATHS` | No | - | Comma-separated git pathspecs to restrict independent audit diff |
+| `--audit-max-diff-bytes AUDIT_MAX_DIFF_BYTES` | No | `200000` | Maximum git diff bytes per independent audit request (default: 200000) |
 
 ### `auto-dev init`
 
@@ -64,6 +66,8 @@ Auto Developer: Trustworthy Autonomous Pipeline Orchestrator
 | `--auditor-family AUDITOR_FAMILY` | No | - | Explicit model family for Independent Auditor |
 | `--auditor-fallback-models AUDITOR_FALLBACK_MODELS` | No | - | Comma-separated fallback models for independent auditor |
 | `--audit-baseline AUDIT_BASELINE` | No | - | Baseline commit hash for independent audit comparison |
+| `--audit-paths AUDIT_PATHS` | No | - | Comma-separated git pathspecs to restrict independent audit diff |
+| `--audit-max-diff-bytes AUDIT_MAX_DIFF_BYTES` | No | - | Maximum git diff bytes per independent audit request (default: 200000) |
 | `--dashboard` | No | - | Auto-update HTML dashboard on each event during this run |
 
 ### `auto-dev brief`

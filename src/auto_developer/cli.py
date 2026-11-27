@@ -49,7 +49,15 @@ from auto_developer.runner import (
     RunnerAdapter,
     parse_checker_decision,
 )
-from auto_developer.verifier import DeterministicVerifier, resolve_verify_timeout
+from auto_developer.verifier import (
+    RED_FIRST_FILE_TIMEOUT_SEC,
+    DeterministicVerifier,
+    find_changed_test_files,
+    is_red_first_task,
+    resolve_red_first_mode,
+    resolve_verify_timeout,
+    verify_red_first_tests,
+)
 
 VERSION = "0.10.0"
 
@@ -638,6 +646,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--audit-baseline", type=str, default=None, help="Baseline commit hash for independent audit comparison"
     )
+    parser.add_argument(
+        "--audit-paths", type=str, default=None, help="Comma-separated git pathspecs to restrict independent audit diff"
+    )
+    parser.add_argument(
+        "--audit-max-diff-bytes",
+        type=int,
+        default=200000,
+        help="Maximum git diff bytes per independent audit request (default: 200000)",
+    )
 
     subparsers = parser.add_subparsers(dest="subcommand", help="Subcommand actions")
 
@@ -685,6 +702,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--auditor-family", type=str, default=argparse.SUPPRESS, help="Explicit model family for Independent Auditor")
     run_parser.add_argument("--auditor-fallback-models", type=str, default=argparse.SUPPRESS, help="Comma-separated fallback models for independent auditor")
     run_parser.add_argument("--audit-baseline", type=str, default=argparse.SUPPRESS, help="Baseline commit hash for independent audit comparison")
+    run_parser.add_argument("--audit-paths", type=str, default=argparse.SUPPRESS, help="Comma-separated git pathspecs to restrict independent audit diff")
+    run_parser.add_argument(
+        "--audit-max-diff-bytes",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="Maximum git diff bytes per independent audit request (default: 200000)",
+    )
     run_parser.add_argument(
         "--dashboard",
         action="store_true",
@@ -1526,6 +1550,7 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             verify_timeout, verify_timeout_source = resolve_verify_timeout(args.timeout, verify_script)
+            red_first_mode = resolve_red_first_mode(verify_script)
         except ValueError as timeout_err:
             print(f"CONFIG ERROR: {timeout_err}", file=sys.stderr)
             return 2
@@ -1598,6 +1623,83 @@ def main(argv: list[str] | None = None) -> int:
                     phase=phase,
                 )
                 return 11
+
+        red_first_payload: dict[str, Any] | None = None
+        if red_first_mode != "off":
+            if is_red_first_task(target.title):
+                try:
+                    target_test_files = find_changed_test_files(work_dir, args.checkpoint)
+                except RuntimeError as rf_err:
+                    effective_plan_path.write_text(original_plan_content, encoding="utf-8")
+                    print(f"RED_FIRST_ERROR: {rf_err}", file=sys.stderr)
+                    return 2
+                if not target_test_files:
+                    rf_result = "NO_TEST_CHANGES"
+                    rf_file_results: list[dict[str, Any]] = []
+                else:
+                    rf_check = verify_red_first_tests(
+                        work_dir,
+                        args.checkpoint,
+                        target_test_files,
+                        timeout_sec=RED_FIRST_FILE_TIMEOUT_SEC,
+                    )
+                    rf_result = str(rf_check["result"])
+                    rf_file_results = list(rf_check["file_results"])
+                red_first_payload = {
+                    "mode": red_first_mode,
+                    "result": rf_result,
+                    "test_files": target_test_files,
+                    "file_results": rf_file_results,
+                }
+                rf_attempt = metrics.count_verify_attempts(args.task_id, args.checkpoint, phase=phase) + 1
+                metrics.record_event(
+                    "red_first",
+                    task_id=args.task_id,
+                    checkpoint=args.checkpoint,
+                    mode=red_first_mode,
+                    result=rf_result,
+                    test_files=target_test_files,
+                    file_results=rf_file_results,
+                    attempt=rf_attempt,
+                    phase=phase,
+                )
+                if rf_result != "CONFIRMED":
+                    rf_summary = (
+                        ", ".join(f"{r['file']}={r['result']}({r['reason']})" for r in rf_file_results)
+                        if rf_file_results
+                        else "no changed test files"
+                    )
+                    if red_first_mode == "warn":
+                        print(
+                            f"RED_FIRST_WARNING: result={rf_result} files={target_test_files} ({rf_summary})",
+                            file=sys.stderr,
+                        )
+                    elif red_first_mode == "enforce":
+                        effective_plan_path.write_text(original_plan_content, encoding="utf-8")
+                        print(
+                            f"RED_FIRST_NOT_CONFIRMED: result={rf_result} files={target_test_files} ({rf_summary})",
+                            file=sys.stderr,
+                        )
+                        duration_sec = round(time.time() - start_time, 2)
+                        attempt = metrics.count_verify_attempts(args.task_id, args.checkpoint, phase=phase) + 1
+                        metrics.record_event(
+                            "verify_step",
+                            task_id=args.task_id,
+                            checkpoint=args.checkpoint,
+                            result="RED_FIRST_NOT_CONFIRMED",
+                            exit_code=1,
+                            duration_sec=duration_sec,
+                            attempt=attempt,
+                            phase=phase,
+                        )
+                        return 1
+            else:
+                red_first_payload = {
+                    "mode": red_first_mode,
+                    "result": "SKIPPED",
+                    "test_files": [],
+                    "file_results": [],
+                }
 
         code, out = verifier.run_verification(
             verify_script,
@@ -1680,6 +1782,7 @@ def main(argv: list[str] | None = None) -> int:
                     "output_summary": out_lines[-10:] if out_lines else [],
                 }
             },
+            red_first=red_first_payload,
         )
         metrics.record_event(
             "verify_step",
@@ -2166,6 +2269,17 @@ def main(argv: list[str] | None = None) -> int:
         diff_out = out_dir / "diff.patch"
         diff_out.write_bytes(diff_bytes)
 
+        red_first_data = review_evidence.get("red_first")
+        if not isinstance(red_first_data, dict):
+            red_first_data = {
+                "mode": "off",
+                "result": "OFF",
+                "test_files": [],
+                "file_results": [],
+            }
+        red_first_out = out_dir / "red_first.json"
+        red_first_out.write_text(json.dumps(red_first_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
         diff_sha256 = hashlib.sha256(diff_bytes).hexdigest()
         effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
         metrics = MetricsLog(
@@ -2420,10 +2534,18 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"REPORT_WARNING: Failed to generate standalone report: {e}", file=sys.stderr)
 
         if state_file.exists():
+            from auto_developer.evidence import resolve_evidence_records_dir
+
             state = JobState.load(state_file)
+            total_tasks = len(state.completed_tasks) + (1 if state.quarantined_task else 0)
+            if total_tasks == 0 and effective_plan_path.is_file():
+                try:
+                    total_tasks = len(TaskDispatcher().parse_plan(effective_plan_path))
+                except OSError:
+                    total_tasks = 0
             summary: dict[str, Any] = {
                 "status": state.status,
-                "total_tasks": len(state.completed_tasks) + (1 if state.quarantined_task else 0),
+                "total_tasks": total_tasks,
                 "succeeded_count": len(state.completed_tasks),
                 "quarantined_count": 1 if state.quarantined_task else 0,
                 "checkpoint": state.checkpoint_hash,
@@ -2432,6 +2554,19 @@ def main(argv: list[str] | None = None) -> int:
             }
             if mt_summary is not None:
                 summary["multi_team"] = mt_summary
+            else:
+                for cand_audit in [
+                    resolve_evidence_records_dir(work_dir) / "audit_stage.json",
+                    work_dir / ".dev" / "evidence" / "records" / "audit_stage.json",
+                    work_dir / ".git" / "nightly_evidence" / "audit_stage.json",
+                    work_dir / ".dev" / "audit_stage.json",
+                ]:
+                    if cand_audit.is_file():
+                        try:
+                            summary["audit_stage"] = json.loads(cand_audit.read_text(encoding="utf-8"))
+                            break
+                        except (json.JSONDecodeError, OSError):
+                            pass
             try:
                 reporter.write_report(
                     report_path,
@@ -2610,6 +2745,16 @@ def main(argv: list[str] | None = None) -> int:
         else []
     )
     audit_baseline = getattr(args, "audit_baseline", None)
+    raw_audit_paths = getattr(args, "audit_paths", None)
+    audit_paths = (
+        [p.strip() for p in raw_audit_paths.split(",") if p.strip()]
+        if raw_audit_paths
+        else None
+    )
+    audit_max_diff_bytes = int(getattr(args, "audit_max_diff_bytes", 200000))
+    if audit_max_diff_bytes <= 0:
+        print("CONFIG ERROR: --audit-max-diff-bytes must be a positive integer", file=sys.stderr)
+        return 2
     dry_run = bool(getattr(args, "dry_run", False))
     resume = bool(getattr(args, "resume", False))
     try:
@@ -2693,6 +2838,8 @@ def main(argv: list[str] | None = None) -> int:
         auditor_family=auditor_family,
         fallback_models=fallback_models,
         audit_baseline_commit=audit_baseline,
+        audit_paths=audit_paths,
+        audit_max_diff_bytes=audit_max_diff_bytes,
     )
     use_dashboard = bool(getattr(args, "dashboard", False)) and not dry_run
     prev_dash_env = os.environ.get("AUTO_DEV_DASHBOARD")

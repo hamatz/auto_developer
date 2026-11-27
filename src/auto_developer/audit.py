@@ -276,6 +276,212 @@ class AuditRunner:
         raise TypeError(f"Unsupported audit input type: {type(audit_input).__name__}")
 
 
+DEFAULT_AUDIT_PATHSPECS: tuple[str, ...] = (
+    ".",
+    ":(exclude)tests/",
+    ":(exclude)docs/",
+    ":(exclude)examples/",
+    ":(exclude)*.md",
+)
+
+DEFAULT_AUDIT_MAX_DIFF_BYTES: int = 200_000
+
+
+def resolve_audit_pathspecs(audit_paths: list[str] | tuple[str, ...] | None) -> list[str]:
+    """Resolve explicit audit pathspecs or fall back to default exclusions (AUDIT-6)."""
+    if audit_paths is None:
+        return list(DEFAULT_AUDIT_PATHSPECS)
+    cleaned = [str(p).strip() for p in audit_paths if str(p).strip()]
+    if not cleaned:
+        return list(DEFAULT_AUDIT_PATHSPECS)
+    return cleaned
+
+
+def pack_audit_diff_chunks(
+    file_diffs: list[tuple[str, str]],
+    max_diff_bytes: int,
+) -> list[dict[str, Any]]:
+    """Pack per-file diffs in path order into chunks within max_diff_bytes (AUDIT-7).
+
+    Files are never split mid-file. If a single file exceeds max_diff_bytes on its
+    own, it forms a single-file chunk with exceeds_max_diff_bytes=True.
+    """
+    import hashlib
+
+    if max_diff_bytes <= 0:
+        raise ValueError("audit_max_diff_bytes must be a positive integer")
+
+    sorted_items = sorted(file_diffs, key=lambda item: item[0])
+    chunks: list[dict[str, Any]] = []
+    cur_files: list[str] = []
+    cur_diffs: list[str] = []
+    cur_bytes = 0
+
+    def _flush() -> None:
+        nonlocal cur_files, cur_diffs, cur_bytes
+        if not cur_files:
+            return
+        combined = "".join(cur_diffs)
+        chunks.append(
+            {
+                "files": list(cur_files),
+                "diff": combined,
+                "diff_bytes": cur_bytes,
+                "exceeds_max_diff_bytes": len(cur_files) == 1 and cur_bytes > max_diff_bytes,
+                "diff_sha256": hashlib.sha256(combined.encode("utf-8")).hexdigest(),
+            }
+        )
+        cur_files = []
+        cur_diffs = []
+        cur_bytes = 0
+
+    for file_path, file_diff in sorted_items:
+        file_bytes = len(file_diff.encode("utf-8"))
+        if cur_files and cur_bytes + file_bytes > max_diff_bytes:
+            _flush()
+        cur_files.append(file_path)
+        cur_diffs.append(file_diff)
+        cur_bytes += file_bytes
+        if cur_bytes > max_diff_bytes:
+            _flush()
+
+    _flush()
+    return chunks
+
+
+def _unquote_git_path(quoted: str) -> str:
+    """Decode a C-quoted git path (without surrounding double quotes) into a UTF-8 string."""
+    out = bytearray()
+    i = 0
+    n = len(quoted)
+    escapes = {
+        "a": 7,
+        "b": 8,
+        "t": 9,
+        "n": 10,
+        "v": 11,
+        "f": 12,
+        "r": 13,
+        '"': ord('"'),
+        "\\": ord("\\"),
+    }
+    while i < n:
+        ch = quoted[i]
+        if ch == "\\" and i + 1 < n:
+            nxt = quoted[i + 1]
+            if nxt in escapes:
+                out.append(escapes[nxt])
+                i += 2
+                continue
+            if i + 3 < n and all(c in "01234567" for c in quoted[i + 1 : i + 4]):
+                out.append(int(quoted[i + 1 : i + 4], 8))
+                i += 4
+                continue
+        out.extend(ch.encode("utf-8"))
+        i += 1
+    return out.decode("utf-8", errors="replace")
+
+
+def _extract_path_from_diff_section(section: str) -> str:
+    """Extract the file path from a single file's git diff section."""
+    lines = section.splitlines()
+    if not lines:
+        return ""
+    header = lines[0]
+    if header.startswith("diff --git "):
+        rest = header[len("diff --git ") :]
+        if rest.startswith('"'):
+            i = 1
+            while i < len(rest):
+                if rest[i] == "\\" and i + 1 < len(rest):
+                    i += 2
+                    continue
+                if rest[i] == '"':
+                    unquoted = _unquote_git_path(rest[1:i])
+                    if unquoted.startswith("a/"):
+                        return unquoted[2:]
+                    return unquoted
+                i += 1
+        if rest.startswith("a/") and len(rest) >= 5 and (len(rest) - 1) % 2 == 0:
+            mid = (len(rest) - 1) // 2
+            left = rest[:mid]
+            right = rest[mid + 1 :]
+            if rest[mid] == " " and right.startswith("b/") and left[2:] == right[2:]:
+                return left[2:]
+    for line in lines[1:12]:
+        if line.startswith("rename to "):
+            return line[len("rename to ") :]
+        if line.startswith("+++ b/"):
+            return line[len("+++ b/") :]
+        if line.startswith("--- a/"):
+            return line[len("--- a/") :]
+    return header
+
+
+def split_git_diff_by_file(diff_text: str) -> list[tuple[str, str]]:
+    """Split a unified git diff output into (file_path, section_text) pairs."""
+    if not diff_text:
+        return []
+    sections: list[str] = []
+    cur_lines: list[str] = []
+    for line in diff_text.splitlines(keepends=True):
+        if line.startswith("diff --git ") and cur_lines:
+            sections.append("".join(cur_lines))
+            cur_lines = [line]
+        else:
+            cur_lines.append(line)
+    if cur_lines:
+        sections.append("".join(cur_lines))
+    return [(_extract_path_from_diff_section(sec), sec) for sec in sections]
+
+
+def verify_audit_chunks_match_full_diff(
+    full_diff: str,
+    packed_chunks: list[dict[str, Any]],
+) -> list[str]:
+    """Verify each file in full_diff appears in exactly one chunk with identical diff content (AUDIT-8).
+
+    Returns a sorted list of missing, duplicated, extra, or mismatched file paths.
+    """
+    full_map: dict[str, list[str]] = {}
+    for file_path, sec_text in split_git_diff_by_file(full_diff):
+        full_map.setdefault(file_path, []).append(sec_text)
+
+    chunk_map: dict[str, list[str]] = {}
+    for chunk in packed_chunks:
+        chunk_diff = str(chunk.get("diff", ""))
+        for file_path, sec_text in split_git_diff_by_file(chunk_diff):
+            chunk_map.setdefault(file_path, []).append(sec_text)
+
+    mismatched: list[str] = []
+    for file_path in sorted(set(full_map.keys()) | set(chunk_map.keys())):
+        f_secs = full_map.get(file_path, [])
+        c_secs = chunk_map.get(file_path, [])
+        if len(f_secs) != 1 or len(c_secs) != 1 or f_secs[0] != c_secs[0]:
+            mismatched.append(file_path)
+    return mismatched
+
+
+def extract_thinking_tokens(usage_dict: dict[str, Any] | None) -> int | None:
+    """usage 辞書から考えた部分（thinking / reasoning）のトークン数を抽出する。"""
+    if not isinstance(usage_dict, dict):
+        return None
+    candidates: list[Any] = [
+        usage_dict.get("thinking_tokens"),
+        usage_dict.get("thoughts_token_count"),
+    ]
+    out_details = usage_dict.get("output_tokens_details")
+    if isinstance(out_details, dict):
+        candidates.extend([out_details.get("thinking_tokens"), out_details.get("reasoning_tokens")])
+    comp_details = usage_dict.get("completion_tokens_details")
+    if isinstance(comp_details, dict):
+        candidates.append(comp_details.get("reasoning_tokens"))
+    for val in candidates:
+        if isinstance(val, int) and not isinstance(val, bool):
+            return val
+    return None
+
+
 class IndependentAuditRunner:
     """SPEC.md と git diff のみを厳格に入力とし、独立したLLMセッションから構造化 AuditFinding を抽出するランナー (EEE.2)。"""
 
@@ -322,7 +528,11 @@ class IndependentAuditRunner:
         maker_model: str | None = None,
         maker_family: str | None = None,
         auditor_family: str | None = None,
+        audit_paths: list[str] | None = None,
+        audit_max_diff_bytes: int = DEFAULT_AUDIT_MAX_DIFF_BYTES,
     ) -> None:
+        if audit_max_diff_bytes <= 0:
+            raise ValueError("audit_max_diff_bytes must be a positive integer")
         self.auditor_cmd_template = auditor_cmd_template
         self.model_name = model_name
         self.timeout_sec = timeout_sec
@@ -333,16 +543,41 @@ class IndependentAuditRunner:
         self.maker_model = maker_model or (config.maker_model if config else "gemini-3.8-flash")
         self.maker_family = maker_family if maker_family is not None else (config.maker_family if config else None)
         self.auditor_family = auditor_family if auditor_family is not None else (config.auditor_family if config else None)
+        self.audit_paths: list[str] | None = list(audit_paths) if audit_paths is not None else None
+        self.audit_max_diff_bytes: int = audit_max_diff_bytes
         self.audit_runner = AuditRunner()
         self.last_run_metadata: dict[str, Any] | None = None
         self._last_envelope_metadata: dict[str, Any] | None = None
 
-    def build_audit_prompt(self, spec_content: str, git_diff: str) -> str:
-        return (
+    def build_audit_prompt(
+        self,
+        spec_content: str,
+        git_diff: str,
+        chunk_index: int | None = None,
+        total_chunks: int | None = None,
+        other_chunk_files: list[str] | None = None,
+        exceeds_max_diff_bytes: bool = False,
+    ) -> str:
+        prompt = (
             self.DEFAULT_PROMPT_TEMPLATE
             .replace("{spec_content}", spec_content)
             .replace("{git_diff}", git_diff)
         )
+        if chunk_index is not None and total_chunks is not None:
+            others = other_chunk_files or []
+            others_block = "\n".join(f"- {p}" for p in others) if others else "- (none)"
+            exceed_note = (
+                "\nNote: This single-file chunk exceeds --audit-max-diff-bytes and could not be split further."
+                if exceeds_max_diff_bytes
+                else ""
+            )
+            chunk_header = (
+                f"--- AUDIT CHUNK CONTEXT ---\n"
+                f"This is chunk {chunk_index} of {total_chunks}.{exceed_note}\n"
+                f"Files in other chunks (paths only):\n{others_block}\n\n"
+            )
+            prompt = prompt.replace("--- GIT DIFF ---", f"{chunk_header}--- GIT DIFF ---", 1)
+        return prompt
 
     def parse_response(self, output: str) -> list[AuditFinding]:
         import json
@@ -669,12 +904,17 @@ class IndependentAuditRunner:
         return self.audit_runner.parse_findings(data)
 
     def audit(self, spec_content: str, git_diff: str) -> list[AuditFinding]:
+        prompt = self.build_audit_prompt(spec_content, git_diff)
+        findings, run_meta = self._run_audit_prompt(prompt)
+        self.last_run_metadata = run_meta
+        return findings
+
+    def _run_audit_prompt(self, prompt: str) -> tuple[list[AuditFinding], dict[str, Any]]:
         import hashlib
         import os
         import subprocess
         import tempfile
 
-        prompt = self.build_audit_prompt(spec_content, git_diff)
         raw_prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
         if not self.auditor_cmd_template:
@@ -783,7 +1023,7 @@ class IndependentAuditRunner:
                     candidate, cand_fam_override
                 )
 
-                self.last_run_metadata = {
+                run_meta: dict[str, Any] = {
                     "mode": mode,
                     "provider": provider,
                     "provider_request_id": provider_req_id,
@@ -805,7 +1045,7 @@ class IndependentAuditRunner:
                     "findings_count": len(findings),
                     "usage": envelope_meta.get("usage"),
                 }
-                return findings
+                return findings, run_meta
             except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as e:
                 last_error = e
                 continue
@@ -821,6 +1061,55 @@ class IndependentAuditRunner:
             f"NO_INDEPENDENT_AUDITOR_AVAILABLE: All candidate auditor models failed or were rejected by independence policy. Last error: {last_error}"
         )
 
+    @staticmethod
+    def _build_chunk_record(
+        chunk_index: int,
+        total_chunks: int,
+        files: list[str],
+        diff_bytes: int,
+        exceeds_max_diff_bytes: bool,
+        diff_sha256: str,
+        run_meta: dict[str, Any],
+        findings_count: int,
+    ) -> dict[str, Any]:
+        usage = run_meta.get("usage")
+        usage_dict = usage if isinstance(usage, dict) else None
+        return {
+            "chunk_index": chunk_index,
+            "total_chunks": total_chunks,
+            "files": list(files),
+            "diff_bytes": diff_bytes,
+            "exceeds_max_diff_bytes": exceeds_max_diff_bytes,
+            "diff_sha256": diff_sha256,
+            "mode": run_meta.get("mode"),
+            "provider": run_meta.get("provider"),
+            "provider_request_id": run_meta.get("provider_request_id"),
+            "execution_id": run_meta.get("execution_id"),
+            "stop_reason": run_meta.get("stop_reason"),
+            "status": run_meta.get("status", "COMPLETED"),
+            "input_tokens": usage_dict.get("input_tokens") if usage_dict else None,
+            "output_tokens": usage_dict.get("output_tokens") if usage_dict else None,
+            "thinking_tokens": extract_thinking_tokens(usage_dict),
+            "usage": usage_dict,
+            "findings_count": findings_count,
+        }
+
+    @staticmethod
+    def _build_unexecuted_chunk_record(
+        chunk_index: int,
+        total_chunks: int,
+        chunk: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "chunk_index": chunk_index,
+            "total_chunks": total_chunks,
+            "files": list(chunk["files"]),
+            "diff_bytes": chunk["diff_bytes"],
+            "exceeds_max_diff_bytes": chunk["exceeds_max_diff_bytes"],
+            "diff_sha256": chunk["diff_sha256"],
+            "status": "NOT_EXECUTED",
+        }
+
     def audit_repository(
         self,
         repo_dir: Path,
@@ -828,8 +1117,10 @@ class IndependentAuditRunner:
         baseline_commit: str | None = None,
         spec_path: Path | str | None = None,
         head_commit: str | None = None,
+        audit_paths: list[str] | None = None,
+        audit_max_diff_bytes: int | None = None,
     ) -> list[AuditFinding]:
-        """指定されたベースラインコミットからの diff およびコミット拘束された SPEC を抽出し、独立外部監査を実行する (RRR.1)。"""
+        """指定されたベースラインコミットからの diff およびコミット拘束された SPEC を抽出し、独立外部監査を実行する (RRR.1 / AUDIT-6)。"""
         import hashlib
         import subprocess
 
@@ -862,15 +1153,49 @@ class IndependentAuditRunner:
         )
         target_tree_sha = tree_res.stdout.strip()
 
-        # baseline から target までの git diff を厳格に抽出
+        effective_pathspecs = resolve_audit_pathspecs(audit_paths if audit_paths is not None else self.audit_paths)
+
+        # baseline から target までの git diff を範囲で絞って抽出 (AUDIT-6, AUDIT-8)
         diff_res = subprocess.run(
-            ["git", "diff", target_baseline, target_sha],
+            ["git", "-c", "core.quotePath=false", "diff", "--no-renames", target_baseline, target_sha, "--", *effective_pathspecs],
             cwd=repo_dir,
             capture_output=True,
             text=True,
             check=True,
         )
         git_diff = diff_res.stdout
+
+        name_res = subprocess.run(
+            ["git", "diff", "--no-renames", "-z", "--name-only", target_baseline, target_sha, "--", *effective_pathspecs],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        diff_files = [p for p in name_res.stdout.split("\0") if p]
+        diff_files_count = len(diff_files)
+        diff_bytes = len(git_diff.encode("utf-8"))
+
+        # 失敗時にも範囲と差分の規模を残せるよう先に基本情報を記録する (AUDIT-9)
+        self.last_run_metadata = {
+            "mode": "LIVE",
+            "provider": None,
+            "provider_request_id": None,
+            "auditor_model": self.model_name,
+            "maker_model": self.maker_model,
+            "status": "AUDIT_PENDING",
+            "baseline_commit": target_baseline,
+            "target_commit": target_sha,
+            "target_tree_sha": target_tree_sha,
+            "audit_paths": effective_pathspecs,
+            "diff_files_count": diff_files_count,
+            "diff_bytes": diff_bytes,
+            "empty_diff": (not git_diff.strip() and diff_files_count == 0),
+            "chunks": [],
+            "total_chunks": 0,
+            "executed_chunks": [],
+            "not_executed_chunks": [],
+        }
 
         # SPEC.md の内容を target_commit から厳密に抽出 (SSS.2 / Sol氏 Phase 58 P1指摘)
         # 作業ツリーへのフォールバックを完全撤廃し、コミット内に存在しない場合は Fail-Closed で即座に拒絶
@@ -901,23 +1226,268 @@ class IndependentAuditRunner:
         spec_sha256 = hashlib.sha256(spec_content.encode("utf-8")).hexdigest()
         diff_sha256 = hashlib.sha256(git_diff.encode("utf-8")).hexdigest()
 
-        findings = self.audit(spec_content=spec_content, git_diff=git_diff)
-        for finding in findings:
-            finding.baseline_commit = target_baseline
-            finding.target_commit = target_sha
-            finding.target_tree_sha = target_tree_sha
-            finding.spec_sha256 = spec_sha256
-            finding.diff_sha256 = diff_sha256
+        effective_max_bytes = (
+            audit_max_diff_bytes if audit_max_diff_bytes is not None else self.audit_max_diff_bytes
+        )
+        if effective_max_bytes <= 0:
+            raise ValueError("audit_max_diff_bytes must be a positive integer")
 
-        if self.last_run_metadata:
-            self.last_run_metadata.update({
+        if not git_diff.strip() and diff_files_count == 0:
+            self.last_run_metadata = {
+                "mode": "SKIPPED_EMPTY_DIFF",
+                "provider": None,
+                "provider_request_id": None,
+                "auditor_model": self.model_name,
+                "maker_model": self.maker_model,
+                "status": "COMPLETED",
+                "findings_count": 0,
                 "baseline_commit": target_baseline,
                 "target_commit": target_sha,
                 "target_tree_sha": target_tree_sha,
                 "spec_sha256": spec_sha256,
                 "diff_sha256": diff_sha256,
-            })
-        return findings
+                "audit_paths": effective_pathspecs,
+                "audit_max_diff_bytes": effective_max_bytes,
+                "diff_files_count": 0,
+                "diff_bytes": 0,
+                "empty_diff": True,
+                "chunks": [],
+                "total_chunks": 0,
+                "executed_chunks": [],
+                "not_executed_chunks": [],
+            }
+            return []
+
+        if diff_bytes <= effective_max_bytes:
+            try:
+                findings = self.audit(spec_content=spec_content, git_diff=git_diff)
+            except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as err:
+                failed_chunk_rec = {
+                    "chunk_index": 1,
+                    "total_chunks": 1,
+                    "files": sorted(diff_files),
+                    "diff_bytes": diff_bytes,
+                    "exceeds_max_diff_bytes": False,
+                    "diff_sha256": diff_sha256,
+                    "status": "AUDIT_PENDING",
+                    "error": str(err),
+                }
+                self.last_run_metadata = {
+                    "mode": "LIVE",
+                    "provider": None,
+                    "provider_request_id": None,
+                    "auditor_model": self.model_name,
+                    "maker_model": self.maker_model,
+                    "status": "AUDIT_PENDING",
+                    "baseline_commit": target_baseline,
+                    "target_commit": target_sha,
+                    "target_tree_sha": target_tree_sha,
+                    "spec_sha256": spec_sha256,
+                    "diff_sha256": diff_sha256,
+                    "audit_paths": effective_pathspecs,
+                    "audit_max_diff_bytes": effective_max_bytes,
+                    "diff_files_count": diff_files_count,
+                    "diff_bytes": diff_bytes,
+                    "empty_diff": False,
+                    "chunks": [failed_chunk_rec],
+                    "total_chunks": 1,
+                    "failed_chunk_index": 1,
+                    "executed_chunks": [1],
+                    "not_executed_chunks": [],
+                }
+                raise
+            for finding in findings:
+                finding.baseline_commit = target_baseline
+                finding.target_commit = target_sha
+                finding.target_tree_sha = target_tree_sha
+                finding.spec_sha256 = spec_sha256
+                finding.diff_sha256 = diff_sha256
+
+            if self.last_run_metadata:
+                chunk_rec = self._build_chunk_record(
+                    chunk_index=1,
+                    total_chunks=1,
+                    files=sorted(diff_files),
+                    diff_bytes=diff_bytes,
+                    exceeds_max_diff_bytes=False,
+                    diff_sha256=diff_sha256,
+                    run_meta=self.last_run_metadata,
+                    findings_count=len(findings),
+                )
+                self.last_run_metadata.update({
+                    "baseline_commit": target_baseline,
+                    "target_commit": target_sha,
+                    "target_tree_sha": target_tree_sha,
+                    "spec_sha256": spec_sha256,
+                    "diff_sha256": diff_sha256,
+                    "audit_paths": effective_pathspecs,
+                    "audit_max_diff_bytes": effective_max_bytes,
+                    "diff_files_count": diff_files_count,
+                    "diff_bytes": diff_bytes,
+                    "empty_diff": False,
+                    "chunks": [chunk_rec],
+                    "total_chunks": 1,
+                    "executed_chunks": [1],
+                    "not_executed_chunks": [],
+                })
+            return findings
+
+        # AUDIT-7: 差分が上限を超えるためファイル単位で分割して監査する
+        file_diffs: list[tuple[str, str]] = []
+        for file_path in sorted(diff_files):
+            f_res = subprocess.run(
+                ["git", "-c", "core.quotePath=false", "diff", "--no-renames", target_baseline, target_sha, "--", file_path],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            file_diffs.append((file_path, f_res.stdout))
+
+        packed_chunks = pack_audit_diff_chunks(file_diffs, effective_max_bytes)
+        mismatched_files = verify_audit_chunks_match_full_diff(git_diff, packed_chunks)
+        if mismatched_files:
+            mismatch_total = len(packed_chunks)
+            mismatch_chunks = [
+                self._build_unexecuted_chunk_record(c_idx, mismatch_total, c)
+                for c_idx, c in enumerate(packed_chunks, 1)
+            ]
+            self.last_run_metadata = {
+                "mode": "LIVE",
+                "provider": None,
+                "provider_request_id": None,
+                "auditor_model": self.model_name,
+                "maker_model": self.maker_model,
+                "status": "AUDIT_PENDING",
+                "baseline_commit": target_baseline,
+                "target_commit": target_sha,
+                "target_tree_sha": target_tree_sha,
+                "spec_sha256": spec_sha256,
+                "diff_sha256": diff_sha256,
+                "audit_paths": effective_pathspecs,
+                "audit_max_diff_bytes": effective_max_bytes,
+                "diff_files_count": diff_files_count,
+                "diff_bytes": diff_bytes,
+                "empty_diff": False,
+                "chunks": mismatch_chunks,
+                "total_chunks": mismatch_total,
+                "executed_chunks": [],
+                "not_executed_chunks": list(range(1, mismatch_total + 1)),
+                "mismatched_files": mismatched_files,
+            }
+            raise RuntimeError(
+                f"AUDIT_CHUNK_MISMATCH: chunked diff does not match full diff for files: {', '.join(mismatched_files)}"
+            )
+        total_chunks = len(packed_chunks)
+        all_findings: list[AuditFinding] = []
+        chunk_records: list[dict[str, Any]] = []
+        first_meta: dict[str, Any] | None = None
+
+        for idx, chunk in enumerate(packed_chunks, 1):
+            other_files = [
+                p
+                for c_idx, c in enumerate(packed_chunks, 1)
+                if c_idx != idx
+                for p in c["files"]
+            ]
+            prompt = self.build_audit_prompt(
+                spec_content=spec_content,
+                git_diff=chunk["diff"],
+                chunk_index=idx,
+                total_chunks=total_chunks,
+                other_chunk_files=other_files,
+                exceeds_max_diff_bytes=chunk["exceeds_max_diff_bytes"],
+            )
+            try:
+                chunk_findings, chunk_meta = self._run_audit_prompt(prompt)
+            except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as err:
+                chunk_records.append(
+                    {
+                        "chunk_index": idx,
+                        "total_chunks": total_chunks,
+                        "files": list(chunk["files"]),
+                        "diff_bytes": chunk["diff_bytes"],
+                        "exceeds_max_diff_bytes": chunk["exceeds_max_diff_bytes"],
+                        "diff_sha256": chunk["diff_sha256"],
+                        "status": "AUDIT_PENDING",
+                        "error": str(err),
+                    }
+                )
+                for rem_idx in range(idx + 1, total_chunks + 1):
+                    chunk_records.append(
+                        self._build_unexecuted_chunk_record(
+                            rem_idx, total_chunks, packed_chunks[rem_idx - 1]
+                        )
+                    )
+                self.last_run_metadata = {
+                    "mode": first_meta.get("mode", "LIVE") if first_meta else "LIVE",
+                    "provider": first_meta.get("provider") if first_meta else None,
+                    "provider_request_id": first_meta.get("provider_request_id") if first_meta else None,
+                    "auditor_model": self.model_name,
+                    "maker_model": self.maker_model,
+                    "status": "AUDIT_PENDING",
+                    "baseline_commit": target_baseline,
+                    "target_commit": target_sha,
+                    "target_tree_sha": target_tree_sha,
+                    "spec_sha256": spec_sha256,
+                    "diff_sha256": diff_sha256,
+                    "audit_paths": effective_pathspecs,
+                    "audit_max_diff_bytes": effective_max_bytes,
+                    "diff_files_count": diff_files_count,
+                    "diff_bytes": diff_bytes,
+                    "empty_diff": False,
+                    "chunks": chunk_records,
+                    "total_chunks": total_chunks,
+                    "failed_chunk_index": idx,
+                    "executed_chunks": list(range(1, idx + 1)),
+                    "not_executed_chunks": list(range(idx + 1, total_chunks + 1)),
+                }
+                raise RuntimeError(
+                    f"AUDIT_CHUNK_FAILED (chunk {idx}/{total_chunks}): {err}"
+                ) from err
+
+            if first_meta is None:
+                first_meta = chunk_meta
+            for finding in chunk_findings:
+                finding.baseline_commit = target_baseline
+                finding.target_commit = target_sha
+                finding.target_tree_sha = target_tree_sha
+                finding.spec_sha256 = spec_sha256
+                finding.diff_sha256 = diff_sha256
+            all_findings.extend(chunk_findings)
+            chunk_records.append(
+                self._build_chunk_record(
+                    chunk_index=idx,
+                    total_chunks=total_chunks,
+                    files=chunk["files"],
+                    diff_bytes=chunk["diff_bytes"],
+                    exceeds_max_diff_bytes=chunk["exceeds_max_diff_bytes"],
+                    diff_sha256=chunk["diff_sha256"],
+                    run_meta=chunk_meta,
+                    findings_count=len(chunk_findings),
+                )
+            )
+
+        merged_meta = dict(first_meta or {})
+        merged_meta.update({
+            "baseline_commit": target_baseline,
+            "target_commit": target_sha,
+            "target_tree_sha": target_tree_sha,
+            "spec_sha256": spec_sha256,
+            "diff_sha256": diff_sha256,
+            "audit_paths": effective_pathspecs,
+            "audit_max_diff_bytes": effective_max_bytes,
+            "diff_files_count": diff_files_count,
+            "diff_bytes": diff_bytes,
+            "empty_diff": False,
+            "findings_count": len(all_findings),
+            "chunks": chunk_records,
+            "total_chunks": total_chunks,
+            "executed_chunks": list(range(1, total_chunks + 1)),
+            "not_executed_chunks": [],
+        })
+        self.last_run_metadata = merged_meta
+        return all_findings
 
     def screen_and_dispatch_findings(
         self,

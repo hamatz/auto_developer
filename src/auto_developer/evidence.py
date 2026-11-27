@@ -120,6 +120,7 @@ class EvidenceStore:
         tree_sha: str = "",
         spec_sha: str = "",
         details: dict[str, Any] | None = None,
+        red_first: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """検証合格の証跡を発行し、.git 配下に永続化する。"""
         import hashlib
@@ -130,7 +131,7 @@ class EvidenceStore:
         now = time.time()
         raw = f"{task_id}:{checkpoint}:{tree_sha}:{spec_sha}:{now}"
         token = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        evidence = {
+        evidence: dict[str, Any] = {
             "task_id": task_id,
             "checkpoint": checkpoint,
             "tree_sha": tree_sha,
@@ -139,6 +140,8 @@ class EvidenceStore:
             "token": token,
             "details": details or {},
         }
+        if red_first is not None:
+            evidence["red_first"] = red_first
         path = self.evidence_dir / f"task_{task_id}.json"
         path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
         return evidence

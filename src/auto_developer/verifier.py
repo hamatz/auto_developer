@@ -15,7 +15,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 try:
@@ -1003,6 +1003,94 @@ def resolve_verify_timeout(cli_timeout: int | None, script_path: Path | None) ->
     return DEFAULT_VERIFY_TIMEOUT_SEC, f"default ({DEFAULT_VERIFY_TIMEOUT_SEC}s)"
 
 
+DEFAULT_RED_FIRST_MODE = "warn"
+RED_FIRST_MODES = frozenset({"off", "warn", "enforce"})
+RED_FIRST_DIRECTIVE_RE = re.compile(r"^\s*#\s*auto-dev:\s*red-first\s*=\s*(.*?)\s*$")
+RED_FIRST_FILE_TIMEOUT_SEC = 120
+_RED_FIRST_CONFIRMED_REASONS = frozenset(
+    {"GENUINE_RED", "IMPORT_ERROR", "UNHANDLED_EXCEPTION", "SETUP_ERROR"}
+)
+_RED_FIRST_SANDBOX_REASONS = frozenset({"SANDBOX_UNAVAILABLE", "ROOT_EXECUTION_FORBIDDEN"})
+
+
+def resolve_red_first_mode(script_path: Path | None) -> str:
+    """検証スクリプト先頭 20 行以内の `# auto-dev: red-first=<off|warn|enforce>` を解決する。"""
+    if script_path is not None and script_path.exists() and script_path.is_file():
+        lines = script_path.read_text(encoding="utf-8", errors="replace").splitlines()[
+            :VERIFY_TIMEOUT_DIRECTIVE_SCAN_LINES
+        ]
+        for line in lines:
+            match = RED_FIRST_DIRECTIVE_RE.match(line)
+            if not match:
+                continue
+            raw_val = match.group(1).strip()
+            if raw_val not in RED_FIRST_MODES:
+                raise ValueError(
+                    f"Invalid '# auto-dev: red-first=' value '{raw_val}' in {script_path}: "
+                    "must be one of off, warn, enforce."
+                )
+            return raw_val
+    return DEFAULT_RED_FIRST_MODE
+
+
+def is_red_first_task(title: str) -> bool:
+    """タスクの題名が Red-First の対象（`Red-First` または `Red:` を含む）か判定する。"""
+    return "Red-First" in title or "Red:" in title
+
+
+def is_target_python_test_file(rel_path: str) -> bool:
+    """GATE-16 の対象テストファイル（`tests/immunity/` を除く `test_*.py` / `*_test.py`）か判定する。"""
+    posix_path = PurePosixPath(rel_path)
+    parts = posix_path.parts
+    if len(parts) >= 2 and parts[0] == "tests" and parts[1] == "immunity":
+        return False
+    name = posix_path.name
+    return (name.startswith("test_") and name.endswith(".py")) or name.endswith("_test.py")
+
+
+def find_changed_test_files(repo_dir: Path, checkpoint: str) -> list[str]:
+    """チェックポイントから作業ツリーまでに追加・変更された対象 Python テストファイルを返す。"""
+    diff_proc = subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--diff-filter=ACM",
+            checkpoint,
+        ],
+        cwd=repo_dir,
+        capture_output=True,
+        check=False,
+    )
+    if diff_proc.returncode != 0:
+        err = diff_proc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"git diff failed while finding changed test files: {err}")
+
+    untracked_proc = subprocess.run(
+        ["git", "-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=repo_dir,
+        capture_output=True,
+        check=False,
+    )
+    if untracked_proc.returncode != 0:
+        err = untracked_proc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"git ls-files failed while finding changed test files: {err}")
+
+    candidates: set[str] = set()
+    for raw_output in (diff_proc.stdout, untracked_proc.stdout):
+        for raw_entry in raw_output.split(b"\x00"):
+            if not raw_entry:
+                continue
+            rel_path = raw_entry.decode("utf-8", errors="replace")
+            if is_target_python_test_file(rel_path) and (repo_dir / rel_path).is_file():
+                candidates.add(rel_path)
+    return sorted(candidates)
+
+
 class DeterministicVerifier:
     """ローカル検証スクリプトの実行と判定を担当。"""
 
@@ -1413,6 +1501,48 @@ class RedTestVerifier:
         code = test_file_path.read_text(encoding="utf-8")
         return self.verify_candidate_test(code, timeout_sec=timeout_sec)
 
+    def verify_red_first_test(
+        self,
+        rel_path: str,
+        test_code: str,
+        timeout_sec: int = RED_FIRST_FILE_TIMEOUT_SEC,
+        commit: str | None = None,
+    ) -> RedVerificationResult:
+        """GATE-17: 変更されたテストファイルをチェックポイント時点のコードに対してサンドボックス実行する。"""
+        try:
+            ast.parse(test_code)
+        except SyntaxError as e:
+            return RedVerificationResult(
+                is_reproduced=False,
+                exit_code=1,
+                reason="SYNTAX_ERROR",
+                output=str(e),
+                reason_detail=f"SyntaxError: {e}",
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            clone_path = Path(tmpdir) / "isolated_repo"
+            try:
+                self._create_isolated_clone(clone_path, commit=commit)
+            except CommitCheckoutError as e:
+                return RedVerificationResult(
+                    is_reproduced=False,
+                    exit_code=1,
+                    reason="COMMIT_CHECKOUT_FAILED",
+                    output=f"COMMIT_CHECKOUT_FAILED: {e}",
+                    reason_detail=str(e),
+                )
+            test_file = clone_path / rel_path
+            test_file.parent.mkdir(parents=True, exist_ok=True)
+            test_file.write_text(test_code, encoding="utf-8")
+            return self._execute_test(
+                test_file,
+                str(test_file.parent),
+                timeout_sec,
+                sandbox_dir=clone_path,
+                tracer_root=str(clone_path),
+            )
+
     RUNNER_CODE = """
 import json
 import os
@@ -1423,6 +1553,7 @@ from pathlib import Path
 search_dir = sys.argv[1]
 pattern = sys.argv[2]
 protected_repo = sys.argv[3] if len(sys.argv) > 3 else ""
+tracer_root = sys.argv[4] if len(sys.argv) > 4 else search_dir
 
 if protected_repo:
     try:
@@ -1495,9 +1626,9 @@ result = unittest.TestResult()
 
 executed_product_code = False
 try:
-    resolved_search = str(Path(search_dir).resolve())
+    resolved_search = str(Path(tracer_root).resolve())
 except Exception:
-    resolved_search = search_dir
+    resolved_search = tracer_root
 
 def _product_code_tracer(frame, event, arg):
     global executed_product_code
@@ -1507,7 +1638,8 @@ def _product_code_tracer(frame, event, arg):
             try:
                 rel = os.path.relpath(fn, resolved_search)
                 parts = Path(rel).parts
-                is_test_file = Path(rel).name.startswith("test_") or "tests" in parts
+                name = Path(rel).name
+                is_test_file = name.startswith("test_") or name.endswith("_test.py") or "tests" in parts
                 if not is_test_file:
                     executed_product_code = True
             except Exception:
@@ -1888,6 +2020,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         search_dir: str,
         timeout_sec: int,
         sandbox_dir: Path | None = None,
+        tracer_root: str | None = None,
     ) -> RedVerificationResult:
         """構造化 TestResult を用いて候補テストを実行し、Red/Green/無効を判定する。
         本体リポジトリ汚染を防ぐため、実行作業ディレクトリは使い捨ての一時クローン sandbox_dir に隔離し、
@@ -1966,6 +2099,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             search_dir,
             test_file.name,
             str(repo_resolved),
+            tracer_root or search_dir,
         ]
 
         profile_file: Path | None = None
@@ -2438,3 +2572,71 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             failures=fail_count,
             errors=err_count,
         )
+
+
+def _classify_red_first_file_result(res: RedVerificationResult) -> str:
+    """RedVerificationResult の reason を GATE-17 のファイル単位の判定へ変換する。"""
+    if res.reason in _RED_FIRST_CONFIRMED_REASONS:
+        return "CONFIRMED"
+    if res.reason in _RED_FIRST_SANDBOX_REASONS:
+        return "SANDBOX_UNAVAILABLE"
+    if res.reason == "TIMEOUT":
+        return "TIMEOUT"
+    return "NOT_RED"
+
+
+def verify_red_first_tests(
+    repo_dir: Path,
+    checkpoint: str,
+    test_files: list[str],
+    timeout_sec: int = RED_FIRST_FILE_TIMEOUT_SEC,
+) -> dict[str, Any]:
+    """GATE-17: 対象テストファイルをチェックポイント時点のコードに対してサンドボックス実行し集計する。"""
+    if not test_files:
+        return {"result": "NO_TEST_CHANGES", "file_results": []}
+
+    verifier = RedTestVerifier(repo_dir=repo_dir)
+    file_results: list[dict[str, Any]] = []
+    for rel_path in test_files:
+        test_path = repo_dir / rel_path
+        try:
+            test_code = test_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            file_results.append(
+                {
+                    "file": rel_path,
+                    "result": "NOT_RED",
+                    "reason": "EXECUTION_ERROR",
+                    "reason_detail": f"Failed to read test file: {e}",
+                }
+            )
+            continue
+        res = verifier.verify_red_first_test(
+            rel_path,
+            test_code,
+            timeout_sec=timeout_sec,
+            commit=checkpoint,
+        )
+        file_results.append(
+            {
+                "file": rel_path,
+                "result": _classify_red_first_file_result(res),
+                "reason": res.reason,
+                "reason_detail": res.reason_detail,
+            }
+        )
+
+    statuses = [entry["result"] for entry in file_results]
+    if "CONFIRMED" in statuses:
+        overall = "CONFIRMED"
+    elif "SANDBOX_UNAVAILABLE" in statuses:
+        overall = "SANDBOX_UNAVAILABLE"
+    elif "TIMEOUT" in statuses:
+        overall = "TIMEOUT"
+    else:
+        overall = "NOT_RED"
+
+    return {
+        "result": overall,
+        "file_results": file_results,
+    }

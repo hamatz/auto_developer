@@ -57,7 +57,13 @@ def format_snapshot_only_files_lines(
             rel_path = str(entry.get("path") or "")
             sha = str(entry.get("sha") or "")
             if rel_path and sha:
-                lines.append(f"  - {rel_path}: git cat-file -p {sha} > {shlex.quote(rel_path)}")
+                parent_dir = Path(rel_path).parent.as_posix()
+                cat_cmd = f"git cat-file -p {sha} > {shlex.quote(rel_path)}"
+                if parent_dir and parent_dir != ".":
+                    cmd = f"mkdir -p {shlex.quote(parent_dir)} && {cat_cmd}"
+                else:
+                    cmd = cat_cmd
+                lines.append(f"  - {rel_path}: {cmd}")
     return lines
 
 

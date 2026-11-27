@@ -4,30 +4,31 @@
 現在のタスク進捗と次の一手。会話ログではなく、ここに状態を残す。
 実装エージェントは1回に1ステップだけを担当し、終わったらチェックを付けてコミットする。
 セッションが切れても、SPEC.md・このファイル・git の履歴を読めば作業を再開できる状態に保つ。
-前のフェーズの PLAN は git の履歴で参照する（Phase 77 は 35c583d 時点の PLAN.md）。
+前のフェーズの PLAN は git の履歴で参照する（Phase 79 は 1b61d87 時点の PLAN.md）。
 -->
 
 ## 現在の目標
-- Phase 78: v0.10.0 のリリース（SPEC.md 5.1: GATE-15, STAT-12, REL-6）
-  - 要件ごとの影響分析と設計の判断は docs/contracts/phase78.md を参照する。
-  - README・CHANGELOG・リリースノート・README の GIF は、人間が準備のコミットで書いた。Maker は変更しない。
-- スコープ外: v0.11 のテーマ（docs/contracts/v0.11-draft.md）、BACKLOG の P3。
+- Phase 80: 監査の分割の修正と、Red-First の確認（SPEC.md 5.1: AUDIT-8, AUDIT-9, GATE-16, GATE-17）。v0.11 のテーマ G（柔らかい規則を硬い関門に）の最初。
+  - 要件ごとの影響分析と設計の判断は docs/contracts/phase80.md を参照する。
+  - v0.11 の全体の方向は docs/contracts/v0.11-draft.md（5 章の3点は 2026-11-27 に決定）。
+- スコープ外: `run` / `teams run` の経路の Red-First の確認、このリポジトリでの `enforce` への切り替え（いずれも Phase 81 以降で判断）。
 
-## 作業手順（Phase 78・LESSONS.md に基づく）
-- Maker と Checker は別系統のモデルにする（`commit-step` が終了コード 4 で強制する）。使うモデルを変えたときは、この節と「記録」に書く。
+## 作業手順（Phase 80・LESSONS.md に基づく）
+- 各行の印: 【機械】はツールが守る（破れば止まる・拒否される）。【手順】はエージェントが読んで守る。【手順】の行を、フェーズごとに機械に移して減らしていく（v0.11-draft の 2.2）。
+- 【機械】 Maker と Checker は別系統のモデルにする（`commit-step` が終了コード 4 で強制する）。使うモデルを変えたときは、この節と「記録」に書く。
   - Maker: `gemini-4-hydrogen-medium`
   - Checker: `claude-sonnet-5-5`（Anthropic API 利用。環境変数 `ANTHROPIC_API_KEY` を利用）
-- **検証の制限時間**: 検証スクリプトの先頭の行（`# auto-dev: verify-timeout=1200`）で決まる（DX-13）。`auto-dev verify-step --checkpoint <SHA> --task-id <n>` でよい。打ち切られた場合は、出力の案内に従う。
-- **Checker の完了の通知だけでは、次に進まない。** Checker のプロセスが終わり、出力ファイルから判定が1つに決まること（GATE-5 の判定の読み取りの規則）を確かめてから記録する。
-- Checker には、指摘は要点だけにして、判定（`DECISION: APPROVE` / `DECISION: REJECT` の行、または出力全体が1つの JSON）を必ず出力の最後に書くよう求める。Checker の出力の上限（`max_tokens`）は 16384 にする（4096 では、考える部分と合わせて出力が途中で切れることがあった）。
-- Checker への入力は、要約・再構成しない。
-  1. SPEC の該当節: `awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_phase78.md`
-  2. 差分: `auto-dev review-input --task-id <n> --out-dir .dev/checker/p78_task<n>`（やり直したときは `_v2` などを付ける）
-  3. Checker の出力: `.dev/checker/review_p78_task<n>.txt` に置く（やり直したときは `_v2` などを付け、上書きしない）。
-- Checker には、SPEC の要件のうち、例外・異常系・境界値の扱いを満たしているかを、差分とテストの両方で確かめるよう求める。後のステップで加える予定のもの（PLAN のステップの一覧を Checker に渡す）がまだないことは、REJECT の理由にしないよう伝える。README・CHANGELOG・リリースノートは人間が書くもので、Maker の差分には含まれないことも伝える。
-- verify-step の前に `git status --porcelain` を確認し、意図しないファイルがないことを確かめる。実験は `mktemp -d` の中で行う。
-- `--checkpoint` にはコミットの SHA を渡す（`git rev-parse HEAD`）。
-- 査読記録の順序（**この順番を崩さない**）:
+- 【機械】 **検証の制限時間**: 検証スクリプトの先頭の行（`# auto-dev: verify-timeout=1200`）で決まる（DX-13）。`auto-dev verify-step --checkpoint <SHA> --task-id <n>` でよい。打ち切られた場合は、出力の案内に従う。
+- 【機械】 **Checker の完了の通知だけでは、次に進まない。** Checker のプロセスが終わり、出力ファイルから判定が1つに決まること（GATE-5 の判定の読み取りの規則）を確かめてから記録する。
+- 【手順】 Checker には、指摘は要点だけにして、判定（`DECISION: APPROVE` / `DECISION: REJECT` の行、または出力全体が1つの JSON）を必ず出力の最後に書くよう求める。Checker の出力の上限（`max_tokens`）は 16384 にする（4096 では、考える部分と合わせて出力が途中で切れることがあった）。
+- 【機械】 Checker への入力は、要約・再構成しない。
+  1. SPEC の該当節: `awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_phase80.md`
+  2. 差分: `auto-dev review-input --task-id <n> --out-dir .dev/checker/p80_task<n>`（やり直したときは `_v2` などを付ける）
+  3. Checker の出力: `.dev/checker/review_p80_task<n>.txt` に置く（やり直したときは `_v2` などを付け、上書きしない）。
+- 【手順】 Checker には、SPEC の要件のうち、例外・異常系・境界値の扱いを満たしているかを、差分とテストの両方で確かめるよう求める。後のステップで加える予定のもの（PLAN のステップの一覧を Checker に渡す）がまだないことは、REJECT の理由にしないよう伝える。テストで本物の監査役（外部の API）を呼ばないことも伝える（監査役はテストの中で置き換える）。
+- 【手順】 verify-step の前に `git status --porcelain` を確認し、意図しないファイルがないことを確かめる。実験は `mktemp -d` の中で行う。
+- 【機械】 `--checkpoint` にはコミットの SHA を渡す（`git rev-parse HEAD`）。
+- 【機械（同じ入力で Checker を2回実行しないことだけは手順）】 査読記録の順序（**この順番を崩さない**）:
   1. `auto-dev verify-step --checkpoint <SHA> --task-id <n>`
   2. 検証が通った後に、`review-input` で差分を作る。**検証の後に作業ツリーを変えたら、1 からやり直す。** 検証の前に `review-input` や Checker を実行しない（Phase 73 のタスク 5 では、検証の前に査読を行い、その出力を記録しなかった）。
   3. Checker の査読。**1回の verify-step に対して、Checker は1回だけ実行する。** 出力が途中で切れて判定が読み取れない場合だけ、その出力ファイルを残したまま（上書きしない）、1回だけ実行し直してよい。そのことを「記録」に書く。
@@ -36,53 +37,60 @@
   6. APPROVE なら `auto-dev commit-step --task-id <n> --checkpoint <SHA> --maker-model <maker> --checker-model <checker> --checker-reason "<reason>"`
   7. commit-step が終了コード 3 で拒否されたら、verify-step からやり直す。再検証した後も、査読と record-review をやり直す。
   8. commit-step が終了コード 4 で拒否されたら、原因を「止まっていること・判断待ち」に書いて止まる。引数を変えて再実行しない。
-- 同じタスクで、検証の失敗（`verify-step` の失敗）と査読の不承認（REJECT、または実行し直しても判定が読み取れない）を合わせて、2回続けて失敗したら、INV-4 に従って隔離して止まる。たとえば「REJECT → 手直し → 検証の失敗」も2回続けての失敗に数える（Phase 77 のステップ 2 では、これを数えずに3回目の検証に進んだ）。
-- 隔離したときは、`rollback-step` の案内（RCV-6・RCV-7）に従い、隔離ブランチの差分だけでなく、スナップショットにだけある新しいファイルと、Git のオブジェクトとして残したファイル（取り出し方つき）も報告に書く。
-- 人間の承認を PLAN.md に記録するコミットは、`git commit -m "docs(plan): ..." -- PLAN.md` の形にする。**ステップの途中（verify-step の後、commit-step の前）には PLAN.md を変えない**（Evidence の Tree SHA と合わなくなる）。
-- CLI の引数を変えるステップでは、同じステップで `python scripts/gen_cli_reference.py` を実行して `docs/cli.md` を作り直す（DX-4 のテストが一致を確かめる）。
-- コミットした後に欠陥が見つかった場合は、`git reset` などで正規の経路の外から巻き戻さない。「止まっていること・判断待ち」に書いて止まり、修正は新しいステップとして行う。
-- テストを書く途中で製品の欠陥に気づいた場合は、テスト側で回避しない。「止まっていること・判断待ち」に書いて止まる（AGENTS.md Rule 4）。
-- 「既存テスト変更の理由」に書いていない既存テストが失敗した場合は、変更せずに止まって報告する。
-- E2E テストで作る一時リポジトリ・worktree は、必ず `tempfile` の中に作る。`git init` には必ず `-b <ブランチ名>` を付ける。
-- サブプロセスを起動するテストでは、`PYTHONDONTWRITEBYTECODE` と `PYTHONPYCACHEPREFIX` を環境から外して実行する。
-- テストでは、Python 3.10 にないモジュール（`tomllib` など）を使わない（CI は 3.10 と 3.12 で動く）。
-- テストで、秘密鍵などに見える目印（`-----BEGIN PRIVATE KEY-----` など）を使うときは、ソースにそのまま書かず、実行時に組み立てる（例: `"-----BEGIN " + "PRIVATE KEY-----"`）。CI の gitleaks が、本物の秘密として検知して失敗する（Phase 75 の RCV-7 のテストで起きた）。
-- `sys.platform` で分岐する処理を書くときは、分岐の前で変数の型を宣言する。
-- 各ステップの検証は手元の macOS で行う。Linux での確認は人間が行う。
-- SPEC.md はフェーズの途中で変えない。SPEC にあいまいさや矛盾を見つけたら、止まって報告する。
-- Bundle を生成した後に、SPEC.md や追跡ファイルを変更しない。
-- 各ステップは `auto-dev pre-flight` で始める（`task_start` のイベントが書かれ、ダッシュボードの時系列に Maker の開始が出る。Phase 76 のステップ 2〜5 では呼ばれていなかった）。
+- 【機械】 同じタスクで、検証の失敗（`verify-step` の失敗）と査読の不承認（REJECT、または実行し直しても判定が読み取れない）を合わせて、2回続けて失敗したら、INV-4 に従って隔離して止まる。たとえば「REJECT → 手直し → 検証の失敗」も2回続けての失敗に数える（Phase 77 のステップ 2 では、これを数えずに3回目の検証に進んだ）。
+- 【手順】 隔離したときは、`rollback-step` の案内（RCV-6・RCV-7）に従い、隔離ブランチの差分だけでなく、スナップショットにだけある新しいファイルと、Git のオブジェクトとして残したファイル（取り出し方つき）も報告に書く。
+- 【手順（ステップの途中の変更は、commit-step が検知する）】 人間の承認を PLAN.md に記録するコミットは、`git commit -m "docs(plan): ..." -- PLAN.md` の形にする。**ステップの途中（verify-step の後、commit-step の前）には PLAN.md を変えない**（Evidence の Tree SHA と合わなくなる）。
+- 【機械】 CLI の引数を変えるステップでは、同じステップで `python scripts/gen_cli_reference.py` を実行して `docs/cli.md` を作り直す（DX-4 のテストが一致を確かめる）。
+- 【手順】 コミットした後に欠陥が見つかった場合は、`git reset` などで正規の経路の外から巻き戻さない。「止まっていること・判断待ち」に書いて止まり、修正は新しいステップとして行う。
+- 【手順】 テストを書く途中で製品の欠陥に気づいた場合は、テスト側で回避しない。「止まっていること・判断待ち」に書いて止まる（AGENTS.md Rule 4）。
+- 【手順】 「既存テスト変更の理由」に書いていない既存テストが失敗した場合は、変更せずに止まって報告する。
+- 【手順】 E2E テストで作る一時リポジトリ・worktree は、必ず `tempfile` の中に作る。`git init` には必ず `-b <ブランチ名>` を付ける。
+- 【手順】 サブプロセスを起動するテストでは、`PYTHONDONTWRITEBYTECODE` と `PYTHONPYCACHEPREFIX` を環境から外して実行する。
+- 【手順（CI の 3.10 で検知）】 テストでは、Python 3.10 にないモジュール（`tomllib` など）を使わない（CI は 3.10 と 3.12 で動く）。
+- 【手順（CI の gitleaks で検知）】 テストで、秘密鍵などに見える目印（`-----BEGIN PRIVATE KEY-----` など）を使うときは、ソースにそのまま書かず、実行時に組み立てる（例: `"-----BEGIN " + "PRIVATE KEY-----"`）。CI の gitleaks が、本物の秘密として検知して失敗する（Phase 75 の RCV-7 のテストで起きた）。
+- 【機械】 `sys.platform` で分岐する処理を書くときは、分岐の前で変数の型を宣言する。
+- 【手順】 各ステップの検証は手元の macOS で行う。Linux での確認は人間が行う。
+- 【機械】 SPEC.md はフェーズの途中で変えない。SPEC にあいまいさや矛盾を見つけたら、止まって報告する。
+- 【手順】 Bundle を生成した後に、SPEC.md や追跡ファイルを変更しない。
+- 【手順】 各ステップは `auto-dev pre-flight` で始める（`task_start` のイベントが書かれ、ダッシュボードの時系列に Maker の開始が出る。Phase 76 のステップ 2〜5 では呼ばれていなかった）。
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-<!-- docs/contracts/phase78.md の 4 章の影響分析から作成。ここに書いていない既存テストは変更しない。 -->
-- このフェーズで前のステップが作ったテストの資料は、後のステップの検査や出力に合わせて直してよい。アサーションの趣旨は変えない。
-- ステップ 1（GATE-15）: 既存テストは変更しない。同じタスクで2回以上失敗した後に `verify-step` や `commit-step` の成功を期待している既存テストが失敗した場合は、止まって報告する。
-- ステップ 2（STAT-12）: イベントの項目の集合を完全な一致で確かめている既存テスト（`tests/test_stat4_events_run.py` など）は、`ts_ms` を期待の集合に加えてよい。ほかのアサーションは変えない。
-- ステップ 3（REL-6）: `tests/test_version_consistency.py` の期待の版を 0.10.0 にしてよい。
+<!-- docs/contracts/phase80.md の 4 章の影響分析から作成。ここに書いていない既存テストは変更しない。 -->
+- このフェーズで前のステップが作ったテストの資料は、後のステップの検査や出力に合わせて直してよい。Phase 79 で作った監査の分割のテスト（`tests/test_audit6_*`・`tests/test_audit7_*`・`tests/test_rpt8_*` など）も、失敗の記録の項目が増えたことに合わせて、期待を足してよい。アサーションの趣旨は変えない。
+- ステップ 1・2（AUDIT-8・AUDIT-9）: それ以外の既存テストは変更しない。
+- ステップ 3・4（GATE-16・GATE-17）: Evidence の記録の項目の集合を完全な一致で確かめている既存テストは、`red_first` を期待に加えてよい。題名に `Red-First` や `Red:` を含む計画で `verify-step` を呼んでいる既存テストが失敗した場合は、止まって報告する。
 - CLI を変えたステップでは `docs/cli.md` を作り直す（既存テストの変更ではない）。
 - 免疫テスト（`tests/immunity/**`）は変更しない。
-- README は人間が持つ契約なので、Maker は変更しない。README のコマンドのテスト（DX-1）や検査（DX-14）が失敗した場合は、止まって報告する。
 
 ## ステップ
-- [x] 1. `verify-step` と `commit-step` が、そのタスクの最後のコミットか隔離の後の失敗（検証の失敗と査読の REJECT）を記録から数え、2回以上なら `INV4_FAIL_FAST:` で止まる（`verify-step` は終了コード 1、`commit-step` は 4）。スキルに書く（Red: REJECT と検証の失敗の後に、3回目の `verify-step` が通る）（GATE-15）
-- [x] 2. イベントにミリ秒の時刻 `ts_ms` を加え、時系列と再生は `ts_ms` で並べる。`demo --teams` で統合のイベントが最後に来る（Red: `demo --teams` の時系列で `integration_start` がチームのイベントより前に来る）（STAT-12）
-- [x] 3. 版の表記を 0.10.0 にそろえる（`pyproject.toml`、`plugin.json`、`__version__`、CLI の表示）。`CHANGELOG.md` の `## [0.10.0]` と `docs/releases/v0.10.0.md` があることを確かめる（Red: `test_version_consistency.py` の新しい期待）（REL-6）
+- [x] 1. 監査の組のファイルの一覧を `-z` で読み、組をつなげた差分と範囲の差分の全体がファイルごとに一致することを確かめ、食い違えば監査役を呼ばずに `AUDIT_PENDING`（Red: 日本語の名前のファイルの変更が、分割した監査の入力から抜ける）（AUDIT-8）
+- [x] 2. 失敗した監査の記録に、範囲・ファイルの数・バイト数・組の全体の数・実行した組と実行しなかった組を残し、報告の監査の深さに示す（Red: 3組のうち1組目で失敗すると「1 組」と表示される）（AUDIT-9）
+- [x] 3. Red-First の設定（検証スクリプトの `# auto-dev: red-first=<off|warn|enforce>`、既定 `warn`）、対象のタスク（題名に `Red-First` か `Red:`）と対象のテストのファイル、イベント `red_first` と Evidence の記録（Red-First）（GATE-16）
+- [x] 4. 対象のテストをチェックポイントのコードに対してサンドボックスで実行し、`CONFIRMED` / `NOT_RED` / `SANDBOX_UNAVAILABLE` / `TIMEOUT` に分け、`warn` は警告、`enforce` は検証の失敗にする。`review-input` が `red_first.json` を書く。スキルに書く（Red-First）（GATE-17）
 
 ## 止まっていること・判断待ち
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [x] Phase 78 の準備コミット: SPEC.md（Phase 77 の要件を 4 章へ移し、2 章の保護ファイルに IR を加える。5.1 に Phase 78 の要件）、PLAN.md、docs/contracts/phase78.md、README.md、README.en.md、CHANGELOG.md、docs/releases/v0.10.0.md、docs/images/dashboard-demo.gif。
-- [x] 準備のコミットの前に: Phase 77 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase77/` に退かせる。
-- [x] ステップ 2 の完了後（フェーズの完了後にまとめて確認）: `demo --teams` のダッシュボードで、2チームが並行に見え、統合が最後に来ることを確かめ、`docs/images/dashboard-demo.gif` を作り直す。
-- [x] ステップ 3 の完了後:
+- [x] Phase 80 の準備コミット: SPEC.md（Phase 79 の要件を 4 章へ移す。5.1 に Phase 80 の要件）、PLAN.md（作業手順に【機械】【手順】の印）、BACKLOG.md、docs/contracts/phase80.md。
+- [x] 準備のコミットの前に: Phase 79 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase79/` に退かせる。
+- [x] ステップ 4 の完了後:
   - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI（macOS・Ubuntu × Python 3.10・3.12、gitleaks）が通ることを確かめる。
   - 査読の記録と Checker の出力ファイルを突き合わせ、記録されていない出力が0件であることを確かめる。
   - Bundle を作り、`verify-bundle` が VERIFIED になることを確かめる。
-  - リリース前の独立監査を行い、P0・P1 がないことを確かめる（あればリリースの前に直す）。
-  - CHANGELOG とリリースノートの日付を直し、`v0.10.0` のタグを打つ。
+  - このリポジトリの過去のステップ（Phase 77〜79 のいくつか）で、Red-First の確認がどう判定されるかを試し、`enforce` に切り替えるかを決める。
+  - 日本語の名前のファイルを含む差分で、監査の分割が欠けなく行われることを確かめる。
 
 ## 記録
+- 2026-11-27: Red-First の試し。このリポジトリの過去の 10 ステップ（Phase 77〜80。STAT-12・GATE-15・REL-6・AUDIT-6・AUDIT-7・RPT-8・RCV-8/CMP-15・AUDIT-8・AUDIT-9・GATE-16）で、各コミットの親をチェックポイントにして、足したテストのファイルを GATE-17 の確認（`verify_red_first_tests`、Linux、`AUTO_DEV_REQUIRE_SANDBOX=1`）にかけた。9 ステップ（13 ファイル）が `CONFIRMED`、1 ステップ（REL-6 の `test_version_consistency.py`）が `NOT_RED`（`TRIVIAL_RED`。製品のコードを実行しない版の番号の検査で、Red-First の対象の題名ではない）。`SANDBOX_UNAVAILABLE` と `TIMEOUT` は0件。ただし `CONFIRMED` の理由は、`UNHANDLED_EXCEPTION` が7件、`IMPORT_ERROR` が3件、`SETUP_ERROR` が3件で、アサーションの失敗による Red は0件だった。新しい関数や新しいモジュールを読み込むだけで Red になるので、テストの中身が振る舞いを確かめているかまでは保証しない（IDEA-038）。この結果から、Phase 81 の準備で、人間が `scripts/verify_local.sh` の見出しを `red-first=enforce` に変える。なお、git worktree の中では確認が `COMMIT_CHECKOUT_FAILED`（`Repository is not a git repository`）で `NOT_RED` になった（IDEA-039）。
+- 2026-11-27: 監査の分割の確認（AUDIT-8）。一時的なリポジトリで `src/鍵.py` と `src/b.py` を変え、`--audit-max-diff-bytes 300` 相当で監査だけを実行した（偽の監査役）。2組（`src/b.py` 473 バイト、`src/鍵.py` 479 バイト）に分かれ、どちらの組も監査役に渡り（`鍵.py` の差分が入力に含まれる）、`COMPLETED`。`verify_audit_chunks_match_full_diff` は、組を1つ落とすと `src/鍵.py` を、組を重ねると `src/b.py` を返した。
+- 2026-11-27: Phase 80 の完了後の確認。4 ステップすべて完了し、隔離は0回（ステップ 1・3 は1回目の査読が REJECT、2回目で APPROVE）。保護ファイルの変更なし。査読の記録の突き合わせで、`.dev/checker/review_p80_*.txt` の6件すべてが履歴に記録された。ステップ 3 のイベントには途中の実装が書いた `red_first:PENDING` が残る（最終のコードは書かない）。ステップ 4 は、自分の Red-First の確認で `CONFIRMED` だった。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1198 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）だけ。Bundle は VERIFIED（`AUDIT_OUTDATED` は Phase 80 の後の監査で解消する）。
+- 2026-11-27: Phase 79 の後の独立監査（`claude-opus-5-5`、起点 f98c251、対象 1b61d87、既定の範囲で 23 ファイル・約 434KB、3組に分割）。`SUCCESS` で、P2 が2件（AUD-1006: 日本語などのファイル名の変更が、分割した監査の入力から黙って抜ける。AUD-1007: 失敗した監査の記録に範囲などが残らない。IDEA-037 と同じ）。組ごとの考えた量は、入力 1 万トークンあたり約 258・112・245 トークンで、v0.10.0 の監査（約 36）から大きく増えた。各組の入力（約 7〜12 万トークン）の多くは、毎回渡す SPEC.md（約 119KB）が占めている。
+- 2026-11-27: Phase 80 の準備。v0.11-draft の 5 章の3点を提案どおりに決めた（優先順位は G → T → L → E → S、Red-First の確認は設定で選べて既定は warn、Checker の評価は CI に入れず手で回す）。人間が承認した。AUD-1006 は P2 として登録されたが、監査の入力から変更が黙って抜けるので、すぐに直す（AUDIT-8）。PLAN の作業手順の各行に【機械】【手順】の印を付けた（【機械】10 行、【手順】15 行）。
+- 2026-11-27: Phase 79 の完了後の確認。4 ステップすべて、1回目の査読で APPROVE（隔離は0回。ステップ 3 は検証の失敗が1回あり、2回目で通った）。保護ファイルの変更なし。査読の記録の突き合わせで、`.dev/checker/review_p79_*.txt` の4件すべてが履歴に記録され、`review_input` の回数とも一致した。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1166 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）だけ。Bundle は VERIFIED。
+- 2026-11-27: 監査の範囲と分割の確認。v0.10.0 の監査と同じ範囲（起点 f98c251、対象 53d55a9）で、既定の範囲（`tests/`・`docs/`・`examples/`・`*.md` を除く）の差分は 22 ファイル・約 373KB（範囲で絞る前は約 1.34MB）。既定の上限（20 万バイト）で、3組（約 153KB・172KB・48KB）に分かれた。一時的なクローンで、監査役を設定せずに監査だけの実行をすると、報告は「監査だけの実行（計画のタスクは 4 件すべて完了済み）」と示し、1組目で `AUDIT_CHUNK_FAILED (chunk 1/3)` として `AUDIT_PENDING` で止まった（Fail-Closed）。ただし失敗のときの記録に、範囲・ファイルの数・バイト数・組の全体の数が残らず、報告の監査の深さが「1 組」と表示される（IDEA-037）。本物の監査役での確認は、人間が行う。
+- 2026-11-27: RCV-8 の確認。空白を含むディレクトリの下の、機密に見える新しいファイルを隔離すると、案内が `mkdir -p 'my dir/sub' && git cat-file -p <SHA> > 'my dir/sub/t.py'` になり、そのまま実行して元の中身を取り出せた。
+- 2026-11-27: v0.10.0 をリリースした（タグ `v0.10.0`）。Phase 79（v0.11 の最初のフェーズ）の準備。リリース前の監査で見つかった IDEA-017（監査の入力が大きすぎる）と IDEA-018（監査だけの実行の報告）を AUDIT-6・AUDIT-7・RPT-8 とし、小さな修正の IDEA-028（RCV-8）と IDEA-032（CMP-15）を加えた。人間が承認した。v0.11-draft の 5 章の決定は、Phase 80 の準備で行う。
 - 2026-11-27: リリース前の独立監査（`claude-opus-5-5`、LIVE、起点 f98c251、対象 53d55a9）。1回目は出力の上限 8192 トークンを考える部分で使い切って打ち切られ（`stop_reason=max_tokens`）、`AUDIT_PENDING` で止まった（途中で切れた結果を0件として扱わない安全策が働いた）。監査役のコマンドに `--max-tokens 32000 --timeout 1800` を足して再実行し、`end_turn` で指摘0件（`SUCCESS`）。Bundle は VERIFIED で、監査の検証も通った。ただし入力は約 60 万トークン（v0.9.0 の約 25 万の倍以上。テストとドキュメントを含む差分の全体）で、監査役の出力は 2,183 トークン（考えた部分 2,174）と短く、弱い保証として扱う。CHANGELOG とリリースノートの Known issues に書いた。監査の入力を製品のコードに絞る・分ける改善（IDEA-017）を v0.11 の早いうちに行う。監査だけの実行の報告が「0 / 3 件のタスクが正常に完了」と失敗に見える問題（IDEA-018）も、同時に直す。人間が v0.10.0 のリリースを決めた。
 - 2026-11-27: Phase 78 の完了後の確認。3 ステップすべて完了し、隔離は0回（ステップ 1・2 は1回目の査読が REJECT、2回目で APPROVE）。README・CHANGELOG・リリースノートと保護ファイルは、準備のコミットの後に変わっていない。査読の記録の突き合わせで、`.dev/checker/review_p78_*.txt` の5件すべてが履歴に記録され、`review_input` の回数とも一致した。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1146 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）と、Phase 75 でも見た `test_reaps_multiple_descendant_processes_on_timeout`（単独では2回とも通る）。`auto-dev --version` は 0.10.0。Bundle は VERIFIED（`AUDIT_OUTDATED` はリリース前の監査で解消する）。`check_doc_commands.py` は 144 コマンドで終了コード 0。
 - 2026-11-27: GATE-15 の確認。一時リポジトリで、失敗する検証スクリプトで `verify-step` を3回実行すると、3回目は検証を実行せずに `INV4_FAIL_FAST:`（失敗の内訳と `rollback-step` の案内）で止まり、`commit-step` も同じく拒否した。`rollback-step` の後は、数え直されて `verify-step` が通った。
