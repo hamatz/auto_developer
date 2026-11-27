@@ -931,15 +931,44 @@ class EvidenceBundler:
                         or audit_meta.get("execution_id")
                     )
 
-                    # Sol氏 Phase 60 P1 指摘:
+                    # Sol氏 Phase 60 P1 指摘 / AUDIT-7:
                     # mode == LIVE かつ provider_request_id が本物（exec_ や mock_ ではなく msg_... 等の実リクエストID）であることを検証
                     if audit_stage_data.get("status") == "SUCCESS":
-                        is_mock_id = (
-                            not prov_req_id
-                            or str(prov_req_id).startswith("mock_")
-                            or str(prov_req_id).startswith("exec_")
-                        )
-                        if mode == "LIVE" and not is_mock_id:
+                        def _is_mock_req_id(req_id: Any) -> bool:
+                            return (
+                                not req_id
+                                or str(req_id).startswith("mock_")
+                                or str(req_id).startswith("exec_")
+                            )
+
+                        chunks = audit_stage_data.get("chunks")
+                        if chunks is None and isinstance(audit_meta, dict):
+                            chunks = audit_meta.get("chunks")
+
+                        chunks_ok = True
+                        if isinstance(chunks, list) and len(chunks) > 0:
+                            for idx, chunk in enumerate(chunks, 1):
+                                if not isinstance(chunk, dict):
+                                    chunks_ok = False
+                                    result.warnings.append(
+                                        f"Audit chunk {idx} is malformed (expected dict)"
+                                    )
+                                    break
+                                c_mode = chunk.get("mode") or "MOCK"
+                                c_req_id = chunk.get("provider_request_id") or chunk.get("execution_id")
+                                if c_mode != "LIVE" or _is_mock_req_id(c_req_id):
+                                    chunks_ok = False
+                                    c_num = chunk.get("chunk_index", idx)
+                                    result.warnings.append(
+                                        f"Audit chunk {c_num} is not live verified: mode='{c_mode}', "
+                                        f"provider_request_id='{c_req_id}' (Simulation/MOCK cannot be verified for release)"
+                                    )
+                                    break
+
+                        is_mock_id = _is_mock_req_id(prov_req_id)
+                        if not chunks_ok:
+                            result.audit_stage_verified = False
+                        elif mode == "LIVE" and not is_mock_id:
                             # VVV.3 / Sol氏 Phase 61 考察: ポスト監査差分検査 (Post-Audit Diff Integrity)
                             # 監査対象コミット以降にプロダクトコード（src/**, scripts/** 等）が変更されていないかを検証
                             target_commit = audit_meta.get("target_commit") or audit_stage_data.get("target_commit")

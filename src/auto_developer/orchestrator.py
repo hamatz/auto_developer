@@ -48,6 +48,7 @@ class NightlyOrchestrator:
         enable_audit_stage: bool = False,
         audit_baseline_commit: str | None = None,
         audit_paths: list[str] | None = None,
+        audit_max_diff_bytes: int = 200_000,
         maker_family: str | None = None,
         checker_family: str | None = None,
         auditor_family: str | None = None,
@@ -84,8 +85,11 @@ class NightlyOrchestrator:
         self.auditor_cmd_template = auditor_cmd_template
         self.fallback_models = list(fallback_models or [])
         self.enable_audit_stage = enable_audit_stage
+        if audit_max_diff_bytes <= 0:
+            raise ValueError("audit_max_diff_bytes must be a positive integer")
         self.audit_baseline_commit = audit_baseline_commit
         self.audit_paths: list[str] | None = list(audit_paths) if audit_paths is not None else None
+        self.audit_max_diff_bytes: int = audit_max_diff_bytes
 
         self.git_guard = GitGuard(repo_dir=self.repo_dir)
         self.dispatcher = TaskDispatcher()
@@ -1192,13 +1196,22 @@ class NightlyOrchestrator:
         target_commit: str = "HEAD",
         auditor_runner: Any | None = None,
         audit_paths: list[str] | None = None,
+        audit_max_diff_bytes: int | None = None,
     ) -> dict[str, Any]:
         """ジョブ完了時に外部独立監査役を起動し、多層防壁で選別した真正指摘を次期 PLAN.md に登録する (RRR.2)。"""
+        import inspect
+
         from auto_developer.audit import IndependentAuditRunner
         from auto_developer.dispatcher import AuditDispatcher
         from auto_developer.verifier import RedTestVerifier
 
         effective_audit_paths = audit_paths if audit_paths is not None else self.audit_paths
+        effective_max_bytes = (
+            audit_max_diff_bytes if audit_max_diff_bytes is not None else self.audit_max_diff_bytes
+        )
+        if effective_max_bytes <= 0:
+            raise ValueError("audit_max_diff_bytes must be a positive integer")
+
         auditor = auditor_runner or self.auditor_runner
         if not auditor and (self.auditor_model or self.auditor_cmd_template):
             auditor = IndependentAuditRunner(
@@ -1209,6 +1222,7 @@ class NightlyOrchestrator:
                 maker_family=self.maker_family,
                 auditor_family=self.auditor_family,
                 audit_paths=effective_audit_paths,
+                audit_max_diff_bytes=effective_max_bytes,
             )
 
         if not auditor:
@@ -1227,19 +1241,21 @@ class NightlyOrchestrator:
             verifier = RedTestVerifier(repo_dir=self.repo_dir)
             dispatcher = AuditDispatcher(repo_dir=self.repo_dir, verifier=verifier)
 
+            repo_kwargs: dict[str, Any] = {
+                "repo_dir": self.repo_dir,
+                "target_commit": target_commit,
+                "baseline_commit": baseline_commit,
+            }
             if effective_audit_paths is not None:
-                findings = auditor.audit_repository(
-                    repo_dir=self.repo_dir,
-                    target_commit=target_commit,
-                    baseline_commit=baseline_commit,
-                    audit_paths=effective_audit_paths,
-                )
-            else:
-                findings = auditor.audit_repository(
-                    repo_dir=self.repo_dir,
-                    target_commit=target_commit,
-                    baseline_commit=baseline_commit,
-                )
+                repo_kwargs["audit_paths"] = effective_audit_paths
+            try:
+                sig = inspect.signature(auditor.audit_repository)
+                if "audit_max_diff_bytes" in sig.parameters:
+                    repo_kwargs["audit_max_diff_bytes"] = effective_max_bytes
+            except (TypeError, ValueError):
+                pass
+
+            findings = auditor.audit_repository(**repo_kwargs)
             screen_res = auditor.screen_and_dispatch_findings(
                 findings=findings,
                 dispatcher=dispatcher,
@@ -1250,32 +1266,37 @@ class NightlyOrchestrator:
             rec_diff_files_count = int(audit_metadata.get("diff_files_count", 0) or 0)
             rec_diff_bytes = int(audit_metadata.get("diff_bytes", 0) or 0)
             rec_empty_diff = bool(audit_metadata.get("empty_diff", False))
+            rec_chunks = audit_metadata.get("chunks")
 
-            # 監査証跡レコードの保存 (SSS.4)
+            # 監査証跡レコードの保存 (SSS.4 / AUDIT-7)
             audit_rec_dir = self.repo_dir / ".git" / "nightly_evidence" / "records"
             if not audit_rec_dir.exists():
                 audit_rec_dir = self.repo_dir / ".dev" / "evidence" / "records"
             try:
                 audit_rec_dir.mkdir(parents=True, exist_ok=True)
                 audit_stage_file = audit_rec_dir / "audit_stage.json"
+                stage_payload: dict[str, Any] = {
+                    "status": "SUCCESS",
+                    "mode": audit_metadata.get("mode", "LIVE"),
+                    "provider": audit_metadata.get("provider"),
+                    "provider_request_id": audit_metadata.get("provider_request_id"),
+                    "audit_paths": rec_audit_paths,
+                    "audit_max_diff_bytes": audit_metadata.get("audit_max_diff_bytes", effective_max_bytes),
+                    "diff_files_count": rec_diff_files_count,
+                    "diff_bytes": rec_diff_bytes,
+                    "empty_diff": rec_empty_diff,
+                    "audit_metadata": audit_metadata,
+                    "dispatched_count": len(screen_res["dispatched"]),
+                    "rejected_count": len(screen_res["rejected"]),
+                    "backlogged_count": len(screen_res.get("backlogged", [])),
+                    "escalated_count": len(screen_res.get("escalated", [])),
+                    "duplicate_count": len(screen_res.get("duplicates", [])),
+                    "timestamp": time.time(),
+                }
+                if isinstance(rec_chunks, list):
+                    stage_payload["chunks"] = rec_chunks
                 audit_stage_file.write_text(
-                    json.dumps({
-                        "status": "SUCCESS",
-                        "mode": audit_metadata.get("mode", "LIVE"),
-                        "provider": audit_metadata.get("provider"),
-                        "provider_request_id": audit_metadata.get("provider_request_id"),
-                        "audit_paths": rec_audit_paths,
-                        "diff_files_count": rec_diff_files_count,
-                        "diff_bytes": rec_diff_bytes,
-                        "empty_diff": rec_empty_diff,
-                        "audit_metadata": audit_metadata,
-                        "dispatched_count": len(screen_res["dispatched"]),
-                        "rejected_count": len(screen_res["rejected"]),
-                        "backlogged_count": len(screen_res.get("backlogged", [])),
-                        "escalated_count": len(screen_res.get("escalated", [])),
-                        "duplicate_count": len(screen_res.get("duplicates", [])),
-                        "timestamp": time.time(),
-                    }, indent=2),
+                    json.dumps(stage_payload, indent=2),
                     encoding="utf-8",
                 )
             except OSError:
@@ -1295,11 +1316,14 @@ class NightlyOrchestrator:
                 "baseline_commit": baseline_commit,
                 "target_commit": target_commit,
                 "audit_paths": rec_audit_paths,
+                "audit_max_diff_bytes": audit_metadata.get("audit_max_diff_bytes", effective_max_bytes),
                 "diff_files_count": rec_diff_files_count,
                 "diff_bytes": rec_diff_bytes,
                 "empty_diff": rec_empty_diff,
                 "audit_metadata": audit_metadata,
             }
+            if isinstance(rec_chunks, list):
+                result["chunks"] = rec_chunks
             self._record_audit_stage_event(
                 status="SUCCESS",
                 findings=findings,
@@ -1310,22 +1334,38 @@ class NightlyOrchestrator:
         except (subprocess.SubprocessError, OSError, ValueError, RuntimeError, KeyError, TypeError) as e:
             # 外部監査役の失敗時にも通常開発成果物は破棄せず安全に保全する (Fail-Safe)
             err_msg = str(e)
-            status = "AUDIT_PENDING" if "NO_INDEPENDENT_AUDITOR_AVAILABLE" in err_msg else "AUDIT_FAILED"
+            is_pending = any(
+                marker in err_msg
+                for marker in (
+                    "NO_INDEPENDENT_AUDITOR_AVAILABLE",
+                    "AUDIT_CHUNK_FAILED",
+                    "AUDIT_INTERRUPTED",
+                    "AUDIT_PARSE_ERROR",
+                )
+            )
+            status = "AUDIT_PENDING" if is_pending else "AUDIT_FAILED"
             print(f"Warning: Independent audit stage {status.lower()}: {err_msg}", file=sys.stderr)
+            failed_meta = getattr(auditor, "last_run_metadata", {}) or {}
+            failed_chunks = failed_meta.get("chunks") if isinstance(failed_meta, dict) else None
             audit_rec_dir = self.repo_dir / ".git" / "nightly_evidence" / "records"
             if not audit_rec_dir.exists():
                 audit_rec_dir = self.repo_dir / ".dev" / "evidence" / "records"
             try:
                 audit_rec_dir.mkdir(parents=True, exist_ok=True)
+                err_payload: dict[str, Any] = {
+                    "status": status,
+                    "mode": "LIVE",
+                    "error": err_msg,
+                    "baseline_commit": baseline_commit,
+                    "target_commit": target_commit,
+                    "timestamp": time.time(),
+                }
+                if isinstance(failed_chunks, list):
+                    err_payload["chunks"] = failed_chunks
+                if isinstance(failed_meta, dict) and failed_meta.get("failed_chunk_index") is not None:
+                    err_payload["failed_chunk_index"] = failed_meta.get("failed_chunk_index")
                 (audit_rec_dir / "audit_stage.json").write_text(
-                    json.dumps({
-                        "status": status,
-                        "mode": "LIVE",
-                        "error": err_msg,
-                        "baseline_commit": baseline_commit,
-                        "target_commit": target_commit,
-                        "timestamp": time.time(),
-                    }, indent=2),
+                    json.dumps(err_payload, indent=2),
                     encoding="utf-8",
                 )
             except OSError:
@@ -1335,15 +1375,18 @@ class NightlyOrchestrator:
                 status=status,
                 findings=[],
                 screen_res={},
-                audit_metadata={},
+                audit_metadata=failed_meta if isinstance(failed_meta, dict) else {},
             )
-            return {
+            ret: dict[str, Any] = {
                 "status": status,
                 "error": err_msg,
                 "baseline_commit": baseline_commit,
                 "target_commit": target_commit,
                 "findings": [],
             }
+            if isinstance(failed_chunks, list):
+                ret["chunks"] = failed_chunks
+            return ret
 
     def _record_audit_stage_event(
         self,

@@ -641,6 +641,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--audit-paths", type=str, default=None, help="Comma-separated git pathspecs to restrict independent audit diff"
     )
+    parser.add_argument(
+        "--audit-max-diff-bytes",
+        type=int,
+        default=200000,
+        help="Maximum git diff bytes per independent audit request (default: 200000)",
+    )
 
     subparsers = parser.add_subparsers(dest="subcommand", help="Subcommand actions")
 
@@ -689,6 +695,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--auditor-fallback-models", type=str, default=argparse.SUPPRESS, help="Comma-separated fallback models for independent auditor")
     run_parser.add_argument("--audit-baseline", type=str, default=argparse.SUPPRESS, help="Baseline commit hash for independent audit comparison")
     run_parser.add_argument("--audit-paths", type=str, default=argparse.SUPPRESS, help="Comma-separated git pathspecs to restrict independent audit diff")
+    run_parser.add_argument(
+        "--audit-max-diff-bytes",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="Maximum git diff bytes per independent audit request (default: 200000)",
+    )
     run_parser.add_argument(
         "--dashboard",
         action="store_true",
@@ -2620,6 +2632,10 @@ def main(argv: list[str] | None = None) -> int:
         if raw_audit_paths
         else None
     )
+    audit_max_diff_bytes = int(getattr(args, "audit_max_diff_bytes", 200000))
+    if audit_max_diff_bytes <= 0:
+        print("CONFIG ERROR: --audit-max-diff-bytes must be a positive integer", file=sys.stderr)
+        return 2
     dry_run = bool(getattr(args, "dry_run", False))
     resume = bool(getattr(args, "resume", False))
     try:
@@ -2704,6 +2720,7 @@ def main(argv: list[str] | None = None) -> int:
         fallback_models=fallback_models,
         audit_baseline_commit=audit_baseline,
         audit_paths=audit_paths,
+        audit_max_diff_bytes=audit_max_diff_bytes,
     )
     use_dashboard = bool(getattr(args, "dashboard", False)) and not dry_run
     prev_dash_env = os.environ.get("AUTO_DEV_DASHBOARD")
