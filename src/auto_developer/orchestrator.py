@@ -1346,6 +1346,7 @@ class NightlyOrchestrator:
                 for marker in (
                     "NO_INDEPENDENT_AUDITOR_AVAILABLE",
                     "AUDIT_CHUNK_FAILED",
+                    "AUDIT_CHUNK_MISMATCH",
                     "AUDIT_INTERRUPTED",
                     "AUDIT_PARSE_ERROR",
                 )

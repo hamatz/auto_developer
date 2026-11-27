@@ -349,6 +349,119 @@ def pack_audit_diff_chunks(
     return chunks
 
 
+def _unquote_git_path(quoted: str) -> str:
+    """Decode a C-quoted git path (without surrounding double quotes) into a UTF-8 string."""
+    out = bytearray()
+    i = 0
+    n = len(quoted)
+    escapes = {
+        "a": 7,
+        "b": 8,
+        "t": 9,
+        "n": 10,
+        "v": 11,
+        "f": 12,
+        "r": 13,
+        '"': ord('"'),
+        "\\": ord("\\"),
+    }
+    while i < n:
+        ch = quoted[i]
+        if ch == "\\" and i + 1 < n:
+            nxt = quoted[i + 1]
+            if nxt in escapes:
+                out.append(escapes[nxt])
+                i += 2
+                continue
+            if i + 3 < n and all(c in "01234567" for c in quoted[i + 1 : i + 4]):
+                out.append(int(quoted[i + 1 : i + 4], 8))
+                i += 4
+                continue
+        out.extend(ch.encode("utf-8"))
+        i += 1
+    return out.decode("utf-8", errors="replace")
+
+
+def _extract_path_from_diff_section(section: str) -> str:
+    """Extract the file path from a single file's git diff section."""
+    lines = section.splitlines()
+    if not lines:
+        return ""
+    header = lines[0]
+    if header.startswith("diff --git "):
+        rest = header[len("diff --git ") :]
+        if rest.startswith('"'):
+            i = 1
+            while i < len(rest):
+                if rest[i] == "\\" and i + 1 < len(rest):
+                    i += 2
+                    continue
+                if rest[i] == '"':
+                    unquoted = _unquote_git_path(rest[1:i])
+                    if unquoted.startswith("a/"):
+                        return unquoted[2:]
+                    return unquoted
+                i += 1
+        if rest.startswith("a/") and len(rest) >= 5 and (len(rest) - 1) % 2 == 0:
+            mid = (len(rest) - 1) // 2
+            left = rest[:mid]
+            right = rest[mid + 1 :]
+            if rest[mid] == " " and right.startswith("b/") and left[2:] == right[2:]:
+                return left[2:]
+    for line in lines[1:12]:
+        if line.startswith("rename to "):
+            return line[len("rename to ") :]
+        if line.startswith("+++ b/"):
+            return line[len("+++ b/") :]
+        if line.startswith("--- a/"):
+            return line[len("--- a/") :]
+    return header
+
+
+def split_git_diff_by_file(diff_text: str) -> list[tuple[str, str]]:
+    """Split a unified git diff output into (file_path, section_text) pairs."""
+    if not diff_text:
+        return []
+    sections: list[str] = []
+    cur_lines: list[str] = []
+    for line in diff_text.splitlines(keepends=True):
+        if line.startswith("diff --git ") and cur_lines:
+            sections.append("".join(cur_lines))
+            cur_lines = [line]
+        else:
+            cur_lines.append(line)
+    if cur_lines:
+        sections.append("".join(cur_lines))
+    return [(_extract_path_from_diff_section(sec), sec) for sec in sections]
+
+
+def verify_audit_chunks_match_full_diff(
+    full_diff: str,
+    packed_chunks: list[dict[str, Any]],
+) -> list[str]:
+    """Verify each file in full_diff appears in exactly one chunk with identical diff content (AUDIT-8).
+
+    Returns a sorted list of missing, duplicated, extra, or mismatched file paths.
+    """
+    full_map: dict[str, list[str]] = {}
+    for file_path, sec_text in split_git_diff_by_file(full_diff):
+        full_map.setdefault(file_path, []).append(sec_text)
+
+    chunk_map: dict[str, list[str]] = {}
+    for chunk in packed_chunks:
+        chunk_diff = str(chunk.get("diff", ""))
+        for file_path, sec_text in split_git_diff_by_file(chunk_diff):
+            chunk_map.setdefault(file_path, []).append(sec_text)
+
+    mismatched: list[str] = []
+    for file_path in sorted(set(full_map.keys()) | set(chunk_map.keys())):
+        f_secs = full_map.get(file_path, [])
+        c_secs = chunk_map.get(file_path, [])
+        if len(f_secs) != 1 or len(c_secs) != 1 or f_secs[0] != c_secs[0]:
+            mismatched.append(file_path)
+    return mismatched
+
+
 def extract_thinking_tokens(usage_dict: dict[str, Any] | None) -> int | None:
     """usage 辞書から考えた部分（thinking / reasoning）のトークン数を抽出する。"""
     if not isinstance(usage_dict, dict):
@@ -1026,9 +1139,9 @@ class IndependentAuditRunner:
 
         effective_pathspecs = resolve_audit_pathspecs(audit_paths if audit_paths is not None else self.audit_paths)
 
-        # baseline から target までの git diff を範囲で絞って抽出 (AUDIT-6)
+        # baseline から target までの git diff を範囲で絞って抽出 (AUDIT-6, AUDIT-8)
         diff_res = subprocess.run(
-            ["git", "diff", target_baseline, target_sha, "--", *effective_pathspecs],
+            ["git", "-c", "core.quotePath=false", "diff", "--no-renames", target_baseline, target_sha, "--", *effective_pathspecs],
             cwd=repo_dir,
             capture_output=True,
             text=True,
@@ -1037,13 +1150,13 @@ class IndependentAuditRunner:
         git_diff = diff_res.stdout
 
         name_res = subprocess.run(
-            ["git", "diff", "--name-only", target_baseline, target_sha, "--", *effective_pathspecs],
+            ["git", "diff", "--no-renames", "-z", "--name-only", target_baseline, target_sha, "--", *effective_pathspecs],
             cwd=repo_dir,
             capture_output=True,
             text=True,
             check=True,
         )
-        diff_files = [line for line in name_res.stdout.splitlines() if line.strip()]
+        diff_files = [p for p in name_res.stdout.split("\0") if p]
         diff_files_count = len(diff_files)
         diff_bytes = len(git_diff.encode("utf-8"))
 
@@ -1146,7 +1259,7 @@ class IndependentAuditRunner:
         file_diffs: list[tuple[str, str]] = []
         for file_path in sorted(diff_files):
             f_res = subprocess.run(
-                ["git", "diff", target_baseline, target_sha, "--", file_path],
+                ["git", "-c", "core.quotePath=false", "diff", "--no-renames", target_baseline, target_sha, "--", file_path],
                 cwd=repo_dir,
                 capture_output=True,
                 text=True,
@@ -1155,6 +1268,31 @@ class IndependentAuditRunner:
             file_diffs.append((file_path, f_res.stdout))
 
         packed_chunks = pack_audit_diff_chunks(file_diffs, effective_max_bytes)
+        mismatched_files = verify_audit_chunks_match_full_diff(git_diff, packed_chunks)
+        if mismatched_files:
+            self.last_run_metadata = {
+                "mode": "LIVE",
+                "provider": None,
+                "provider_request_id": None,
+                "auditor_model": self.model_name,
+                "maker_model": self.maker_model,
+                "status": "AUDIT_PENDING",
+                "baseline_commit": target_baseline,
+                "target_commit": target_sha,
+                "target_tree_sha": target_tree_sha,
+                "spec_sha256": spec_sha256,
+                "diff_sha256": diff_sha256,
+                "audit_paths": effective_pathspecs,
+                "audit_max_diff_bytes": effective_max_bytes,
+                "diff_files_count": diff_files_count,
+                "diff_bytes": diff_bytes,
+                "empty_diff": False,
+                "total_chunks": len(packed_chunks),
+                "mismatched_files": mismatched_files,
+            }
+            raise RuntimeError(
+                f"AUDIT_CHUNK_MISMATCH: chunked diff does not match full diff for files: {', '.join(mismatched_files)}"
+            )
         total_chunks = len(packed_chunks)
         all_findings: list[AuditFinding] = []
         chunk_records: list[dict[str, Any]] = []
