@@ -1402,6 +1402,41 @@ class RedTestVerifier:
                 test_file, str(clone_path), timeout_sec, sandbox_dir=clone_path
             )
 
+    @staticmethod
+    def _is_git_repository(resolved_repo: Path) -> bool:
+        """resolved_repo が Git リポジトリ（worktree を含む）の作業ツリーかどうかを git 自身に問う (SBX-10)。"""
+        clean_env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"}
+        }
+        try:
+            proc = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(resolved_repo),
+                    "rev-parse",
+                    "--is-inside-work-tree",
+                    "--show-toplevel",
+                ],
+                env=clean_env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if proc.returncode != 0:
+            return False
+        lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        if len(lines) < 2 or lines[0] != "true":
+            return False
+        try:
+            return Path(lines[1]).resolve() == resolved_repo
+        except OSError:
+            return False
+
     def _create_isolated_clone(self, target_dir: Path, commit: str | None = None) -> Path:
         """元リポジトリから隔離されたクリーンな一時クローン（作業コピー）を作成する。
         Git リポジトリの場合は git clone --local --no-hardlinks で物理コピーを作成し、
@@ -1412,7 +1447,7 @@ class RedTestVerifier:
         resolved_repo = self.repo_dir.resolve()
         target_dir.parent.mkdir(parents=True, exist_ok=True)
 
-        is_git_repo = (resolved_repo / ".git").is_dir()
+        is_git_repo = self._is_git_repository(resolved_repo)
         cloned_ok = False
         if is_git_repo:
             try:
@@ -1905,7 +1940,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
     def _capture_repo_snapshot(self) -> dict[str, Any]:
         """元リポジトリの改ざん検知用スナップショットを取得する (JJJ.2)。"""
         resolved_repo = self.repo_dir.resolve()
-        is_git = (resolved_repo / ".git").is_dir()
+        is_git = self._is_git_repository(resolved_repo)
         if is_git:
             # 1. HEAD ハッシュ
             proc_head = subprocess.run(
