@@ -230,7 +230,7 @@ class TestGate16RedFirstConfig(unittest.TestCase):
             ev = json.loads((repo / ".git" / "nightly_evidence" / "task_1.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 ev["red_first"],
-                {"mode": "warn", "result": "NO_TEST_CHANGES", "test_files": []},
+                {"mode": "warn", "result": "NO_TEST_CHANGES", "test_files": [], "file_results": []},
             )
             events_path = repo / ".git" / "nightly_evidence" / "events.jsonl"
             events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -250,14 +250,21 @@ class TestGate16RedFirstConfig(unittest.TestCase):
                 plan_text="# PLAN.md\n\n## ステップ\n- [ ] 1. Implement feature (Red-First)\n",
                 verify_script_text="#!/usr/bin/env bash\n# auto-dev: red-first=enforce\nexit 0\n",
             )
-            (repo / "tests" / "test_new.py").write_text("def test_new():\n    assert True\n", encoding="utf-8")
+            (repo / "tests" / "test_new.py").write_text(
+                "import unittest\n"
+                "from non_existent_feature import fn\n\n"
+                "class TestNew(unittest.TestCase):\n"
+                "    def test_new(self):\n"
+                "        self.assertTrue(fn())\n",
+                encoding="utf-8",
+            )
             # INV-8: block events.jsonl by creating a directory at its path
             (repo / ".git" / "nightly_evidence" / "events.jsonl").mkdir(parents=True, exist_ok=True)
             proc = _run_verify_step(repo, checkpoint)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             ev = json.loads((repo / ".git" / "nightly_evidence" / "task_1.json").read_text(encoding="utf-8"))
             self.assertEqual(ev["red_first"]["mode"], "enforce")
-            self.assertEqual(ev["red_first"]["result"], "PENDING")
+            self.assertEqual(ev["red_first"]["result"], "CONFIRMED")
             self.assertEqual(ev["red_first"]["test_files"], ["tests/test_new.py"])
 
     def test_find_changed_test_files_raises_on_invalid_checkpoint(self) -> None:

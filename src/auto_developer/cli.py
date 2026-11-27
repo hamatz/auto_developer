@@ -50,11 +50,13 @@ from auto_developer.runner import (
     parse_checker_decision,
 )
 from auto_developer.verifier import (
+    RED_FIRST_FILE_TIMEOUT_SEC,
     DeterministicVerifier,
     find_changed_test_files,
     is_red_first_task,
     resolve_red_first_mode,
     resolve_verify_timeout,
+    verify_red_first_tests,
 )
 
 VERSION = "0.10.0"
@@ -1631,12 +1633,23 @@ def main(argv: list[str] | None = None) -> int:
                     effective_plan_path.write_text(original_plan_content, encoding="utf-8")
                     print(f"RED_FIRST_ERROR: {rf_err}", file=sys.stderr)
                     return 2
-                # GATE-16 では対象ファイルの有無のみを判定し、変更ありの仮結果 PENDING は GATE-17 で置換する
-                rf_result = "NO_TEST_CHANGES" if not target_test_files else "PENDING"
+                if not target_test_files:
+                    rf_result = "NO_TEST_CHANGES"
+                    rf_file_results: list[dict[str, Any]] = []
+                else:
+                    rf_check = verify_red_first_tests(
+                        work_dir,
+                        args.checkpoint,
+                        target_test_files,
+                        timeout_sec=RED_FIRST_FILE_TIMEOUT_SEC,
+                    )
+                    rf_result = str(rf_check["result"])
+                    rf_file_results = list(rf_check["file_results"])
                 red_first_payload = {
                     "mode": red_first_mode,
                     "result": rf_result,
                     "test_files": target_test_files,
+                    "file_results": rf_file_results,
                 }
                 rf_attempt = metrics.count_verify_attempts(args.task_id, args.checkpoint, phase=phase) + 1
                 metrics.record_event(
@@ -1646,14 +1659,46 @@ def main(argv: list[str] | None = None) -> int:
                     mode=red_first_mode,
                     result=rf_result,
                     test_files=target_test_files,
+                    file_results=rf_file_results,
                     attempt=rf_attempt,
                     phase=phase,
                 )
+                if rf_result != "CONFIRMED":
+                    rf_summary = (
+                        ", ".join(f"{r['file']}={r['result']}({r['reason']})" for r in rf_file_results)
+                        if rf_file_results
+                        else "no changed test files"
+                    )
+                    if red_first_mode == "warn":
+                        print(
+                            f"RED_FIRST_WARNING: result={rf_result} files={target_test_files} ({rf_summary})",
+                            file=sys.stderr,
+                        )
+                    elif red_first_mode == "enforce":
+                        effective_plan_path.write_text(original_plan_content, encoding="utf-8")
+                        print(
+                            f"RED_FIRST_NOT_CONFIRMED: result={rf_result} files={target_test_files} ({rf_summary})",
+                            file=sys.stderr,
+                        )
+                        duration_sec = round(time.time() - start_time, 2)
+                        attempt = metrics.count_verify_attempts(args.task_id, args.checkpoint, phase=phase) + 1
+                        metrics.record_event(
+                            "verify_step",
+                            task_id=args.task_id,
+                            checkpoint=args.checkpoint,
+                            result="RED_FIRST_NOT_CONFIRMED",
+                            exit_code=1,
+                            duration_sec=duration_sec,
+                            attempt=attempt,
+                            phase=phase,
+                        )
+                        return 1
             else:
                 red_first_payload = {
                     "mode": red_first_mode,
                     "result": "SKIPPED",
                     "test_files": [],
+                    "file_results": [],
                 }
 
         code, out = verifier.run_verification(
@@ -2223,6 +2268,17 @@ def main(argv: list[str] | None = None) -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         diff_out = out_dir / "diff.patch"
         diff_out.write_bytes(diff_bytes)
+
+        red_first_data = review_evidence.get("red_first")
+        if not isinstance(red_first_data, dict):
+            red_first_data = {
+                "mode": "off",
+                "result": "OFF",
+                "test_files": [],
+                "file_results": [],
+            }
+        red_first_out = out_dir / "red_first.json"
+        red_first_out.write_text(json.dumps(red_first_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
         diff_sha256 = hashlib.sha256(diff_bytes).hexdigest()
         effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
