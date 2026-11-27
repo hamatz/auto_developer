@@ -51,7 +51,7 @@ from auto_developer.runner import (
 )
 from auto_developer.verifier import DeterministicVerifier, resolve_verify_timeout
 
-VERSION = "0.9.0"
+VERSION = "0.10.0"
 
 DEFAULT_VERIFY_SH = """#!/usr/bin/env bash
 set -euo pipefail
@@ -301,6 +301,21 @@ def _verify_evidence_matches_working_tree(work_dir: Path, evidence: dict[str, An
         )
         return False
     return True
+
+
+def _format_inv4_fail_fast_message(
+    task_id: str,
+    checkpoint: str,
+    fail_counts: dict[str, int],
+) -> str:
+    """GATE-15: INV-4 Fail-Fast 停止メッセージを生成する。"""
+    return (
+        f"INV4_FAIL_FAST: Task {task_id} has {fail_counts['total']} failures "
+        f"(verify_failures={fail_counts['verify_failures']}, "
+        f"checker_rejects={fail_counts['checker_rejects']}) since last commit/rollback. "
+        f"Run `auto-dev rollback-step --checkpoint {checkpoint} --task-id {task_id} "
+        f'--reason "INV-4 fail-fast"` to quarantine and halt.'
+    )
 
 
 def _resolve_cli_team_context(
@@ -1515,6 +1530,29 @@ def main(argv: list[str] | None = None) -> int:
             print(f"CONFIG ERROR: {timeout_err}", file=sys.stderr)
             return 2
 
+        fail_counts = metrics.count_task_failures_since_reset(
+            args.task_id,
+            phase=phase,
+            team_id=team_ctx.team_id if team_ctx else None,
+        )
+        if fail_counts["total"] >= 2:
+            print(
+                _format_inv4_fail_fast_message(args.task_id, args.checkpoint, fail_counts),
+                file=sys.stderr,
+            )
+            attempt = metrics.count_verify_attempts(args.task_id, args.checkpoint, phase=phase) + 1
+            metrics.record_event(
+                "verify_step",
+                task_id=args.task_id,
+                checkpoint=args.checkpoint,
+                result="FAIL_FAST_STOPPED",
+                exit_code=1,
+                duration_sec=round(time.time() - start_time, 2),
+                attempt=attempt,
+                phase=phase,
+            )
+            return 1
+
         original_plan_content = effective_plan_path.read_text(encoding="utf-8")
         # 検証対象の最終ツリーに PLAN.md の完了反映を含める
         dispatcher.mark_task_status(effective_plan_path, target, status="completed")
@@ -1691,6 +1729,19 @@ def main(argv: list[str] | None = None) -> int:
         if not target:
             print(f"ERROR: Task {args.task_id} not found in {effective_plan_path}", file=sys.stderr)
             return 1
+
+        phase = metrics.get_current_phase()
+        fail_counts = metrics.count_task_failures_since_reset(
+            args.task_id,
+            phase=phase,
+            team_id=team_ctx.team_id if team_ctx else None,
+        )
+        if fail_counts["total"] >= 2:
+            print(
+                _format_inv4_fail_fast_message(args.task_id, chk_ref, fail_counts),
+                file=sys.stderr,
+            )
+            return 4
 
         # Checker Policy 検査 (機能XXX.1 / AGENTS.md Rule 6 / DX-7 / GATE-6)
         declared_decision = (

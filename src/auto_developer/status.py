@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import subprocess
 from datetime import datetime, timezone
@@ -384,11 +385,32 @@ def _collect_teams_snapshot(
     }
 
 
+def _to_finite_float(raw: Any) -> float | None:
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        try:
+            val = float(raw)
+        except OverflowError:
+            return None
+        return val if math.isfinite(val) else None
+    return None
+
+
+def _format_utc_iso(ts_sec: float) -> str | None:
+    try:
+        return datetime.fromtimestamp(ts_sec, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _parse_event_ts(ev: dict[str, Any]) -> tuple[float, str | None]:
-    raw_ts = ev.get("ts")
-    if isinstance(raw_ts, (int, float)) and not isinstance(raw_ts, bool):
-        ts_num = float(raw_ts)
-        return ts_num, datetime.fromtimestamp(ts_num, tz=timezone.utc).isoformat()
+    raw_ts_ms = _to_finite_float(ev.get("ts_ms"))
+    if raw_ts_ms is not None:
+        ts_sec = raw_ts_ms / 1000.0
+        if math.isfinite(ts_sec):
+            return ts_sec, _format_utc_iso(ts_sec)
+    raw_ts = _to_finite_float(ev.get("ts"))
+    if raw_ts is not None:
+        return raw_ts, _format_utc_iso(raw_ts)
     raw_iso = ev.get("timestamp")
     if isinstance(raw_iso, str) and raw_iso.strip():
         try:
@@ -763,6 +785,7 @@ def _collect_timeline(
             team_val,
             task_val,
             ev.get("ts"),
+            ev.get("ts_ms"),
             ev.get("timestamp"),
             ev.get("attempt"),
             ev.get("result"),
@@ -794,6 +817,7 @@ def _collect_timeline(
             "deletions": deletions,
         }
         for opt_key in (
+            "ts_ms",
             "tag",
             "reason",
             "exit_code",

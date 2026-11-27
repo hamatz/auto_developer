@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.10.0] - 2026-11-27
+
+### Highlights
+
+v0.10.0 aims to make Auto Developer usable by people who do not write good specifications themselves, and to let everyone see at a glance what happened overnight. It adds a **Spec Compiler** that turns an EGM design document into reviewed drafts of `SPEC.md`, `PLAN.md`, `teams.json` and a contract, and a **replayable dashboard** that shows the night as a timeline: tickets leave the backlog, teams work, reviews pass or fail, and verified commits pile up. It also closes several gaps found while dogfooding: unrecorded reviews, files lost during quarantine, and fail-fast that depended on the agent following instructions.
+
+### Breaking changes
+
+- **Top-level option abbreviations are no longer accepted** (DX-15). `auto-dev --work ...` must be written `auto-dev --work-dir ...`. Abbreviations of subcommand options are unchanged. This was needed so that `compile --check` does not collide with the top-level `--checker-*` options.
+- **One decided review per verification** (GATE-13). `record-review` records at most one review with a decision (APPROVE or REJECT) for the same `verify-step`; a second one is refused with `CHECKER_POLICY_VIOLATION` (exit 4). After a REJECT, run `verify-step` again before reviewing again. Outputs without a decision are kept in the review history and allow one more review.
+- **Reviews must follow the verification they belong to** (GATE-13). `review-input` and `record-review` refuse with exit code 3 when the working tree no longer matches the latest verification.
+- **Fail-fast is enforced in the low-level path** (GATE-15). `verify-step` and `commit-step` refuse to continue a task that has already failed twice (verification failures and Checker REJECTs together) since it was last committed or quarantined, and point to `rollback-step`.
+- **Approved IR files are protected** (GATE-14). `docs/designs/*.ir.json` is treated like `SPEC.md`: an agent that creates, changes or deletes it is stopped. The `verify_local.sh` template created by `auto-dev init` includes the new pattern; update existing copies of the script by hand if you want the same check there.
+- **Status snapshot schema** is now `auto-dev-status/2` (adds `timeline[]`, `backlog`, `requirements[]` and `design_irs[]`).
+
+### Added
+
+- **Spec Compiler** (`auto-dev compile`, skill `/nightly-compile`):
+  - `--outline <design.md>` maps the headings of an EGM design document (Goals, CUJs, Architectural Decisions, Verification Plan, ...) to the parts of an intermediate representation (IR), with line ranges and SHA-256, ignoring headings inside code blocks.
+  - `--check <ir.json>` validates the IR (`auto-dev-ir/1`) and its source anchors, and runs deterministic lints: missing acceptance criteria, contradictions with decisions (`forbids`), overlaps with already implemented requirements, team ownership, unlinked requirements and steps, and open questions.
+  - `--emit <ir.json>` writes drafts under `.dev/compile/<name>/`: a SPEC section with source comments, PLAN steps with an "existing test changes" skeleton, `teams.json` and per-team plans, a contract with "decisions for the human", acceptance test outlines, and an impact analysis. It never touches `SPEC.md`, `PLAN.md` or `teams.json` (INV-12).
+  - `--impact <ir.json>` lists where each requirement's fingerprints appear: definitions, references and strings in Python (by AST), other text files, tests that mock or count calls, tests that synthesize records, and entry points.
+  - `--anchor <path>:<start>-<end>` prints a source anchor for the IR.
+  - `/nightly-compile` guides an agent from a design document (or a set of `goal.md` / `architecture.md` / `decision.md` / `todo.md`) to an IR, through the checks and an independent review by a different model family, to the drafts.
+- **Status and dashboard**:
+  - `auto-dev status [--json]`: a snapshot built only from Auto Developer's own records (INV-11): plan and tasks, events, quarantines, team jobs, audit, requirements, and items that need a human decision.
+  - `auto-dev dashboard`: a single offline HTML file that replays the night (backlog, teams with Maker and Checker, integration gate, commit tower with line counts, evidence log, timeline with gap compression, 1×/4×/60× playback). Requirement IDs from plan titles and approved IRs are shown on tickets; `DESIGN_DRIFT` appears when an approved IR no longer matches its design document.
+  - `auto-dev dashboard --enable` (or `run` / `teams run --dashboard`) rewrites the dashboard on every event; `--watch` regenerates it periodically. `/nightly-run` offers to enable it.
+  - `auto-dev demo --teams`: a two-team demo (one verification failure and retry, integration, RC tag) that ends with a dashboard.
+  - `scripts/record_dashboard.py` exports a dashboard replay as an animated GIF (development tool; needs Playwright and Pillow).
+- **Events**: `run` / `teams run` now write `verify_step`, `checker_review`, `commit_step` and `rollback_step` events like the low-level commands, plus `task_start`, integration events and `review_input`.
+- **Review history**: every `record-review` keeps a copy under `reviews/task_<id>/history/<n>/`, including REJECTs and outputs without a decision.
+- **Verification timeout**: `verify-step --timeout SEC`, or a `# auto-dev: verify-timeout=<SEC>` line in the first 20 lines of the verification script (default 300 seconds). Timeouts explain where the limit came from and how to raise it.
+- **Quarantine guidance**: after a quarantine, Auto Developer lists new files that are only in the snapshot (with a `tar xzf` command), and files kept as Git objects because they look like secrets (with a `git cat-file -p` command).
+- `scripts/check_doc_commands.py` checks the `auto-dev` commands written in the README and the skills against the CLI definition.
+
+### Fixed
+
+- **Quarantine could lose files** (RCV-7): new untracked files whose contents looked like secrets (for example a test with a fake private key) were excluded from both the quarantine branch and the snapshot, and then deleted. They are now written as Git objects before cleaning; if that fails, nothing is deleted.
+- `SECRET_FILE_IN_COMMIT` now reads file names with `-z` and treats type changes as changes (AUD-1004, AUD-1005 from the v0.9.0 audit).
+- `status` read the audit record from the wrong place and did not use the same `AUDIT_OUTDATED` rule as `verify-bundle`.
+- `examples/two-teams/.gitignore` lacked `NIGHTLY_REPORT.md`, which made integration fail after `teams run`.
+- Python 3.10 compatibility in a test, and a timing-dependent tamper test that failed when the sandbox probe was not cached.
+
+### Known issues
+
+- Multi-team execution is **experimental**. All teams use the same Maker, Checker and verification; team-specific skills, models and review criteria are planned for v0.11 (`docs/contracts/v0.11-draft.md`).
+- `compile --impact` lists candidates only; it does not decide whether a test must change. Files under `docs/` named `test_*.py` are counted as tests (IDEA-032).
+- A few timing-dependent tests can fail on heavily loaded machines (IDEA-011).
+- The independent release audit (`claude-opus-5-5`, LIVE, from `f98c251` to `53d55a9`) returned no findings. Its input was about 600,000 tokens (the whole diff, including tests and documents) and the auditor reasoned only briefly, so treat it as weak assurance. Narrowing and splitting the audit input is planned (IDEA-017).
+- A run with only `--enable-audit` reports "0 / N tasks completed" in `NIGHTLY_REPORT.md`, which looks like a failure (IDEA-018).
+
+---
+
 ## [0.9.0] - 2026-11-23
 
 ### Highlights
