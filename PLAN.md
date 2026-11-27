@@ -72,9 +72,9 @@
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [ ] Phase 80 の準備コミット: SPEC.md（Phase 79 の要件を 4 章へ移す。5.1 に Phase 80 の要件）、PLAN.md（作業手順に【機械】【手順】の印）、BACKLOG.md、docs/contracts/phase80.md。
+- [x] Phase 80 の準備コミット: SPEC.md（Phase 79 の要件を 4 章へ移す。5.1 に Phase 80 の要件）、PLAN.md（作業手順に【機械】【手順】の印）、BACKLOG.md、docs/contracts/phase80.md。
 - [x] 準備のコミットの前に: Phase 79 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase79/` に退かせる。
-- [ ] ステップ 4 の完了後:
+- [x] ステップ 4 の完了後:
   - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI（macOS・Ubuntu × Python 3.10・3.12、gitleaks）が通ることを確かめる。
   - 査読の記録と Checker の出力ファイルを突き合わせ、記録されていない出力が0件であることを確かめる。
   - Bundle を作り、`verify-bundle` が VERIFIED になることを確かめる。
@@ -82,6 +82,9 @@
   - 日本語の名前のファイルを含む差分で、監査の分割が欠けなく行われることを確かめる。
 
 ## 記録
+- 2026-11-27: Red-First の試し。このリポジトリの過去の 10 ステップ（Phase 77〜80。STAT-12・GATE-15・REL-6・AUDIT-6・AUDIT-7・RPT-8・RCV-8/CMP-15・AUDIT-8・AUDIT-9・GATE-16）で、各コミットの親をチェックポイントにして、足したテストのファイルを GATE-17 の確認（`verify_red_first_tests`、Linux、`AUTO_DEV_REQUIRE_SANDBOX=1`）にかけた。9 ステップ（13 ファイル）が `CONFIRMED`、1 ステップ（REL-6 の `test_version_consistency.py`）が `NOT_RED`（`TRIVIAL_RED`。製品のコードを実行しない版の番号の検査で、Red-First の対象の題名ではない）。`SANDBOX_UNAVAILABLE` と `TIMEOUT` は0件。ただし `CONFIRMED` の理由は、`UNHANDLED_EXCEPTION` が7件、`IMPORT_ERROR` が3件、`SETUP_ERROR` が3件で、アサーションの失敗による Red は0件だった。新しい関数や新しいモジュールを読み込むだけで Red になるので、テストの中身が振る舞いを確かめているかまでは保証しない（IDEA-038）。この結果から、Phase 81 の準備で、人間が `scripts/verify_local.sh` の見出しを `red-first=enforce` に変える。なお、git worktree の中では確認が `COMMIT_CHECKOUT_FAILED`（`Repository is not a git repository`）で `NOT_RED` になった（IDEA-039）。
+- 2026-11-27: 監査の分割の確認（AUDIT-8）。一時的なリポジトリで `src/鍵.py` と `src/b.py` を変え、`--audit-max-diff-bytes 300` 相当で監査だけを実行した（偽の監査役）。2組（`src/b.py` 473 バイト、`src/鍵.py` 479 バイト）に分かれ、どちらの組も監査役に渡り（`鍵.py` の差分が入力に含まれる）、`COMPLETED`。`verify_audit_chunks_match_full_diff` は、組を1つ落とすと `src/鍵.py` を、組を重ねると `src/b.py` を返した。
+- 2026-11-27: Phase 80 の完了後の確認。4 ステップすべて完了し、隔離は0回（ステップ 1・3 は1回目の査読が REJECT、2回目で APPROVE）。保護ファイルの変更なし。査読の記録の突き合わせで、`.dev/checker/review_p80_*.txt` の6件すべてが履歴に記録された。ステップ 3 のイベントには途中の実装が書いた `red_first:PENDING` が残る（最終のコードは書かない）。ステップ 4 は、自分の Red-First の確認で `CONFIRMED` だった。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1198 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）だけ。Bundle は VERIFIED（`AUDIT_OUTDATED` は Phase 80 の後の監査で解消する）。
 - 2026-11-27: Phase 79 の後の独立監査（`claude-opus-5-5`、起点 f98c251、対象 1b61d87、既定の範囲で 23 ファイル・約 434KB、3組に分割）。`SUCCESS` で、P2 が2件（AUD-1006: 日本語などのファイル名の変更が、分割した監査の入力から黙って抜ける。AUD-1007: 失敗した監査の記録に範囲などが残らない。IDEA-037 と同じ）。組ごとの考えた量は、入力 1 万トークンあたり約 258・112・245 トークンで、v0.10.0 の監査（約 36）から大きく増えた。各組の入力（約 7〜12 万トークン）の多くは、毎回渡す SPEC.md（約 119KB）が占めている。
 - 2026-11-27: Phase 80 の準備。v0.11-draft の 5 章の3点を提案どおりに決めた（優先順位は G → T → L → E → S、Red-First の確認は設定で選べて既定は warn、Checker の評価は CI に入れず手で回す）。人間が承認した。AUD-1006 は P2 として登録されたが、監査の入力から変更が黙って抜けるので、すぐに直す（AUDIT-8）。PLAN の作業手順の各行に【機械】【手順】の印を付けた（【機械】10 行、【手順】15 行）。
 - 2026-11-27: Phase 79 の完了後の確認。4 ステップすべて、1回目の査読で APPROVE（隔離は0回。ステップ 3 は検証の失敗が1回あり、2回目で通った）。保護ファイルの変更なし。査読の記録の突き合わせで、`.dev/checker/review_p79_*.txt` の4件すべてが履歴に記録され、`review_input` の回数とも一致した。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1166 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）だけ。Bundle は VERIFIED。
