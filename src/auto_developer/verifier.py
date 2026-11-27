@@ -15,7 +15,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 try:
@@ -1001,6 +1001,89 @@ def resolve_verify_timeout(cli_timeout: int | None, script_path: Path | None) ->
             return sec, f"{script_path.name} directive (# auto-dev: verify-timeout={sec})"
 
     return DEFAULT_VERIFY_TIMEOUT_SEC, f"default ({DEFAULT_VERIFY_TIMEOUT_SEC}s)"
+
+
+DEFAULT_RED_FIRST_MODE = "warn"
+RED_FIRST_MODES = frozenset({"off", "warn", "enforce"})
+RED_FIRST_DIRECTIVE_RE = re.compile(r"^\s*#\s*auto-dev:\s*red-first\s*=\s*(.*?)\s*$")
+
+
+def resolve_red_first_mode(script_path: Path | None) -> str:
+    """検証スクリプト先頭 20 行以内の `# auto-dev: red-first=<off|warn|enforce>` を解決する。"""
+    if script_path is not None and script_path.exists() and script_path.is_file():
+        lines = script_path.read_text(encoding="utf-8", errors="replace").splitlines()[
+            :VERIFY_TIMEOUT_DIRECTIVE_SCAN_LINES
+        ]
+        for line in lines:
+            match = RED_FIRST_DIRECTIVE_RE.match(line)
+            if not match:
+                continue
+            raw_val = match.group(1).strip()
+            if raw_val not in RED_FIRST_MODES:
+                raise ValueError(
+                    f"Invalid '# auto-dev: red-first=' value '{raw_val}' in {script_path}: "
+                    "must be one of off, warn, enforce."
+                )
+            return raw_val
+    return DEFAULT_RED_FIRST_MODE
+
+
+def is_red_first_task(title: str) -> bool:
+    """タスクの題名が Red-First の対象（`Red-First` または `Red:` を含む）か判定する。"""
+    return "Red-First" in title or "Red:" in title
+
+
+def is_target_python_test_file(rel_path: str) -> bool:
+    """GATE-16 の対象テストファイル（`tests/immunity/` を除く `test_*.py` / `*_test.py`）か判定する。"""
+    posix_path = PurePosixPath(rel_path)
+    parts = posix_path.parts
+    if len(parts) >= 2 and parts[0] == "tests" and parts[1] == "immunity":
+        return False
+    name = posix_path.name
+    return (name.startswith("test_") and name.endswith(".py")) or name.endswith("_test.py")
+
+
+def find_changed_test_files(repo_dir: Path, checkpoint: str) -> list[str]:
+    """チェックポイントから作業ツリーまでに追加・変更された対象 Python テストファイルを返す。"""
+    diff_proc = subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--diff-filter=ACM",
+            checkpoint,
+        ],
+        cwd=repo_dir,
+        capture_output=True,
+        check=False,
+    )
+    if diff_proc.returncode != 0:
+        err = diff_proc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"git diff failed while finding changed test files: {err}")
+
+    untracked_proc = subprocess.run(
+        ["git", "-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=repo_dir,
+        capture_output=True,
+        check=False,
+    )
+    if untracked_proc.returncode != 0:
+        err = untracked_proc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"git ls-files failed while finding changed test files: {err}")
+
+    candidates: set[str] = set()
+    for raw_output in (diff_proc.stdout, untracked_proc.stdout):
+        for raw_entry in raw_output.split(b"\x00"):
+            if not raw_entry:
+                continue
+            rel_path = raw_entry.decode("utf-8", errors="replace")
+            if is_target_python_test_file(rel_path) and (repo_dir / rel_path).is_file():
+                candidates.add(rel_path)
+    return sorted(candidates)
 
 
 class DeterministicVerifier:

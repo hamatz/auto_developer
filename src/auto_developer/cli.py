@@ -49,7 +49,13 @@ from auto_developer.runner import (
     RunnerAdapter,
     parse_checker_decision,
 )
-from auto_developer.verifier import DeterministicVerifier, resolve_verify_timeout
+from auto_developer.verifier import (
+    DeterministicVerifier,
+    find_changed_test_files,
+    is_red_first_task,
+    resolve_red_first_mode,
+    resolve_verify_timeout,
+)
 
 VERSION = "0.10.0"
 
@@ -1542,6 +1548,7 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             verify_timeout, verify_timeout_source = resolve_verify_timeout(args.timeout, verify_script)
+            red_first_mode = resolve_red_first_mode(verify_script)
         except ValueError as timeout_err:
             print(f"CONFIG ERROR: {timeout_err}", file=sys.stderr)
             return 2
@@ -1614,6 +1621,40 @@ def main(argv: list[str] | None = None) -> int:
                     phase=phase,
                 )
                 return 11
+
+        red_first_payload: dict[str, Any] | None = None
+        if red_first_mode != "off":
+            if is_red_first_task(target.title):
+                try:
+                    target_test_files = find_changed_test_files(work_dir, args.checkpoint)
+                except RuntimeError as rf_err:
+                    effective_plan_path.write_text(original_plan_content, encoding="utf-8")
+                    print(f"RED_FIRST_ERROR: {rf_err}", file=sys.stderr)
+                    return 2
+                # GATE-16 では対象ファイルの有無のみを判定し、変更ありの仮結果 PENDING は GATE-17 で置換する
+                rf_result = "NO_TEST_CHANGES" if not target_test_files else "PENDING"
+                red_first_payload = {
+                    "mode": red_first_mode,
+                    "result": rf_result,
+                    "test_files": target_test_files,
+                }
+                rf_attempt = metrics.count_verify_attempts(args.task_id, args.checkpoint, phase=phase) + 1
+                metrics.record_event(
+                    "red_first",
+                    task_id=args.task_id,
+                    checkpoint=args.checkpoint,
+                    mode=red_first_mode,
+                    result=rf_result,
+                    test_files=target_test_files,
+                    attempt=rf_attempt,
+                    phase=phase,
+                )
+            else:
+                red_first_payload = {
+                    "mode": red_first_mode,
+                    "result": "SKIPPED",
+                    "test_files": [],
+                }
 
         code, out = verifier.run_verification(
             verify_script,
@@ -1696,6 +1737,7 @@ def main(argv: list[str] | None = None) -> int:
                     "output_summary": out_lines[-10:] if out_lines else [],
                 }
             },
+            red_first=red_first_payload,
         )
         metrics.record_event(
             "verify_step",
