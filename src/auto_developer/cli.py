@@ -1665,7 +1665,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if rf_result != "CONFIRMED":
                     rf_summary = (
-                        ", ".join(f"{r['file']}={r['result']}({r['reason']})" for r in rf_file_results)
+                        ", ".join(
+                            f"{r['file']}={r['result']}(checkpoint={r['reason']}, current={r.get('current_result', 'SKIPPED')}:{r.get('current_reason', 'SKIPPED')})"
+                            for r in rf_file_results
+                        )
                         if rf_file_results
                         else "no changed test files"
                     )

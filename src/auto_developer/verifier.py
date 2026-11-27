@@ -2633,7 +2633,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
 
 def _classify_red_first_file_result(res: RedVerificationResult) -> str:
-    """RedVerificationResult の reason を GATE-17 のファイル単位の判定へ変換する。"""
+    """RedVerificationResult の reason を GATE-17 のチェックポイント単位の判定へ変換する。"""
     if res.reason in _RED_FIRST_CONFIRMED_REASONS:
         return "CONFIRMED"
     if res.reason in _RED_FIRST_SANDBOX_REASONS:
@@ -2643,13 +2643,24 @@ def _classify_red_first_file_result(res: RedVerificationResult) -> str:
     return "NOT_RED"
 
 
+def _classify_red_first_current_result(res: RedVerificationResult) -> tuple[str, str, str]:
+    """GATE-18: 今の作業ツリーでの実行結果を (file_result, current_result, current_reason) へ変換する。"""
+    if res.reason in _RED_FIRST_SANDBOX_REASONS:
+        return "SANDBOX_UNAVAILABLE", "SANDBOX_UNAVAILABLE", res.reason
+    if res.reason == "TIMEOUT":
+        return "TIMEOUT", "TIMEOUT", res.reason
+    if res.reason == "ALREADY_GREEN":
+        return "CONFIRMED", "PASSED", res.reason
+    return "NOT_GREEN", "FAILED", res.reason
+
+
 def verify_red_first_tests(
     repo_dir: Path,
     checkpoint: str,
     test_files: list[str],
     timeout_sec: int = RED_FIRST_FILE_TIMEOUT_SEC,
 ) -> dict[str, Any]:
-    """GATE-17: 対象テストファイルをチェックポイント時点のコードに対してサンドボックス実行し集計する。"""
+    """GATE-17 / GATE-18: 対象テストファイルをチェックポイントと今の作業ツリーに対してサンドボックス実行し集計する。"""
     if not test_files:
         return {"result": "NO_TEST_CHANGES", "file_results": []}
 
@@ -2666,21 +2677,39 @@ def verify_red_first_tests(
                     "result": "NOT_RED",
                     "reason": "EXECUTION_ERROR",
                     "reason_detail": f"Failed to read test file: {e}",
+                    "current_result": "SKIPPED",
+                    "current_reason": "SKIPPED",
                 }
             )
             continue
-        res = verifier.verify_red_first_test(
+        cp_res = verifier.verify_red_first_test(
             rel_path,
             test_code,
             timeout_sec=timeout_sec,
             commit=checkpoint,
         )
+        cp_status = _classify_red_first_file_result(cp_res)
+        if cp_status != "CONFIRMED":
+            file_result = cp_status
+            current_result = "SKIPPED"
+            current_reason = "SKIPPED"
+        else:
+            cur_res = verifier.verify_red_first_test(
+                rel_path,
+                test_code,
+                timeout_sec=timeout_sec,
+                commit=None,
+            )
+            file_result, current_result, current_reason = _classify_red_first_current_result(cur_res)
+
         file_results.append(
             {
                 "file": rel_path,
-                "result": _classify_red_first_file_result(res),
-                "reason": res.reason,
-                "reason_detail": res.reason_detail,
+                "result": file_result,
+                "reason": cp_res.reason,
+                "reason_detail": cp_res.reason_detail,
+                "current_result": current_result,
+                "current_reason": current_reason,
             }
         )
 
@@ -2691,6 +2720,8 @@ def verify_red_first_tests(
         overall = "SANDBOX_UNAVAILABLE"
     elif "TIMEOUT" in statuses:
         overall = "TIMEOUT"
+    elif "NOT_GREEN" in statuses:
+        overall = "NOT_GREEN"
     else:
         overall = "NOT_RED"
 
