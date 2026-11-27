@@ -1328,6 +1328,7 @@ class RedTestVerifier:
         "LD_",
         "DYLD_",
         "PYTHON",
+        "GIT_",
     )
 
     def __init__(self, repo_dir: Path | None = None) -> None:
@@ -2092,6 +2093,18 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         sanitized_env["PYTHONPATH"] = f"{src_path}:{repo_path}"
         sanitized_env["TMPDIR"] = str(exec_resolved)
 
+        # SBX-9: 候補テストの HOME / XDG_CONFIG_HOME を一時領域の空ディレクトリにし、
+        # システム設定の参照も抑止してサンドボックス内で git がホスト設定に依存せず動くようにする
+        sandbox_home_tmp = tempfile.TemporaryDirectory()
+        sandbox_home_root = Path(sandbox_home_tmp.name).resolve()
+        sandbox_home_dir = sandbox_home_root / "home"
+        sandbox_xdg_config_dir = sandbox_home_root / "xdg_config"
+        sandbox_home_dir.mkdir(parents=True, exist_ok=True)
+        sandbox_xdg_config_dir.mkdir(parents=True, exist_ok=True)
+        sanitized_env["HOME"] = str(sandbox_home_dir)
+        sanitized_env["XDG_CONFIG_HOME"] = str(sandbox_xdg_config_dir)
+        sanitized_env["GIT_CONFIG_NOSYSTEM"] = "1"
+
         runner_args = [
             sys.executable,
             "-c",
@@ -2164,6 +2177,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 (deny file-write*)
 (allow file-write* (subpath "{exec_resolved}"))
 (allow file-write* (subpath "{exec_cwd}"))
+(allow file-write* (subpath "{sandbox_home_root}"))
 (allow file-write* (literal "/dev/null"))
 (allow file-write* (literal "/dev/zero"))
 (allow file-write* (literal "/dev/dtracehelper"))
@@ -2219,6 +2233,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 (allow file-read* (subpath "{py_bin}"))
 (allow file-read* (subpath "{exec_resolved}"))
 (allow file-read* (subpath "{exec_cwd}"))
+(allow file-read* (subpath "{sandbox_home_root}"))
 (deny file-read* (subpath "{repo_resolved}"))
 (deny file-write* (subpath "{repo_resolved}"))
 """
@@ -2267,11 +2282,17 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 "--tmpfs", "/tmp",
                 "--dir", str(exec_resolved),
                 "--bind", str(exec_resolved), str(exec_resolved),
+                "--dir", str(sandbox_home_dir),
+                "--bind", str(sandbox_home_dir), str(sandbox_home_dir),
+                "--dir", str(sandbox_xdg_config_dir),
+                "--bind", str(sandbox_xdg_config_dir), str(sandbox_xdg_config_dir),
                 "--unshare-net",
                 "--die-with-parent",
             ])
             cmd.extend(runner_args)
         else:
+            with contextlib.suppress(OSError):
+                sandbox_home_tmp.cleanup()
             return _res(
                 is_reproduced=False,
                 exit_code=1,
@@ -2337,6 +2358,8 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             if profile_file and profile_file.exists():
                 with contextlib.suppress(OSError):
                     profile_file.unlink()
+            with contextlib.suppress(OSError):
+                sandbox_home_tmp.cleanup()
 
         # 3. 元リポジトリ改ざん検知 (JJJ.2: 多層防御)
         after_snapshot = self._capture_repo_snapshot()
