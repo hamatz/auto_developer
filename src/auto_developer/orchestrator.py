@@ -1354,7 +1354,18 @@ class NightlyOrchestrator:
             status = "AUDIT_PENDING" if is_pending else "AUDIT_FAILED"
             print(f"Warning: Independent audit stage {status.lower()}: {err_msg}", file=sys.stderr)
             failed_meta = getattr(auditor, "last_run_metadata", {}) or {}
-            failed_chunks = failed_meta.get("chunks") if isinstance(failed_meta, dict) else None
+            meta_dict = failed_meta if isinstance(failed_meta, dict) else {}
+            failed_chunks = meta_dict.get("chunks")
+            fail_audit_paths = meta_dict.get("audit_paths", effective_audit_paths or [])
+            fail_max_bytes = meta_dict.get("audit_max_diff_bytes", effective_max_bytes)
+            fail_diff_files_count = meta_dict.get("diff_files_count")
+            fail_diff_bytes = meta_dict.get("diff_bytes")
+            fail_empty_diff = bool(meta_dict.get("empty_diff", False))
+            fail_total_chunks = meta_dict.get("total_chunks")
+            fail_executed_chunks = meta_dict.get("executed_chunks")
+            fail_not_executed_chunks = meta_dict.get("not_executed_chunks")
+            fail_chunk_index = meta_dict.get("failed_chunk_index")
+
             audit_rec_dir = self.repo_dir / ".git" / "nightly_evidence" / "records"
             if not audit_rec_dir.exists():
                 audit_rec_dir = self.repo_dir / ".dev" / "evidence" / "records"
@@ -1362,16 +1373,33 @@ class NightlyOrchestrator:
                 audit_rec_dir.mkdir(parents=True, exist_ok=True)
                 err_payload: dict[str, Any] = {
                     "status": status,
-                    "mode": "LIVE",
+                    "mode": meta_dict.get("mode", "LIVE"),
+                    "provider": meta_dict.get("provider"),
+                    "provider_request_id": meta_dict.get("provider_request_id"),
                     "error": err_msg,
                     "baseline_commit": baseline_commit,
                     "target_commit": target_commit,
+                    "audit_paths": fail_audit_paths,
+                    "audit_max_diff_bytes": fail_max_bytes,
+                    "empty_diff": fail_empty_diff,
                     "timestamp": time.time(),
                 }
+                if fail_diff_files_count is not None:
+                    err_payload["diff_files_count"] = int(fail_diff_files_count)
+                if fail_diff_bytes is not None:
+                    err_payload["diff_bytes"] = int(fail_diff_bytes)
+                if fail_total_chunks is not None:
+                    err_payload["total_chunks"] = int(fail_total_chunks)
+                if isinstance(fail_executed_chunks, list):
+                    err_payload["executed_chunks"] = fail_executed_chunks
+                if isinstance(fail_not_executed_chunks, list):
+                    err_payload["not_executed_chunks"] = fail_not_executed_chunks
                 if isinstance(failed_chunks, list):
                     err_payload["chunks"] = failed_chunks
-                if isinstance(failed_meta, dict) and failed_meta.get("failed_chunk_index") is not None:
-                    err_payload["failed_chunk_index"] = failed_meta.get("failed_chunk_index")
+                if fail_chunk_index is not None:
+                    err_payload["failed_chunk_index"] = fail_chunk_index
+                if meta_dict:
+                    err_payload["audit_metadata"] = meta_dict
                 (audit_rec_dir / "audit_stage.json").write_text(
                     json.dumps(err_payload, indent=2),
                     encoding="utf-8",
@@ -1383,7 +1411,7 @@ class NightlyOrchestrator:
                 status=status,
                 findings=[],
                 screen_res={},
-                audit_metadata=failed_meta if isinstance(failed_meta, dict) else {},
+                audit_metadata=meta_dict,
             )
             ret: dict[str, Any] = {
                 "status": status,
@@ -1391,9 +1419,26 @@ class NightlyOrchestrator:
                 "baseline_commit": baseline_commit,
                 "target_commit": target_commit,
                 "findings": [],
+                "audit_paths": fail_audit_paths,
+                "audit_max_diff_bytes": fail_max_bytes,
+                "empty_diff": fail_empty_diff,
             }
+            if fail_diff_files_count is not None:
+                ret["diff_files_count"] = int(fail_diff_files_count)
+            if fail_diff_bytes is not None:
+                ret["diff_bytes"] = int(fail_diff_bytes)
+            if fail_total_chunks is not None:
+                ret["total_chunks"] = int(fail_total_chunks)
+            if isinstance(fail_executed_chunks, list):
+                ret["executed_chunks"] = fail_executed_chunks
+            if isinstance(fail_not_executed_chunks, list):
+                ret["not_executed_chunks"] = fail_not_executed_chunks
+            if fail_chunk_index is not None:
+                ret["failed_chunk_index"] = fail_chunk_index
             if isinstance(failed_chunks, list):
                 ret["chunks"] = failed_chunks
+            if meta_dict:
+                ret["audit_metadata"] = meta_dict
             return ret
 
     def _record_audit_stage_event(

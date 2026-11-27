@@ -87,6 +87,8 @@ class MorningReporter:
             )
             return {
                 "chunk_index": int(chunk_dict.get("chunk_index") or idx),
+                "status": chunk_dict.get("status"),
+                "error": chunk_dict.get("error"),
                 "input_tokens": in_tok,
                 "output_tokens": out_tok,
                 "thinking_tokens": think_tok,
@@ -113,6 +115,38 @@ class MorningReporter:
                 else int(audit_stage.get("total_chunks") or meta_dict.get("total_chunks") or 0)
             )
 
+        failed_chunk_index = _int_or_none(
+            audit_stage.get("failed_chunk_index")
+            if "failed_chunk_index" in audit_stage
+            else meta_dict.get("failed_chunk_index")
+        )
+        raw_executed = (
+            audit_stage.get("executed_chunks")
+            if "executed_chunks" in audit_stage
+            else meta_dict.get("executed_chunks")
+        )
+        raw_not_executed = (
+            audit_stage.get("not_executed_chunks")
+            if "not_executed_chunks" in audit_stage
+            else meta_dict.get("not_executed_chunks")
+        )
+        if isinstance(raw_executed, list):
+            executed_chunks = [int(x) for x in raw_executed if isinstance(x, int) and not isinstance(x, bool)]
+        else:
+            executed_chunks = [
+                c["chunk_index"] for c in chunk_entries if c.get("status") != "NOT_EXECUTED"
+            ]
+        if isinstance(raw_not_executed, list):
+            not_executed_chunks = [
+                int(x) for x in raw_not_executed if isinstance(x, int) and not isinstance(x, bool)
+            ]
+        else:
+            not_executed_chunks = [
+                c["chunk_index"] for c in chunk_entries if c.get("status") == "NOT_EXECUTED"
+            ]
+            if not not_executed_chunks and failed_chunk_index is not None and total_chunks > failed_chunk_index:
+                not_executed_chunks = list(range(failed_chunk_index + 1, total_chunks + 1))
+
         weak_chunks = [c["chunk_index"] for c in chunk_entries if c["weak_assurance"]]
         return {
             "audit_paths": audit_paths,
@@ -120,10 +154,36 @@ class MorningReporter:
             "diff_bytes": diff_bytes,
             "empty_diff": empty_diff,
             "total_chunks": total_chunks,
+            "failed_chunk_index": failed_chunk_index,
+            "executed_chunks": executed_chunks,
+            "not_executed_chunks": not_executed_chunks,
             "chunk_entries": chunk_entries,
             "weak_chunks": weak_chunks,
             "has_weak_assurance": bool(weak_chunks),
         }
+
+    @staticmethod
+    def _format_audit_depth_summary(status_str: str, audit_depth: dict[str, Any]) -> str:
+        """監査の深さ（全体の組数と失敗・未実行の状況）を要約する (RPT-8 / AUDIT-9)。"""
+        total_chunks = audit_depth["total_chunks"]
+        failed_idx = audit_depth.get("failed_chunk_index")
+        not_executed = audit_depth.get("not_executed_chunks") or []
+        is_failure = (
+            status_str in ("AUDIT_PENDING", "AUDIT_FAILED")
+            or failed_idx is not None
+            or bool(not_executed)
+        )
+        if not is_failure:
+            return f"{total_chunks} 組"
+        if failed_idx is not None:
+            if not_executed:
+                not_exec_str = "・".join(str(i) for i in not_executed)
+                return f"{total_chunks} 組のうち {failed_idx} 組目で失敗（{not_exec_str} 組目は実行していない）"
+            return f"{total_chunks} 組のうち {failed_idx} 組目で失敗"
+        if not_executed:
+            not_exec_str = "・".join(str(i) for i in not_executed)
+            return f"{total_chunks} 組のうち実行前に失敗（{not_exec_str} 組目は実行していない）"
+        return f"{total_chunks} 組（失敗）"
 
     @staticmethod
     def _extract_record_fields(rec_data: dict[str, Any]) -> tuple[str, str, str | None]:
@@ -463,8 +523,25 @@ class MorningReporter:
             if empty_diff:
                 lines.append("- **監査スキップ**: 対象範囲の差分が空のため、監査役を呼ばずに `SUCCESS`（指摘0件）としました。")
             elif total_chunks > 0 or chunk_entries:
-                lines.append(f"- **監査の深さ（組の数）**: {total_chunks} 組")
+                depth_summary = self._format_audit_depth_summary(status_str, audit_depth)
+                lines.append(f"- **監査の深さ（組の数）**: {depth_summary}")
+                failed_idx = audit_depth.get("failed_chunk_index")
                 for c_entry in chunk_entries:
+                    c_status = c_entry.get("status")
+                    if c_status == "NOT_EXECUTED":
+                        lines.append(f"  - 組 {c_entry['chunk_index']}: 未実行（実行していない）")
+                        continue
+                    is_failed_chunk = (
+                        c_status in ("AUDIT_PENDING", "AUDIT_FAILED", "FAILED")
+                        or (failed_idx is not None and c_entry["chunk_index"] == failed_idx)
+                    )
+                    if (
+                        is_failed_chunk
+                        and c_entry["input_tokens"] is None
+                        and c_entry["output_tokens"] is None
+                    ):
+                        lines.append(f"  - 組 {c_entry['chunk_index']}: 失敗")
+                        continue
                     in_s = str(c_entry["input_tokens"]) if c_entry["input_tokens"] is not None else "N/A"
                     out_s = str(c_entry["output_tokens"]) if c_entry["output_tokens"] is not None else "N/A"
                     think_s = (
@@ -472,13 +549,14 @@ class MorningReporter:
                         if c_entry["thinking_tokens"] is not None
                         else "N/A"
                     )
+                    fail_suffix = " [失敗]" if is_failed_chunk else ""
                     warn_suffix = (
                         " [注意: 監査役の考えた量が入力に比べて少ない（弱い保証）]"
                         if c_entry["weak_assurance"]
                         else ""
                     )
                     lines.append(
-                        f"  - 組 {c_entry['chunk_index']}: 入力 {in_s} トークン / 出力 {out_s} トークン（うち考えた部分: {think_s}）{warn_suffix}"
+                        f"  - 組 {c_entry['chunk_index']}: 入力 {in_s} トークン / 出力 {out_s} トークン（うち考えた部分: {think_s}）{fail_suffix}{warn_suffix}"
                     )
                 if audit_depth["has_weak_assurance"]:
                     weak_list = ", ".join(str(i) for i in audit_depth["weak_chunks"])
@@ -900,8 +978,27 @@ class MorningReporter:
                 if audit_depth["empty_diff"]:
                     lines.append("  Skipped: 対象範囲の差分が空のため監査役を呼ばずに SUCCESS")
                 elif audit_depth["total_chunks"] > 0 or audit_depth["chunk_entries"]:
-                    lines.append(f"  Chunks: {audit_depth['total_chunks']} 組")
+                    depth_summary = self._format_audit_depth_summary(
+                        str(audit_stage.get("status", "UNKNOWN")), audit_depth
+                    )
+                    lines.append(f"  Chunks: {depth_summary}")
+                    failed_idx = audit_depth.get("failed_chunk_index")
                     for c_entry in audit_depth["chunk_entries"]:
+                        c_status = c_entry.get("status")
+                        if c_status == "NOT_EXECUTED":
+                            lines.append(f"  Chunk {c_entry['chunk_index']}: not executed")
+                            continue
+                        is_failed_chunk = (
+                            c_status in ("AUDIT_PENDING", "AUDIT_FAILED", "FAILED")
+                            or (failed_idx is not None and c_entry["chunk_index"] == failed_idx)
+                        )
+                        if (
+                            is_failed_chunk
+                            and c_entry["input_tokens"] is None
+                            and c_entry["output_tokens"] is None
+                        ):
+                            lines.append(f"  Chunk {c_entry['chunk_index']}: failed")
+                            continue
                         in_s = (
                             str(c_entry["input_tokens"])
                             if c_entry["input_tokens"] is not None
@@ -917,8 +1014,9 @@ class MorningReporter:
                             if c_entry["thinking_tokens"] is not None
                             else "N/A"
                         )
+                        fail_suffix = " [FAILED]" if is_failed_chunk else ""
                         lines.append(
-                            f"  Chunk {c_entry['chunk_index']}: input={in_s}, output={out_s}, thinking={think_s}"
+                            f"  Chunk {c_entry['chunk_index']}: input={in_s}, output={out_s}, thinking={think_s}{fail_suffix}"
                         )
                     if audit_depth["has_weak_assurance"]:
                         lines.append(

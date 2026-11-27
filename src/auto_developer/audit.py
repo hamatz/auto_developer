@@ -1094,6 +1094,22 @@ class IndependentAuditRunner:
             "findings_count": findings_count,
         }
 
+    @staticmethod
+    def _build_unexecuted_chunk_record(
+        chunk_index: int,
+        total_chunks: int,
+        chunk: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "chunk_index": chunk_index,
+            "total_chunks": total_chunks,
+            "files": list(chunk["files"]),
+            "diff_bytes": chunk["diff_bytes"],
+            "exceeds_max_diff_bytes": chunk["exceeds_max_diff_bytes"],
+            "diff_sha256": chunk["diff_sha256"],
+            "status": "NOT_EXECUTED",
+        }
+
     def audit_repository(
         self,
         repo_dir: Path,
@@ -1160,6 +1176,27 @@ class IndependentAuditRunner:
         diff_files_count = len(diff_files)
         diff_bytes = len(git_diff.encode("utf-8"))
 
+        # 失敗時にも範囲と差分の規模を残せるよう先に基本情報を記録する (AUDIT-9)
+        self.last_run_metadata = {
+            "mode": "LIVE",
+            "provider": None,
+            "provider_request_id": None,
+            "auditor_model": self.model_name,
+            "maker_model": self.maker_model,
+            "status": "AUDIT_PENDING",
+            "baseline_commit": target_baseline,
+            "target_commit": target_sha,
+            "target_tree_sha": target_tree_sha,
+            "audit_paths": effective_pathspecs,
+            "diff_files_count": diff_files_count,
+            "diff_bytes": diff_bytes,
+            "empty_diff": (not git_diff.strip() and diff_files_count == 0),
+            "chunks": [],
+            "total_chunks": 0,
+            "executed_chunks": [],
+            "not_executed_chunks": [],
+        }
+
         # SPEC.md の内容を target_commit から厳密に抽出 (SSS.2 / Sol氏 Phase 58 P1指摘)
         # 作業ツリーへのフォールバックを完全撤廃し、コミット内に存在しない場合は Fail-Closed で即座に拒絶
         spec_git_path = "SPEC.md"
@@ -1216,11 +1253,49 @@ class IndependentAuditRunner:
                 "empty_diff": True,
                 "chunks": [],
                 "total_chunks": 0,
+                "executed_chunks": [],
+                "not_executed_chunks": [],
             }
             return []
 
         if diff_bytes <= effective_max_bytes:
-            findings = self.audit(spec_content=spec_content, git_diff=git_diff)
+            try:
+                findings = self.audit(spec_content=spec_content, git_diff=git_diff)
+            except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as err:
+                failed_chunk_rec = {
+                    "chunk_index": 1,
+                    "total_chunks": 1,
+                    "files": sorted(diff_files),
+                    "diff_bytes": diff_bytes,
+                    "exceeds_max_diff_bytes": False,
+                    "diff_sha256": diff_sha256,
+                    "status": "AUDIT_PENDING",
+                    "error": str(err),
+                }
+                self.last_run_metadata = {
+                    "mode": "LIVE",
+                    "provider": None,
+                    "provider_request_id": None,
+                    "auditor_model": self.model_name,
+                    "maker_model": self.maker_model,
+                    "status": "AUDIT_PENDING",
+                    "baseline_commit": target_baseline,
+                    "target_commit": target_sha,
+                    "target_tree_sha": target_tree_sha,
+                    "spec_sha256": spec_sha256,
+                    "diff_sha256": diff_sha256,
+                    "audit_paths": effective_pathspecs,
+                    "audit_max_diff_bytes": effective_max_bytes,
+                    "diff_files_count": diff_files_count,
+                    "diff_bytes": diff_bytes,
+                    "empty_diff": False,
+                    "chunks": [failed_chunk_rec],
+                    "total_chunks": 1,
+                    "failed_chunk_index": 1,
+                    "executed_chunks": [1],
+                    "not_executed_chunks": [],
+                }
+                raise
             for finding in findings:
                 finding.baseline_commit = target_baseline
                 finding.target_commit = target_sha
@@ -1252,6 +1327,8 @@ class IndependentAuditRunner:
                     "empty_diff": False,
                     "chunks": [chunk_rec],
                     "total_chunks": 1,
+                    "executed_chunks": [1],
+                    "not_executed_chunks": [],
                 })
             return findings
 
@@ -1270,6 +1347,11 @@ class IndependentAuditRunner:
         packed_chunks = pack_audit_diff_chunks(file_diffs, effective_max_bytes)
         mismatched_files = verify_audit_chunks_match_full_diff(git_diff, packed_chunks)
         if mismatched_files:
+            mismatch_total = len(packed_chunks)
+            mismatch_chunks = [
+                self._build_unexecuted_chunk_record(c_idx, mismatch_total, c)
+                for c_idx, c in enumerate(packed_chunks, 1)
+            ]
             self.last_run_metadata = {
                 "mode": "LIVE",
                 "provider": None,
@@ -1287,7 +1369,10 @@ class IndependentAuditRunner:
                 "diff_files_count": diff_files_count,
                 "diff_bytes": diff_bytes,
                 "empty_diff": False,
-                "total_chunks": len(packed_chunks),
+                "chunks": mismatch_chunks,
+                "total_chunks": mismatch_total,
+                "executed_chunks": [],
+                "not_executed_chunks": list(range(1, mismatch_total + 1)),
                 "mismatched_files": mismatched_files,
             }
             raise RuntimeError(
@@ -1328,6 +1413,12 @@ class IndependentAuditRunner:
                         "error": str(err),
                     }
                 )
+                for rem_idx in range(idx + 1, total_chunks + 1):
+                    chunk_records.append(
+                        self._build_unexecuted_chunk_record(
+                            rem_idx, total_chunks, packed_chunks[rem_idx - 1]
+                        )
+                    )
                 self.last_run_metadata = {
                     "mode": first_meta.get("mode", "LIVE") if first_meta else "LIVE",
                     "provider": first_meta.get("provider") if first_meta else None,
@@ -1348,6 +1439,8 @@ class IndependentAuditRunner:
                     "chunks": chunk_records,
                     "total_chunks": total_chunks,
                     "failed_chunk_index": idx,
+                    "executed_chunks": list(range(1, idx + 1)),
+                    "not_executed_chunks": list(range(idx + 1, total_chunks + 1)),
                 }
                 raise RuntimeError(
                     f"AUDIT_CHUNK_FAILED (chunk {idx}/{total_chunks}): {err}"
@@ -1390,6 +1483,8 @@ class IndependentAuditRunner:
             "findings_count": len(all_findings),
             "chunks": chunk_records,
             "total_chunks": total_chunks,
+            "executed_chunks": list(range(1, total_chunks + 1)),
+            "not_executed_chunks": [],
         })
         self.last_run_metadata = merged_meta
         return all_findings
