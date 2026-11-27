@@ -1139,12 +1139,6 @@ class NightlyOrchestrator:
         job_state.transition_phase("COMPLETED")
         if not self.dry_run:
             job_state.save(self.state_path)
-            # 意思決定支援型 Morning Brief サマリーの組み立て (機能P, 機能R)
-            exec_summary = (
-                f"全 {len(succeeded_tasks)} 件のタスクが検証ゲートおよび独立Checker査読を通過し、正常に完了しました。"
-                if len(succeeded_tasks) == total_tasks
-                else f"{len(succeeded_tasks)} / {total_tasks} 件のタスクが正常に完了しました。"
-            )
             verify_cmd = "bash scripts/verify_local.sh" if (self.repo_dir / "scripts" / "verify_local.sh").exists() else "python3 -m unittest discover tests"
 
             # 成果物利用コマンド (Run) の自動推測
@@ -1166,6 +1160,19 @@ class NightlyOrchestrator:
                 base_c = self.audit_baseline_commit or initial_checkpoint
                 print(f"\n[Independent Audit Stage] Running repository audit against baseline {base_c[:7]}...")
                 audit_stage_result = self.run_audit_stage(baseline_commit=base_c, target_commit=current_head)
+
+            # 意思決定支援型 Morning Brief サマリーの組み立て (機能P, 機能R, RPT-8)
+            is_audit_only = (
+                len(succeeded_tasks) == 0
+                and audit_stage_result is not None
+                and audit_stage_result.get("status") != "SKIPPED"
+            )
+            if is_audit_only:
+                exec_summary = f"監査だけの実行（計画のタスクは {total_tasks} 件すべて完了済み）"
+            elif len(succeeded_tasks) == total_tasks:
+                exec_summary = f"全 {len(succeeded_tasks)} 件のタスクが検証ゲートおよび独立Checker査読を通過し、正常に完了しました。"
+            else:
+                exec_summary = f"{len(succeeded_tasks)} / {total_tasks} 件のタスクが正常に完了しました。"
 
             self._write_report_then_create_bundle(
                 job_id=job_state.job_id,

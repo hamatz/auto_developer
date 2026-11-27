@@ -349,6 +349,26 @@ def pack_audit_diff_chunks(
     return chunks
 
 
+def extract_thinking_tokens(usage_dict: dict[str, Any] | None) -> int | None:
+    """usage 辞書から考えた部分（thinking / reasoning）のトークン数を抽出する。"""
+    if not isinstance(usage_dict, dict):
+        return None
+    candidates: list[Any] = [
+        usage_dict.get("thinking_tokens"),
+        usage_dict.get("thoughts_token_count"),
+    ]
+    out_details = usage_dict.get("output_tokens_details")
+    if isinstance(out_details, dict):
+        candidates.extend([out_details.get("thinking_tokens"), out_details.get("reasoning_tokens")])
+    comp_details = usage_dict.get("completion_tokens_details")
+    if isinstance(comp_details, dict):
+        candidates.append(comp_details.get("reasoning_tokens"))
+    for val in candidates:
+        if isinstance(val, int) and not isinstance(val, bool):
+            return val
+    return None
+
+
 class IndependentAuditRunner:
     """SPEC.md と git diff のみを厳格に入力とし、独立したLLMセッションから構造化 AuditFinding を抽出するランナー (EEE.2)。"""
 
@@ -956,6 +976,7 @@ class IndependentAuditRunner:
             "status": run_meta.get("status", "COMPLETED"),
             "input_tokens": usage_dict.get("input_tokens") if usage_dict else None,
             "output_tokens": usage_dict.get("output_tokens") if usage_dict else None,
+            "thinking_tokens": extract_thinking_tokens(usage_dict),
             "usage": usage_dict,
             "findings_count": findings_count,
         }

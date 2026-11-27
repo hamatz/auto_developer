@@ -2436,10 +2436,18 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"REPORT_WARNING: Failed to generate standalone report: {e}", file=sys.stderr)
 
         if state_file.exists():
+            from auto_developer.evidence import resolve_evidence_records_dir
+
             state = JobState.load(state_file)
+            total_tasks = len(state.completed_tasks) + (1 if state.quarantined_task else 0)
+            if total_tasks == 0 and effective_plan_path.is_file():
+                try:
+                    total_tasks = len(TaskDispatcher().parse_plan(effective_plan_path))
+                except OSError:
+                    total_tasks = 0
             summary: dict[str, Any] = {
                 "status": state.status,
-                "total_tasks": len(state.completed_tasks) + (1 if state.quarantined_task else 0),
+                "total_tasks": total_tasks,
                 "succeeded_count": len(state.completed_tasks),
                 "quarantined_count": 1 if state.quarantined_task else 0,
                 "checkpoint": state.checkpoint_hash,
@@ -2448,6 +2456,19 @@ def main(argv: list[str] | None = None) -> int:
             }
             if mt_summary is not None:
                 summary["multi_team"] = mt_summary
+            else:
+                for cand_audit in [
+                    resolve_evidence_records_dir(work_dir) / "audit_stage.json",
+                    work_dir / ".dev" / "evidence" / "records" / "audit_stage.json",
+                    work_dir / ".git" / "nightly_evidence" / "audit_stage.json",
+                    work_dir / ".dev" / "audit_stage.json",
+                ]:
+                    if cand_audit.is_file():
+                        try:
+                            summary["audit_stage"] = json.loads(cand_audit.read_text(encoding="utf-8"))
+                            break
+                        except (json.JSONDecodeError, OSError):
+                            pass
             try:
                 reporter.write_report(
                     report_path,
