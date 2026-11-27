@@ -164,13 +164,13 @@ class TestRcv7QuarantineGitObject(unittest.TestCase):
             self.assertEqual(git_objs.get("tests/test_key_fixture.py"), recovered_by_path["tests/test_key_fixture.py"])
             self.assertEqual(git_objs.get(".env"), recovered_by_path[".env"])
 
-            # Failure log keeps first 2 lines and includes git cat-file -p guidance
+            # Failure log keeps first 2 lines and includes mkdir -p + git cat-file -p guidance
             log_path = repo / "logs" / "nightly" / "task_1_failure.log"
             log_text = log_path.read_text(encoding="utf-8")
             log_lines = log_text.splitlines()
             self.assertEqual(log_lines[0], "Failure Phase: ROLLBACK")
             self.assertEqual(log_lines[1], "Reason: Checker rejected twice")
-            self.assertIn(f"git cat-file -p {recovered_by_path['tests/test_key_fixture.py']} > tests/test_key_fixture.py", log_text)
+            self.assertIn(f"mkdir -p tests && git cat-file -p {recovered_by_path['tests/test_key_fixture.py']} > tests/test_key_fixture.py", log_text)
             self.assertIn(f"git cat-file -p {recovered_by_path['.env']} > .env", log_text)
             self.assertNotIn("MIIEvQIBADANBgkqhkiG9w0BAQEF", log_text)
             self.assertNotIn("top_secret_value_999", log_text)

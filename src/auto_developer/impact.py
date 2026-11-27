@@ -61,9 +61,11 @@ class _IndexedFile:
 
 
 def is_test_file(rel_path: str) -> bool:
-    """Return True if `rel_path` is under `tests/` or named `test_*.py` / `*_test.py`."""
+    """Return True if `rel_path` is under `tests/` or named `test_*.py` / `*_test.py` (excluding `docs/`)."""
     parts = Path(rel_path).parts
     if not parts:
+        return False
+    if parts[0] == "docs":
         return False
     if "tests" in parts[:-1]:
         return True
@@ -430,6 +432,7 @@ def analyze_ir_impact(
                     "note": NO_FINGERPRINTS_NOTE,
                     "code_matches": [],
                     "test_matches": [],
+                    "mock_tests": [],
                     "entry_points": [],
                 }
             )
@@ -492,10 +495,9 @@ def analyze_ir_impact(
             "note": None,
             "code_matches": code_matches,
             "test_matches": test_matches,
+            "mock_tests": mock_tests,
             "entry_points": entry_points,
         }
-        if mock_tests:
-            req_entry["mock_tests"] = mock_tests
         req_results.append(req_entry)
 
     record_tests = [

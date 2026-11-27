@@ -219,10 +219,10 @@ class TestCmp4CompileImpact(unittest.TestCase):
             self.assertEqual(req1["code_matches"], [])
             self.assertEqual(req1["test_matches"], [])
             self.assertEqual(req1["entry_points"], [])
-            self.assertNotIn("mock_tests", req1)
+            self.assertEqual(req1["mock_tests"], [])
 
             self.assertTrue(req2["searched"])
-            self.assertNotIn("mock_tests", req2)
+            self.assertEqual(req2["mock_tests"], [])
             code_matches = req2["code_matches"]
             test_matches = req2["test_matches"]
 
