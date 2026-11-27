@@ -72,7 +72,7 @@
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [ ] Phase 79 の準備コミット: SPEC.md（Phase 78 の要件を 4 章へ移し、5 章を v0.11.0 にする。5.1 に Phase 79 の要件）、PLAN.md、docs/contracts/phase79.md。
+- [x] Phase 79 の準備コミット: SPEC.md（Phase 78 の要件を 4 章へ移し、5 章を v0.11.0 にする。5.1 に Phase 79 の要件）、PLAN.md、docs/contracts/phase79.md。
 - [x] 準備のコミットの前に: Phase 78 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase78/` に退かせる。
 - [ ] ステップ 4 の完了後:
   - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI（macOS・Ubuntu × Python 3.10・3.12、gitleaks）が通ることを確かめる。
@@ -82,6 +82,9 @@
 - [ ] v0.11-draft の 5 章の3点を決める（Phase 80 の準備のため）。
 
 ## 記録
+- 2026-11-27: Phase 79 の完了後の確認。4 ステップすべて、1回目の査読で APPROVE（隔離は0回。ステップ 3 は検証の失敗が1回あり、2回目で通った）。保護ファイルの変更なし。査読の記録の突き合わせで、`.dev/checker/review_p79_*.txt` の4件すべてが履歴に記録され、`review_input` の回数とも一致した。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1166 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）だけ。Bundle は VERIFIED。
+- 2026-11-27: 監査の範囲と分割の確認。v0.10.0 の監査と同じ範囲（起点 f98c251、対象 53d55a9）で、既定の範囲（`tests/`・`docs/`・`examples/`・`*.md` を除く）の差分は 22 ファイル・約 373KB（範囲で絞る前は約 1.34MB）。既定の上限（20 万バイト）で、3組（約 153KB・172KB・48KB）に分かれた。一時的なクローンで、監査役を設定せずに監査だけの実行をすると、報告は「監査だけの実行（計画のタスクは 4 件すべて完了済み）」と示し、1組目で `AUDIT_CHUNK_FAILED (chunk 1/3)` として `AUDIT_PENDING` で止まった（Fail-Closed）。ただし失敗のときの記録に、範囲・ファイルの数・バイト数・組の全体の数が残らず、報告の監査の深さが「1 組」と表示される（IDEA-037）。本物の監査役での確認は、人間が行う。
+- 2026-11-27: RCV-8 の確認。空白を含むディレクトリの下の、機密に見える新しいファイルを隔離すると、案内が `mkdir -p 'my dir/sub' && git cat-file -p <SHA> > 'my dir/sub/t.py'` になり、そのまま実行して元の中身を取り出せた。
 - 2026-11-27: v0.10.0 をリリースした（タグ `v0.10.0`）。Phase 79（v0.11 の最初のフェーズ）の準備。リリース前の監査で見つかった IDEA-017（監査の入力が大きすぎる）と IDEA-018（監査だけの実行の報告）を AUDIT-6・AUDIT-7・RPT-8 とし、小さな修正の IDEA-028（RCV-8）と IDEA-032（CMP-15）を加えた。人間が承認した。v0.11-draft の 5 章の決定は、Phase 80 の準備で行う。
 - 2026-11-27: リリース前の独立監査（`claude-opus-5-5`、LIVE、起点 f98c251、対象 53d55a9）。1回目は出力の上限 8192 トークンを考える部分で使い切って打ち切られ（`stop_reason=max_tokens`）、`AUDIT_PENDING` で止まった（途中で切れた結果を0件として扱わない安全策が働いた）。監査役のコマンドに `--max-tokens 32000 --timeout 1800` を足して再実行し、`end_turn` で指摘0件（`SUCCESS`）。Bundle は VERIFIED で、監査の検証も通った。ただし入力は約 60 万トークン（v0.9.0 の約 25 万の倍以上。テストとドキュメントを含む差分の全体）で、監査役の出力は 2,183 トークン（考えた部分 2,174）と短く、弱い保証として扱う。CHANGELOG とリリースノートの Known issues に書いた。監査の入力を製品のコードに絞る・分ける改善（IDEA-017）を v0.11 の早いうちに行う。監査だけの実行の報告が「0 / 3 件のタスクが正常に完了」と失敗に見える問題（IDEA-018）も、同時に直す。人間が v0.10.0 のリリースを決めた。
 - 2026-11-27: Phase 78 の完了後の確認。3 ステップすべて完了し、隔離は0回（ステップ 1・2 は1回目の査読が REJECT、2回目で APPROVE）。README・CHANGELOG・リリースノートと保護ファイルは、準備のコミットの後に変わっていない。査読の記録の突き合わせで、`.dev/checker/review_p78_*.txt` の5件すべてが履歴に記録され、`review_input` の回数とも一致した。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト 1146 件のうち、失敗は既知の SIGKILL の2件（IDEA-011）と、Phase 75 でも見た `test_reaps_multiple_descendant_processes_on_timeout`（単独では2回とも通る）。`auto-dev --version` は 0.10.0。Bundle は VERIFIED（`AUDIT_OUTDATED` はリリース前の監査で解消する）。`check_doc_commands.py` は 144 コマンドで終了コード 0。
