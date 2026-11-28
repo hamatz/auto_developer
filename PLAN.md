@@ -4,16 +4,16 @@
 現在のタスク進捗と次の一手。会話ログではなく、ここに状態を残す。
 実装エージェントは1回に1ステップだけを担当し、終わったらチェックを付けてコミットする。
 セッションが切れても、SPEC.md・このファイル・git の履歴を読めば作業を再開できる状態に保つ。
-前のフェーズの PLAN は git の履歴で参照する（Phase 80 は 8cf1729 時点の PLAN.md）。
+前のフェーズの PLAN は git の履歴で参照する（Phase 81 は 6d0956b 時点の PLAN.md）。
 -->
 
 ## 現在の目標
-- Phase 81: Red-First の確認を信頼できるものにする、ファイル名の扱いの修正（SPEC.md 5.1: SBX-9, SBX-10, GATE-18, RCV-9, AUDIT-10, GATE-19）。v0.11 のテーマ G（柔らかい規則を硬い関門に）の続き。
-  - 要件ごとの影響分析と設計の判断は docs/contracts/phase81.md を参照する。
+- Phase 82: テーマ G の仕上げ（SPEC.md 5.1: SBX-11, GATE-20, GATE-21, DX-16）。Red-First の確認を一時クローンで実行して誤りの判定をなくし、テストの書き方の規則を静的なテストにし、`init` の検証スクリプトの雛形に設定の行とプロジェクトの規則の段を足す。
+  - 要件ごとの影響分析と設計の判断は docs/contracts/phase82.md を参照する。
   - v0.11 の全体の方向は docs/contracts/v0.11-draft.md。
-- スコープ外: このリポジトリでの `enforce` への切り替え（Phase 81 の後に試し直してから決める）、`init` の検証スクリプトの雛形の規則の場所（Phase 82 の候補）、`run` / `teams run` の経路の Red-First の確認。
+- スコープ外: このリポジトリでの `enforce` への切り替え（このフェーズの後に試し直してから、人間が行う）、`run` / `teams run` の経路の Red-First の確認、テーマ T（Phase 83 以降）。
 
-## 作業手順（Phase 81・LESSONS.md に基づく）
+## 作業手順（Phase 82・LESSONS.md に基づく）
 - 各行の印: 【機械】はツールが守る（破れば止まる・拒否される）。【手順】はエージェントが読んで守る。【手順】の行を、フェーズごとに機械に移して減らしていく（v0.11-draft の 2.2）。
 - 【機械】 Maker と Checker は別系統のモデルにする（`commit-step` が終了コード 4 で強制する）。使うモデルを変えたときは、この節と「記録」に書く。
   - Maker: `gemini-4-hydrogen-medium`
@@ -22,9 +22,9 @@
 - 【機械】 **Checker の完了の通知だけでは、次に進まない。** Checker のプロセスが終わり、出力ファイルから判定が1つに決まること（GATE-5 の判定の読み取りの規則）を確かめてから記録する。
 - 【手順】 Checker には、指摘は要点だけにして、判定（`DECISION: APPROVE` / `DECISION: REJECT` の行、または出力全体が1つの JSON）を必ず出力の最後に書くよう求める。Checker の出力の上限（`max_tokens`）は 16384 にする（4096 では、考える部分と合わせて出力が途中で切れることがあった）。
 - 【機械】 Checker への入力は、要約・再構成しない。
-  1. SPEC の該当節: `awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_phase81.md`
-  2. 差分: `auto-dev review-input --task-id <n> --out-dir .dev/checker/p81_task<n>`（やり直したときは `_v2` などを付ける）
-  3. Checker の出力: `.dev/checker/review_p81_task<n>.txt` に置く（やり直したときは `_v2` などを付け、上書きしない）。
+  1. SPEC の該当節: `awk '/^### 5\.1/,/^## 6\./' SPEC.md > .dev/checker/spec_phase82.md`
+  2. 差分: `auto-dev review-input --task-id <n> --out-dir .dev/checker/p82_task<n>`（やり直したときは `_v2` などを付ける）
+  3. Checker の出力: `.dev/checker/review_p82_task<n>.txt` に置く（やり直したときは `_v2` などを付け、上書きしない）。
 - 【手順】 Checker には、SPEC の要件のうち、例外・異常系・境界値の扱いを満たしているかを、差分とテストの両方で確かめるよう求める。後のステップで加える予定のもの（PLAN のステップの一覧を Checker に渡す）がまだないことは、REJECT の理由にしないよう伝える。テストで本物の監査役（外部の API）を呼ばないことも伝える（監査役はテストの中で置き換える）。
 - 【手順】 verify-step の前に `git status --porcelain` を確認し、意図しないファイルがないことを確かめる。実験は `mktemp -d` の中で行う。
 - 【機械】 `--checkpoint` にはコミットの SHA を渡す（`git rev-parse HEAD`）。
@@ -44,10 +44,10 @@
 - 【手順】 コミットした後に欠陥が見つかった場合は、`git reset` などで正規の経路の外から巻き戻さない。「止まっていること・判断待ち」に書いて止まり、修正は新しいステップとして行う。
 - 【手順】 テストを書く途中で製品の欠陥に気づいた場合は、テスト側で回避しない。「止まっていること・判断待ち」に書いて止まる（AGENTS.md Rule 4）。
 - 【手順】 「既存テスト変更の理由」に書いていない既存テストが失敗した場合は、変更せずに止まって報告する。
-- 【手順】 E2E テストで作る一時リポジトリ・worktree は、必ず `tempfile` の中に作る。`git init` には必ず `-b <ブランチ名>` を付ける。
+- 【手順（ブランチの名前は、ステップ 3 の後は静的なテストで検知）】 E2E テストで作る一時リポジトリ・worktree は、必ず `tempfile` の中に作る。`git init` には必ず `-b <ブランチ名>` を付ける。
 - 【手順】 サブプロセスを起動するテストでは、`PYTHONDONTWRITEBYTECODE` と `PYTHONPYCACHEPREFIX` を環境から外して実行する。
-- 【手順（CI の 3.10 で検知）】 テストでは、Python 3.10 にないモジュール（`tomllib` など）を使わない（CI は 3.10 と 3.12 で動く）。
-- 【手順（CI の gitleaks で検知）】 テストで、秘密鍵などに見える目印（`-----BEGIN PRIVATE KEY-----` など）を使うときは、ソースにそのまま書かず、実行時に組み立てる（例: `"-----BEGIN " + "PRIVATE KEY-----"`）。CI の gitleaks が、本物の秘密として検知して失敗する（Phase 75 の RCV-7 のテストで起きた）。
+- 【手順（CI の 3.10 で検知。ステップ 3 の後は静的なテストで検知）】 テストでは、Python 3.10 にないモジュール（`tomllib` など）を使わない（CI は 3.10 と 3.12 で動く）。
+- 【手順（CI の gitleaks で検知。ステップ 3 の後は静的なテストで検知）】 テストで、秘密鍵などに見える目印（`-----BEGIN PRIVATE KEY-----` など）を使うときは、ソースにそのまま書かず、実行時に組み立てる（例: `"-----BEGIN " + "PRIVATE KEY-----"`）。CI の gitleaks が、本物の秘密として検知して失敗する（Phase 75 の RCV-7 のテストで起きた）。
 - 【機械】 `sys.platform` で分岐する処理を書くときは、分岐の前で変数の型を宣言する。
 - 【手順】 各ステップの検証は手元の macOS で行う。Linux での確認は人間が行う。
 - 【機械】 SPEC.md はフェーズの途中で変えない。SPEC にあいまいさや矛盾を見つけたら、止まって報告する。
@@ -55,36 +55,36 @@
 - 【手順】 各ステップは `auto-dev pre-flight` で始める（`task_start` のイベントが書かれ、ダッシュボードの時系列に Maker の開始が出る。Phase 76 のステップ 2〜5 では呼ばれていなかった）。
 
 ## 既存テスト変更の理由 (AGENTS.md Rule 2 に準拠)
-<!-- docs/contracts/phase81.md の 4 章の影響分析から作成。ここに書いていない既存テストは変更しない。 -->
+<!-- docs/contracts/phase82.md の 4 章の影響分析から作成。ここに書いていない既存テストは変更しない。 -->
 - このフェーズで前のステップが作ったテストの資料は、後のステップの検査や出力に合わせて直してよい。アサーションの趣旨は変えない。
-- ステップ 1・2（SBX-9・SBX-10）: 候補テストに渡る環境そのもの（`GIT_*`・`HOME`・`XDG_CONFIG_HOME`）を確かめている既存テストは、期待を変えてよい。ホームディレクトリなどの読み取りの禁止を確かめるテスト（SBX-1・SBX-5）が失敗した場合は、変更せずに止まって報告する。
-- ステップ 3（GATE-18）: Phase 80 で作った `tests/test_gate16_red_first_config.py`・`tests/test_gate17_red_first_exec.py` は、資料のテストを今のコードで通る形に直してよい（「チェックポイントで失敗し、今のコードで通る」ことを確かめる趣旨は変えない）。ファイルごとの結果の項目の集合を完全な一致で確かめているテストは、`current_result`・`current_reason` を期待に加えてよい。
-- ステップ 4・5（RCV-9・AUDIT-10・GATE-19）: 既存テストは変更しない。
+- ステップ 1（SBX-11）: 既存テストは変更しない。
+- ステップ 2（GATE-20）: `tests/test_gate16_red_first_config.py`・`tests/test_gate17_red_first_exec.py`・`tests/test_gate18_red_first_current_green.py` は、サンドボックスを前提にした期待と、自明な Red の判定（`TRIVIAL_RED`）による `NOT_RED` の期待を、GATE-20 の判定に合わせて変えてよい（「チェックポイントで失敗し、今のコードで通るときだけ `CONFIRMED`」を確かめる趣旨は変えない）。監査の再現テストのテスト（`tests/test_red_verifier.py`、SBX の各テスト）が失敗した場合は、変更せずに止まって報告する。
+- ステップ 3（GATE-21）: `git init` にブランチの名前がない既存テスト（約 55 か所）に、ブランチの名前を足してよい（そのテストが後で使う名前に合わせる）。秘密鍵などの目印をそのまま書いている2か所（`tests/test_nightly_orchestrator.py`、`tests/test_rcv6_quarantine_snapshot_listing.py`）は、実行時に組み立てる形に変えてよい。アサーションは変えない。
+- ステップ 4（DX-16）: 雛形の文字列を確かめている既存テスト（`tests/test_dx5_python_selection.py`・`tests/test_gate14_protect_design_irs.py` など）は、段の見出しの番号の期待を変えてよい。保護ファイルの検査とテストの実行の内容を確かめるアサーションは変えない。
 - CLI を変えたステップでは `docs/cli.md` を作り直す（既存テストの変更ではない）。
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [x] 1. 候補テストの環境から、ホストの `GIT_` で始まる環境変数をすべて除き、`HOME`・`XDG_CONFIG_HOME` を一時領域の空のディレクトリにし、`GIT_CONFIG_NOSYSTEM=1` を渡す（Red: ホストに `GIT_CONFIG_COUNT=1` などがあると、サンドボックスの中の `git init` が終了コード 128 になる。macOS と Linux の両方で確かめる）（SBX-9）
-- [x] 2. 元のリポジトリが worktree（`.git` がファイル）でも、チェックポイントを指定した候補テストの実行ができるようにする（Red: worktree の中では `COMMIT_CHECKOUT_FAILED` になる）（SBX-10）
-- [x] 3. Red-First の確認で、対象のテストを今の作業ツリーのコードに対しても実行し、チェックポイントで失敗して今のコードで通るときだけ `CONFIRMED`、両方で失敗すれば `NOT_GREEN` にする。記録とメッセージに両方の結果を示し、スキルに書く（Red: チェックポイントでも今のコードでも失敗するテストが `CONFIRMED` になる）（GATE-18）
-- [x] 4. 隔離のときの秘密の検査が、ステージしたファイルの一覧を `-z` で読み、監査の組の差分がファイルのパスを `:(literal)` で指定する（Red: 追跡している `鍵.txt` に入れた秘密が隔離ブランチにコミットされる。`a*.py` と `ab.py` で、組の欠落の検査が食い違いになる）（RCV-9・AUDIT-10）
-- [x] 5. `src/auto_developer/` の git の呼び出しで、`--name-only`・`--name-status` に `-z` がないものを見つけて失敗する静的なテストを足し、今そうなっていない読み方を直す（Red: 今のコードで、そのテストが失敗する）（GATE-19）
+- [ ] 1. 一時クローンに作業ツリーの変更を写すとき、新しいディレクトリの中の未追跡のファイルも、ファイルごとに写す（Red: `src/newpkg/mod.py` を足したステップが、Red-First の確認の今のコードでの実行で `IMPORT_ERROR` になる）（SBX-11）
+- [ ] 2. Red-First の確認を、OS のサンドボックスではなく一時クローンの中で、検証スクリプトと同じ環境で実行し、実行の前後で元のリポジトリが変わっていないことを確かめ（`REPO_MODIFIED`）、自明な Red の判定を使わずに判定する。記録に `runner: clone` を残し、スキルに書く（Red: `self.assertTrue(captured)` のように、モックが後から中身を足すリストへのアサーションで失敗するテストが `NOT_RED` になる）（GATE-20）
+- [ ] 3. `tests/`（`tests/immunity/` を除く）を静的に調べ、`git init` にブランチの名前がない、Python 3.10 にないモジュールを `try` の外で読み込む、秘密鍵などの目印を1つの文字列にそのまま書く、のどれかがあれば失敗するテストを足し、今そうなっていないテストを直す（Red: 今のテストで、そのテストが失敗する）（GATE-21）
+- [ ] 4. `init` が作る検証スクリプトの雛形に、設定の行（`verify-timeout=300`、`red-first=warn`）と、注釈にした例を置いた「プロジェクト固有の規則」の段を足す（Red: 今の雛形に設定の行がない）（DX-16）
 
 ## 止まっていること・判断待ち
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [x] Phase 81 の準備コミット: SPEC.md（Phase 80 の要件を 4 章へ移す。5.1 に Phase 81 の要件）、PLAN.md、BACKLOG.md、docs/contracts/phase81.md。
-- [x] 準備のコミットの前に: Phase 80 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase80/` に退かせる（監査の記録 `audit_stage.json` は残す）。
-- [x] ステップ 1 の完了後: AUD-1008 の再現テストを実行し直し、サンドボックスの中で git が動くことと、主張が再現しないことを確かめる。
-- [x] ステップ 5 の完了後:
+- [ ] Phase 82 の準備コミット: SPEC.md（Phase 81 の要件を 4 章へ移す。5.1 に Phase 82 の要件）、PLAN.md、BACKLOG.md、docs/contracts/phase82.md。
+- [x] 準備のコミットの前に: Phase 81 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase81/` に退かせる（監査の記録 `audit_stage.json` は残す）。
+- [ ] ステップ 4 の完了後:
   - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI（macOS・Ubuntu × Python 3.10・3.12、gitleaks）が通ることを確かめる。
   - 査読の記録と Checker の出力ファイルを突き合わせ、記録されていない出力が0件であることを確かめる。
   - Bundle を作り、`verify-bundle` が VERIFIED になることを確かめる。
-  - Phase 80 の後と同じ過去のステップで Red-First の確認を試し直し、`CONFIRMED`・`NOT_GREEN`・`NOT_RED` の割合を見て、`enforce` に切り替えるかを決める。
-  - 追跡している日本語の名前のファイルに秘密の形の文字列を入れて隔離し、隔離ブランチに入らないことを確かめる。
+  - Phase 81 の後と同じ過去のステップで Red-First の確認を試し直す（macOS の結果は、このフェーズのステップの記録で見る）。誤りの判定がなければ、次のフェーズの準備で、このリポジトリの検証スクリプトを `red-first=enforce` に変える。
+  - README の `init` の説明に、雛形の設定の行とプロジェクトの規則の段を書く。
 
 ## 記録
+- 2026-11-28: Phase 82 の準備。Phase 81 の後の独立監査（`claude-opus-5-5`、起点 ba6b040、対象 5c8e960、9 ファイル・約 35KB、1組）は `SUCCESS`。入力 1 万トークンあたりの考えた量は約 797 トークン。指摘は AUD-1010（P2、一時クローンに新しいディレクトリの中の未追跡のファイルが写されない）の1件で、手元で、`src/newpkg/mod.py` を足した正しいステップが `NOT_GREEN` になることを確かめた。テーマ G をこのフェーズで仕上げることにした。Red-First の確認の実行の場所は、人間が「一時クローンで、検証スクリプトと同じ扱い」に決めた（同じテストを検証スクリプトがサンドボックスなしで実行しているので、安全の水準は変わらない。IDEA-042・IDEA-043 の原因の、サンドボックスとの環境の違いをなくす）。範囲は docs/contracts/phase82.md。
 - 2026-11-28: Red-First の試し直し（Linux、`AUTO_DEV_REQUIRE_SANDBOX=1`、HEAD e95c967 のコード）。Phase 80 の後と同じ 10 ステップに Phase 81 の5ステップを加えた 15 ステップで、14 が `CONFIRMED`。今のコードでの実行は、対象のファイルすべてで `PASSED` だった。`CONFIRMED` の理由には、アサーションの失敗（`GENUINE_RED`）が増えた（前回の試しでは0件）。前回 `CONFIRMED`（`SETUP_ERROR`）だった `tests/test_audit8_chunk_completeness.py` を、通るはずのコミット（966114c）に対して実行すると、今回は正しく失敗しなかった。`NOT_RED` の1件はステップ 1（fcab915）の `tests/test_sbx9_sandbox_git_env.py` で、自明な Red の判定（`TRIVIAL_RED`）の誤り。テストの中の `self.assertTrue(captured_cmd)`（モックが後から中身を足すリスト）を、定数の空のリストへのアサーションとみなし、ファイルの全体を `NOT_RED` にした（IDEA-042）。また、macOS でのステップ 3 の確認は、3 ファイルとも `NOT_GREEN` だった。そのテストは中でもう一度サンドボックスを使うので、macOS ではサンドボックスを入れ子にできずに失敗したと考えられる（Linux では入れ子でも通った。IDEA-043）。どちらも `enforce` では正しいステップを止めるので、**このリポジトリの `enforce` への切り替えは、IDEA-042・IDEA-043 を直してからにする**。
 - 2026-11-28: AUD-1008 の再現テストを、今のコード（e95c967）で実行し直した。git の段階で止まらずに最後まで動き、`ALREADY_GREEN`（主張は再現しない）。この再現テストは中でもう一度サンドボックスを呼んでいるので、結果は弱い証拠として扱う。Phase 81 の準備のときの直接の確認（最上位に置いたモジュールで `NOT_RED`）と合わせて、AUD-1008 は誤りと判断する。隔離の確認: 追跡している `鍵.txt`・`key.txt` に秘密鍵の形の文字列を入れ、`普通.py` を変えて `quarantine_and_restore` を呼ぶと、隔離ブランチのコミットには `普通.py` だけが入り、秘密はどのファイルにも入らなかった（RCV-9）。
 - 2026-11-28: Phase 81 の完了後の確認。5 ステップすべて、検証も査読も1回目で通った（隔離は0回）。保護ファイルの変更なし。既存テストの変更は、許可した `tests/test_gate16_red_first_config.py`・`tests/test_gate17_red_first_exec.py` だけ。査読の記録の突き合わせで、`.dev/checker/review_p81_*.txt` の5件すべてが履歴に記録され、`review_input` の回数とも一致した。全ステップに `task_start` があった。macOS でのステップ 4・5 の Red-First の確認は、今のコードでも `PASSED` の `CONFIRMED` で、macOS のサンドボックスの中でも git が動くようになった。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト（130 モジュール・1189 件。unittest で数えた）がすべて通った（既知の SIGKILL の2件も今回は通った）。Bundle は VERIFIED（`AUDIT_OUTDATED` は Phase 81 の後の監査で解消する）。`check_doc_commands.py` は 144 コマンドで終了コード 0。
