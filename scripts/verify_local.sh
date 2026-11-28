@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # auto-dev: verify-timeout=1200
 # （検証の制限時間。macOS で全体のテストに約 8 分かかるため。DX-13 で auto-dev が読む）
+# auto-dev: red-first=enforce
+# （Red-First の確認。題名に Red-First か Red: を含むタスクで、変えたテストがチェックポイントで失敗し、今のコードで通ることを確かめられなければ、検証の失敗にする。GATE-16・GATE-20。Phase 83 から）
 set -euo pipefail
 
 echo "=== [1/4] Checking protected file invariants (tracked & untracked) ==="
