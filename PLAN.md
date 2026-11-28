@@ -74,9 +74,9 @@
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [ ] Phase 82 の準備コミット: SPEC.md（Phase 81 の要件を 4 章へ移す。5.1 に Phase 82 の要件）、PLAN.md、BACKLOG.md、docs/contracts/phase82.md。
+- [x] Phase 82 の準備コミット: SPEC.md（Phase 81 の要件を 4 章へ移す。5.1 に Phase 82 の要件）、PLAN.md、BACKLOG.md、docs/contracts/phase82.md。
 - [x] 準備のコミットの前に: Phase 81 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase81/` に退かせる（監査の記録 `audit_stage.json` は残す）。
-- [ ] ステップ 4 の完了後:
+- [x] ステップ 4 の完了後:
   - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI（macOS・Ubuntu × Python 3.10・3.12、gitleaks）が通ることを確かめる。
   - 査読の記録と Checker の出力ファイルを突き合わせ、記録されていない出力が0件であることを確かめる。
   - Bundle を作り、`verify-bundle` が VERIFIED になることを確かめる。
@@ -84,6 +84,8 @@
   - README の `init` の説明に、雛形の設定の行とプロジェクトの規則の段を書く。
 
 ## 記録
+- 2026-11-28: Red-First の試し直し（Linux、HEAD d15424c のコード、一時クローンでの実行）。Phase 81 の後と同じ 15 ステップに Phase 82 の4ステップを加えた 19 ステップで、19 すべてが `CONFIRMED`、今のコードでの実行はすべて `PASSED`。Phase 81 の後に誤って `NOT_RED` だった2件（fcab915 の `tests/test_sbx9_sandbox_git_env.py`、abefc3b の `tests/test_cmp15_impact_details.py`）も `CONFIRMED` になった。ステップ 3（GATE-21）で `git init` のブランチの名前を足しただけの既存テストの 22 ファイルは、正しく `NOT_RED`（`ALREADY_GREEN`）だった。macOS でも、ステップ 2〜4 の確認は `runner: clone` で `CONFIRMED`、今のコードでの実行は `PASSED` で、Phase 81 で `NOT_GREEN` だった GATE-16〜18 のテストも `CONFIRMED` になった（IDEA-043 の解消）。逆の向きの確認: テストがクローンの `origin` をたどって元のリポジトリにファイルを書くと、`REPO_MODIFIED` になった（書き込みそのものは止めない設計どおり。メッセージの変わったパスの並びが読みにくい。IDEA-044）。誤りの判定がなくなったので、**次のフェーズの準備で、このリポジトリの検証スクリプトを `red-first=enforce` に変え、テーマ G を閉じる。**
+- 2026-11-28: Phase 82 の完了後の確認。4 ステップすべて完了し、隔離は0回、査読はすべて1回目で APPROVE。ステップ 1 は、1回目の検証が約 29 分で終了コード 1 になり、2回目で通った。検証の出力ファイル（`.dev/checker/verify_p82_task1.txt`）が2回目で上書きされていて、1回目の失敗の原因は分からない（IDEA-045）。保護ファイルの変更なし。既存テストの変更は、許可した範囲（`git init` のブランチの名前、目印の組み立て、GATE-16〜18 の期待）だけだった。査読の記録の突き合わせで、`.dev/checker/review_p82_*.txt` の4件すべてが履歴に記録された。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト（134 モジュール・1206 件）がすべて通った。Bundle は VERIFIED（`AUDIT_OUTDATED` は Phase 82 の後の監査で解消する）。README（日本語・英語）の `init` の説明に、雛形の設定の行とプロジェクトの規則の段を書いた（人間の変更）。README の実行の確認（DX-1）とドキュメントのコマンドの検査（144 コマンド）は通った。
 - 2026-11-28: Phase 82 の準備。Phase 81 の後の独立監査（`claude-opus-5-5`、起点 ba6b040、対象 5c8e960、9 ファイル・約 35KB、1組）は `SUCCESS`。入力 1 万トークンあたりの考えた量は約 797 トークン。指摘は AUD-1010（P2、一時クローンに新しいディレクトリの中の未追跡のファイルが写されない）の1件で、手元で、`src/newpkg/mod.py` を足した正しいステップが `NOT_GREEN` になることを確かめた。テーマ G をこのフェーズで仕上げることにした。Red-First の確認の実行の場所は、人間が「一時クローンで、検証スクリプトと同じ扱い」に決めた（同じテストを検証スクリプトがサンドボックスなしで実行しているので、安全の水準は変わらない。IDEA-042・IDEA-043 の原因の、サンドボックスとの環境の違いをなくす）。範囲は docs/contracts/phase82.md。
 - 2026-11-28: Red-First の試し直し（Linux、`AUTO_DEV_REQUIRE_SANDBOX=1`、HEAD e95c967 のコード）。Phase 80 の後と同じ 10 ステップに Phase 81 の5ステップを加えた 15 ステップで、14 が `CONFIRMED`。今のコードでの実行は、対象のファイルすべてで `PASSED` だった。`CONFIRMED` の理由には、アサーションの失敗（`GENUINE_RED`）が増えた（前回の試しでは0件）。前回 `CONFIRMED`（`SETUP_ERROR`）だった `tests/test_audit8_chunk_completeness.py` を、通るはずのコミット（966114c）に対して実行すると、今回は正しく失敗しなかった。`NOT_RED` の1件はステップ 1（fcab915）の `tests/test_sbx9_sandbox_git_env.py` で、自明な Red の判定（`TRIVIAL_RED`）の誤り。テストの中の `self.assertTrue(captured_cmd)`（モックが後から中身を足すリスト）を、定数の空のリストへのアサーションとみなし、ファイルの全体を `NOT_RED` にした（IDEA-042）。また、macOS でのステップ 3 の確認は、3 ファイルとも `NOT_GREEN` だった。そのテストは中でもう一度サンドボックスを使うので、macOS ではサンドボックスを入れ子にできずに失敗したと考えられる（Linux では入れ子でも通った。IDEA-043）。どちらも `enforce` では正しいステップを止めるので、**このリポジトリの `enforce` への切り替えは、IDEA-042・IDEA-043 を直してからにする**。
 - 2026-11-28: AUD-1008 の再現テストを、今のコード（e95c967）で実行し直した。git の段階で止まらずに最後まで動き、`ALREADY_GREEN`（主張は再現しない）。この再現テストは中でもう一度サンドボックスを呼んでいるので、結果は弱い証拠として扱う。Phase 81 の準備のときの直接の確認（最上位に置いたモジュールで `NOT_RED`）と合わせて、AUD-1008 は誤りと判断する。隔離の確認: 追跡している `鍵.txt`・`key.txt` に秘密鍵の形の文字列を入れ、`普通.py` を変えて `quarantine_and_restore` を呼ぶと、隔離ブランチのコミットには `普通.py` だけが入り、秘密はどのファイルにも入らなかった（RCV-9）。
