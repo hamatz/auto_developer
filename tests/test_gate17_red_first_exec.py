@@ -190,6 +190,11 @@ class TestGate17RedFirstExec(unittest.TestCase):
                 repo,
                 plan_text="# PLAN.md\n\n## ステップ\n- [ ] 1. Task (Red-First)\n",
             )
+            (repo / "src" / "app" / "calc.py").write_text(
+                "def add(a: int, b: int) -> int:\n    return a + b\n\n"
+                "def sub(a: int, b: int) -> int:\n    return a - b\n",
+                encoding="utf-8",
+            )
             (repo / "tests" / "test_a_green.py").write_text(
                 "import unittest\n"
                 "from app.calc import add\n\n"
@@ -200,10 +205,10 @@ class TestGate17RedFirstExec(unittest.TestCase):
             )
             (repo / "tests" / "test_b_red.py").write_text(
                 "import unittest\n"
-                "from app.calc import missing_fn\n\n"
+                "from app.calc import sub\n\n"
                 "class TestB(unittest.TestCase):\n"
-                "    def test_missing(self):\n"
-                "        self.assertEqual(missing_fn(), 1)\n",
+                "    def test_sub(self):\n"
+                "        self.assertEqual(sub(5, 2), 3)\n",
                 encoding="utf-8",
             )
             res = verify_red_first_tests(

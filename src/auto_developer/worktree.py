@@ -192,16 +192,16 @@ class WorktreeManager:
         """worktree 内の未コミット変更・無視ファイル・機密ファイルを検査し、(has_uncommitted, candidate_work_files) を返す。"""
         # 1. Git状態の取得 (管理済み未変更ファイルの特定および status 検査)
         ls_res = subprocess.run(
-            ["git", "ls-files"],
+            ["git", "ls-files", "-z"],
             cwd=target_dir,
             capture_output=True,
             text=True,
             check=False,
         )
-        tracked_files = set(ls_res.stdout.splitlines()) if ls_res.returncode == 0 else set()
+        tracked_files = {p for p in ls_res.stdout.split("\0") if p} if ls_res.returncode == 0 else set()
 
         status_res = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "status", "--porcelain", "-z"],
             cwd=target_dir,
             check=False,
             capture_output=True,
@@ -235,11 +235,21 @@ class WorktreeManager:
 
         # git status で変更・未追跡が報告されているファイル集合
         modified_or_untracked: set[str] = set()
-        for line in status_res.stdout.splitlines():
-            parts = line.strip().split(maxsplit=1)
-            if len(parts) == 2:
-                fpath = parts[1].split(" -> ")[-1].strip()
-                modified_or_untracked.add(fpath)
+        st_tokens = [tok for tok in status_res.stdout.split("\0") if tok]
+        st_idx = 0
+        while st_idx < len(st_tokens):
+            tok = st_tokens[st_idx]
+            if len(tok) < 4:
+                st_idx += 1
+                continue
+            xy = tok[:2]
+            path1 = tok[3:]
+            if path1:
+                modified_or_untracked.add(path1)
+            if xy[0] in ("R", "C") or xy[1] in ("R", "C"):
+                st_idx += 2
+            else:
+                st_idx += 1
 
         # 2. 実ファイルの事前スキャン（管理済み未変更ファイルを除外し、未保存成果・機密を検査・把握）
         from auto_developer.guard import GitGuard

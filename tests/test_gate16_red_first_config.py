@@ -250,12 +250,16 @@ class TestGate16RedFirstConfig(unittest.TestCase):
                 plan_text="# PLAN.md\n\n## ステップ\n- [ ] 1. Implement feature (Red-First)\n",
                 verify_script_text="#!/usr/bin/env bash\n# auto-dev: red-first=enforce\nexit 0\n",
             )
+            (repo / "calc.py").write_text(
+                "def sub(a: int, b: int) -> int:\n    return a - b\n",
+                encoding="utf-8",
+            )
             (repo / "tests" / "test_new.py").write_text(
                 "import unittest\n"
-                "from non_existent_feature import fn\n\n"
+                "from calc import sub\n\n"
                 "class TestNew(unittest.TestCase):\n"
                 "    def test_new(self):\n"
-                "        self.assertTrue(fn())\n",
+                "        self.assertEqual(sub(5, 2), 3)\n",
                 encoding="utf-8",
             )
             # INV-8: block events.jsonl by creating a directory at its path

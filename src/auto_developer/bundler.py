@@ -71,7 +71,7 @@ def check_audit_diff_status(
         return "OK", ""
 
     diff_res = subprocess.run(
-        ["git", "diff", "--no-renames", "--name-only", target_c, head_sha],
+        ["git", "diff", "--no-renames", "--name-only", "-z", target_c, head_sha],
         cwd=repo_dir,
         capture_output=True,
         text=True,
@@ -83,7 +83,7 @@ def check_audit_diff_status(
             f"AUDIT_DIFF_FAILED: git diff failed between target commit '{target_c[:7]}' and HEAD '{head_sha[:7]}': {diff_res.stderr.strip()}",
         )
 
-    modified_files = [f.strip() for f in diff_res.stdout.splitlines() if f.strip()]
+    modified_files = [f for f in diff_res.stdout.split("\0") if f]
     unverified_code = [
         f
         for f in modified_files

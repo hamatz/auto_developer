@@ -2138,9 +2138,13 @@ def _quarantine_team_before_cleanup(
         if anc.returncode != 0:
             raise RuntimeError(f"Quarantine verification failed: commit history lost for '{q_branch}'.")
     if excluded_secrets:
-        tree_files = set(
-            _run_git_cmd(resolved_repo, ["ls-tree", "-r", "--name-only", target_commit_sha]).stdout.splitlines()
-        )
+        tree_files = {
+            p
+            for p in _run_git_cmd(
+                resolved_repo, ["ls-tree", "-r", "-z", "--name-only", target_commit_sha]
+            ).stdout.split("\0")
+            if p
+        }
         leaked = [s for s in excluded_secrets if s in tree_files]
         if leaked:
             raise RuntimeError(f"INV-5 violation: secret files leaked into '{q_branch}': {leaked}")

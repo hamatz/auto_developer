@@ -1328,6 +1328,7 @@ class RedTestVerifier:
         "LD_",
         "DYLD_",
         "PYTHON",
+        "GIT_",
     )
 
     def __init__(self, repo_dir: Path | None = None) -> None:
@@ -1401,6 +1402,41 @@ class RedTestVerifier:
                 test_file, str(clone_path), timeout_sec, sandbox_dir=clone_path
             )
 
+    @staticmethod
+    def _is_git_repository(resolved_repo: Path) -> bool:
+        """resolved_repo が Git リポジトリ（worktree を含む）の作業ツリーかどうかを git 自身に問う (SBX-10)。"""
+        clean_env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"}
+        }
+        try:
+            proc = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(resolved_repo),
+                    "rev-parse",
+                    "--is-inside-work-tree",
+                    "--show-toplevel",
+                ],
+                env=clean_env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if proc.returncode != 0:
+            return False
+        lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        if len(lines) < 2 or lines[0] != "true":
+            return False
+        try:
+            return Path(lines[1]).resolve() == resolved_repo
+        except OSError:
+            return False
+
     def _create_isolated_clone(self, target_dir: Path, commit: str | None = None) -> Path:
         """元リポジトリから隔離されたクリーンな一時クローン（作業コピー）を作成する。
         Git リポジトリの場合は git clone --local --no-hardlinks で物理コピーを作成し、
@@ -1411,7 +1447,7 @@ class RedTestVerifier:
         resolved_repo = self.repo_dir.resolve()
         target_dir.parent.mkdir(parents=True, exist_ok=True)
 
-        is_git_repo = (resolved_repo / ".git").is_dir()
+        is_git_repo = self._is_git_repository(resolved_repo)
         cloned_ok = False
         if is_git_repo:
             try:
@@ -1469,22 +1505,32 @@ class RedTestVerifier:
         """元リポジトリの未コミットの変更・新規ファイルを一時クローンへ同期する。"""
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             res = subprocess.run(
-                ["git", "status", "--porcelain"],
+                ["git", "status", "--porcelain", "-z"],
                 cwd=source_repo,
                 capture_output=True,
                 text=True,
                 check=False,
             )
-            if res.returncode == 0 and res.stdout.strip():
-                for line in res.stdout.splitlines():
-                    parts = line.strip().split(maxsplit=1)
-                    if len(parts) == 2:
-                        rel_path = parts[1]
+            if res.returncode == 0 and res.stdout:
+                tokens = [tok for tok in res.stdout.split("\0") if tok]
+                idx = 0
+                while idx < len(tokens):
+                    tok = tokens[idx]
+                    if len(tok) < 4:
+                        idx += 1
+                        continue
+                    xy = tok[:2]
+                    rel_path = tok[3:]
+                    if rel_path:
                         src_file = source_repo / rel_path
                         tgt_file = target_repo / rel_path
                         if src_file.is_file() and not src_file.is_symlink():
                             tgt_file.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(src_file, tgt_file)
+                    if xy[0] in ("R", "C") or xy[1] in ("R", "C"):
+                        idx += 2
+                    else:
+                        idx += 1
 
     def verify_candidate_test_file(
         self, test_file_path: Path, timeout_sec: int = 30
@@ -1904,7 +1950,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
     def _capture_repo_snapshot(self) -> dict[str, Any]:
         """元リポジトリの改ざん検知用スナップショットを取得する (JJJ.2)。"""
         resolved_repo = self.repo_dir.resolve()
-        is_git = (resolved_repo / ".git").is_dir()
+        is_git = self._is_git_repository(resolved_repo)
         if is_git:
             # 1. HEAD ハッシュ
             proc_head = subprocess.run(
@@ -1918,7 +1964,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
             # 2. ステータス (追跡・未追跡・無視ファイルすべて)
             proc_status = subprocess.run(
-                ["git", "status", "--porcelain", "--ignored", "--untracked-files=all"],
+                ["git", "status", "--porcelain", "-z", "--ignored", "--untracked-files=all"],
                 cwd=resolved_repo,
                 capture_output=True,
                 text=True,
@@ -1928,11 +1974,16 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
             # 2.1 未追跡・無視ファイルの内容ハッシュ・種別記録 (KKK.2 / Sol氏 Phase 50 P1指摘)
             untracked_hashes: dict[str, str] = {}
-            for line in status_text.splitlines():
-                if line.startswith(("?? ", "!! ")):
-                    rel_path = line[3:].strip()
-                    if rel_path.startswith('"') and rel_path.endswith('"'):
-                        rel_path = rel_path[1:-1]
+            st_tokens = [tok for tok in status_text.split("\0") if tok]
+            st_idx = 0
+            while st_idx < len(st_tokens):
+                tok = st_tokens[st_idx]
+                if len(tok) < 4:
+                    st_idx += 1
+                    continue
+                xy = tok[:2]
+                if xy in ("??", "!!"):
+                    rel_path = tok[3:]
                     p = resolved_repo / rel_path
                     try:
                         if p.is_symlink():
@@ -1946,6 +1997,10 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                             untracked_hashes[rel_path] = "missing"
                     except OSError as e:
                         untracked_hashes[rel_path] = f"error:{e}"
+                if xy[0] in ("R", "C") or xy[1] in ("R", "C"):
+                    st_idx += 2
+                else:
+                    st_idx += 1
 
             # 3. diff ハッシュ
             diff_args = ["git", "diff", "HEAD", "--binary"] if head_commit else ["git", "diff", "--binary"]
@@ -2092,6 +2147,18 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
         sanitized_env["PYTHONPATH"] = f"{src_path}:{repo_path}"
         sanitized_env["TMPDIR"] = str(exec_resolved)
 
+        # SBX-9: 候補テストの HOME / XDG_CONFIG_HOME を一時領域の空ディレクトリにし、
+        # システム設定の参照も抑止してサンドボックス内で git がホスト設定に依存せず動くようにする
+        sandbox_home_tmp = tempfile.TemporaryDirectory()
+        sandbox_home_root = Path(sandbox_home_tmp.name).resolve()
+        sandbox_home_dir = sandbox_home_root / "home"
+        sandbox_xdg_config_dir = sandbox_home_root / "xdg_config"
+        sandbox_home_dir.mkdir(parents=True, exist_ok=True)
+        sandbox_xdg_config_dir.mkdir(parents=True, exist_ok=True)
+        sanitized_env["HOME"] = str(sandbox_home_dir)
+        sanitized_env["XDG_CONFIG_HOME"] = str(sandbox_xdg_config_dir)
+        sanitized_env["GIT_CONFIG_NOSYSTEM"] = "1"
+
         runner_args = [
             sys.executable,
             "-c",
@@ -2164,6 +2231,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 (deny file-write*)
 (allow file-write* (subpath "{exec_resolved}"))
 (allow file-write* (subpath "{exec_cwd}"))
+(allow file-write* (subpath "{sandbox_home_root}"))
 (allow file-write* (literal "/dev/null"))
 (allow file-write* (literal "/dev/zero"))
 (allow file-write* (literal "/dev/dtracehelper"))
@@ -2219,6 +2287,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 (allow file-read* (subpath "{py_bin}"))
 (allow file-read* (subpath "{exec_resolved}"))
 (allow file-read* (subpath "{exec_cwd}"))
+(allow file-read* (subpath "{sandbox_home_root}"))
 (deny file-read* (subpath "{repo_resolved}"))
 (deny file-write* (subpath "{repo_resolved}"))
 """
@@ -2267,11 +2336,17 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 "--tmpfs", "/tmp",
                 "--dir", str(exec_resolved),
                 "--bind", str(exec_resolved), str(exec_resolved),
+                "--dir", str(sandbox_home_dir),
+                "--bind", str(sandbox_home_dir), str(sandbox_home_dir),
+                "--dir", str(sandbox_xdg_config_dir),
+                "--bind", str(sandbox_xdg_config_dir), str(sandbox_xdg_config_dir),
                 "--unshare-net",
                 "--die-with-parent",
             ])
             cmd.extend(runner_args)
         else:
+            with contextlib.suppress(OSError):
+                sandbox_home_tmp.cleanup()
             return _res(
                 is_reproduced=False,
                 exit_code=1,
@@ -2337,6 +2412,8 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
             if profile_file and profile_file.exists():
                 with contextlib.suppress(OSError):
                     profile_file.unlink()
+            with contextlib.suppress(OSError):
+                sandbox_home_tmp.cleanup()
 
         # 3. 元リポジトリ改ざん検知 (JJJ.2: 多層防御)
         after_snapshot = self._capture_repo_snapshot()
@@ -2575,7 +2652,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
 
 def _classify_red_first_file_result(res: RedVerificationResult) -> str:
-    """RedVerificationResult の reason を GATE-17 のファイル単位の判定へ変換する。"""
+    """RedVerificationResult の reason を GATE-17 のチェックポイント単位の判定へ変換する。"""
     if res.reason in _RED_FIRST_CONFIRMED_REASONS:
         return "CONFIRMED"
     if res.reason in _RED_FIRST_SANDBOX_REASONS:
@@ -2585,13 +2662,24 @@ def _classify_red_first_file_result(res: RedVerificationResult) -> str:
     return "NOT_RED"
 
 
+def _classify_red_first_current_result(res: RedVerificationResult) -> tuple[str, str, str]:
+    """GATE-18: 今の作業ツリーでの実行結果を (file_result, current_result, current_reason) へ変換する。"""
+    if res.reason in _RED_FIRST_SANDBOX_REASONS:
+        return "SANDBOX_UNAVAILABLE", "SANDBOX_UNAVAILABLE", res.reason
+    if res.reason == "TIMEOUT":
+        return "TIMEOUT", "TIMEOUT", res.reason
+    if res.reason == "ALREADY_GREEN":
+        return "CONFIRMED", "PASSED", res.reason
+    return "NOT_GREEN", "FAILED", res.reason
+
+
 def verify_red_first_tests(
     repo_dir: Path,
     checkpoint: str,
     test_files: list[str],
     timeout_sec: int = RED_FIRST_FILE_TIMEOUT_SEC,
 ) -> dict[str, Any]:
-    """GATE-17: 対象テストファイルをチェックポイント時点のコードに対してサンドボックス実行し集計する。"""
+    """GATE-17 / GATE-18: 対象テストファイルをチェックポイントと今の作業ツリーに対してサンドボックス実行し集計する。"""
     if not test_files:
         return {"result": "NO_TEST_CHANGES", "file_results": []}
 
@@ -2608,21 +2696,39 @@ def verify_red_first_tests(
                     "result": "NOT_RED",
                     "reason": "EXECUTION_ERROR",
                     "reason_detail": f"Failed to read test file: {e}",
+                    "current_result": "SKIPPED",
+                    "current_reason": "SKIPPED",
                 }
             )
             continue
-        res = verifier.verify_red_first_test(
+        cp_res = verifier.verify_red_first_test(
             rel_path,
             test_code,
             timeout_sec=timeout_sec,
             commit=checkpoint,
         )
+        cp_status = _classify_red_first_file_result(cp_res)
+        if cp_status != "CONFIRMED":
+            file_result = cp_status
+            current_result = "SKIPPED"
+            current_reason = "SKIPPED"
+        else:
+            cur_res = verifier.verify_red_first_test(
+                rel_path,
+                test_code,
+                timeout_sec=timeout_sec,
+                commit=None,
+            )
+            file_result, current_result, current_reason = _classify_red_first_current_result(cur_res)
+
         file_results.append(
             {
                 "file": rel_path,
-                "result": _classify_red_first_file_result(res),
-                "reason": res.reason,
-                "reason_detail": res.reason_detail,
+                "result": file_result,
+                "reason": cp_res.reason,
+                "reason_detail": cp_res.reason_detail,
+                "current_result": current_result,
+                "current_reason": current_reason,
             }
         )
 
@@ -2633,6 +2739,8 @@ def verify_red_first_tests(
         overall = "SANDBOX_UNAVAILABLE"
     elif "TIMEOUT" in statuses:
         overall = "TIMEOUT"
+    elif "NOT_GREEN" in statuses:
+        overall = "NOT_GREEN"
     else:
         overall = "NOT_RED"
 
