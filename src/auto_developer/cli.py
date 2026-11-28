@@ -373,6 +373,37 @@ def _resolve_cli_team_context(
     return ctx, 0
 
 
+def _check_team_declared_models(
+    team_ctx: TeamContext | None,
+    *,
+    maker_model: str,
+    checker_model: str,
+    source_label: str,
+) -> str | None:
+    """TEAM-33: 宣言された maker / checker モデルと実際のモデルを比較し、不一致ならエラー文を返す。"""
+    if team_ctx is None:
+        return None
+    mismatches: list[str] = []
+    if team_ctx.maker is not None:
+        declared_maker = str(team_ctx.maker.get("model", ""))
+        if maker_model != declared_maker:
+            mismatches.append(
+                f"maker ({source_label}: declared='{declared_maker}', actual='{maker_model}')"
+            )
+    if team_ctx.checker is not None:
+        declared_checker = str(team_ctx.checker.get("model", ""))
+        if checker_model != declared_checker:
+            mismatches.append(
+                f"checker ({source_label}: declared='{declared_checker}', actual='{checker_model}')"
+            )
+    if not mismatches:
+        return None
+    return (
+        f"TEAM_PROFILE_MISMATCH: Team '{team_ctx.team_id}' model mismatch: "
+        + "; ".join(mismatches)
+    )
+
+
 def _refresh_team_report_best_effort(
     reporter: MorningReporter,
     report_path: Path,
@@ -1930,6 +1961,22 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 4
 
+        mismatch_msg = _check_team_declared_models(
+            team_ctx,
+            maker_model=args.maker_model,
+            checker_model=args.checker_model,
+            source_label="CLI",
+        )
+        if mismatch_msg is not None:
+            print(mismatch_msg, file=sys.stderr)
+            metrics.record_event(
+                "commit_step",
+                result="TEAM_PROFILE_MISMATCH",
+                commit=None,
+                **commit_event_base,
+            )
+            return 4
+
         is_independent, violation_msg = verify_model_independence(
             args.maker_model,
             args.checker_model,
@@ -2033,6 +2080,22 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 4
 
+        review_mismatch_msg = _check_team_declared_models(
+            team_ctx,
+            maker_model=str(review_record.get("maker_model", "")),
+            checker_model=str(review_record.get("checker_model", "")),
+            source_label="review_record",
+        )
+        if review_mismatch_msg is not None:
+            print(review_mismatch_msg, file=sys.stderr)
+            metrics.record_event(
+                "commit_step",
+                result="TEAM_PROFILE_MISMATCH",
+                commit=None,
+                **commit_event_base,
+            )
+            return 4
+
         if (
             str(review_record.get("maker_model", "")) != args.maker_model
             or str(review_record.get("checker_model", "")) != args.checker_model
@@ -2125,6 +2188,20 @@ def main(argv: list[str] | None = None) -> int:
 
         decision = recorded_decision
 
+        commit_team_profile: dict[str, Any] | None = None
+        if team_ctx is not None:
+            try:
+                commit_team_profile, _ = build_team_profile_payload(work_dir, team_ctx)
+            except ManifestValidationError as profile_err:
+                print(f"TEAM_PROFILE_ERROR: {profile_err}", file=sys.stderr)
+                metrics.record_event(
+                    "commit_step",
+                    result="TEAM_PROFILE_ERROR",
+                    commit=None,
+                    **commit_event_base,
+                )
+                return 3
+
         current_spec_sha = git_guard.get_spec_sha(spec_path)
         if not evidence_store.verify_and_consume(
             task_id=args.task_id,
@@ -2198,6 +2275,7 @@ def main(argv: list[str] | None = None) -> int:
                 "tree_verified": True,
             },
             checker_info=checker_info,
+            team_profile=commit_team_profile,
         )
         metrics.record_event(
             "commit_step",
@@ -2488,6 +2566,14 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 4
 
+        review_team_profile: dict[str, Any] | None = None
+        if team_ctx is not None:
+            try:
+                review_team_profile, _ = build_team_profile_payload(work_dir, team_ctx)
+            except ManifestValidationError as profile_err:
+                print(f"TEAM_PROFILE_ERROR: {profile_err}", file=sys.stderr)
+                return 3
+
         if dec is None:
             evidence_store.record_review(
                 task_id=args.task_id,
@@ -2503,6 +2589,7 @@ def main(argv: list[str] | None = None) -> int:
                 checker_family=checker_fam,
                 checker_family_source=checker_fam_source,
                 reason=args.reason or "",
+                team_profile=review_team_profile,
             )
             print(
                 "CHECKER_POLICY_VIOLATION: Checker output must contain exactly one DECISION line (APPROVE or REJECT)",
@@ -2524,6 +2611,7 @@ def main(argv: list[str] | None = None) -> int:
             checker_family=checker_fam,
             checker_family_source=checker_fam_source,
             reason=args.reason or "",
+            team_profile=review_team_profile,
         )
 
         metrics = MetricsLog(
