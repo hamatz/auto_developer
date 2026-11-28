@@ -20,7 +20,7 @@ class TestMetricsLog(unittest.TestCase):
         self.repo = Path(self._tmp.name) / "repo"
         self.repo.mkdir()
         for cmd in (
-            ["git", "init"],
+            ["git", "init", "-b", "main"],
             ["git", "config", "user.name", "Tester"],
             ["git", "config", "user.email", "tester@example.com"],
         ):

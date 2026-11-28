@@ -19,7 +19,7 @@ from tests.review_test_helpers import ensure_synthetic_review_evidence
 
 
 def _init_git_repo(repo_dir: Path) -> None:
-    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "Tester"], cwd=repo_dir, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=repo_dir, check=True, capture_output=True)
     (repo_dir / "README.md").write_text("init\n", encoding="utf-8")

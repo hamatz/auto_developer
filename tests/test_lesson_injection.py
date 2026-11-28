@@ -92,7 +92,7 @@ class TestLessonInjection(unittest.TestCase):
     def test_e2e_closed_self_improvement_loop(self) -> None:
         """機能FFF.4: 外部監査 → Red実証 → PLAN登録 → Maker修正 → After Green → 免疫昇格 → LESSONS追記 → 次回Maker教訓注入の完全閉ループ。"""
         # Git リポジトリ初期化 (HHH.1)
-        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "AutoDev Test"], cwd=self.repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.email", "autodev@example.com"], cwd=self.repo_dir, check=True, capture_output=True)
 

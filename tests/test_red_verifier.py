@@ -30,7 +30,7 @@ class TestRedTestVerifier(unittest.TestCase):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.repo_dir = Path(self.tmp_dir.name)
         # MMM.3: プロダクトコード (src/) を初期化してコミット
-        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "TestUser"], cwd=self.repo_dir, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True)
         src_dir = self.repo_dir / "src"
@@ -319,7 +319,7 @@ else:
         import subprocess
 
         # 1. 元リポジトリを初期化して canary.txt をコミット
-        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "TestUser"], cwd=self.repo_dir, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True)
         canary = self.repo_dir / "canary.txt"
@@ -370,7 +370,7 @@ class HostileChmodTest(unittest.TestCase):
         import subprocess
 
         # Git リポジトリ初期化
-        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo_dir, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True)
         dummy_file = self.repo_dir / "app.py"
@@ -542,7 +542,7 @@ class TamperingTest(unittest.TestCase):
         from unittest.mock import MagicMock, patch
 
         # Git リポジトリ初期化
-        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo_dir, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True)
         dummy_init = self.repo_dir / "init.txt"
@@ -738,7 +738,7 @@ class ReadParentRepoTest(unittest.TestCase):
         スナップショット比較で確実に改ざんが検知されること (Sol氏 Phase 50 再現手順)。
         """
         # Git リポジトリ初期化
-        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo_dir, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True)
 

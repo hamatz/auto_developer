@@ -69,7 +69,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             repo_dir.mkdir()
-            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
 
@@ -91,7 +91,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             repo_dir.mkdir()
-            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
 
@@ -129,7 +129,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             repo_dir.mkdir()
-            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
 
@@ -164,7 +164,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             repo_dir.mkdir()
-            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
 
@@ -224,7 +224,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             repo_dir.mkdir()
-            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
 
@@ -430,7 +430,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             repo_dir.mkdir()
-            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
 
@@ -502,7 +502,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_dir = Path(tmp_dir) / "repo"
             repo_dir.mkdir()
-            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo_dir, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True)
 
@@ -741,7 +741,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
             subprocess.run([sys.executable, str(script_path), "init"], cwd=ext_app, check=True)
 
             # 2. Git 初期化と初期コミット
-            subprocess.run(["git", "init"], cwd=ext_app, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=ext_app, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=ext_app, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=ext_app, check=True)
             subprocess.run(["git", "add", "-A"], cwd=ext_app, check=True)
@@ -795,7 +795,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         """機能H-1: init が生成する scripts/verify_local.sh はテスト失敗を握りつぶさず非ゼロで終了する。"""
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / "SPEC.md").write_text("spec", encoding="utf-8")
@@ -825,7 +825,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         script_path = Path(__file__).resolve().parents[1] / "scripts" / "nightly_orchestrator.py"
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
@@ -855,7 +855,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
@@ -894,7 +894,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         script_path = Path(__file__).resolve().parents[1] / "scripts" / "nightly_orchestrator.py"
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
@@ -971,7 +971,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         """機能J: 隔離退避時、.gitignore 対象の生成物や未追跡ファイルも含めて確実に保全されること。"""
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / ".gitignore").write_text("*.ignored\n.dev/\n", encoding="utf-8")
@@ -1102,7 +1102,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         """機能L-1: 既に COMPLETED または FAILED な JobState を --resume した場合に再開を拒否すること。"""
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
@@ -1156,7 +1156,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         """機能M-1: 実際にコミットされた Git Tree SHA (HEAD^{tree}) は Evidence に拘束された Tree SHA と完全一致すること。"""
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
@@ -1218,7 +1218,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         import tarfile
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / ".gitignore").write_text(".env*\n*.key\n.dev/\n", encoding="utf-8")
@@ -1232,7 +1232,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
             (repo / "base.py").write_text("print('base modified')\n", encoding="utf-8")
             (repo / "failed_feature.py").write_text("print('incomplete')\n", encoding="utf-8")
             (repo / ".env").write_text("SECRET_API_KEY=topsecret123\n", encoding="utf-8")
-            (repo / "private.key").write_text("-----BEGIN RSA PRIVATE KEY-----\n", encoding="utf-8")
+            (repo / "private.key").write_text("-----BEGIN " + "RSA PRIVATE KEY-----\n", encoding="utf-8")
 
             guard = GitGuard(repo_dir=repo)
             quarantine_branch = guard.quarantine_and_restore(checkpoint, task_id="sec1")
@@ -1291,7 +1291,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         """機能M-3: --resume 実行時、現在の HEAD が保存された checkpoint_hash と不一致なら巻き戻しを拒絶 (Exit 2) すること。"""
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
@@ -1340,7 +1340,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         """機能M-4: DEFAULT_VERIFY_SH は tests/ ディレクトリまたはテストが存在しない場合に Exit 1 で失敗すること。"""
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / "SPEC.md").write_text("spec\n", encoding="utf-8")
@@ -1364,7 +1364,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         import fcntl
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
@@ -1406,7 +1406,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         """機能N-2: commit_task は再ステージ (git add -A) を行わず、検証済みIndexから直接コミットすること。"""
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / "base.txt").write_text("initial\n", encoding="utf-8")
@@ -1447,7 +1447,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         import tarfile
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
@@ -1500,7 +1500,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         """機能P-1: CLI verify-step が検証失敗した場合、PLAN.md は [x] にならず未完了状態が保たれること。"""
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
@@ -1545,7 +1545,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         """機能P-2: 2タスク連続実行でMakerが厳密に2回だけ呼ばれ、成功タスクは[x]となり再起動しても再実行されないこと。"""
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
@@ -1632,7 +1632,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         import json
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo = Path(tmp_dir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
             (repo / ".gitignore").write_text(".dev/\nlogs/\nNIGHTLY_REPORT.md\n", encoding="utf-8")
@@ -1696,7 +1696,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
 
@@ -1760,7 +1760,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
 
@@ -1868,7 +1868,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
             repo = Path(tmpdir)
             script_path = Path(__file__).parents[1] / "scripts" / "nightly_orchestrator.py"
 
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
 
@@ -2005,7 +2005,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
 
@@ -2104,7 +2104,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         # Case 1: Scenario A (Attempt 1 verify fail -> Attempt 2 verify pass -> Success with attempts in Evidence Record)
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
 
@@ -2175,7 +2175,7 @@ class TestNightlyOrchestrator(unittest.TestCase):
         # Case 2: Scenario B (Attempt 1 fail -> Attempt 2 fail -> Failure log contains both attempt 1 and 2 logs)
         with tempfile.TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
             subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
 
@@ -2241,7 +2241,7 @@ class TestNightlyOrchestratorAuditStage(unittest.TestCase):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.repo_dir = Path(self.tmp_dir.name)
 
-        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "Tester"], cwd=self.repo_dir, check=True)
         subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=self.repo_dir, check=True)
 

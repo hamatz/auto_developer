@@ -88,7 +88,7 @@ class TestRcv6QuarantineSnapshotListing(unittest.TestCase):
             (repo / "__pycache__").mkdir(parents=True, exist_ok=True)
             (repo / "__pycache__" / "mod.cpython-310.pyc").write_bytes(b"pycdata")
             (repo / ".env").write_text("API_KEY=super_secret_12345\n", encoding="utf-8")
-            (repo / "server.pem").write_text("-----BEGIN PRIVATE KEY-----\nsecret\n", encoding="utf-8")
+            (repo / "server.pem").write_text("-----BEGIN " + "PRIVATE KEY-----\nsecret\n", encoding="utf-8")
             (repo / "credentials.json").write_text('{"token": "secret"}\n', encoding="utf-8")
 
             proc = _run_cli(

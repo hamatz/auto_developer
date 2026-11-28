@@ -19,7 +19,7 @@ class TestAsymmetricImmunityGuard(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.repo_dir = Path(self.tmp_dir.name)
-        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "TestUser"], cwd=self.repo_dir, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True)
 

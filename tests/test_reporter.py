@@ -18,7 +18,7 @@ class TestMorningReporterEvidenceVerification(unittest.TestCase):
         self.repo = Path(self.tmpdir.name)
 
         # Git リポジトリ初期化
-        subprocess.run(["git", "init"], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo, check=True)
         subprocess.run(["git", "config", "user.name", "Test User"], cwd=self.repo, check=True)
 
@@ -325,7 +325,7 @@ class TestStandaloneReportGeneration(unittest.TestCase):
         self.repo = Path(self.tmpdir.name)
 
         # Git リポジトリ初期化
-        subprocess.run(["git", "init"], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo, check=True)
         subprocess.run(["git", "config", "user.name", "Test User"], cwd=self.repo, check=True)
 
