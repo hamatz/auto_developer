@@ -1556,6 +1556,15 @@ def main(argv: list[str] | None = None) -> int:
         if ctx_err != 0:
             return ctx_err
         effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
+        effective_verify_script = (
+            args.verify_script
+            if args.verify_script is not None
+            else (
+                (work_dir / team_ctx.verify_script)
+                if (team_ctx is not None and team_ctx.verify_script)
+                else verify_script
+            )
+        )
         metrics = MetricsLog(
             repo_dir=work_dir,
             plan_path=effective_plan_path,
@@ -1570,8 +1579,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         try:
-            verify_timeout, verify_timeout_source = resolve_verify_timeout(args.timeout, verify_script)
-            red_first_mode = resolve_red_first_mode(verify_script)
+            verify_timeout, verify_timeout_source = resolve_verify_timeout(args.timeout, effective_verify_script)
+            red_first_mode = resolve_red_first_mode(effective_verify_script)
         except ValueError as timeout_err:
             print(f"CONFIG ERROR: {timeout_err}", file=sys.stderr)
             return 2
@@ -1730,7 +1739,7 @@ def main(argv: list[str] | None = None) -> int:
                 }
 
         code, out = verifier.run_verification(
-            verify_script,
+            effective_verify_script,
             timeout_sec=verify_timeout,
             cwd=work_dir,
             timeout_source=verify_timeout_source,
@@ -1799,6 +1808,17 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         spec_sha = git_guard.get_spec_sha(spec_path)
         out_lines = [line.strip() for line in out.strip().splitlines() if line.strip()]
+        resolved_work_dir = work_dir.resolve()
+        resolved_script = effective_verify_script.resolve()
+        try:
+            verify_script_label = resolved_script.relative_to(resolved_work_dir).as_posix()
+        except ValueError:
+            verify_script_label = str(effective_verify_script)
+        verify_script_sha256 = (
+            hashlib.sha256(resolved_script.read_bytes()).hexdigest()
+            if resolved_script.is_file()
+            else ""
+        )
         evidence = evidence_store.issue_evidence(
             task_id=args.task_id,
             checkpoint=args.checkpoint,
@@ -1808,6 +1828,8 @@ def main(argv: list[str] | None = None) -> int:
                 "verification": {
                     "exit_code": code,
                     "output_summary": out_lines[-10:] if out_lines else [],
+                    "verify_script": verify_script_label,
+                    "verify_script_sha256": verify_script_sha256,
                 }
             },
             red_first=red_first_payload,

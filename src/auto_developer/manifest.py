@@ -628,6 +628,7 @@ class TeamContext:
     plan_rel_path: str
     plan_path: Path
     owns_patterns: list[str]
+    verify_script: str | None = None
 
 
 def _normalize_rel_path(path_str: str) -> str:
@@ -725,6 +726,7 @@ def _build_team_context(repo_dir: Path, team: TeamConfig) -> TeamContext:
         plan_rel_path=plan_rel,
         plan_path=(repo_dir.resolve() / plan_rel),
         owns_patterns=effective_owns,
+        verify_script=_normalize_rel_path(team.verify_script) if team.verify_script else None,
     )
 
 
