@@ -204,7 +204,7 @@ class TestGate18RedFirstCurrentGreen(unittest.TestCase):
             )
             self.assertEqual(res2["result"], "CONFIRMED")
 
-    def test_current_tree_timeout_and_sandbox_unavailable(self) -> None:
+    def test_current_tree_timeout_and_repo_modified(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             checkpoint = _init_repo(
@@ -231,12 +231,12 @@ class TestGate18RedFirstCurrentGreen(unittest.TestCase):
                 output="",
                 reason_detail="timed out",
             )
-            cur_sbx = RedVerificationResult(
+            cur_repo_mod = RedVerificationResult(
                 is_reproduced=False,
                 exit_code=1,
-                reason="SANDBOX_UNAVAILABLE",
+                reason="REPO_MODIFIED",
                 output="",
-                reason_detail="no sandbox",
+                reason_detail="modified parent repo",
             )
             with patch.object(RedTestVerifier, "verify_red_first_test", side_effect=[cp_red, cur_timeout]):
                 res_to = verify_red_first_tests(repo, checkpoint, ["tests/test_any.py"])
@@ -245,12 +245,12 @@ class TestGate18RedFirstCurrentGreen(unittest.TestCase):
             self.assertEqual(res_to["file_results"][0]["current_result"], "TIMEOUT")
             self.assertEqual(res_to["file_results"][0]["current_reason"], "TIMEOUT")
 
-            with patch.object(RedTestVerifier, "verify_red_first_test", side_effect=[cp_red, cur_sbx]):
-                res_sbx = verify_red_first_tests(repo, checkpoint, ["tests/test_any.py"])
-            self.assertEqual(res_sbx["result"], "SANDBOX_UNAVAILABLE")
-            self.assertEqual(res_sbx["file_results"][0]["result"], "SANDBOX_UNAVAILABLE")
-            self.assertEqual(res_sbx["file_results"][0]["current_result"], "SANDBOX_UNAVAILABLE")
-            self.assertEqual(res_sbx["file_results"][0]["current_reason"], "SANDBOX_UNAVAILABLE")
+            with patch.object(RedTestVerifier, "verify_red_first_test", side_effect=[cp_red, cur_repo_mod]):
+                res_mod = verify_red_first_tests(repo, checkpoint, ["tests/test_any.py"])
+            self.assertEqual(res_mod["result"], "REPO_MODIFIED")
+            self.assertEqual(res_mod["file_results"][0]["result"], "REPO_MODIFIED")
+            self.assertEqual(res_mod["file_results"][0]["current_result"], "REPO_MODIFIED")
+            self.assertEqual(res_mod["file_results"][0]["current_reason"], "REPO_MODIFIED")
 
     def test_verify_step_warn_and_enforce_for_not_green_and_messages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

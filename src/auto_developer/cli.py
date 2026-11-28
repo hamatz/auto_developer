@@ -1635,6 +1635,7 @@ def main(argv: list[str] | None = None) -> int:
                     return 2
                 if not target_test_files:
                     rf_result = "NO_TEST_CHANGES"
+                    rf_runner = "clone"
                     rf_file_results: list[dict[str, Any]] = []
                 else:
                     rf_check = verify_red_first_tests(
@@ -1644,9 +1645,11 @@ def main(argv: list[str] | None = None) -> int:
                         timeout_sec=RED_FIRST_FILE_TIMEOUT_SEC,
                     )
                     rf_result = str(rf_check["result"])
+                    rf_runner = str(rf_check.get("runner", "clone"))
                     rf_file_results = list(rf_check["file_results"])
                 red_first_payload = {
                     "mode": red_first_mode,
+                    "runner": rf_runner,
                     "result": rf_result,
                     "test_files": target_test_files,
                     "file_results": rf_file_results,
@@ -1657,6 +1660,7 @@ def main(argv: list[str] | None = None) -> int:
                     task_id=args.task_id,
                     checkpoint=args.checkpoint,
                     mode=red_first_mode,
+                    runner=rf_runner,
                     result=rf_result,
                     test_files=target_test_files,
                     file_results=rf_file_results,

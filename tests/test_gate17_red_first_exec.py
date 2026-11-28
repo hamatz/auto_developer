@@ -157,7 +157,7 @@ class TestGate17RedFirstExec(unittest.TestCase):
             self.assertEqual(res["result"], "NOT_RED")
             self.assertEqual(res["file_results"][0]["result"], "NOT_RED")
 
-    def test_not_red_for_syntax_error_and_trivial_red(self) -> None:
+    def test_not_red_for_syntax_error_and_not_green_for_always_false(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             checkpoint = _init_repo(
@@ -167,21 +167,22 @@ class TestGate17RedFirstExec(unittest.TestCase):
             (repo / "tests" / "test_syntax.py").write_text(
                 "def test_broken(:\n    pass\n", encoding="utf-8"
             )
-            (repo / "tests" / "test_trivial.py").write_text(
+            (repo / "tests" / "test_always_false.py").write_text(
                 "import unittest\n\n"
-                "class TestTrivial(unittest.TestCase):\n"
+                "class TestAlwaysFalse(unittest.TestCase):\n"
                 "    def test_false(self):\n"
                 "        self.assertTrue(False)\n",
                 encoding="utf-8",
             )
             res = verify_red_first_tests(
-                repo, checkpoint, ["tests/test_syntax.py", "tests/test_trivial.py"]
+                repo, checkpoint, ["tests/test_syntax.py", "tests/test_always_false.py"]
             )
-            self.assertEqual(res["result"], "NOT_RED")
+            self.assertEqual(res["result"], "NOT_GREEN")
             self.assertEqual(res["file_results"][0]["result"], "NOT_RED")
             self.assertEqual(res["file_results"][0]["reason"], "SYNTAX_ERROR")
-            self.assertEqual(res["file_results"][1]["result"], "NOT_RED")
-            self.assertEqual(res["file_results"][1]["reason"], "TRIVIAL_RED")
+            self.assertEqual(res["file_results"][1]["result"], "NOT_GREEN")
+            self.assertEqual(res["file_results"][1]["reason"], "GENUINE_RED")
+            self.assertEqual(res["file_results"][1]["current_result"], "FAILED")
 
     def test_confirmed_if_any_file_is_confirmed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -234,7 +235,7 @@ class TestGate17RedFirstExec(unittest.TestCase):
             self.assertEqual(res["result"], "TIMEOUT")
             self.assertEqual(res["file_results"][0]["result"], "TIMEOUT")
 
-    def test_sandbox_unavailable_returns_sandbox_unavailable(self) -> None:
+    def test_clone_runner_does_not_return_sandbox_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             checkpoint = _init_repo(
@@ -250,8 +251,9 @@ class TestGate17RedFirstExec(unittest.TestCase):
             )
             with patch.object(RedTestVerifier, "_get_sandbox_backend", return_value=None):
                 res = verify_red_first_tests(repo, checkpoint, ["tests/test_any.py"])
-            self.assertEqual(res["result"], "SANDBOX_UNAVAILABLE")
-            self.assertEqual(res["file_results"][0]["result"], "SANDBOX_UNAVAILABLE")
+            self.assertEqual(res["result"], "NOT_RED")
+            self.assertEqual(res["file_results"][0]["result"], "NOT_RED")
+            self.assertEqual(res["runner"], "clone")
 
     def test_verify_step_warn_mode_warns_and_continues(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
