@@ -397,10 +397,8 @@ print(json.dumps(data))
                 i += 1
         return entries
 
-    def get_modified_protected_files(
-        self, checkpoint: str, allow_immunity_additions: bool = False
-    ) -> list[str]:
-        """チェックポイント以降に変更・追加された保護ファイルのパス一覧を返す。"""
+    def _collect_changed_files(self, checkpoint: str) -> set[str]:
+        """チェックポイント以降に変更・追加・削除されたファイル（未追跡・ステージ済を含む）を収集する。"""
         files_to_check: set[str] = set()
         proc_diff = self._run_git(["diff", "--name-only", "-z", checkpoint])
         for entry in proc_diff.stdout.split("\0"):
@@ -410,10 +408,46 @@ print(json.dumps(data))
         proc_status = self._run_git(["status", "--porcelain", "-z", "-uall"])
         for _xy, paths in self._parse_porcelain_z_entries(proc_status.stdout):
             files_to_check.update(paths)
+        return files_to_check
 
+    def _get_team_protected_paths(self, checkpoint: str) -> set[str]:
+        """チェックポイント時点の teams.json に宣言された review_docs / verify_script の一覧を返す (TEAM-30)。"""
+        from auto_developer.manifest import (
+            ManifestValidationError,
+            _normalize_rel_path,
+            load_committed_teams_manifest,
+        )
+
+        try:
+            manifest = load_committed_teams_manifest(self.repo_dir, ref=checkpoint)
+        except (ManifestValidationError, OSError, subprocess.SubprocessError, ValueError):
+            return set()
+        if manifest is None:
+            return set()
+
+        protected: set[str] = set()
+        for team in manifest.teams:
+            for doc_path in team.review_docs:
+                norm = _normalize_rel_path(doc_path)
+                if norm:
+                    protected.add(norm)
+            if team.verify_script:
+                norm_vs = _normalize_rel_path(team.verify_script)
+                if norm_vs:
+                    protected.add(norm_vs)
+        return protected
+
+    def get_modified_protected_files(
+        self, checkpoint: str, allow_immunity_additions: bool = False
+    ) -> list[str]:
+        """チェックポイント以降に変更・追加された保護ファイルのパス一覧を返す。"""
+        files_to_check = self._collect_changed_files(checkpoint)
+        team_protected = self._get_team_protected_paths(checkpoint)
         patterns = self.BASE_PROTECTED_PATTERNS if allow_immunity_additions else self.PROTECTED_PATTERNS
         matched = [
-            fp for fp in sorted(files_to_check) if any(pat.search(fp) for pat in patterns)
+            fp
+            for fp in sorted(files_to_check)
+            if fp in team_protected or any(pat.search(fp) for pat in patterns)
         ]
         if allow_immunity_additions:
             for fp in sorted(files_to_check):
@@ -437,39 +471,28 @@ print(json.dumps(data))
         既存の免疫テストの変更・削除・改変は依然として厳格に遮断する。
         さらに、新規追加されるファイルは通常ファイル（非symlink）かつ test_*.py の命名規則を満たす必要がある。
         """
+        team_protected = self._get_team_protected_paths(checkpoint)
         if not allow_immunity_additions:
-            files_to_check: set[str] = set()
-            proc_diff = self._run_git(["diff", "--name-only", "-z", checkpoint])
-            for entry in proc_diff.stdout.split("\0"):
-                if entry:
-                    files_to_check.add(entry)
-
-            proc_status = self._run_git(["status", "--porcelain", "-z", "-uall"])
-            for _xy, paths in self._parse_porcelain_z_entries(proc_status.stdout):
-                files_to_check.update(paths)
-
+            files_to_check = self._collect_changed_files(checkpoint)
             for file_path in files_to_check:
+                if file_path in team_protected:
+                    return False
                 for pattern in self.PROTECTED_PATTERNS:
                     if pattern.search(file_path):
                         return False
             return True
 
         # allow_immunity_additions=True の場合:
-        # A. 基本保護対象 (.github/, SPEC.md, scripts/verify_local.sh) の検査
-        files_to_check_base: set[str] = set()
-        proc_diff = self._run_git(["diff", "--name-only", "-z", checkpoint])
-        for entry in proc_diff.stdout.split("\0"):
-            if entry:
-                files_to_check_base.add(entry)
-
-        proc_status = self._run_git(["status", "--porcelain", "-z", "-uall"])
-        for _xy, paths in self._parse_porcelain_z_entries(proc_status.stdout):
-            files_to_check_base.update(paths)
-
+        # A. 基本保護対象 (.github/, SPEC.md, scripts/verify_local.sh, teams.json, 承認IR, チーム宣言ファイル) の検査
+        files_to_check_base = self._collect_changed_files(checkpoint)
         for file_path in files_to_check_base:
+            if file_path in team_protected:
+                return False
             for pattern in self.BASE_PROTECTED_PATTERNS:
                 if pattern.search(file_path):
                     return False
+
+        proc_status = self._run_git(["status", "--porcelain", "-z", "-uall"])
 
         # B. tests/immunity/ の非対称検査
         try:

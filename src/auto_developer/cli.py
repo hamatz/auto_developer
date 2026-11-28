@@ -2027,6 +2027,20 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 4
 
+        if not git_guard.check_protected_files_untouched(chk_ref):
+            evidence_store.clear_evidence(task_id=args.task_id)
+            print(
+                f"CIRCUIT BREAKER: Protected file modified since {chk_ref}",
+                file=sys.stderr,
+            )
+            metrics.record_event(
+                "commit_step",
+                result="CIRCUIT_BREAKER",
+                commit=None,
+                **commit_event_base,
+            )
+            return 10
+
         if team_ctx is not None:
             boundary_res = BoundaryGuard(
                 repo_dir=work_dir,
