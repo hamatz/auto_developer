@@ -23,7 +23,7 @@ class TestAuditLessonRecording(unittest.TestCase):
         self.repo_dir = Path(self.tmp_dir.name)
 
         # Git リポジトリ初期化 (HHH.1)
-        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "AutoDev Test"], cwd=self.repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.email", "autodev@example.com"], cwd=self.repo_dir, check=True, capture_output=True)
 

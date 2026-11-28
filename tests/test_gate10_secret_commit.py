@@ -17,7 +17,7 @@ class TestGate10SecretCommit(unittest.TestCase):
     """GATE-10: .env / 鍵ファイル / SSH鍵のコミット拒否と init .gitignore を検証する。"""
 
     def _init_repo(self, repo: Path) -> str:
-        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True)
         (repo / "SPEC.md").write_text("# Spec\n", encoding="utf-8")

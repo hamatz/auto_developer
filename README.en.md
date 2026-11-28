@@ -79,6 +79,13 @@ Files created:
 | `tests/immunity/` | Regression tests for past failures | Human (the agent cannot change it) |
 | `.gitignore` | Lines that ignore generated files such as `.dev/` and `logs/`, and `.env`, are appended | Automatic |
 
+The template `scripts/verify_local.sh` starts with setting lines (read from the first 20 lines).
+
+- `# auto-dev: verify-timeout=300`: verification time limit in seconds.
+- `# auto-dev: red-first=warn`: how the Red-First check is handled (`off` / `warn` / `enforce`). For tasks whose title contains `Red-First` or `Red:`, it checks in a temporary clone that the tests changed in that step fail against the checkpoint code and pass against the current code. `warn` only warns; `enforce` fails verification when this cannot be confirmed.
+
+The template's "[2/3] project-specific rules" section contains commented-out examples (a forbidden pattern, an import that crosses layers). Whenever you feel like fixing the agent's work by hand, add that rule here as a check. The verification script is a protected file, so the agent cannot change it.
+
 Replace the second half of `scripts/verify_local.sh` with your project's test command. Verification fails if there are no tests at all, so that it can never pass trivially. `auto-dev pre-flight` shows whether the working tree is clean and what the next task is. `auto-dev status` shows the current state and what needs a human decision, and `auto-dev dashboard` turns it into a single HTML file (`.dev/dashboard.html`).
 
 ### 2. Let an agent run it

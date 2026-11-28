@@ -200,7 +200,7 @@ class TestPlanParsingScope(unittest.TestCase):
     def test_teams_status_and_integrate_use_same_plan_scope(self) -> None:
         repo_dir = self.tmp_dir / "repo"
         repo_dir.mkdir()
-        _git(repo_dir, "init")
+        _git(repo_dir, "init", "-b", "main")
         _git(repo_dir, "config", "user.name", "Tester")
         _git(repo_dir, "config", "user.email", "tester@example.com")
 
@@ -252,7 +252,7 @@ class TestPlanParsingScope(unittest.TestCase):
     def test_reporter_and_metrics_follow_same_plan_scope(self) -> None:
         repo_dir = self.tmp_dir / "repo_rpt"
         repo_dir.mkdir()
-        _git(repo_dir, "init")
+        _git(repo_dir, "init", "-b", "main")
         _git(repo_dir, "config", "user.name", "Tester")
         _git(repo_dir, "config", "user.email", "tester@example.com")
 
@@ -313,7 +313,7 @@ class TestPlanParsingScope(unittest.TestCase):
     def test_cli_pre_flight_and_rollback_respect_scope(self) -> None:
         repo_dir = self.tmp_dir / "repo_cli"
         repo_dir.mkdir()
-        _git(repo_dir, "init")
+        _git(repo_dir, "init", "-b", "main")
         _git(repo_dir, "config", "user.name", "Tester")
         _git(repo_dir, "config", "user.email", "tester@example.com")
 

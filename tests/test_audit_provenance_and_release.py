@@ -19,7 +19,7 @@ class TestAuditProvenanceAndRelease(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.repo_dir = Path(self.tmp.name)
-        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_dir, check=True, capture_output=True)
         subprocess.run(
             ["git", "config", "user.name", "Test Runner"],
             cwd=self.repo_dir,

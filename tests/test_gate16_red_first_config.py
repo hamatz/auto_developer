@@ -230,7 +230,13 @@ class TestGate16RedFirstConfig(unittest.TestCase):
             ev = json.loads((repo / ".git" / "nightly_evidence" / "task_1.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 ev["red_first"],
-                {"mode": "warn", "result": "NO_TEST_CHANGES", "test_files": [], "file_results": []},
+                {
+                    "mode": "warn",
+                    "runner": "clone",
+                    "result": "NO_TEST_CHANGES",
+                    "test_files": [],
+                    "file_results": [],
+                },
             )
             events_path = repo / ".git" / "nightly_evidence" / "events.jsonl"
             events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]

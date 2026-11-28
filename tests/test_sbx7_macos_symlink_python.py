@@ -32,7 +32,7 @@ class TestSBX7MacOSSymlinkPython(unittest.TestCase):
 
         import subprocess
 
-        subprocess.run(["git", "init"], cwd=self.repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo_dir, check=True, capture_output=True)
         subprocess.run(["git", "add", "."], cwd=self.repo_dir, check=True, capture_output=True)

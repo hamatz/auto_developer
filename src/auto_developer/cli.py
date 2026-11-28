@@ -62,9 +62,13 @@ from auto_developer.verifier import (
 VERSION = "0.10.0"
 
 DEFAULT_VERIFY_SH = """#!/usr/bin/env bash
+# auto-dev: verify-timeout=300
+# 検証の制限時間（秒）。先頭 20 行から auto-dev が読み取ります（DX-13 既定: 300）。
+# auto-dev: red-first=warn
+# Red-First 確認の扱い（off / warn / enforce）。先頭 20 行から auto-dev が読み取ります（GATE-16 既定: warn）。
 set -euo pipefail
 
-echo "=== [1/2] Checking protected file invariants (tracked & untracked) ==="
+echo "=== [1/3] Checking protected file invariants (tracked & untracked) ==="
 CHECKPOINT="${1:-HEAD}"
 
 if git rev-parse --verify "$CHECKPOINT" >/dev/null 2>&1; then
@@ -83,7 +87,24 @@ if [ -n "$DIRTY_PROTECTED" ]; then
   exit 1
 fi
 
-echo "=== [2/2] Running Project Tests ==="
+echo "=== [2/3] Checking project-specific rules ==="
+# プロジェクト固有の規則（禁止パターン・層境界など）をここに足してください（既定では何もしません）。
+#
+# 例 1: 使ってはいけない書き方（例: eval(）が src/ にあれば失敗する検査
+# if [ -d "src" ] && grep -rn "eval(" src/ >/dev/null 2>&1; then
+#   echo "ERROR: Forbidden pattern 'eval(' found in src/"
+#   grep -rn "eval(" src/
+#   exit 1
+# fi
+#
+# 例 2: 層をまたぐ読み込み（例: domain の下から ui を読み込む）があれば失敗する検査
+# if [ -d "src/domain" ] && grep -rnE "^\\s*(from|import)\\s+.*\\bui\\b" src/domain/ >/dev/null 2>&1; then
+#   echo "ERROR: Layer violation: domain must not import ui"
+#   grep -rnE "^\\s*(from|import)\\s+.*\\bui\\b" src/domain/
+#   exit 1
+# fi
+
+echo "=== [3/3] Running Project Tests ==="
 # プロジェクトのテストコマンドに置き換えてください (例: pytest, npm test, cargo test 等)
 if [ ! -d "tests" ] || [ -z "$(find tests -name 'test_*.py' 2>/dev/null)" ]; then
   echo "ERROR: No tests configured. A valid test suite (e.g. tests/test_*.py) is required to enforce verification gates."
@@ -1635,6 +1656,7 @@ def main(argv: list[str] | None = None) -> int:
                     return 2
                 if not target_test_files:
                     rf_result = "NO_TEST_CHANGES"
+                    rf_runner = "clone"
                     rf_file_results: list[dict[str, Any]] = []
                 else:
                     rf_check = verify_red_first_tests(
@@ -1644,9 +1666,11 @@ def main(argv: list[str] | None = None) -> int:
                         timeout_sec=RED_FIRST_FILE_TIMEOUT_SEC,
                     )
                     rf_result = str(rf_check["result"])
+                    rf_runner = str(rf_check.get("runner", "clone"))
                     rf_file_results = list(rf_check["file_results"])
                 red_first_payload = {
                     "mode": red_first_mode,
+                    "runner": rf_runner,
                     "result": rf_result,
                     "test_files": target_test_files,
                     "file_results": rf_file_results,
@@ -1657,6 +1681,7 @@ def main(argv: list[str] | None = None) -> int:
                     task_id=args.task_id,
                     checkpoint=args.checkpoint,
                     mode=red_first_mode,
+                    runner=rf_runner,
                     result=rf_result,
                     test_files=target_test_files,
                     file_results=rf_file_results,

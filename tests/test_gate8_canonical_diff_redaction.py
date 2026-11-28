@@ -11,7 +11,7 @@ from tests.review_test_helpers import record_test_review
 
 
 def _init_git_repo(repo_dir: Path) -> str:
-    subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "Tester"], cwd=repo_dir, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.email", "tester@example.com"], cwd=repo_dir, check=True, capture_output=True)
     (repo_dir / ".gitignore").write_text(".dev/\n", encoding="utf-8")

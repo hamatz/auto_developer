@@ -1505,7 +1505,7 @@ class RedTestVerifier:
         """元リポジトリの未コミットの変更・新規ファイルを一時クローンへ同期する。"""
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             res = subprocess.run(
-                ["git", "status", "--porcelain", "-z"],
+                ["git", "status", "--porcelain", "-z", "--untracked-files=all"],
                 cwd=source_repo,
                 capture_output=True,
                 text=True,
@@ -1547,6 +1547,42 @@ class RedTestVerifier:
         code = test_file_path.read_text(encoding="utf-8")
         return self.verify_candidate_test(code, timeout_sec=timeout_sec)
 
+    _RED_FIRST_CLONE_RUNNER_CODE = """
+import json
+import sys
+import unittest
+
+search_dir = sys.argv[1]
+pattern = sys.argv[2]
+
+loader = unittest.defaultTestLoader
+try:
+    suite = loader.discover(start_dir=search_dir, pattern=pattern)
+except Exception as e:
+    data = {
+        "tests_run": 0,
+        "failures": [],
+        "errors": [{"test": "loader", "err": str(e)}],
+        "skipped": 0,
+    }
+    print("===AUTO_DEV_TEST_RESULT===")
+    print(json.dumps(data))
+    sys.exit(1)
+
+result = unittest.TestResult()
+suite.run(result)
+
+data = {
+    "tests_run": result.testsRun,
+    "failures": [{"test": str(test), "err": err} for test, err in result.failures],
+    "errors": [{"test": str(test), "err": err} for test, err in result.errors],
+    "skipped": len(result.skipped),
+}
+print("===AUTO_DEV_TEST_RESULT===")
+print(json.dumps(data))
+sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.errors) == 0) else 1)
+"""
+
     def verify_red_first_test(
         self,
         rel_path: str,
@@ -1554,7 +1590,7 @@ class RedTestVerifier:
         timeout_sec: int = RED_FIRST_FILE_TIMEOUT_SEC,
         commit: str | None = None,
     ) -> RedVerificationResult:
-        """GATE-17: 変更されたテストファイルをチェックポイント時点のコードに対してサンドボックス実行する。"""
+        """GATE-20: 変更されたテストファイルを一時クローンの中で検証スクリプトと同じ環境で実行する。"""
         try:
             ast.parse(test_code)
         except SyntaxError as e:
@@ -1578,15 +1614,210 @@ class RedTestVerifier:
                     output=f"COMMIT_CHECKOUT_FAILED: {e}",
                     reason_detail=str(e),
                 )
-            test_file = clone_path / rel_path
-            test_file.parent.mkdir(parents=True, exist_ok=True)
-            test_file.write_text(test_code, encoding="utf-8")
-            return self._execute_test(
-                test_file,
+
+            clone_resolved = clone_path.resolve()
+            test_file = clone_resolved / rel_path
+            if commit is not None or not test_file.exists():
+                test_file.parent.mkdir(parents=True, exist_ok=True)
+                test_file.write_text(test_code, encoding="utf-8")
+
+            env = dict(os.environ)
+            src_path = str(clone_resolved / "src")
+            repo_path = str(clone_resolved)
+            existing_pp = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = (
+                f"{src_path}{os.pathsep}{repo_path}{os.pathsep}{existing_pp}"
+                if existing_pp
+                else f"{src_path}{os.pathsep}{repo_path}"
+            )
+
+            cmd = [
+                sys.executable,
+                "-c",
+                self._RED_FIRST_CLONE_RUNNER_CODE,
                 str(test_file.parent),
-                timeout_sec,
-                sandbox_dir=clone_path,
-                tracer_root=str(clone_path),
+                test_file.name,
+            ]
+
+            before_snapshot = self._capture_repo_snapshot()
+            pgid: int | None = None
+            stdout = ""
+            stderr = ""
+            returncode = 1
+            timed_out = False
+            timeout_err = ""
+            execution_err = ""
+
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=clone_resolved,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=bool(os.name == "posix"),
+                )
+                pgid = proc.pid
+                try:
+                    stdout, stderr = proc.communicate(timeout=timeout_sec)
+                except subprocess.TimeoutExpired as e:
+                    timed_out = True
+                    timeout_err = str(e)
+                    if pgid and os.name == "posix":
+                        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                            os.killpg(pgid, signal.SIGKILL)
+                    with contextlib.suppress(Exception):
+                        stdout, stderr = proc.communicate(timeout=5)
+                except Exception as e:  # noqa: BLE001
+                    execution_err = str(e)
+                    if pgid and os.name == "posix":
+                        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                            os.killpg(pgid, signal.SIGKILL)
+                finally:
+                    if pgid and os.name == "posix":
+                        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                            os.killpg(pgid, signal.SIGKILL)
+                returncode = proc.returncode if proc.returncode is not None else 1
+            except Exception as e:  # noqa: BLE001
+                execution_err = str(e)
+
+            after_snapshot = self._capture_repo_snapshot()
+            tampered_paths = self._compare_repo_snapshots(before_snapshot, after_snapshot)
+            if tampered_paths:
+                return RedVerificationResult(
+                    is_reproduced=False,
+                    exit_code=1,
+                    reason="REPO_MODIFIED",
+                    output=f"Original repository was modified during Red-First check. Modified paths: {tampered_paths}",
+                    reason_detail=f"Original repository was modified during Red-First check: {', '.join(tampered_paths)}",
+                )
+
+            if timed_out:
+                return RedVerificationResult(
+                    is_reproduced=False,
+                    exit_code=124,
+                    reason="TIMEOUT",
+                    output=timeout_err,
+                    reason_detail=f"Test timed out after {timeout_sec}s",
+                )
+
+            if execution_err:
+                return RedVerificationResult(
+                    is_reproduced=False,
+                    exit_code=1,
+                    reason="EXECUTION_ERROR",
+                    output=execution_err,
+                    reason_detail=execution_err,
+                )
+
+            output = (stdout + "\n" + stderr).strip()
+            marker = "===AUTO_DEV_TEST_RESULT==="
+            parsed_result: dict[str, Any] | None = None
+            if marker in stdout:
+                try:
+                    json_part = stdout.split(marker, 1)[1].strip()
+                    parsed_result = json.loads(json_part)
+                except (json.JSONDecodeError, IndexError, ValueError):
+                    parsed_result = None
+
+            if parsed_result is not None:
+                tests_run: int = parsed_result.get("tests_run", 0)
+                failures: list[dict[str, str]] = parsed_result.get("failures", [])
+                errors: list[dict[str, str]] = parsed_result.get("errors", [])
+                skipped_count: int = int(parsed_result.get("skipped", 0))
+
+                if tests_run == 0 or returncode == 5:
+                    return RedVerificationResult(
+                        is_reproduced=False,
+                        exit_code=returncode,
+                        reason="NO_TESTS_RAN",
+                        output=output,
+                        reason_detail="No test methods were executed during unittest run (ran_count=0).",
+                        tests_run=0,
+                        failures=len(failures),
+                        errors=len(errors),
+                    )
+
+                if len(failures) == 0 and len(errors) == 0:
+                    if skipped_count >= tests_run:
+                        return RedVerificationResult(
+                            is_reproduced=False,
+                            exit_code=returncode,
+                            reason="ALL_SKIPPED",
+                            output=output,
+                            reason_detail="All executed tests were skipped (skipped == tests_run).",
+                            tests_run=tests_run,
+                            failures=0,
+                            errors=0,
+                        )
+                    return RedVerificationResult(
+                        is_reproduced=False,
+                        exit_code=0,
+                        reason="ALREADY_GREEN",
+                        output=output,
+                        reason_detail="Candidate test passed without failures.",
+                        tests_run=tests_run,
+                        failures=0,
+                        errors=0,
+                    )
+
+                if len(errors) > 0:
+                    err_text = " ".join(e.get("err", "") for e in errors)
+                    if (
+                        "ImportError" in err_text
+                        or "ModuleNotFoundError" in err_text
+                        or any("_FailedTest" in str(e) for e in errors)
+                    ):
+                        return RedVerificationResult(
+                            is_reproduced=False,
+                            exit_code=returncode,
+                            reason="IMPORT_ERROR",
+                            output=output,
+                            reason_detail="Test failed due to ImportError / ModuleNotFoundError.",
+                            tests_run=tests_run,
+                            failures=len(failures),
+                            errors=len(errors),
+                        )
+                    if "in setUp" in err_text or "in tearDown" in err_text:
+                        return RedVerificationResult(
+                            is_reproduced=False,
+                            exit_code=returncode,
+                            reason="SETUP_ERROR",
+                            output=output,
+                            reason_detail="Test failure occurred during setUp/tearDown rather than test body assertion.",
+                            tests_run=tests_run,
+                            failures=len(failures),
+                            errors=len(errors),
+                        )
+                    return RedVerificationResult(
+                        is_reproduced=False,
+                        exit_code=returncode,
+                        reason="UNHANDLED_EXCEPTION",
+                        output=output,
+                        reason_detail="Test exited with error/exception without an assertion failure.",
+                        tests_run=tests_run,
+                        failures=len(failures),
+                        errors=len(errors),
+                    )
+
+                return RedVerificationResult(
+                    is_reproduced=True,
+                    exit_code=returncode,
+                    reason="GENUINE_RED",
+                    output=output,
+                    reason_detail="Candidate test failed with assertion failure (Genuine Red).",
+                    tests_run=tests_run,
+                    failures=len(failures),
+                    errors=len(errors),
+                )
+
+            return RedVerificationResult(
+                is_reproduced=False,
+                exit_code=returncode,
+                reason="EXECUTION_ERROR",
+                output=output,
+                reason_detail=f"Failed to parse structured test result (exit_code={returncode}).",
             )
 
     RUNNER_CODE = """
@@ -2652,20 +2883,20 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
 
 def _classify_red_first_file_result(res: RedVerificationResult) -> str:
-    """RedVerificationResult の reason を GATE-17 のチェックポイント単位の判定へ変換する。"""
+    """RedVerificationResult の reason を GATE-20 のチェックポイント単位の判定へ変換する。"""
+    if res.reason == "REPO_MODIFIED":
+        return "REPO_MODIFIED"
     if res.reason in _RED_FIRST_CONFIRMED_REASONS:
         return "CONFIRMED"
-    if res.reason in _RED_FIRST_SANDBOX_REASONS:
-        return "SANDBOX_UNAVAILABLE"
     if res.reason == "TIMEOUT":
         return "TIMEOUT"
     return "NOT_RED"
 
 
 def _classify_red_first_current_result(res: RedVerificationResult) -> tuple[str, str, str]:
-    """GATE-18: 今の作業ツリーでの実行結果を (file_result, current_result, current_reason) へ変換する。"""
-    if res.reason in _RED_FIRST_SANDBOX_REASONS:
-        return "SANDBOX_UNAVAILABLE", "SANDBOX_UNAVAILABLE", res.reason
+    """GATE-20: 今の作業ツリーでの実行結果を (file_result, current_result, current_reason) へ変換する。"""
+    if res.reason == "REPO_MODIFIED":
+        return "REPO_MODIFIED", "REPO_MODIFIED", res.reason
     if res.reason == "TIMEOUT":
         return "TIMEOUT", "TIMEOUT", res.reason
     if res.reason == "ALREADY_GREEN":
@@ -2679,9 +2910,9 @@ def verify_red_first_tests(
     test_files: list[str],
     timeout_sec: int = RED_FIRST_FILE_TIMEOUT_SEC,
 ) -> dict[str, Any]:
-    """GATE-17 / GATE-18: 対象テストファイルをチェックポイントと今の作業ツリーに対してサンドボックス実行し集計する。"""
+    """GATE-20: 対象テストファイルをチェックポイントと今の作業ツリーの一時クローンで実行し集計する。"""
     if not test_files:
-        return {"result": "NO_TEST_CHANGES", "file_results": []}
+        return {"result": "NO_TEST_CHANGES", "runner": "clone", "file_results": []}
 
     verifier = RedTestVerifier(repo_dir=repo_dir)
     file_results: list[dict[str, Any]] = []
@@ -2712,6 +2943,8 @@ def verify_red_first_tests(
             file_result = cp_status
             current_result = "SKIPPED"
             current_reason = "SKIPPED"
+            display_reason = cp_res.reason
+            display_detail = cp_res.reason_detail
         else:
             cur_res = verifier.verify_red_first_test(
                 rel_path,
@@ -2720,23 +2953,25 @@ def verify_red_first_tests(
                 commit=None,
             )
             file_result, current_result, current_reason = _classify_red_first_current_result(cur_res)
+            display_reason = cur_res.reason if file_result == "REPO_MODIFIED" else cp_res.reason
+            display_detail = cur_res.reason_detail if file_result == "REPO_MODIFIED" else cp_res.reason_detail
 
         file_results.append(
             {
                 "file": rel_path,
                 "result": file_result,
-                "reason": cp_res.reason,
-                "reason_detail": cp_res.reason_detail,
+                "reason": display_reason,
+                "reason_detail": display_detail,
                 "current_result": current_result,
                 "current_reason": current_reason,
             }
         )
 
     statuses = [entry["result"] for entry in file_results]
-    if "CONFIRMED" in statuses:
+    if "REPO_MODIFIED" in statuses:
+        overall = "REPO_MODIFIED"
+    elif "CONFIRMED" in statuses:
         overall = "CONFIRMED"
-    elif "SANDBOX_UNAVAILABLE" in statuses:
-        overall = "SANDBOX_UNAVAILABLE"
     elif "TIMEOUT" in statuses:
         overall = "TIMEOUT"
     elif "NOT_GREEN" in statuses:
@@ -2746,5 +2981,6 @@ def verify_red_first_tests(
 
     return {
         "result": overall,
+        "runner": "clone",
         "file_results": file_results,
     }

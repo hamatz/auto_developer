@@ -18,7 +18,7 @@ class TestDX9CheckpointResolution(unittest.TestCase):
     """DX-9: 参照名 (HEAD 等) を解決した40桁 SHA が Evidence・査読・イベントに記録されること。"""
 
     def _init_repo(self, repo: Path) -> str:
-        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, capture_output=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True)
         (repo / "SPEC.md").write_text("# Spec\n", encoding="utf-8")
