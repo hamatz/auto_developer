@@ -1505,7 +1505,7 @@ class RedTestVerifier:
         """元リポジトリの未コミットの変更・新規ファイルを一時クローンへ同期する。"""
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             res = subprocess.run(
-                ["git", "status", "--porcelain", "-z"],
+                ["git", "status", "--porcelain", "-z", "--untracked-files=all"],
                 cwd=source_repo,
                 capture_output=True,
                 text=True,
