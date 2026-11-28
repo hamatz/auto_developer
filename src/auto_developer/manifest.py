@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -8,9 +9,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from auto_developer.audit import resolve_model_family
 from auto_developer.boundary import match_path
 
 TEAM_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+_GLOB_CHARS = frozenset("*?[]")
 
 
 class ManifestValidationError(ValueError):
@@ -177,10 +180,144 @@ class TeamConfig:
     depends_on: list[str] = field(default_factory=list)
     max_parallel_tasks: int = 1
     plan: str = ""
+    skills: list[dict[str, str]] = field(default_factory=list)
+    maker: dict[str, str] | None = None
+    checker: dict[str, str] | None = None
+    review_docs: list[str] = field(default_factory=list)
+    verify_script: str | None = None
 
     def __post_init__(self) -> None:
         if not self.plan and self.id:
             self.plan = f"plans/{self.id}.md"
+
+    def to_profile_dict(self) -> dict[str, Any]:
+        """チームの持ち物（profile）を JSON 出力向けの辞書として返す (TEAM-29)。"""
+        return {
+            "skills": [dict(s) for s in self.skills],
+            "maker": dict(self.maker) if self.maker is not None else None,
+            "checker": dict(self.checker) if self.checker is not None else None,
+            "review_docs": list(self.review_docs),
+            "verify_script": self.verify_script,
+        }
+
+
+def _validate_repo_rel_file_path(raw_val: Any, team_id: str, field_name: str) -> str:
+    """リポジトリ最上位からの安全な相対ファイルパス（glob・絶対パス・.. 禁止）を検証する。"""
+    if not isinstance(raw_val, str) or not raw_val.strip():
+        raise ManifestValidationError(
+            f"Team '{team_id}' field '{field_name}' must be a non-empty string"
+        )
+    if "\0" in raw_val:
+        raise ManifestValidationError(
+            f"Team '{team_id}' field '{field_name}' contains NUL byte"
+        )
+    norm = raw_val.strip().replace("\\", "/")
+    if (
+        norm.startswith("/")
+        or re.match(r"^[a-zA-Z]:", norm) is not None
+        or Path(norm).is_absolute()
+    ):
+        raise ManifestValidationError(
+            f"Team '{team_id}' field '{field_name}' must be a relative path inside repository: {raw_val!r}"
+        )
+    while norm.startswith("./"):
+        norm = norm[2:]
+    if not norm or norm == "." or norm.endswith("/") or "//" in norm:
+        raise ManifestValidationError(
+            f"Team '{team_id}' field '{field_name}' must be a valid relative file path: {raw_val!r}"
+        )
+    parts = norm.split("/")
+    if ".." in parts or "." in parts:
+        raise ManifestValidationError(
+            f"Team '{team_id}' field '{field_name}' must not contain '..' or '.': {raw_val!r}"
+        )
+    if any(ch in _GLOB_CHARS for ch in norm):
+        raise ManifestValidationError(
+            f"Team '{team_id}' field '{field_name}' must not contain glob characters: {raw_val!r}"
+        )
+    return norm
+
+
+def _parse_team_skills(raw_val: Any, team_id: str) -> list[dict[str, str]]:
+    """チームの skills 一覧を検証・正規化する (TEAM-29)。"""
+    if raw_val is None:
+        return []
+    if not isinstance(raw_val, list):
+        raise ManifestValidationError(f"Team '{team_id}' field 'skills' must be a list")
+    skills: list[dict[str, str]] = []
+    for idx, item in enumerate(raw_val):
+        if not isinstance(item, dict):
+            raise ManifestValidationError(
+                f"Team '{team_id}' field 'skills[{idx}]' must be a dictionary"
+            )
+        name_raw = item.get("name")
+        version_raw = item.get("version")
+        if not isinstance(name_raw, str) or not name_raw.strip():
+            raise ManifestValidationError(
+                f"Team '{team_id}' field 'skills[{idx}].name' must be a non-empty string"
+            )
+        if not isinstance(version_raw, str) or not version_raw.strip():
+            raise ManifestValidationError(
+                f"Team '{team_id}' field 'skills[{idx}].version' must be a non-empty string"
+            )
+        skills.append({"name": name_raw.strip(), "version": version_raw.strip()})
+    return skills
+
+
+def _parse_team_model(raw_val: Any, team_id: str, field_name: str) -> dict[str, str] | None:
+    """チームの maker / checker モデル宣言を検証し、系統を解決する (TEAM-29 / DX-7)。"""
+    if raw_val is None:
+        return None
+    if not isinstance(raw_val, dict):
+        raise ManifestValidationError(
+            f"Team '{team_id}' field '{field_name}' must be a dictionary"
+        )
+    model_raw = raw_val.get("model")
+    if not isinstance(model_raw, str) or not model_raw.strip():
+        raise ManifestValidationError(
+            f"Team '{team_id}' field '{field_name}.model' must be a non-empty string"
+        )
+    model_str = model_raw.strip()
+
+    explicit_family: str | None = None
+    if "family" in raw_val and raw_val["family"] is not None:
+        fam_raw = raw_val["family"]
+        if not isinstance(fam_raw, str) or not fam_raw.strip():
+            raise ManifestValidationError(
+                f"Team '{team_id}' field '{field_name}.family' must be a non-empty string"
+            )
+        explicit_family = fam_raw.strip()
+
+    try:
+        resolved_family, _ = resolve_model_family(model_str, explicit_family)
+    except (ValueError, TypeError) as err:
+        raise ManifestValidationError(
+            f"Team '{team_id}' field '{field_name}' is invalid: {err}"
+        ) from err
+
+    return {"model": model_str, "family": resolved_family}
+
+
+def _validate_team_model_pair(
+    maker: dict[str, str] | None,
+    checker: dict[str, str] | None,
+    team_id: str,
+) -> None:
+    """maker と checker の両方が宣言されている場合、別系統かつ判定可能であることを検証する (INV-6)。"""
+    if maker is None or checker is None:
+        return
+    m_fam = maker["family"]
+    c_fam = checker["family"]
+    if m_fam == "unknown" or c_fam == "unknown":
+        raise ManifestValidationError(
+            f"Team '{team_id}' cannot determine model family for 'maker' "
+            f"({maker['model']!r} -> '{m_fam}') and 'checker' ({checker['model']!r} -> '{c_fam}')"
+        )
+    if maker["model"].lower() == checker["model"].lower() or m_fam == c_fam:
+        raise ManifestValidationError(
+            f"Team '{team_id}' 'maker' ({maker['model']!r}, family='{m_fam}') and "
+            f"'checker' ({checker['model']!r}, family='{c_fam}') must belong to different model families (INV-6)"
+        )
 
 
 @dataclass
@@ -328,6 +465,29 @@ class TeamManifest:
                     f"Team '{tid}' max_parallel_tasks must be a positive integer, got: {max_parallel_raw!r}"
                 )
 
+            skills = _parse_team_skills(t_data.get("skills"), tid)
+            maker = _parse_team_model(t_data.get("maker"), tid, "maker")
+            checker = _parse_team_model(t_data.get("checker"), tid, "checker")
+            _validate_team_model_pair(maker, checker, tid)
+
+            review_docs_raw = t_data.get("review_docs")
+            if review_docs_raw is None:
+                review_docs: list[str] = []
+            elif not isinstance(review_docs_raw, list):
+                raise ManifestValidationError(f"Team '{tid}' field 'review_docs' must be a list")
+            else:
+                review_docs = [
+                    _validate_repo_rel_file_path(item, tid, f"review_docs[{idx}]")
+                    for idx, item in enumerate(review_docs_raw)
+                ]
+
+            verify_script_raw = t_data.get("verify_script")
+            verify_script = (
+                None
+                if verify_script_raw is None
+                else _validate_repo_rel_file_path(verify_script_raw, tid, "verify_script")
+            )
+
             teams.append(
                 TeamConfig(
                     id=tid,
@@ -335,6 +495,11 @@ class TeamManifest:
                     depends_on=depends_on,
                     max_parallel_tasks=max_parallel_raw,
                     plan=plan_path,
+                    skills=skills,
+                    maker=maker,
+                    checker=checker,
+                    review_docs=review_docs,
+                    verify_script=verify_script,
                 )
             )
 
@@ -464,6 +629,11 @@ class TeamContext:
     plan_rel_path: str
     plan_path: Path
     owns_patterns: list[str]
+    verify_script: str | None = None
+    skills: list[dict[str, str]] = field(default_factory=list)
+    maker: dict[str, str] | None = None
+    checker: dict[str, str] | None = None
+    review_docs: list[str] = field(default_factory=list)
 
 
 def _normalize_rel_path(path_str: str) -> str:
@@ -561,7 +731,70 @@ def _build_team_context(repo_dir: Path, team: TeamConfig) -> TeamContext:
         plan_rel_path=plan_rel,
         plan_path=(repo_dir.resolve() / plan_rel),
         owns_patterns=effective_owns,
+        verify_script=_normalize_rel_path(team.verify_script) if team.verify_script else None,
+        skills=[dict(s) for s in team.skills],
+        maker=dict(team.maker) if team.maker is not None else None,
+        checker=dict(team.checker) if team.checker is not None else None,
+        review_docs=[_normalize_rel_path(p) for p in team.review_docs],
     )
+
+
+def _read_team_repo_file(repo_dir: Path, rel_path: str, field_name: str) -> bytes:
+    """チーム持ち物として宣言されたリポジトリ内ファイルを安全に読み込む。"""
+    resolved_repo = repo_dir.resolve()
+    candidate = resolved_repo / rel_path
+    if candidate.is_symlink():
+        raise ManifestValidationError(
+            f"Declared {field_name} '{rel_path}' must not be a symlink"
+        )
+    if not candidate.exists() or not candidate.is_file():
+        raise ManifestValidationError(
+            f"Declared {field_name} '{rel_path}' does not exist in repository"
+        )
+    try:
+        resolved_candidate = candidate.resolve()
+        resolved_candidate.relative_to(resolved_repo)
+    except ValueError as err:
+        raise ManifestValidationError(
+            f"Declared {field_name} '{rel_path}' resolves outside repository"
+        ) from err
+    return resolved_candidate.read_bytes()
+
+
+def build_team_profile_payload(
+    repo_dir: Path,
+    team_ctx: TeamContext,
+) -> tuple[dict[str, Any], list[tuple[str, bytes]]]:
+    """team_profile.json の内容と review_docs の写し用バイト列を構築する (TEAM-32)。"""
+    review_docs_entries: list[dict[str, str]] = []
+    review_doc_copies: list[tuple[str, bytes]] = []
+    for doc_rel in team_ctx.review_docs:
+        doc_bytes = _read_team_repo_file(repo_dir, doc_rel, "review_docs")
+        review_docs_entries.append(
+            {
+                "path": doc_rel,
+                "sha256": hashlib.sha256(doc_bytes).hexdigest(),
+            }
+        )
+        review_doc_copies.append((doc_rel, doc_bytes))
+
+    verify_script_entry: dict[str, str] | None = None
+    if team_ctx.verify_script is not None:
+        vs_bytes = _read_team_repo_file(repo_dir, team_ctx.verify_script, "verify_script")
+        verify_script_entry = {
+            "path": team_ctx.verify_script,
+            "sha256": hashlib.sha256(vs_bytes).hexdigest(),
+        }
+
+    payload: dict[str, Any] = {
+        "team_id": team_ctx.team_id,
+        "skills": {"declared": [dict(s) for s in team_ctx.skills]},
+        "maker": dict(team_ctx.maker) if team_ctx.maker is not None else None,
+        "checker": dict(team_ctx.checker) if team_ctx.checker is not None else None,
+        "review_docs": review_docs_entries,
+        "verify_script": verify_script_entry,
+    }
+    return payload, review_doc_copies
 
 
 def _validate_explicit_against_team(

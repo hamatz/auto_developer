@@ -1552,12 +1552,13 @@ import json
 import sys
 import unittest
 
-search_dir = sys.argv[1]
-pattern = sys.argv[2]
+start_dir = sys.argv[1]
+module_name = sys.argv[2]
+sys.path.insert(0, start_dir)
 
 loader = unittest.defaultTestLoader
 try:
-    suite = loader.discover(start_dir=search_dir, pattern=pattern)
+    suite = loader.loadTestsFromName(module_name)
 except Exception as e:
     data = {
         "tests_run": 0,
@@ -1631,12 +1632,24 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                 else f"{src_path}{os.pathsep}{repo_path}"
             )
 
+            pkg_parts = [test_file.stem]
+            cur = test_file.parent
+            while (
+                cur != clone_resolved
+                and cur != cur.parent
+                and (cur / "__init__.py").is_file()
+            ):
+                pkg_parts.append(cur.name)
+                cur = cur.parent
+            start_dir = cur
+            module_name = ".".join(reversed(pkg_parts))
+
             cmd = [
                 sys.executable,
                 "-c",
                 self._RED_FIRST_CLONE_RUNNER_CODE,
-                str(test_file.parent),
-                test_file.name,
+                str(start_dir),
+                module_name,
             ]
 
             before_snapshot = self._capture_repo_snapshot()

@@ -196,6 +196,7 @@ class EvidenceStore:
         checker_info: dict[str, Any] | None = None,
         verification_info: dict[str, Any] | None = None,
         attempts: list[dict[str, Any]] | None = None,
+        team_profile: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """コミット完了後に監査レコードを最終更新する。"""
         import json
@@ -224,6 +225,8 @@ class EvidenceStore:
                     data["tree_sha"] = commit_info["tree_sha"]
             if checker_info is not None:
                 data["checker"] = checker_info
+            if team_profile is not None:
+                data["team_profile"] = team_profile
             if verification_info is not None:
                 data["verification"] = verification_info
             elif (
@@ -317,6 +320,7 @@ class EvidenceStore:
         checker_family: str,
         checker_family_source: str,
         reason: str = "",
+        team_profile: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """GATE-5: 査読の3ファイルの写しを Evidence 保存先へ置き、照合用メタデータを記録する。
 
@@ -357,6 +361,8 @@ class EvidenceStore:
             "reason": reason,
             "recorded_at": time.time(),
         }
+        if team_profile is not None:
+            base_record["team_profile"] = team_profile
 
         # GATE-12: 記録のたびに 3 ファイルの写しと記録を history/<連番>/ に残し、上書きしない
         history_base = copies_dir / "history"

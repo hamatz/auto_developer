@@ -1608,6 +1608,7 @@ def prepare_teams_job(
             "branch": f"team/{team.id}",
             "worktree_path": str(wt_paths[team.id]),
             "plan": team.plan,
+            "profile": team.to_profile_dict(),
         }
         for team in manifest.teams
     ]
@@ -1713,7 +1714,9 @@ def get_teams_status(
     manifest: TeamManifest | None = None
     try:
         manifest = load_teams_manifest(resolved_repo)
-    except (FileNotFoundError, ManifestValidationError, OSError):
+    except ManifestValidationError as err:
+        return None, 2, f"TEAMS_CONFIG_ERROR: {err}"
+    except (FileNotFoundError, OSError):
         manifest = None
 
     wt_manager = WorktreeManager(repo_dir=resolved_repo)
@@ -1840,6 +1843,18 @@ def get_teams_status(
             if raw_err:
                 worker_error = str(raw_err).strip() or None
 
+        profile = (
+            m_team.to_profile_dict()
+            if m_team is not None
+            else {
+                "skills": [],
+                "maker": None,
+                "checker": None,
+                "review_docs": [],
+                "verify_script": None,
+            }
+        )
+
         team_statuses.append(
             {
                 "team_id": tid,
@@ -1848,6 +1863,7 @@ def get_teams_status(
                 "branch": branch,
                 "branch_exists": branch_exists,
                 "plan": plan_rel,
+                "profile": profile,
                 "completed_tasks": completed_tasks,
                 "total_tasks": total_tasks,
                 "failed_tasks": failed_tasks,

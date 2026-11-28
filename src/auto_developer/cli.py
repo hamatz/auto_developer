@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -22,6 +23,7 @@ from auto_developer.manifest import (
     ManifestValidationError,
     TeamContext,
     TeamManifest,
+    build_team_profile_payload,
     load_teams_manifest,
     resolve_team_context,
 )
@@ -369,6 +371,37 @@ def _resolve_cli_team_context(
         print(f"TEAMS_CONFIG_ERROR: {err}", file=sys.stderr)
         return None, 2
     return ctx, 0
+
+
+def _check_team_declared_models(
+    team_ctx: TeamContext | None,
+    *,
+    maker_model: str,
+    checker_model: str,
+    source_label: str,
+) -> str | None:
+    """TEAM-33: 宣言された maker / checker モデルと実際のモデルを比較し、不一致ならエラー文を返す。"""
+    if team_ctx is None:
+        return None
+    mismatches: list[str] = []
+    if team_ctx.maker is not None:
+        declared_maker = str(team_ctx.maker.get("model", ""))
+        if maker_model != declared_maker:
+            mismatches.append(
+                f"maker ({source_label}: declared='{declared_maker}', actual='{maker_model}')"
+            )
+    if team_ctx.checker is not None:
+        declared_checker = str(team_ctx.checker.get("model", ""))
+        if checker_model != declared_checker:
+            mismatches.append(
+                f"checker ({source_label}: declared='{declared_checker}', actual='{checker_model}')"
+            )
+    if not mismatches:
+        return None
+    return (
+        f"TEAM_PROFILE_MISMATCH: Team '{team_ctx.team_id}' model mismatch: "
+        + "; ".join(mismatches)
+    )
 
 
 def _refresh_team_report_best_effort(
@@ -1556,6 +1589,15 @@ def main(argv: list[str] | None = None) -> int:
         if ctx_err != 0:
             return ctx_err
         effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
+        effective_verify_script = (
+            args.verify_script
+            if args.verify_script is not None
+            else (
+                (work_dir / team_ctx.verify_script)
+                if (team_ctx is not None and team_ctx.verify_script)
+                else verify_script
+            )
+        )
         metrics = MetricsLog(
             repo_dir=work_dir,
             plan_path=effective_plan_path,
@@ -1570,8 +1612,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         try:
-            verify_timeout, verify_timeout_source = resolve_verify_timeout(args.timeout, verify_script)
-            red_first_mode = resolve_red_first_mode(verify_script)
+            verify_timeout, verify_timeout_source = resolve_verify_timeout(args.timeout, effective_verify_script)
+            red_first_mode = resolve_red_first_mode(effective_verify_script)
         except ValueError as timeout_err:
             print(f"CONFIG ERROR: {timeout_err}", file=sys.stderr)
             return 2
@@ -1730,7 +1772,7 @@ def main(argv: list[str] | None = None) -> int:
                 }
 
         code, out = verifier.run_verification(
-            verify_script,
+            effective_verify_script,
             timeout_sec=verify_timeout,
             cwd=work_dir,
             timeout_source=verify_timeout_source,
@@ -1799,6 +1841,17 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         spec_sha = git_guard.get_spec_sha(spec_path)
         out_lines = [line.strip() for line in out.strip().splitlines() if line.strip()]
+        resolved_work_dir = work_dir.resolve()
+        resolved_script = effective_verify_script.resolve()
+        try:
+            verify_script_label = resolved_script.relative_to(resolved_work_dir).as_posix()
+        except ValueError:
+            verify_script_label = str(effective_verify_script)
+        verify_script_sha256 = (
+            hashlib.sha256(resolved_script.read_bytes()).hexdigest()
+            if resolved_script.is_file()
+            else ""
+        )
         evidence = evidence_store.issue_evidence(
             task_id=args.task_id,
             checkpoint=args.checkpoint,
@@ -1808,6 +1861,8 @@ def main(argv: list[str] | None = None) -> int:
                 "verification": {
                     "exit_code": code,
                     "output_summary": out_lines[-10:] if out_lines else [],
+                    "verify_script": verify_script_label,
+                    "verify_script_sha256": verify_script_sha256,
                 }
             },
             red_first=red_first_payload,
@@ -1901,6 +1956,22 @@ def main(argv: list[str] | None = None) -> int:
             metrics.record_event(
                 "commit_step",
                 result="CHECKER_POLICY_VIOLATION",
+                commit=None,
+                **commit_event_base,
+            )
+            return 4
+
+        mismatch_msg = _check_team_declared_models(
+            team_ctx,
+            maker_model=args.maker_model,
+            checker_model=args.checker_model,
+            source_label="CLI",
+        )
+        if mismatch_msg is not None:
+            print(mismatch_msg, file=sys.stderr)
+            metrics.record_event(
+                "commit_step",
+                result="TEAM_PROFILE_MISMATCH",
                 commit=None,
                 **commit_event_base,
             )
@@ -2009,6 +2080,22 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 4
 
+        review_mismatch_msg = _check_team_declared_models(
+            team_ctx,
+            maker_model=str(review_record.get("maker_model", "")),
+            checker_model=str(review_record.get("checker_model", "")),
+            source_label="review_record",
+        )
+        if review_mismatch_msg is not None:
+            print(review_mismatch_msg, file=sys.stderr)
+            metrics.record_event(
+                "commit_step",
+                result="TEAM_PROFILE_MISMATCH",
+                commit=None,
+                **commit_event_base,
+            )
+            return 4
+
         if (
             str(review_record.get("maker_model", "")) != args.maker_model
             or str(review_record.get("checker_model", "")) != args.checker_model
@@ -2026,6 +2113,20 @@ def main(argv: list[str] | None = None) -> int:
                 **commit_event_base,
             )
             return 4
+
+        if not git_guard.check_protected_files_untouched(chk_ref):
+            evidence_store.clear_evidence(task_id=args.task_id)
+            print(
+                f"CIRCUIT BREAKER: Protected file modified since {chk_ref}",
+                file=sys.stderr,
+            )
+            metrics.record_event(
+                "commit_step",
+                result="CIRCUIT_BREAKER",
+                commit=None,
+                **commit_event_base,
+            )
+            return 10
 
         if team_ctx is not None:
             boundary_res = BoundaryGuard(
@@ -2086,6 +2187,20 @@ def main(argv: list[str] | None = None) -> int:
             return 3
 
         decision = recorded_decision
+
+        commit_team_profile: dict[str, Any] | None = None
+        if team_ctx is not None:
+            try:
+                commit_team_profile, _ = build_team_profile_payload(work_dir, team_ctx)
+            except ManifestValidationError as profile_err:
+                print(f"TEAM_PROFILE_ERROR: {profile_err}", file=sys.stderr)
+                metrics.record_event(
+                    "commit_step",
+                    result="TEAM_PROFILE_ERROR",
+                    commit=None,
+                    **commit_event_base,
+                )
+                return 3
 
         current_spec_sha = git_guard.get_spec_sha(spec_path)
         if not evidence_store.verify_and_consume(
@@ -2160,6 +2275,7 @@ def main(argv: list[str] | None = None) -> int:
                 "tree_verified": True,
             },
             checker_info=checker_info,
+            team_profile=commit_team_profile,
         )
         metrics.record_event(
             "commit_step",
@@ -2292,6 +2408,16 @@ def main(argv: list[str] | None = None) -> int:
         except subprocess.CalledProcessError as e:
             print(f"ERROR: Failed to compute canonical diff from {checkpoint}: {e}", file=sys.stderr)
             return 3
+
+        team_profile_payload: dict[str, Any] | None = None
+        team_doc_copies: list[tuple[str, bytes]] = []
+        if team_ctx is not None:
+            try:
+                team_profile_payload, team_doc_copies = build_team_profile_payload(work_dir, team_ctx)
+            except ManifestValidationError as profile_err:
+                print(f"TEAM_PROFILE_ERROR: {profile_err}", file=sys.stderr)
+                return 3
+
         out_dir: Path = args.out_dir
         out_dir.mkdir(parents=True, exist_ok=True)
         diff_out = out_dir / "diff.patch"
@@ -2307,6 +2433,23 @@ def main(argv: list[str] | None = None) -> int:
             }
         red_first_out = out_dir / "red_first.json"
         red_first_out.write_text(json.dumps(red_first_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        if team_profile_payload is not None:
+            team_profile_out = out_dir / "team_profile.json"
+            team_profile_out.write_text(
+                json.dumps(team_profile_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            team_docs_dir = out_dir / "team_review_docs"
+            if team_docs_dir.is_symlink() or team_docs_dir.is_file():
+                team_docs_dir.unlink()
+            elif team_docs_dir.exists():
+                shutil.rmtree(team_docs_dir)
+            team_docs_dir.mkdir(parents=True, exist_ok=True)
+            for doc_rel, doc_bytes in team_doc_copies:
+                dst = team_docs_dir / doc_rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(doc_bytes)
 
         diff_sha256 = hashlib.sha256(diff_bytes).hexdigest()
         effective_plan_path = team_ctx.plan_path if team_ctx else plan_path
@@ -2423,6 +2566,14 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 4
 
+        review_team_profile: dict[str, Any] | None = None
+        if team_ctx is not None:
+            try:
+                review_team_profile, _ = build_team_profile_payload(work_dir, team_ctx)
+            except ManifestValidationError as profile_err:
+                print(f"TEAM_PROFILE_ERROR: {profile_err}", file=sys.stderr)
+                return 3
+
         if dec is None:
             evidence_store.record_review(
                 task_id=args.task_id,
@@ -2438,6 +2589,7 @@ def main(argv: list[str] | None = None) -> int:
                 checker_family=checker_fam,
                 checker_family_source=checker_fam_source,
                 reason=args.reason or "",
+                team_profile=review_team_profile,
             )
             print(
                 "CHECKER_POLICY_VIOLATION: Checker output must contain exactly one DECISION line (APPROVE or REJECT)",
@@ -2459,6 +2611,7 @@ def main(argv: list[str] | None = None) -> int:
             checker_family=checker_fam,
             checker_family_source=checker_fam_source,
             reason=args.reason or "",
+            team_profile=review_team_profile,
         )
 
         metrics = MetricsLog(
