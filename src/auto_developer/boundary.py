@@ -92,7 +92,7 @@ class BoundaryGuard:
 
         # 1. 追跡中コミット間の差分（リネーム元・先も検出）
         diff_res = subprocess.run(
-            ["git", "diff", "--name-status", "-M", self.base_checkpoint],
+            ["git", "diff", "--name-status", "-z", "-M", self.base_checkpoint],
             cwd=self.repo_dir,
             check=False,
             capture_output=True,
@@ -104,22 +104,23 @@ class BoundaryGuard:
                 f"{diff_res.stderr.strip()}"
             )
 
-        for line in diff_res.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("\t")
-            status = parts[0]
-            if status.startswith("R") and len(parts) >= 3:
-                # リネーム: R100\told\tnew -> old と new の両方を検査
-                modified.add(parts[1].strip())
-                modified.add(parts[2].strip())
-            elif len(parts) >= 2:
-                modified.add(parts[1].strip())
+        diff_tokens = [tok for tok in diff_res.stdout.split("\0") if tok]
+        idx = 0
+        while idx < len(diff_tokens):
+            status = diff_tokens[idx]
+            if status.startswith(("R", "C")):
+                for p in diff_tokens[idx + 1 : idx + 3]:
+                    if p:
+                        modified.add(p)
+                idx += 3
+            else:
+                if idx + 1 < len(diff_tokens) and diff_tokens[idx + 1]:
+                    modified.add(diff_tokens[idx + 1])
+                idx += 2
 
         # 2. 作業ツリー内の未ステージ・ステージ済み・未追跡ファイル
         status_res = subprocess.run(
-            ["git", "status", "--porcelain", "-uall"],
+            ["git", "status", "--porcelain", "-z", "-uall"],
             cwd=self.repo_dir,
             check=False,
             capture_output=True,
@@ -130,17 +131,23 @@ class BoundaryGuard:
                 f"Failed to inspect git status: {status_res.stderr.strip()}"
             )
 
-        for line in status_res.stdout.splitlines():
-            if len(line) > 3:
-                path_part = line[3:].strip()
-                if " -> " in path_part:
-                    old_path, new_path = path_part.split(" -> ", 1)
-                    if old_path.strip():
-                        modified.add(old_path.strip())
-                    if new_path.strip():
-                        modified.add(new_path.strip())
-                elif path_part:
-                    modified.add(path_part)
+        st_tokens = [tok for tok in status_res.stdout.split("\0") if tok]
+        st_idx = 0
+        while st_idx < len(st_tokens):
+            tok = st_tokens[st_idx]
+            if len(tok) < 4:
+                st_idx += 1
+                continue
+            xy = tok[:2]
+            path1 = tok[3:]
+            if path1:
+                modified.add(path1)
+            if xy[0] in ("R", "C") or xy[1] in ("R", "C"):
+                if st_idx + 1 < len(st_tokens) and st_tokens[st_idx + 1]:
+                    modified.add(st_tokens[st_idx + 1])
+                st_idx += 2
+            else:
+                st_idx += 1
 
         return sorted(modified)
 

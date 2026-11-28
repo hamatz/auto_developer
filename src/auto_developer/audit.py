@@ -1597,7 +1597,7 @@ class AuditResolutionManager:
             }
 
         status_proc = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "status", "--porcelain", "-z"],
             cwd=self.repo_dir,
             capture_output=True,
             text=True,
@@ -1611,17 +1611,21 @@ class AuditResolutionManager:
             }
 
         uncommitted_files: list[str] = []
-        for line in status_proc.stdout.splitlines():
-            line = line.strip()
-            if not line:
+        st_tokens = [tok for tok in status_proc.stdout.split("\0") if tok]
+        st_idx = 0
+        while st_idx < len(st_tokens):
+            tok = st_tokens[st_idx]
+            if len(tok) < 4:
+                st_idx += 1
                 continue
-            parts = line.split(maxsplit=1)
-            if len(parts) >= 2:
-                file_path = parts[1].strip()
-                if " -> " in file_path:
-                    file_path = file_path.split(" -> ")[1].strip()
-                if not file_path.startswith(".dev/") and file_path != ".dev":
-                    uncommitted_files.append(file_path)
+            xy = tok[:2]
+            file_path = tok[3:]
+            if file_path and not file_path.startswith(".dev/") and file_path != ".dev":
+                uncommitted_files.append(file_path)
+            if xy[0] in ("R", "C") or xy[1] in ("R", "C"):
+                st_idx += 2
+            else:
+                st_idx += 1
 
         if uncommitted_files:
             return {

@@ -354,6 +354,7 @@ class IntegrationGate:
             [
                 "diff",
                 "--name-only",
+                "-z",
                 base_commit,
                 "--",
                 ".github/",
@@ -368,8 +369,9 @@ class IntegrationGate:
         )
         if diff_proc.returncode != 0:
             return False, 10, f"Git diff execution failed during protected file invariant check:\n{diff_proc.stderr or diff_proc.stdout}"
-        if diff_proc.stdout.strip():
-            return False, 10, f"Protected files modified during integration:\n{diff_proc.stdout.strip()}"
+        modified_protected = [p for p in diff_proc.stdout.split("\0") if p]
+        if modified_protected:
+            return False, 10, "Protected files modified during integration:\n" + "\n".join(modified_protected)
 
         script_path = verify_script or (run_dir / "scripts" / "verify_local.sh")
         try:

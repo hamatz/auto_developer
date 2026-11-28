@@ -375,26 +375,41 @@ print(json.dumps(data))
             return False
         return validate_test_ast(target)
 
+    @staticmethod
+    def _parse_porcelain_z_entries(stdout: str) -> list[tuple[str, list[str]]]:
+        """git status --porcelain -z の出力を (xy, [path, ...]) の一覧に分解する。"""
+        tokens = [tok for tok in stdout.split("\0") if tok]
+        entries: list[tuple[str, list[str]]] = []
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if len(tok) < 4:
+                i += 1
+                continue
+            xy = tok[:2]
+            path1 = tok[3:]
+            if xy[0] in ("R", "C") or xy[1] in ("R", "C"):
+                paths = [p for p in (path1, tokens[i + 1] if i + 1 < len(tokens) else "") if p]
+                entries.append((xy, paths))
+                i += 2
+            else:
+                entries.append((xy, [path1] if path1 else []))
+                i += 1
+        return entries
+
     def get_modified_protected_files(
         self, checkpoint: str, allow_immunity_additions: bool = False
     ) -> list[str]:
         """チェックポイント以降に変更・追加された保護ファイルのパス一覧を返す。"""
         files_to_check: set[str] = set()
-        proc_diff = self._run_git(["diff", "--name-only", checkpoint])
-        for line in proc_diff.stdout.splitlines():
-            if line.strip():
-                files_to_check.add(line.strip())
+        proc_diff = self._run_git(["diff", "--name-only", "-z", checkpoint])
+        for entry in proc_diff.stdout.split("\0"):
+            if entry:
+                files_to_check.add(entry)
 
-        proc_status = self._run_git(["status", "--porcelain", "-uall"])
-        for line in proc_status.stdout.splitlines():
-            if not line.strip():
-                continue
-            raw_path = line[3:].strip()
-            if " -> " in raw_path:
-                for p in raw_path.split(" -> "):
-                    files_to_check.add(p.strip().strip('"'))
-            else:
-                files_to_check.add(raw_path.strip('"'))
+        proc_status = self._run_git(["status", "--porcelain", "-z", "-uall"])
+        for _xy, paths in self._parse_porcelain_z_entries(proc_status.stdout):
+            files_to_check.update(paths)
 
         patterns = self.BASE_PROTECTED_PATTERNS if allow_immunity_additions else self.PROTECTED_PATTERNS
         matched = [
@@ -424,21 +439,14 @@ print(json.dumps(data))
         """
         if not allow_immunity_additions:
             files_to_check: set[str] = set()
-            proc_diff = self._run_git(["diff", "--name-only", checkpoint])
-            for line in proc_diff.stdout.splitlines():
-                if line.strip():
-                    files_to_check.add(line.strip())
+            proc_diff = self._run_git(["diff", "--name-only", "-z", checkpoint])
+            for entry in proc_diff.stdout.split("\0"):
+                if entry:
+                    files_to_check.add(entry)
 
-            proc_status = self._run_git(["status", "--porcelain", "-uall"])
-            for line in proc_status.stdout.splitlines():
-                if not line.strip():
-                    continue
-                raw_path = line[3:].strip()
-                if " -> " in raw_path:
-                    for p in raw_path.split(" -> "):
-                        files_to_check.add(p.strip().strip('"'))
-                else:
-                    files_to_check.add(raw_path.strip('"'))
+            proc_status = self._run_git(["status", "--porcelain", "-z", "-uall"])
+            for _xy, paths in self._parse_porcelain_z_entries(proc_status.stdout):
+                files_to_check.update(paths)
 
             for file_path in files_to_check:
                 for pattern in self.PROTECTED_PATTERNS:
@@ -449,21 +457,14 @@ print(json.dumps(data))
         # allow_immunity_additions=True の場合:
         # A. 基本保護対象 (.github/, SPEC.md, scripts/verify_local.sh) の検査
         files_to_check_base: set[str] = set()
-        proc_diff = self._run_git(["diff", "--name-only", checkpoint])
-        for line in proc_diff.stdout.splitlines():
-            if line.strip():
-                files_to_check_base.add(line.strip())
+        proc_diff = self._run_git(["diff", "--name-only", "-z", checkpoint])
+        for entry in proc_diff.stdout.split("\0"):
+            if entry:
+                files_to_check_base.add(entry)
 
-        proc_status = self._run_git(["status", "--porcelain", "-uall"])
-        for line in proc_status.stdout.splitlines():
-            if not line.strip():
-                continue
-            raw_path = line[3:].strip()
-            if " -> " in raw_path:
-                for p in raw_path.split(" -> "):
-                    files_to_check_base.add(p.strip().strip('"'))
-            else:
-                files_to_check_base.add(raw_path.strip('"'))
+        proc_status = self._run_git(["status", "--porcelain", "-z", "-uall"])
+        for _xy, paths in self._parse_porcelain_z_entries(proc_status.stdout):
+            files_to_check_base.update(paths)
 
         for file_path in files_to_check_base:
             for pattern in self.BASE_PROTECTED_PATTERNS:
@@ -472,21 +473,24 @@ print(json.dumps(data))
 
         # B. tests/immunity/ の非対称検査
         try:
-            proc_ls = self._run_git(["ls-tree", "-r", "--name-only", checkpoint, "--", "tests/immunity"])
-            existing_immunity_files = {line.strip() for line in proc_ls.stdout.splitlines() if line.strip()}
+            proc_ls = self._run_git(["ls-tree", "-r", "-z", "--name-only", checkpoint, "--", "tests/immunity"])
+            existing_immunity_files = {entry for entry in proc_ls.stdout.split("\0") if entry}
         except subprocess.CalledProcessError:
             existing_immunity_files = set()
 
-        # B-1: diff による検査 (--name-status)
-        proc_diff_status = self._run_git(["diff", "--name-status", checkpoint])
-        for line in proc_diff_status.stdout.splitlines():
-            if not line.strip():
-                continue
-            parts = line.strip().split("\t")
-            status_code = parts[0]
-            paths = parts[1:]
-            for p in paths:
-                p_clean = p.strip().strip('"')
+        # B-1: diff による検査 (--name-status -z)
+        proc_diff_status = self._run_git(["diff", "--name-status", "-z", checkpoint])
+        diff_tokens = [tok for tok in proc_diff_status.stdout.split("\0") if tok]
+        idx = 0
+        while idx < len(diff_tokens):
+            status_code = diff_tokens[idx]
+            if status_code.startswith(("R", "C")):
+                paths = diff_tokens[idx + 1 : idx + 3]
+                idx += 3
+            else:
+                paths = diff_tokens[idx + 1 : idx + 2]
+                idx += 2
+            for p_clean in paths:
                 if self.IMMUNITY_PATTERN.search(p_clean):
                     if p_clean in existing_immunity_files:
                         return False
@@ -496,16 +500,7 @@ print(json.dumps(data))
                         return False
 
         # B-2: status による検査 (未追跡・ステージ状態)
-        for line in proc_status.stdout.splitlines():
-            if not line.strip():
-                continue
-            xy = line[:2]
-            raw_path = line[3:].strip()
-            paths = (
-                [p.strip().strip('"') for p in raw_path.split(" -> ")]
-                if " -> " in raw_path
-                else [raw_path.strip('"')]
-            )
+        for xy, paths in self._parse_porcelain_z_entries(proc_status.stdout):
             for p in paths:
                 if self.IMMUNITY_PATTERN.search(p):
                     if p in existing_immunity_files:

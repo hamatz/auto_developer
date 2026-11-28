@@ -1505,22 +1505,32 @@ class RedTestVerifier:
         """元リポジトリの未コミットの変更・新規ファイルを一時クローンへ同期する。"""
         with contextlib.suppress(OSError, subprocess.SubprocessError):
             res = subprocess.run(
-                ["git", "status", "--porcelain"],
+                ["git", "status", "--porcelain", "-z"],
                 cwd=source_repo,
                 capture_output=True,
                 text=True,
                 check=False,
             )
-            if res.returncode == 0 and res.stdout.strip():
-                for line in res.stdout.splitlines():
-                    parts = line.strip().split(maxsplit=1)
-                    if len(parts) == 2:
-                        rel_path = parts[1]
+            if res.returncode == 0 and res.stdout:
+                tokens = [tok for tok in res.stdout.split("\0") if tok]
+                idx = 0
+                while idx < len(tokens):
+                    tok = tokens[idx]
+                    if len(tok) < 4:
+                        idx += 1
+                        continue
+                    xy = tok[:2]
+                    rel_path = tok[3:]
+                    if rel_path:
                         src_file = source_repo / rel_path
                         tgt_file = target_repo / rel_path
                         if src_file.is_file() and not src_file.is_symlink():
                             tgt_file.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(src_file, tgt_file)
+                    if xy[0] in ("R", "C") or xy[1] in ("R", "C"):
+                        idx += 2
+                    else:
+                        idx += 1
 
     def verify_candidate_test_file(
         self, test_file_path: Path, timeout_sec: int = 30
@@ -1954,7 +1964,7 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
             # 2. ステータス (追跡・未追跡・無視ファイルすべて)
             proc_status = subprocess.run(
-                ["git", "status", "--porcelain", "--ignored", "--untracked-files=all"],
+                ["git", "status", "--porcelain", "-z", "--ignored", "--untracked-files=all"],
                 cwd=resolved_repo,
                 capture_output=True,
                 text=True,
@@ -1964,11 +1974,16 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
 
             # 2.1 未追跡・無視ファイルの内容ハッシュ・種別記録 (KKK.2 / Sol氏 Phase 50 P1指摘)
             untracked_hashes: dict[str, str] = {}
-            for line in status_text.splitlines():
-                if line.startswith(("?? ", "!! ")):
-                    rel_path = line[3:].strip()
-                    if rel_path.startswith('"') and rel_path.endswith('"'):
-                        rel_path = rel_path[1:-1]
+            st_tokens = [tok for tok in status_text.split("\0") if tok]
+            st_idx = 0
+            while st_idx < len(st_tokens):
+                tok = st_tokens[st_idx]
+                if len(tok) < 4:
+                    st_idx += 1
+                    continue
+                xy = tok[:2]
+                if xy in ("??", "!!"):
+                    rel_path = tok[3:]
                     p = resolved_repo / rel_path
                     try:
                         if p.is_symlink():
@@ -1982,6 +1997,10 @@ sys.exit(0 if (result.testsRun > 0 and len(result.failures) == 0 and len(result.
                             untracked_hashes[rel_path] = "missing"
                     except OSError as e:
                         untracked_hashes[rel_path] = f"error:{e}"
+                if xy[0] in ("R", "C") or xy[1] in ("R", "C"):
+                    st_idx += 2
+                else:
+                    st_idx += 1
 
             # 3. diff ハッシュ
             diff_args = ["git", "diff", "HEAD", "--binary"] if head_commit else ["git", "diff", "--binary"]
