@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -22,6 +23,7 @@ from auto_developer.manifest import (
     ManifestValidationError,
     TeamContext,
     TeamManifest,
+    build_team_profile_payload,
     load_teams_manifest,
     resolve_team_context,
 )
@@ -2328,6 +2330,16 @@ def main(argv: list[str] | None = None) -> int:
         except subprocess.CalledProcessError as e:
             print(f"ERROR: Failed to compute canonical diff from {checkpoint}: {e}", file=sys.stderr)
             return 3
+
+        team_profile_payload: dict[str, Any] | None = None
+        team_doc_copies: list[tuple[str, bytes]] = []
+        if team_ctx is not None:
+            try:
+                team_profile_payload, team_doc_copies = build_team_profile_payload(work_dir, team_ctx)
+            except ManifestValidationError as profile_err:
+                print(f"TEAM_PROFILE_ERROR: {profile_err}", file=sys.stderr)
+                return 3
+
         out_dir: Path = args.out_dir
         out_dir.mkdir(parents=True, exist_ok=True)
         diff_out = out_dir / "diff.patch"
@@ -2343,6 +2355,23 @@ def main(argv: list[str] | None = None) -> int:
             }
         red_first_out = out_dir / "red_first.json"
         red_first_out.write_text(json.dumps(red_first_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        if team_profile_payload is not None:
+            team_profile_out = out_dir / "team_profile.json"
+            team_profile_out.write_text(
+                json.dumps(team_profile_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            team_docs_dir = out_dir / "team_review_docs"
+            if team_docs_dir.is_symlink() or team_docs_dir.is_file():
+                team_docs_dir.unlink()
+            elif team_docs_dir.exists():
+                shutil.rmtree(team_docs_dir)
+            team_docs_dir.mkdir(parents=True, exist_ok=True)
+            for doc_rel, doc_bytes in team_doc_copies:
+                dst = team_docs_dir / doc_rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(doc_bytes)
 
         diff_sha256 = hashlib.sha256(diff_bytes).hexdigest()
         effective_plan_path = team_ctx.plan_path if team_ctx else plan_path

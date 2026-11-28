@@ -71,7 +71,7 @@
 - [x] 2. `teams.json` のチームの項目に、任意の `skills`・`maker`・`checker`・`review_docs`・`verify_script` を書けるようにし、規則に合わなければ読み込みの誤りにし、`teams status --json`・`teams prepare --json` に `profile` を示す（Red: `maker` と `checker` が同じ系統の宣言が、誤りにならない）（TEAM-29）
 - [x] 3. どれかのチームの `review_docs` と `verify_script` に書いたファイルを、`verify-step` と `commit-step` の保護ファイルの検査の対象にする（Red: Maker がチームの査読の文書を書き換えても、検証が通る）（TEAM-30）
 - [x] 4. チームの worktree の `verify-step` で、そのチームの `verify_script` を検証スクリプトとして使い（制限時間と Red-First の設定もそこから読む）、Evidence に検証スクリプトのパスと SHA-256 を残す（Red: チームの検証スクリプトが失敗しても、検証が通る）（TEAM-31）
-- [ ] 5. チームの worktree の `review-input` が、出力先に `team_profile.json` と `team_review_docs/` を書き、スキルに Checker への渡し方を書く（Red: チームの worktree の `review-input` の出力に、チームの持ち物がない）（TEAM-32）
+- [x] 5. チームの worktree の `review-input` が、出力先に `team_profile.json` と `team_review_docs/` を書き、スキルに Checker への渡し方を書く（Red: チームの worktree の `review-input` の出力に、チームの持ち物がない）（TEAM-32）
 - [ ] 6. チームの worktree の `commit-step` で、宣言したモデルと実際のモデルが違えば `TEAM_PROFILE_MISMATCH:` で終了コード 4 にし、Evidence と査読の記録に `team_profile` を残す（Red: 宣言と違う Maker のモデルでコミットできる）（TEAM-33）
 
 ## 止まっていること・判断待ち

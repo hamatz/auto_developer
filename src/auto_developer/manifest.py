@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -629,6 +630,10 @@ class TeamContext:
     plan_path: Path
     owns_patterns: list[str]
     verify_script: str | None = None
+    skills: list[dict[str, str]] = field(default_factory=list)
+    maker: dict[str, str] | None = None
+    checker: dict[str, str] | None = None
+    review_docs: list[str] = field(default_factory=list)
 
 
 def _normalize_rel_path(path_str: str) -> str:
@@ -727,7 +732,69 @@ def _build_team_context(repo_dir: Path, team: TeamConfig) -> TeamContext:
         plan_path=(repo_dir.resolve() / plan_rel),
         owns_patterns=effective_owns,
         verify_script=_normalize_rel_path(team.verify_script) if team.verify_script else None,
+        skills=[dict(s) for s in team.skills],
+        maker=dict(team.maker) if team.maker is not None else None,
+        checker=dict(team.checker) if team.checker is not None else None,
+        review_docs=[_normalize_rel_path(p) for p in team.review_docs],
     )
+
+
+def _read_team_repo_file(repo_dir: Path, rel_path: str, field_name: str) -> bytes:
+    """チーム持ち物として宣言されたリポジトリ内ファイルを安全に読み込む。"""
+    resolved_repo = repo_dir.resolve()
+    candidate = resolved_repo / rel_path
+    if candidate.is_symlink():
+        raise ManifestValidationError(
+            f"Declared {field_name} '{rel_path}' must not be a symlink"
+        )
+    if not candidate.exists() or not candidate.is_file():
+        raise ManifestValidationError(
+            f"Declared {field_name} '{rel_path}' does not exist in repository"
+        )
+    try:
+        resolved_candidate = candidate.resolve()
+        resolved_candidate.relative_to(resolved_repo)
+    except ValueError as err:
+        raise ManifestValidationError(
+            f"Declared {field_name} '{rel_path}' resolves outside repository"
+        ) from err
+    return resolved_candidate.read_bytes()
+
+
+def build_team_profile_payload(
+    repo_dir: Path,
+    team_ctx: TeamContext,
+) -> tuple[dict[str, Any], list[tuple[str, bytes]]]:
+    """team_profile.json の内容と review_docs の写し用バイト列を構築する (TEAM-32)。"""
+    review_docs_entries: list[dict[str, str]] = []
+    review_doc_copies: list[tuple[str, bytes]] = []
+    for doc_rel in team_ctx.review_docs:
+        doc_bytes = _read_team_repo_file(repo_dir, doc_rel, "review_docs")
+        review_docs_entries.append(
+            {
+                "path": doc_rel,
+                "sha256": hashlib.sha256(doc_bytes).hexdigest(),
+            }
+        )
+        review_doc_copies.append((doc_rel, doc_bytes))
+
+    verify_script_entry: dict[str, str] | None = None
+    if team_ctx.verify_script is not None:
+        vs_bytes = _read_team_repo_file(repo_dir, team_ctx.verify_script, "verify_script")
+        verify_script_entry = {
+            "path": team_ctx.verify_script,
+            "sha256": hashlib.sha256(vs_bytes).hexdigest(),
+        }
+
+    payload: dict[str, Any] = {
+        "team_id": team_ctx.team_id,
+        "skills": {"declared": [dict(s) for s in team_ctx.skills]},
+        "maker": dict(team_ctx.maker) if team_ctx.maker is not None else None,
+        "checker": dict(team_ctx.checker) if team_ctx.checker is not None else None,
+        "review_docs": review_docs_entries,
+        "verify_script": verify_script_entry,
+    }
+    return payload, review_doc_copies
 
 
 def _validate_explicit_against_team(
