@@ -74,10 +74,10 @@
 - なし。
 
 ## 人間が行うこと（Maker は実行しない）
-- [ ] Phase 81 の準備コミット: SPEC.md（Phase 80 の要件を 4 章へ移す。5.1 に Phase 81 の要件）、PLAN.md、BACKLOG.md、docs/contracts/phase81.md。
+- [x] Phase 81 の準備コミット: SPEC.md（Phase 80 の要件を 4 章へ移す。5.1 に Phase 81 の要件）、PLAN.md、BACKLOG.md、docs/contracts/phase81.md。
 - [x] 準備のコミットの前に: Phase 80 の Evidence の記録と査読の記録を `.git/nightly_evidence/archive/phase80/` に退かせる（監査の記録 `audit_stage.json` は残す）。
-- [ ] ステップ 1 の完了後: AUD-1008 の再現テストを実行し直し、サンドボックスの中で git が動くことと、主張が再現しないことを確かめる。
-- [ ] ステップ 5 の完了後:
+- [x] ステップ 1 の完了後: AUD-1008 の再現テストを実行し直し、サンドボックスの中で git が動くことと、主張が再現しないことを確かめる。
+- [x] ステップ 5 の完了後:
   - Linux で、全テストを `AUTO_DEV_REQUIRE_SANDBOX=1` 付きで実行する。CI（macOS・Ubuntu × Python 3.10・3.12、gitleaks）が通ることを確かめる。
   - 査読の記録と Checker の出力ファイルを突き合わせ、記録されていない出力が0件であることを確かめる。
   - Bundle を作り、`verify-bundle` が VERIFIED になることを確かめる。
@@ -85,6 +85,9 @@
   - 追跡している日本語の名前のファイルに秘密の形の文字列を入れて隔離し、隔離ブランチに入らないことを確かめる。
 
 ## 記録
+- 2026-11-28: Red-First の試し直し（Linux、`AUTO_DEV_REQUIRE_SANDBOX=1`、HEAD e95c967 のコード）。Phase 80 の後と同じ 10 ステップに Phase 81 の5ステップを加えた 15 ステップで、14 が `CONFIRMED`。今のコードでの実行は、対象のファイルすべてで `PASSED` だった。`CONFIRMED` の理由には、アサーションの失敗（`GENUINE_RED`）が増えた（前回の試しでは0件）。前回 `CONFIRMED`（`SETUP_ERROR`）だった `tests/test_audit8_chunk_completeness.py` を、通るはずのコミット（966114c）に対して実行すると、今回は正しく失敗しなかった。`NOT_RED` の1件はステップ 1（fcab915）の `tests/test_sbx9_sandbox_git_env.py` で、自明な Red の判定（`TRIVIAL_RED`）の誤り。テストの中の `self.assertTrue(captured_cmd)`（モックが後から中身を足すリスト）を、定数の空のリストへのアサーションとみなし、ファイルの全体を `NOT_RED` にした（IDEA-042）。また、macOS でのステップ 3 の確認は、3 ファイルとも `NOT_GREEN` だった。そのテストは中でもう一度サンドボックスを使うので、macOS ではサンドボックスを入れ子にできずに失敗したと考えられる（Linux では入れ子でも通った。IDEA-043）。どちらも `enforce` では正しいステップを止めるので、**このリポジトリの `enforce` への切り替えは、IDEA-042・IDEA-043 を直してからにする**。
+- 2026-11-28: AUD-1008 の再現テストを、今のコード（e95c967）で実行し直した。git の段階で止まらずに最後まで動き、`ALREADY_GREEN`（主張は再現しない）。この再現テストは中でもう一度サンドボックスを呼んでいるので、結果は弱い証拠として扱う。Phase 81 の準備のときの直接の確認（最上位に置いたモジュールで `NOT_RED`）と合わせて、AUD-1008 は誤りと判断する。隔離の確認: 追跡している `鍵.txt`・`key.txt` に秘密鍵の形の文字列を入れ、`普通.py` を変えて `quarantine_and_restore` を呼ぶと、隔離ブランチのコミットには `普通.py` だけが入り、秘密はどのファイルにも入らなかった（RCV-9）。
+- 2026-11-28: Phase 81 の完了後の確認。5 ステップすべて、検証も査読も1回目で通った（隔離は0回）。保護ファイルの変更なし。既存テストの変更は、許可した `tests/test_gate16_red_first_config.py`・`tests/test_gate17_red_first_exec.py` だけ。査読の記録の突き合わせで、`.dev/checker/review_p81_*.txt` の5件すべてが履歴に記録され、`review_input` の回数とも一致した。全ステップに `task_start` があった。macOS でのステップ 4・5 の Red-First の確認は、今のコードでも `PASSED` の `CONFIRMED` で、macOS のサンドボックスの中でも git が動くようになった。Linux で `AUTO_DEV_REQUIRE_SANDBOX=1` 付きの全テスト（130 モジュール・1189 件。unittest で数えた）がすべて通った（既知の SIGKILL の2件も今回は通った）。Bundle は VERIFIED（`AUDIT_OUTDATED` は Phase 81 の後の監査で解消する）。`check_doc_commands.py` は 144 コマンドで終了コード 0。
 - 2026-11-27: Phase 81 の準備。Phase 80 の後の独立監査（`claude-opus-5-5`、起点 1b61d87、対象 ba6b040、既定の範囲で 6 ファイル・約 48KB、1組）は `SUCCESS`。入力 1 万トークンあたりの考えた量は約 1,232 トークン（Phase 79 の後の約 112〜258 から、さらに増えた）。指摘は2件で、AUD-1009（P2、監査の組の差分の pathspec）は BACKLOG に入り、AUD-1008（P1、Red-First の確認の読み込みの誤り）は再現テストが `git init` で失敗して `REJECTED` になった。調べると、AUD-1008 の主張は成り立たない（`PYTHONPATH` に最上位が入っている）が、サンドボックスの中で git が動かないことが分かった（Linux では、ホストの `GIT_CONFIG_KEY_0` だけが秘密として除かれ、`GIT_CONFIG_COUNT` が残るため。macOS の原因は未確認）。そのため、Phase 80 の完了後の Red-First の試しの `CONFIRMED` の多くは、環境による失敗だった。Phase 80 で足した `tests/test_audit8_chunk_completeness.py` は、通るはずのコミット（966114c）に対しても `CONFIRMED`（`SETUP_ERROR`）になった。**前の記録の「Phase 81 の準備で `enforce` に変える」は取り消し、Phase 81 の後に試し直してから決める。** あわせて、隔離のときの秘密の検査（`sanitize_staged_changes`）が日本語の名前のファイルを飛ばすことを見つけた（RCV-9）。ファイル名の扱いの不具合が4回目なので、規則を静的なテストにする（GATE-19）。範囲は docs/contracts/phase81.md。
 - 2026-11-27: Red-First の試し。このリポジトリの過去の 10 ステップ（Phase 77〜80。STAT-12・GATE-15・REL-6・AUDIT-6・AUDIT-7・RPT-8・RCV-8/CMP-15・AUDIT-8・AUDIT-9・GATE-16）で、各コミットの親をチェックポイントにして、足したテストのファイルを GATE-17 の確認（`verify_red_first_tests`、Linux、`AUTO_DEV_REQUIRE_SANDBOX=1`）にかけた。9 ステップ（13 ファイル）が `CONFIRMED`、1 ステップ（REL-6 の `test_version_consistency.py`）が `NOT_RED`（`TRIVIAL_RED`。製品のコードを実行しない版の番号の検査で、Red-First の対象の題名ではない）。`SANDBOX_UNAVAILABLE` と `TIMEOUT` は0件。ただし `CONFIRMED` の理由は、`UNHANDLED_EXCEPTION` が7件、`IMPORT_ERROR` が3件、`SETUP_ERROR` が3件で、アサーションの失敗による Red は0件だった。新しい関数や新しいモジュールを読み込むだけで Red になるので、テストの中身が振る舞いを確かめているかまでは保証しない（IDEA-038）。この結果から、Phase 81 の準備で、人間が `scripts/verify_local.sh` の見出しを `red-first=enforce` に変える。なお、git worktree の中では確認が `COMMIT_CHECKOUT_FAILED`（`Repository is not a git repository`）で `NOT_RED` になった（IDEA-039）。
 - 2026-11-27: 監査の分割の確認（AUDIT-8）。一時的なリポジトリで `src/鍵.py` と `src/b.py` を変え、`--audit-max-diff-bytes 300` 相当で監査だけを実行した（偽の監査役）。2組（`src/b.py` 473 バイト、`src/鍵.py` 479 バイト）に分かれ、どちらの組も監査役に渡り（`鍵.py` の差分が入力に含まれる）、`COMPLETED`。`verify_audit_chunks_match_full_diff` は、組を1つ落とすと `src/鍵.py` を、組を重ねると `src/b.py` を返した。
