@@ -67,7 +67,7 @@
 - 免疫テスト（`tests/immunity/**`）は変更しない。
 
 ## ステップ
-- [ ] 1. Red-First の確認の一時クローンでの実行で、対象のテストのファイルそのものだけを読み込んで実行する（Red: 中身のない変更をした `tests/test_a.py` が、下の `tests/sub/test_a.py` の失敗で `CONFIRMED` になる）（GATE-22）
+- [x] 1. Red-First の確認の一時クローンでの実行で、対象のテストのファイルそのものだけを読み込んで実行する（Red: 中身のない変更をした `tests/test_a.py` が、下の `tests/sub/test_a.py` の失敗で `CONFIRMED` になる）（GATE-22）
 - [ ] 2. `teams.json` のチームの項目に、任意の `skills`・`maker`・`checker`・`review_docs`・`verify_script` を書けるようにし、規則に合わなければ読み込みの誤りにし、`teams status --json`・`teams prepare --json` に `profile` を示す（Red: `maker` と `checker` が同じ系統の宣言が、誤りにならない）（TEAM-29）
 - [ ] 3. どれかのチームの `review_docs` と `verify_script` に書いたファイルを、`verify-step` と `commit-step` の保護ファイルの検査の対象にする（Red: Maker がチームの査読の文書を書き換えても、検証が通る）（TEAM-30）
 - [ ] 4. チームの worktree の `verify-step` で、そのチームの `verify_script` を検証スクリプトとして使い（制限時間と Red-First の設定もそこから読む）、Evidence に検証スクリプトのパスと SHA-256 を残す（Red: チームの検証スクリプトが失敗しても、検証が通る）（TEAM-31）
